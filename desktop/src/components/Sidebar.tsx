@@ -1,7 +1,7 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore } from "@/store";
 import { repoAvatar, openExternal } from "@/bridge/client";
-import { openContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "./Icon";
@@ -149,6 +149,11 @@ function WorkspaceRow(props: { name: string }) {
       classList={{ selected: selected() }}
       onClick={() => nav.selectWorkspace(props.name)}
       onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.name))}
+      onKeyDown={(e) => {
+        if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+          openContextMenuFromKeyboard(e, workspaceMenuItems(props.name));
+        }
+      }}
     >
       <span class="workspace-row-head">
         <span
@@ -211,7 +216,16 @@ function ProjectGroup(props: { repo: string }) {
     );
   return (
     <div class="project-group">
-      <div class="project-row" onContextMenu={(e) => openContextMenu(e, repoMenuItems(props.repo))}>
+      <div
+        class="project-row"
+        tabIndex={0}
+        onContextMenu={(e) => openContextMenu(e, repoMenuItems(props.repo))}
+        onKeyDown={(e) => {
+          if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+            openContextMenuFromKeyboard(e, repoMenuItems(props.repo));
+          }
+        }}
+      >
         <ProjectAvatar repo={props.repo} />
         <span class="project-name">{props.repo}</span>
         <button
@@ -232,6 +246,8 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
   return (
     <aside
       class="sidebar"
+      data-focus-target="sidebar-search"
+      tabIndex={-1}
       classList={{ collapsed: props.collapsed }}
       style={props.collapsed ? undefined : { width: `${width()}px`, "min-width": `${width()}px` }}
     >

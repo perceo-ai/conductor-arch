@@ -31,6 +31,8 @@ export interface Prefs {
   density: Density;
   // Persisted layout state so the app restores where you left off.
   sidebarCollapsed: boolean;
+  // Machine-local keyboard overrides, e.g. "palette=ctrl+p; focus=ctrl+j".
+  keybindings: string;
 }
 
 const DEFAULTS: Prefs = {
@@ -40,6 +42,7 @@ const DEFAULTS: Prefs = {
   accent: "amber",
   density: "cozy",
   sidebarCollapsed: false,
+  keybindings: "",
 };
 
 function load(): Prefs {
@@ -74,6 +77,7 @@ function persist() {
         accent: state.accent,
         density: state.density,
         sidebarCollapsed: state.sidebarCollapsed,
+        keybindings: state.keybindings,
       }),
     );
   } catch {
@@ -108,6 +112,11 @@ export const prefsStore = {
 
   setSidebarCollapsed(collapsed: boolean) {
     setState("sidebarCollapsed", collapsed);
+    persist();
+  },
+
+  setKeybindings(keybindings: string) {
+    setState("keybindings", keybindings);
     persist();
   },
 

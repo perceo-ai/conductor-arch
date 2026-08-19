@@ -265,6 +265,11 @@ body.resizing-col {
 .workspace-row-shell:hover {
   background: var(--lc-hover-soft);
 }
+.workspace-row-shell:focus-visible,
+.project-row:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: 2px;
+}
 .workspace-row-shell.selected {
   background: var(--lc-hover);
 }
@@ -2268,6 +2273,7 @@ button.ui-button-icon .ui-icon,
 }
 
 .compact-select-option:hover,
+.compact-select-option-focused,
 .compact-select-option-active {
   background: #2a2a2a;
   color: #f0f0f0;
@@ -2510,6 +2516,12 @@ button.ui-button-icon .ui-icon,
   flex: 1 1 auto;
   font-size: 13px;
   color: var(--lc-text-muted, #b0b0b0);
+}
+
+.settings-shortcuts-preview {
+  max-height: 180px;
+  overflow: auto;
+  padding: 6px 0 0;
 }
 
 .ws-readiness {
@@ -2873,13 +2885,15 @@ pre.ws-file-editor-highlight.hljs {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.context-menu-item:hover {
+.context-menu-item:hover,
+.context-menu-item-focused {
   background: var(--lc-hover, rgba(255, 255, 255, 0.08));
 }
 .context-menu-item-destructive {
   color: #f0a8a8;
 }
-.context-menu-item-destructive:hover {
+.context-menu-item-destructive:hover,
+.context-menu-item-destructive.context-menu-item-focused {
   background: rgba(255, 120, 120, 0.14);
 }
 
@@ -3220,6 +3234,11 @@ button.ws-tab-shell {
 .ws-tab-shell:hover {
   background: #191919;
 }
+.ws-chat-tab-shell:focus-visible,
+.ws-file-tab:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: -2px;
+}
 
 .ws-tab-shell.ws-tab-active {
   background: #1d1d1d;
@@ -3454,6 +3473,7 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 
 .compact-select-option:hover,
+.compact-select-option-focused,
 .compact-select-option-active {
   background: #292929;
   color: #f0f0f0;

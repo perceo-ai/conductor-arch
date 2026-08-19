@@ -1,4 +1,4 @@
-import { createEffect, createSignal, onCleanup, onMount, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js";
 import Sidebar from "./components/Sidebar";
 import WindowControls from "./components/WindowControls";
 import MetricsOverlay from "./components/MetricsOverlay";
@@ -22,7 +22,32 @@ import {
   repositoriesStore,
 } from "./store";
 import { ACCENT_HEX } from "./store/prefs";
-import { resolveShortcut } from "./lib/shortcuts";
+import { PRODUCT_RIGHT_PANEL_TABS } from "./lib/rightPanelTabs";
+import { parseKeybindingOverrides, resolveShortcut, type ShortcutAction } from "./lib/shortcuts";
+
+const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
+  "toggle-sidebar",
+  "nav-back",
+  "nav-forward",
+  "goto-dashboard",
+  "goto-history",
+  "goto-settings",
+  "show-help",
+  "new-workspace",
+  "show-changes",
+  "create-pr",
+  "focus-composer",
+  "focus-workspace",
+  "focus-search",
+  "next-panel",
+  "prev-panel",
+  "next-workspace",
+  "prev-workspace",
+  "workspace-actions",
+  "add-project",
+  "new-chat",
+  "toggle-terminal",
+]);
 
 export default function App() {
   const [sidebarCollapsed, setSidebarCollapsedRaw] = createSignal(prefsStore.state.sidebarCollapsed);
@@ -35,6 +60,7 @@ export default function App() {
   };
   const helpOpen = uiStore.helpOpen;
   const setHelpOpen = uiStore.setHelpOpen;
+  const activeShortcuts = createMemo(() => parseKeybindingOverrides(prefsStore.state.keybindings));
 
   // Apply appearance prefs (theme/accent/density) to the document body — the
   // theme.css class hooks (lc-theme-*, lc-accent-*, lc-density-*) are already
@@ -58,8 +84,37 @@ export default function App() {
     void startStore().then(() => setupStore.check().catch(() => undefined));
   });
 
-  // Global keyboard shortcuts (GTK parity). The command palette owns Cmd/Ctrl+K
-  // itself, so this handler skips "open-palette" to avoid double-toggling.
+  function focusFirst(selectors: string[]) {
+    for (const selector of selectors) {
+      const el = document.querySelector<HTMLElement>(selector);
+      if (el) {
+        el.focus();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function moveRightPanel(delta: 1 | -1) {
+    const current = nav.rightPanelTab();
+    const tabs = PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id);
+    const index = Math.max(0, tabs.indexOf(current));
+    nav.setRightPanelTab(tabs[(index + delta + tabs.length) % tabs.length]);
+    queueMicrotask(() => focusFirst(["[data-focus-target='workspace-panel']", "[data-focus-target='workspace-main']"]));
+  }
+
+  function moveWorkspace(delta: 1 | -1) {
+    const names = workspacesStore.state.order.filter((name) => workspacesStore.row(name)?.status !== "archived");
+    if (names.length === 0) return;
+    const current = nav.selectedWorkspace();
+    const index = current ? names.indexOf(current) : -1;
+    const next = names[(Math.max(0, index) + delta + names.length) % names.length];
+    nav.selectWorkspace(next);
+    queueMicrotask(() => focusFirst(["[data-focus-target='workspace-main']", ".page-shell"]));
+  }
+
+  // Global keyboard shortcuts (GTK parity plus keyboard-first focus movement).
+  // The command palette owns "open-palette", so this handler skips it.
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && helpOpen()) {
@@ -67,17 +122,9 @@ export default function App() {
         setHelpOpen(false);
         return;
       }
-      const action = resolveShortcut(e);
+      const action = resolveShortcut(e, activeShortcuts());
       if (!action || action === "open-palette") return;
-      const target = e.target as HTMLElement | null;
-      const editable =
-        !!target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable);
-      // Only the unmodified "?" help is suppressed while typing; modifier chords
-      // still fire so they work from anywhere.
-      if (action === "show-help" && editable) return;
+      if (!GLOBAL_SHORTCUT_ACTIONS.has(action)) return;
       e.preventDefault();
       switch (action) {
         case "toggle-sidebar":
@@ -122,6 +169,42 @@ export default function App() {
           if (active) void actions.refreshPullRequest(active);
           break;
         }
+        case "focus-composer":
+          focusFirst(["[data-focus-target='chat-composer']", ".chat-input-view"]);
+          break;
+        case "focus-workspace":
+          focusFirst(["[data-focus-target='workspace-main']", ".page-shell"]);
+          break;
+        case "focus-search":
+          setSidebarCollapsed(false);
+          queueMicrotask(() => focusFirst(["[data-focus-target='sidebar-search']", ".sidebar-search", ".sidebar-search-minimal"]));
+          break;
+        case "next-panel":
+          moveRightPanel(1);
+          break;
+        case "prev-panel":
+          moveRightPanel(-1);
+          break;
+        case "next-workspace":
+          moveWorkspace(1);
+          break;
+        case "prev-workspace":
+          moveWorkspace(-1);
+          break;
+        case "workspace-actions": {
+          const active = nav.selectedWorkspace();
+          if (active) dialogs.open({ kind: "workspace-actions", workspace: active });
+          break;
+        }
+        case "add-project":
+          dialogs.open({ kind: "add-project" });
+          break;
+        case "new-chat":
+          window.dispatchEvent(new CustomEvent("archductor:new-chat"));
+          break;
+        case "toggle-terminal":
+          window.dispatchEvent(new CustomEvent("archductor:toggle-terminal-dock"));
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
@@ -150,7 +233,11 @@ export default function App() {
       <Toasts />
       <ContextMenu />
       <CommandPalette />
-      <ShortcutsHelp open={helpOpen()} onClose={() => setHelpOpen(false)} />
+      <ShortcutsHelp
+        open={helpOpen()}
+        shortcuts={activeShortcuts()}
+        onClose={() => setHelpOpen(false)}
+      />
       <MetricsOverlay />
     </>
   );

@@ -115,7 +115,12 @@ function RightPanel(props: { workspace: string }) {
     return "";
   };
   return (
-    <aside class="ws-right-panel" style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}>
+    <aside
+      class="ws-right-panel"
+      data-focus-target="workspace-panel"
+      tabIndex={-1}
+      style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}
+    >
       <ResizeHandle edge="left" width={width} min={RIGHT_MIN} max={RIGHT_MAX} onChange={setWidth} />
       <div class="ws-right-mid">
         <div class="ws-right-topbar">
@@ -189,7 +194,7 @@ export default function CommandCenter() {
       fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}
     >
       {(ws) => (
-        <div class="ws-command-center page-shell">
+        <div class="ws-command-center page-shell" data-focus-target="workspace-main" tabIndex={-1}>
           <div class="ws-center">
             <TopBar
               workspace={ws()}

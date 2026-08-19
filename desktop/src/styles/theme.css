@@ -1943,13 +1943,15 @@ button.ui-button-destructive:hover {
 .lc-theme-light .context-menu-item {
     color: #1f2328;
 }
-.lc-theme-light .context-menu-item:hover {
+.lc-theme-light .context-menu-item:hover,
+.lc-theme-light .context-menu-item-focused {
     background-color: #f1f5f9;
 }
 .lc-theme-light .context-menu-item-destructive {
     color: #cf222e;
 }
-.lc-theme-light .context-menu-item-destructive:hover {
+.lc-theme-light .context-menu-item-destructive:hover,
+.lc-theme-light .context-menu-item-destructive.context-menu-item-focused {
     background-color: #ffebe9;
 }
 .lc-theme-light .toast,

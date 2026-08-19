@@ -24,6 +24,7 @@ import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
 import { inlineEventVerbChip, isDiffCard, isTerminalCard, stripArchductorMetadata } from "@/lib/chatFormat";
 import { composerPrimaryAction } from "@/lib/composerPrimaryAction";
+import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -52,7 +53,14 @@ function ThreadTab(props: {
       class="ws-chat-tab-shell ws-tab-shell"
       classList={{ "ws-tab-active": props.active }}
       onClick={props.onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          props.onClick();
+        }
+      }}
       role="button"
+      tabIndex={0}
       title={`${props.thread.provider} · ${props.thread.status || "ready"}`}
     >
       <span
@@ -89,7 +97,14 @@ function FileTab(props: { path: string; active: boolean; onClick: () => void; on
       class="ws-chat-tab-shell ws-tab-shell ws-file-tab"
       classList={{ "ws-tab-active": props.active }}
       onClick={props.onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          props.onClick();
+        }
+      }}
       role="button"
+      tabIndex={0}
       title={props.path}
     >
       <Icon name="file" class="ws-file-tab-icon" />
@@ -490,9 +505,10 @@ function Composer(props: {
   function onKeyDown(e: KeyboardEvent) {
     if (e.key !== "Enter" || e.shiftKey) return; // Shift+Enter → newline
     e.preventDefault();
-    // Ctrl/Cmd+Enter skips the queue and steers; plain Enter queues.
-    if (e.ctrlKey || e.metaKey) void steerSend();
-    else defaultEnterSend();
+    // The immediate-send chord is customizable; plain Enter keeps the queue-first composer behavior.
+    if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "send-immediate") {
+      void steerSend();
+    } else defaultEnterSend();
   }
 
   return (
@@ -555,6 +571,7 @@ function Composer(props: {
         <div class="chat-input-shell">
           <textarea
             class="chat-input-view"
+            data-focus-target="chat-composer"
             placeholder="Ask to make changes, @mention files, run /commands"
             value={text()}
             onInput={(e) => setText(e.currentTarget.value)}
@@ -727,7 +744,7 @@ function FileEditor(props: { workspace: string; path: string }) {
               }
             }}
             onKeyDown={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+              if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "save") {
                 e.preventDefault();
                 void save();
                 return;
@@ -992,6 +1009,12 @@ export default function ChatSurface(props: { workspace: string }) {
       // non-fatal
     }
   }
+
+  onMount(() => {
+    const onNewChat = () => void newChat();
+    window.addEventListener("archductor:new-chat", onNewChat);
+    onCleanup(() => window.removeEventListener("archductor:new-chat", onNewChat));
+  });
 
   async function closeThread(thread: ArchcarChatThread) {
     try {

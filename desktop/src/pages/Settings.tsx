@@ -3,6 +3,7 @@ import { repositoriesStore, prefsStore } from "@/store";
 import { ACCENT_HEX } from "@/store/prefs";
 import { checkForUpdates, openExternal, remoteDaemon, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS } from "@/lib/models";
+import { DEFAULT_SHORTCUTS, parseKeybindingOverrides, resolveShortcut, shortcutHelp } from "@/lib/shortcuts";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
 import { SetupReadinessCard } from "@/components/SetupReadiness";
 import type { ServiceStatus } from "@/bridge/protocol";
@@ -459,6 +460,31 @@ export function SettingsPage() {
             </div>
           </div>
         </div>
+        <div class="settings-field">
+          <div class="settings-field-title">Keyboard bindings</div>
+          <textarea
+            class="settings-machine-entry"
+            spellcheck={false}
+            rows={2}
+            placeholder="palette=ctrl+p; shortcuts=ctrl+/; save=ctrl+s; terminal=ctrl+`"
+            value={prefsStore.state.keybindings}
+            onInput={(e) => prefsStore.setKeybindings(e.currentTarget.value)}
+          />
+          <div class="settings-status settings-hint">
+            Format: action=keys separated by semicolons. Actions:{" "}
+            {Array.from(new Set(DEFAULT_SHORTCUTS.map((binding) => binding.aliases?.[0] ?? binding.action))).join(", ")}.
+          </div>
+          <div class="shortcuts-list settings-shortcuts-preview">
+            <For each={shortcutHelp(parseKeybindingOverrides(prefsStore.state.keybindings))}>
+              {(row) => (
+                <div class="shortcuts-row">
+                  <kbd class="shortcuts-keys">{row.keys}</kbd>
+                  <span class="shortcuts-label">{row.label}</span>
+                </div>
+              )}
+            </For>
+          </div>
+        </div>
         <div class="settings-health-grid">
           <SetupReadinessCard />
           <div class="settings-field settings-health-card">
@@ -572,7 +598,7 @@ export function SettingsPage() {
               setStatus("");
             }}
             onKeyDown={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+              if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "save") {
                 e.preventDefault();
                 void save();
               }

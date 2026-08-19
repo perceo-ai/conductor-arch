@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createResource, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { send } from "@/bridge/client";
 import { terminalStore, nav, threadsStore, toastsStore } from "@/store";
 import TerminalPanel from "./TerminalPanel";
@@ -211,9 +211,22 @@ export default function TerminalDock(props: { workspace: string }) {
     setExpanded((e) => !e);
   }
 
+  onMount(() => {
+    const onToggle = () => {
+      setExpanded((expanded) => !expanded);
+      queueMicrotask(() => {
+        document.querySelector<HTMLElement>("[data-focus-target='terminal-dock']")?.focus();
+      });
+    };
+    window.addEventListener("archductor:toggle-terminal-dock", onToggle);
+    onCleanup(() => window.removeEventListener("archductor:toggle-terminal-dock", onToggle));
+  });
+
   return (
     <div
       class="ws-run-section"
+      data-focus-target="terminal-dock"
+      tabIndex={-1}
       classList={{ "ws-run-section-expanded": expanded() }}
       style={expanded() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
     >

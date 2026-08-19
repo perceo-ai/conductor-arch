@@ -53,6 +53,13 @@ describe("prefsStore", () => {
     expect(prefsStore.state.sidebarCollapsed).toBe(true);
   });
 
+  it("tracks custom keyboard bindings", async () => {
+    const { prefsStore } = await import("./prefs");
+    expect(prefsStore.state.keybindings).toBe("");
+    prefsStore.setKeybindings("palette=ctrl+p; focus=ctrl+shift+f");
+    expect(prefsStore.state.keybindings).toBe("palette=ctrl+p; focus=ctrl+shift+f");
+  });
+
   it("exposes a hex for every accent", async () => {
     const { ACCENT_HEX } = await import("./prefs");
     expect(ACCENT_HEX.amber).toMatch(/^#[0-9a-f]{6}$/i);
