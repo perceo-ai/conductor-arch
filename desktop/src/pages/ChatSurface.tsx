@@ -618,6 +618,8 @@ function Composer(props: {
   // session to read state from, so the phase carries the starting signal.
   const starting = () => slice().phase.kind === "starting" && slice().session == null;
   const running = () => slice().session?.runtime_state === "running";
+  const busyStatusLabel = () => (running() ? "Generating" : slowStart() ? "Still starting" : "Starting");
+  const busyStatusTitle = () => (running() ? "Agent is generating" : slowStart() ? "Agent is still starting" : "Agent starting");
   const sessionId = () => slice().session?.session_id ?? null;
   const modelOptions = agentModelOptions;
 
@@ -1106,9 +1108,9 @@ function Composer(props: {
               </span>
             </Show>
             <Show when={!awaitingUser() && (busy() || starting())}>
-              <span class="chat-context-usage" title={slowStart() ? "Agent is still starting" : "Agent starting"}>
+              <span class="chat-context-usage" title={busyStatusTitle()}>
                 <Icon name="bolt" class="chat-context-usage-icon" />
-                <span>{slowStart() ? "Still starting" : "Starting"}</span>
+                <span>{busyStatusLabel()}</span>
               </span>
             </Show>
             <Show
