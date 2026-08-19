@@ -323,6 +323,12 @@ pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjection
                 ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
             ) || (item.title == "Turn" && !item.body.trim().is_empty())
         }
+        // An assistant message whose content was only tool calls, or a thinking
+        // block the provider withheld, projects to a bubble with nothing in it.
+        // Empty prose is never worth a row.
+        ProjectionRenderClass::AssistantChat | ProjectionRenderClass::ReasoningCard => {
+            !item.body.trim().is_empty()
+        }
         _ => true,
     }
 }

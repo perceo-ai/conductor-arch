@@ -1018,6 +1018,8 @@ pub struct ClaudeProviderEventDraft {
     pub provider_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_tool_use_id: Option<String>,
+    /// What the tool call was aimed at (path, command, pattern).
+    pub tool_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_block_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1098,6 +1100,7 @@ impl ClaudeProviderEventDraft {
                 parent_tool_use_id: reasoning_base.parent_tool_use_id.clone(),
                 provider_message_id: reasoning_base.provider_message_id.clone(),
                 provider_tool_use_id: None,
+                tool_target: None,
                 content_block_index: Some(block.content_block_index),
                 tool_name: None,
                 content_delta: Some(block.thinking),
@@ -1143,6 +1146,11 @@ impl ClaudeProviderEventDraft {
         };
         let body = if self.kind == ClaudeProviderEventKind::Hook {
             claude_hook_body(&self.raw_json).unwrap_or_default()
+        } else if let Some(thinking_tokens) = claude_thinking_token_count(&self.raw_json) {
+            // Claude does not send thinking text over stream-json — the deltas
+            // arrive empty even at high effort — so the honest signal is how
+            // much thinking happened, not a blank card.
+            format!("Thought for ~{thinking_tokens} tokens")
         } else {
             self.content_delta
                 .clone()
@@ -1171,7 +1179,12 @@ impl ClaudeProviderEventDraft {
                 .and_then(|value| i64::try_from(value).ok()),
             occurred_at_ms: context.occurred_at_ms,
             normalized_payload: json!({
-                "title": claude_event_title(self.kind, self.tool_name.as_deref(), &self.raw_json),
+                "title": claude_event_title(
+                    self.kind,
+                    self.tool_name.as_deref(),
+                    self.tool_target.as_deref(),
+                    &self.raw_json,
+                ),
                 "body": body,
                 "stream_delta": stream_delta,
                 "tool_name": self.tool_name,
@@ -1190,6 +1203,14 @@ impl ClaudeProviderEventDraft {
 pub struct ClaudeStreamParser {
     current_message_id: Option<String>,
     tool_use_by_block: BTreeMap<u64, ToolBlockState>,
+    /// tool_use_id → tool name, kept for the life of the session. Results
+    /// arrive in a later message than the call, and the per-message block map
+    /// is cleared between them, so without this a tool result has no idea what
+    /// tool produced it and renders as a nameless card.
+    tool_names_by_use_id: HashMap<String, String>,
+    /// tool_use_id → what the call was aimed at (path, command, pattern), so a
+    /// card reads "Read cli.py" rather than just "Read".
+    tool_targets_by_use_id: HashMap<String, String>,
     reasoning_blocks: HashSet<u64>,
 }
 
@@ -1224,6 +1245,7 @@ impl ClaudeStreamParser {
             parent_tool_use_id: string_at(&raw_json, &["parent_tool_use_id"]),
             provider_message_id: None,
             provider_tool_use_id: None,
+            tool_target: None,
             content_block_index: number_at(&raw_json, &["event", "index"]),
             tool_name: None,
             content_delta: None,
@@ -1282,6 +1304,11 @@ impl ClaudeStreamParser {
         if top_type.as_deref() == Some("assistant")
             && message_has_block_type(value, "thinking")
             && !message_has_block_type(value, "text")
+        {
+            return ClaudeProviderEventKind::Reasoning;
+        }
+        if string_at(value, &["type"]).as_deref() == Some("system")
+            && string_at(value, &["subtype"]).as_deref() == Some("thinking_tokens")
         {
             return ClaudeProviderEventKind::Reasoning;
         }
@@ -1371,6 +1398,9 @@ impl ClaudeStreamParser {
                 };
                 draft.provider_tool_use_id = state.id.clone();
                 draft.tool_name = state.name.clone();
+                if let (Some(id), Some(name)) = (state.id.clone(), state.name.clone()) {
+                    self.tool_names_by_use_id.insert(id, name);
+                }
                 self.tool_use_by_block.insert(index, state);
             } else if draft.kind == ClaudeProviderEventKind::Reasoning
                 && string_at(&draft.raw_json, &["event", "type"]).as_deref()
@@ -1406,6 +1436,34 @@ impl ClaudeStreamParser {
             if message_tool_use_id.is_some() {
                 draft.provider_tool_use_id = message_tool_use_id;
             }
+            // The tool_use_id is authoritative. A content-block index is only
+            // meaningful inside the message it came from, so an index-derived
+            // name here would be whatever tool happened to occupy that slot in
+            // a different message — a Read labelled "Bash".
+            if let Some(name) = draft
+                .provider_tool_use_id
+                .as_ref()
+                .and_then(|id| self.tool_names_by_use_id.get(id))
+            {
+                draft.tool_name = Some(name.clone());
+            }
+        }
+
+        // Non-streaming assistant messages carry their tool calls inline; learn
+        // the names there too, or a session without partial messages never sees
+        // a name at all.
+        for (id, name, target) in assistant_tool_calls(&draft.raw_json) {
+            self.tool_names_by_use_id.insert(id.clone(), name);
+            if let Some(target) = target {
+                self.tool_targets_by_use_id.insert(id, target);
+            }
+        }
+        if let Some(target) = draft
+            .provider_tool_use_id
+            .as_ref()
+            .and_then(|id| self.tool_targets_by_use_id.get(id))
+        {
+            draft.tool_target = Some(target.clone());
         }
 
         draft.content_delta = match draft.kind {
@@ -1757,6 +1815,11 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
         {
             ProviderEventPhase::Completed
         }
+        ClaudeProviderEventKind::Reasoning
+            if string_at(raw_json, &["subtype"]).as_deref() == Some("thinking_tokens") =>
+        {
+            ProviderEventPhase::Completed
+        }
         ClaudeProviderEventKind::Reasoning => ProviderEventPhase::Started,
         ClaudeProviderEventKind::Permission
         | ClaudeProviderEventKind::Hook
@@ -1789,11 +1852,22 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
     }
 }
 
-fn claude_title_for(kind: ClaudeProviderEventKind, tool_name: Option<&str>) -> String {
+fn claude_title_for(
+    kind: ClaudeProviderEventKind,
+    tool_name: Option<&str>,
+    tool_target: Option<&str>,
+) -> String {
     match kind {
         ClaudeProviderEventKind::ToolUse
         | ClaudeProviderEventKind::ToolInputDelta
-        | ClaudeProviderEventKind::ToolResult => tool_name.unwrap_or("Tool").to_owned(),
+        | ClaudeProviderEventKind::ToolResult => {
+            let name = tool_name.unwrap_or("Tool");
+            match tool_target {
+                // "Read cli.py" reads as a sentence; "Read Read" does not.
+                Some(target) if !target.is_empty() => format!("{name} {}", first_line(target)),
+                _ => name.to_owned(),
+            }
+        }
         ClaudeProviderEventKind::UserMessage => "User input".to_owned(),
         ClaudeProviderEventKind::AssistantMessage
         | ClaudeProviderEventKind::MessageStart
@@ -1819,9 +1893,68 @@ fn claude_title_for(kind: ClaudeProviderEventKind, tool_name: Option<&str>) -> S
     }
 }
 
+/// The running thinking-token count from a `system/thinking_tokens` record.
+fn claude_thinking_token_count(raw_json: &Value) -> Option<u64> {
+    (string_at(raw_json, &["subtype"]).as_deref() == Some("thinking_tokens"))
+        .then(|| number_at(raw_json, &["estimated_tokens"]))
+        .flatten()
+}
+
+/// Tool targets can be multi-line (a heredoc command); a card shows one line.
+fn first_line(value: &str) -> String {
+    value.lines().next().unwrap_or(value).trim().to_owned()
+}
+
+/// What a tool call is aimed at, in the order claude names them.
+fn claude_tool_target(input: &Value) -> Option<String> {
+    for key in [
+        "file_path",
+        "path",
+        "command",
+        "pattern",
+        "query",
+        "url",
+        "notebook_path",
+        "description",
+    ] {
+        if let Some(value) = input.get(key).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// `(tool_use_id, tool_name, target)` for every tool call inside an assistant
+/// message. The streamed `content_block_start` carries an empty input — the
+/// arguments arrive as later deltas — so the assembled message is where a
+/// call's target can actually be read.
+fn assistant_tool_calls(raw_json: &Value) -> Vec<(String, String, Option<String>)> {
+    raw_json
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .filter_map(|block| {
+                    Some((
+                        block.get("id").and_then(Value::as_str)?.to_owned(),
+                        block.get("name").and_then(Value::as_str)?.to_owned(),
+                        block.get("input").and_then(claude_tool_target),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn claude_event_title(
     kind: ClaudeProviderEventKind,
     tool_name: Option<&str>,
+    tool_target: Option<&str>,
     raw_json: &Value,
 ) -> String {
     if kind == ClaudeProviderEventKind::Hook {
@@ -1830,10 +1963,10 @@ fn claude_event_title(
             .or_else(|| string_at(raw_json, &["hook_event"]))
             .or_else(|| string_at(raw_json, &["hook", "name"]))
             .or_else(|| string_at(raw_json, &["event", "hook_event_name"]))
-            .unwrap_or_else(|| claude_title_for(kind, tool_name));
+            .unwrap_or_else(|| claude_title_for(kind, tool_name, tool_target));
     }
 
-    claude_title_for(kind, tool_name)
+    claude_title_for(kind, tool_name, tool_target)
 }
 
 fn claude_hook_body(raw_json: &Value) -> Option<String> {
@@ -2428,6 +2561,79 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--permission-mode", "plan"]));
+    }
+
+    #[test]
+    fn tool_results_keep_the_name_of_the_tool_that_produced_them() {
+        // The call and its result arrive in different messages, and the
+        // per-message block map is cleared between them; without a session-long
+        // correlation the result renders as a nameless "Tool" card.
+        let native = concat!(
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"3 tests passed"}]}}"#,
+            "\n",
+        );
+
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+        let result = drafts
+            .iter()
+            .find(|draft| draft.kind == ClaudeProviderEventKind::ToolResult)
+            .expect("expected a tool result");
+
+        assert_eq!(result.tool_name.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn tool_cards_name_what_the_call_was_aimed_at() {
+        // The streamed content_block_start carries an empty input, so the
+        // target has to come from the assembled assistant message.
+        let native = concat!(
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}}}"#,
+            "\n",
+            r#"{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/repo/cli.py"}}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"1\timport argparse"}]}}"#,
+            "\n",
+        );
+
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+        let result = drafts
+            .iter()
+            .find(|draft| draft.kind == ClaudeProviderEventKind::ToolResult)
+            .expect("expected a tool result");
+        let event = result
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(event.normalized_payload["title"], "Read /repo/cli.py");
+    }
+
+    #[test]
+    fn thinking_tokens_stand_in_for_thinking_text_claude_withholds() {
+        // Verified against claude 2.1.228: thinking_delta records arrive with an
+        // empty `thinking` string even at --effort high, so the count is the
+        // only honest signal of how much reasoning happened.
+        let native = r#"{"type":"system","subtype":"thinking_tokens","session_id":"s1","estimated_tokens":165,"estimated_tokens_delta":15}"#;
+
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+        let draft = drafts.first().expect("expected an event");
+        let event = draft
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(draft.kind, ClaudeProviderEventKind::Reasoning);
+        assert_eq!(event.normalized_payload["body"], "Thought for ~165 tokens");
     }
 
     #[test]

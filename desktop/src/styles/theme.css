@@ -3549,9 +3549,9 @@ button.ws-tab-shell {
     background-color: #2e2e2e;
     color: #f4f7ff;
     border-radius: 14px;
-    padding: 9px 14px;
+    padding: 8px 14px;
     line-height: 1.4;
-    min-height: 36px;
+    min-height: 0;
 }
 .chat-queued-row {
     margin-top: 4px;
@@ -3590,17 +3590,37 @@ button.ws-tab-shell {
     line-height: 1.55;
     margin-bottom: 0;
 }
+/* Prose needs breathing room from the actions above it; chips next to chips do
+   not. Spacing is charged at the boundary, not to every row. */
+.chat-agent-text:not(:first-child),
+.chat-reasoning-text:not(:first-child),
+.chat-user-row:not(:first-child) {
+    margin-top: 8px;
+}
+/* A chip that follows other content starts a new group and gets air; chips
+   inside the same run stack directly. Order matters: the adjacent-sibling rule
+   has to come last to win over the group rule. */
+.chat-inline-event:not(:first-child) {
+    margin-top: 6px;
+}
+.chat-inline-event + .chat-inline-event {
+    margin-top: 0;
+}
+.chat-inline-event + .chat-agent-text,
+.chat-inline-event + .chat-reasoning-text {
+    margin-top: 10px;
+}
 .chat-reasoning-text {
     color: #8f8f8f;
     font-size: 13px;
     line-height: 1.45;
-    margin: 0 0 4px 0;
+    margin: 0;
 }
 .chat-inline-event {
     background-color: transparent;
     border: none;
     border-radius: 0;
-    margin-bottom: 1px;
+    margin-bottom: 0;
     padding: 0;
 }
 .chat-inline-event-chip {
@@ -4726,3 +4746,4 @@ textarea:focus {
     min-width: 14px;
     min-height: 14px;
 }
+

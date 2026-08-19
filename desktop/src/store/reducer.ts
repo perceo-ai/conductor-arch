@@ -69,15 +69,28 @@ async function refreshThreadSnapshot(threadId: number) {
   }
   inflightSnapshot.add(threadId);
   try {
-    const [snap, proj] = await Promise.all([
+    // Interactions and plan state are pulled, not just listened for: an ask
+    // raised before this window opened (or before this chat was selected) has
+    // no event left to replay, and an unanswered question the user cannot see
+    // is a hung agent.
+    const [snap, proj, interactions, plan] = await Promise.all([
       send({ type: "get_chat_snapshot", thread_id: threadId }),
       send({ type: "get_chat_projection", thread_id: threadId }),
+      send({ type: "list_provider_interactions", thread_id: threadId, pending_only: true }),
+      send({ type: "get_chat_plan", thread_id: threadId }),
     ]);
     if (snap.type === "chat_snapshot") {
       chatStore.applySnapshot((snap as { snapshot: ChatSnapshot }).snapshot);
     }
     if (proj.type === "chat_projection") {
       chatStore.setProjection(threadId, proj.items);
+    }
+    if (interactions.type === "provider_interactions") {
+      interactionsStore.setPending(threadId, interactions.interactions);
+    }
+    if (plan.type === "chat_plan") {
+      chatStore.setPlanMode(threadId, plan.plan_mode);
+      chatStore.setPlanPath(threadId, plan.plan_path ?? null);
     }
   } catch {
     // page owns its own error surface; ignore transient failures

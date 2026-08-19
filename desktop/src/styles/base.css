@@ -789,10 +789,13 @@ body.resizing-col {
   min-height: 0;
   overflow-y: auto;
 }
+/* Transcript rhythm: rows are tight by default and only earn space where the
+   content changes register (prose after a run of tool chips, or a new user
+   message). A uniform gap makes ten one-line chips read like ten paragraphs. */
 .chat-messages {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
   padding: 14px 20px 16px;
 }
 .chat-user-row {
@@ -1279,7 +1282,7 @@ body.resizing-col {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-bottom: 1px;
+  margin-bottom: 0;
 }
 .chat-inline-event-header {
   display: flex;
@@ -3544,9 +3547,12 @@ button.ws-tab-shell.ws-chat-new:hover {
   height: 18px;
 }
 
+/* Rows carry their own spacing (see the transcript-rhythm block above): a
+   uniform gap here would put a paragraph's worth of air between one-line tool
+   chips. */
 .chat-messages {
-  gap: 16px;
-  padding: 24px 28px;
+  gap: 2px;
+  padding: 18px 28px;
 }
 
 .empty-state {

@@ -856,6 +856,9 @@ function Composer(props: {
     return pending?.kind === "plan_approval" ? pending : null;
   };
   const planMode = () => chatStore.slice(props.threadId).planMode;
+  // The session reads as "not ready" while an ask is outstanding, but it is not
+  // starting up — it is blocked on the human.
+  const awaitingUser = () => interactionsStore.pending(props.threadId) != null;
 
   async function togglePlanMode() {
     const next = !planMode();
@@ -1049,7 +1052,13 @@ function Composer(props: {
                 <span>{contextPercent()}%</span>
               </span>
             </Show>
-            <Show when={busy() || starting()}>
+            <Show when={awaitingUser()}>
+              <span class="chat-context-usage" title="The agent is waiting on your answer">
+                <Icon name="alert" class="chat-context-usage-icon" />
+                <span>Waiting for you</span>
+              </span>
+            </Show>
+            <Show when={!awaitingUser() && (busy() || starting())}>
               <span class="chat-context-usage" title={slowStart() ? "Agent is still starting" : "Agent starting"}>
                 <Icon name="bolt" class="chat-context-usage-icon" />
                 <span>{slowStart() ? "Still starting" : "Starting"}</span>

@@ -25,6 +25,12 @@ pub const CODEX_APP_SERVER_PROVIDER: &str = "codex";
 pub const CODEX_APP_SERVER_DEFAULT_EXECUTABLE: &str = "codex";
 pub const CODEX_APP_SERVER_DEFAULT_ARGS: &[&str] = &["app-server"];
 
+/// Codex ships reasoning summaries off over the app server: `item/reasoning`
+/// arrives with empty `summary`/`content`, so the chat shows a thinking card
+/// with nothing in it. Asking for detailed summaries matches what the codex CLI
+/// shows interactively.
+pub const CODEX_REASONING_SUMMARY: &str = "detailed";
+
 const CODEX_OPTIONAL_CAPABILITIES: &[(HarnessCapability, SupportMode)] = &[
     (HarnessCapability::Goals, SupportMode::Native),
     (HarnessCapability::NativeSlashCommands, SupportMode::Native),
@@ -857,6 +863,13 @@ impl CodexAppServerThreadStartParams {
             self.approval_policy.as_deref(),
         );
         insert_string(&mut params, "sandbox", self.sandbox.as_deref());
+        // Per-thread config: the app server does not inherit `-c` overrides
+        // from its own argv for the threads it starts, so reasoning summaries
+        // have to be asked for here or every thinking card arrives empty.
+        params.insert(
+            "config".to_owned(),
+            json!({ "model_reasoning_summary": CODEX_REASONING_SUMMARY }),
+        );
         insert_string(&mut params, "serviceName", self.service_name.as_deref());
         Value::Object(params)
     }
@@ -1555,12 +1568,18 @@ fn codex_payload_body(payload: &Value) -> String {
 }
 
 fn reasoning_body_from_payload(payload: &Value) -> Option<String> {
-    let parts = ["/params/item/summary", "/params/item/content"]
-        .iter()
-        .filter_map(|pointer| payload.pointer(pointer))
-        .filter_map(display_value)
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>();
+    // Depending on the summary setting codex fills `summary`, `content`, or a
+    // flat `text` — take whichever arrived.
+    let parts = [
+        "/params/item/summary",
+        "/params/item/content",
+        "/params/item/text",
+    ]
+    .iter()
+    .filter_map(|pointer| payload.pointer(pointer))
+    .filter_map(display_value)
+    .filter(|part| !part.trim().is_empty())
+    .collect::<Vec<_>>();
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 

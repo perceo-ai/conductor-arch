@@ -40,6 +40,69 @@ afterEach(() => {
   delete (globalThis as { window?: unknown }).window;
 });
 
+describe("loadThread", () => {
+  it("pulls a pending ask and plan state that arrived before this window opened", async () => {
+    api.request.mockImplementation(async (req: { type: string; thread_id?: number }) => {
+      if (req.type === "get_chat_snapshot") {
+        return {
+          type: "chat_snapshot",
+          snapshot: {
+            thread_id: req.thread_id,
+            messages: [],
+            events: [],
+            provider_events: [],
+            queued_inputs: [],
+          },
+        };
+      }
+      if (req.type === "get_chat_projection") {
+        return { type: "chat_projection", thread_id: req.thread_id, items: [] };
+      }
+      if (req.type === "list_provider_interactions") {
+        return {
+          type: "provider_interactions",
+          interactions: [
+            {
+              id: "ask-1",
+              provider_key: "claude",
+              workspace: "berlin",
+              thread_id: 9,
+              session_id: 3,
+              kind: "plan_approval",
+              title: "Plan ready for review",
+              detail: "# Plan",
+              questions: [],
+              status: "pending",
+            },
+          ],
+        };
+      }
+      if (req.type === "get_chat_plan") {
+        return {
+          type: "chat_plan",
+          thread_id: req.thread_id,
+          plan_mode: true,
+          plan_path: ".context/plans/thread-9-abc.md",
+        };
+      }
+      return { type: "ack" };
+    });
+
+    const { loadThread } = await import("./reducer");
+    const { interactionsStore } = await import("./interactions");
+    const { chatStore } = await import("./chat");
+
+    loadThread(9);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // An unanswered ask with no event left to replay is a hung agent the user
+    // cannot see.
+    expect(interactionsStore.pending(9)?.id).toBe("ask-1");
+    expect(chatStore.slice(9).planMode).toBe(true);
+    expect(chatStore.slice(9).planPath).toBe(".context/plans/thread-9-abc.md");
+  });
+});
+
 describe("applyEvent plan mode", () => {
   it("tracks plan mode and the plan file for the chat", async () => {
     const { applyEvent } = await import("./reducer");

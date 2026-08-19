@@ -41,6 +41,7 @@ export type ArchcarRequest =
   | { type: "move_queued_chat_input"; queue_id: number; up: boolean }
   | { type: "save_chat_paste"; thread_id: number; text: string }
   | { type: "resolve_provider_interaction"; interaction_id: string; resolution: ProviderInteractionResolution }
+  | { type: "list_provider_interactions"; thread_id?: number; pending_only: boolean }
   | { type: "set_chat_plan_mode"; thread_id: number; plan_mode: boolean }
   | { type: "get_chat_plan"; thread_id: number }
   | { type: "kill_session"; session_id: number }
@@ -474,6 +475,7 @@ export type ArchcarResponse =
   | { type: "chat_transcripts"; workspace: string; transcripts: ArchcarChatTranscriptSummary[] }
   | { type: "chat_transcript"; thread_id: number; title: string; messages: ArchcarChatTranscriptMessage[] }
   | { type: "context_plans"; workspace: string; plans: ArchcarContextPlan[] }
+  | { type: "provider_interactions"; interactions: ProviderInteractionRecord[] }
   | {
       type: "chat_plan";
       thread_id: number;
