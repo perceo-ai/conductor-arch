@@ -2911,6 +2911,24 @@ pre.ws-file-editor-highlight.hljs {
   background: rgba(255, 255, 255, 0.08);
   color: #e6b673;
 }
+.chat-inline-file-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 24ch;
+  margin: 0 2px;
+  padding: 1px 5px;
+  vertical-align: 0.08em;
+  overflow: hidden;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--lc-text, #e6e6e6);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78em;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* fenced code block (highlighted) */
 .markdown-body pre.md-code {
   margin: 8px 0;

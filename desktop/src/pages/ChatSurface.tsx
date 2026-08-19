@@ -30,7 +30,7 @@ import Diff from "@/components/Diff";
 import CompactSelect from "@/components/CompactSelect";
 import Icon from "@/components/Icon";
 import type { IconName } from "@/components/Icon";
-import { renderMarkdown } from "@/lib/markdown";
+import { renderMarkdown, renderMarkdownWithInlineFileChips } from "@/lib/markdown";
 import { highlightCode, langFromPath } from "@/lib/highlight";
 import { applyIndent } from "@/lib/indent";
 import { ansiToHtml } from "@/lib/ansi";
@@ -52,6 +52,12 @@ import {
   transcriptPickKey,
 } from "@/lib/newChatContext";
 import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
+import {
+  attachmentMarker,
+  insertInlineAttachmentMarker,
+  promptTextWithAttachmentRefs,
+  type ComposerAttachment,
+} from "@/lib/chatAttachments";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, a content stack (chat timeline or a file's diff), and the composer.
@@ -160,7 +166,7 @@ function UserBubble(props: { body: string }) {
     <div class="chat-user-row">
       <div
         class="chat-user-bubble markdown-body"
-        innerHTML={renderMarkdown(stripArchductorMetadata(props.body))}
+        innerHTML={renderMarkdownWithInlineFileChips(stripArchductorMetadata(props.body))}
       />
     </div>
   );
@@ -610,7 +616,8 @@ function Composer(props: {
   const [text, setText] = createSignal("");
   // Pasted blobs saved to the workspace as files; sent as path references so the
   // agent reads them instead of us inlining a huge string.
-  const [attachments, setAttachments] = createSignal<{ path: string; label: string }[]>([]);
+  const [attachments, setAttachments] = createSignal<ComposerAttachment[]>([]);
+  let inputRef: HTMLTextAreaElement | undefined;
   const slice = () => chatStore.slice(props.threadId);
   const sessionKind = () => providerToKind(props.provider);
   const busy = () => slice().session?.ready === false && slice().session != null;
@@ -701,21 +708,19 @@ function Composer(props: {
 
   const PASTE_TO_FILE_CHARS = 2000;
 
-  // Combine the typed text with any pasted-file references and context picked
-  // on the empty-chat screen. `input` (to the agent) carries the transcript /
-  // plan text and the file paths; `visible` (shown in the UI) gets compact 📎
-  // markers so the timeline isn't cluttered with paths or pasted transcripts.
+  // Combine typed text with inline pasted-file markers and context picked on
+  // the empty-chat screen. `input` (to the agent) swaps visible {file.md}
+  // markers for @path references; `visible` keeps the compact inline markers.
   function buildPayload(): { input: string; visible: string } | null {
     const value = text().trim();
-    const atts = attachments();
-    if (!value && atts.length === 0) return null;
+    const atts = attachments().filter((a) => value.includes(a.marker));
+    if (!value) return null;
     const picks = newChatContextStore.picks(props.threadId);
-    const refs = atts.map((a) => `Attached file (${a.label}): ${a.path}`);
-    const input = [contextPreamble(picks), value, ...refs].filter(Boolean).join("\n\n");
+    const inputText = promptTextWithAttachmentRefs(value, atts);
+    const input = [contextPreamble(picks), inputText].filter(Boolean).join("\n\n");
     const visible = [
       value,
-      ...picks.map((pick) => `📎 ${pick.label}`),
-      ...atts.map((a) => `📎 ${a.label}`),
+      ...picks.map((pick) => `{${pick.label}}`),
     ]
       .filter(Boolean)
       .join("  ");
@@ -729,16 +734,31 @@ function Composer(props: {
     newChatContextStore.clear(props.threadId);
   }
 
-  // Large paste → save to a workspace file and attach it as a chip instead of
-  // dumping thousands of characters into the textarea.
+  // Large paste → save to a workspace file and insert an inline marker instead
+  // of dumping thousands of characters into the textarea.
   async function onPaste(e: ClipboardEvent) {
     const pasted = e.clipboardData?.getData("text") ?? "";
     if (pasted.length <= PASTE_TO_FILE_CHARS) return; // small paste: default behaviour
     e.preventDefault();
+    const target = e.currentTarget as HTMLTextAreaElement;
+    const selectionStart = target.selectionStart ?? text().length;
+    const selectionEnd = target.selectionEnd ?? text().length;
     try {
       const res = await send({ type: "save_chat_paste", thread_id: props.threadId, text: pasted });
       if (res.type === "chat_paste_saved") {
-        setAttachments((a) => [...a, { path: res.relative_path, label: res.label }]);
+        const marker = attachmentMarker(res.relative_path);
+        const inserted = insertInlineAttachmentMarker(
+          text(),
+          marker,
+          selectionStart,
+          selectionEnd,
+        );
+        setText(inserted.value);
+        setAttachments((a) => [...a, { path: res.relative_path, label: res.label, marker }]);
+        queueMicrotask(() => {
+          inputRef?.focus();
+          inputRef?.setSelectionRange(inserted.cursor, inserted.cursor);
+        });
       } else {
         setText((t) => t + pasted);
       }
@@ -1020,27 +1040,9 @@ function Composer(props: {
         </div>
       </Show>
       <div class="chat-composer-box">
-        <Show when={attachments().length > 0}>
-          <div class="chat-attachment-chips">
-            <For each={attachments()}>
-              {(a, i) => (
-                <span class="chat-attachment-chip" title={a.path}>
-                  <Icon name="paperclip" class="chat-attachment-chip-icon" />
-                  <span class="chat-attachment-chip-label">{a.label}</span>
-                  <button
-                    class="chat-attachment-chip-remove"
-                    title="Remove attachment"
-                    onClick={() => setAttachments((list) => list.filter((_, j) => j !== i()))}
-                  >
-                    <Icon name="x" />
-                  </button>
-                </span>
-              )}
-            </For>
-          </div>
-        </Show>
         <div class="chat-input-shell">
           <textarea
+            ref={inputRef}
             class="chat-input-view"
             data-focus-target="chat-composer"
             placeholder={
@@ -1118,10 +1120,10 @@ function Composer(props: {
               fallback={
                 <button
                   class="chat-send-btn"
-                  classList={{ "chat-send-btn-active": text().trim().length > 0 || attachments().length > 0 }}
+                  classList={{ "chat-send-btn-active": text().trim().length > 0 }}
                   onClick={primaryAction}
                   title="Send"
-                  disabled={text().trim().length === 0 && attachments().length === 0}
+                  disabled={text().trim().length === 0}
                 >
                   <Icon name="arrow-up" />
                 </button>
