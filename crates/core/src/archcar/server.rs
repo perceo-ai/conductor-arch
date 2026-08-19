@@ -453,6 +453,7 @@ fn handle_connection<S: DuplexStream>(stream: S, state: Arc<Mutex<ServerState>>)
         ArchcarRequest::Subscribe => {
             let (tx, rx) = mpsc::channel();
             register_subscriber_with_snapshot(&mut state.lock().unwrap(), tx);
+            spawn_queued_input_startup_sweep(&state);
             while let Ok(event) = rx.recv() {
                 let envelope = RpcEnvelope {
                     id: Uuid::new_v4().to_string(),

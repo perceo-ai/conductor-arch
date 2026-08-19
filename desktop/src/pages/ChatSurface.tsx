@@ -858,7 +858,7 @@ function Composer(props: {
   async function moveQueued(queueId: number, up: boolean) {
     await send({ type: "move_queued_chat_input", queue_id: queueId, up }).catch(() => {});
   }
-  // Send a queued item now as a steer, then drop it from the queue.
+  // Send a queued item now, then drop it from the queue.
   async function steerQueued(q: { id: number; input: string; visible_input?: string }) {
     const sid = sessionId();
     if (sid == null) return;
@@ -1002,7 +1002,7 @@ function Composer(props: {
                   </button>
                   <button
                     class="chat-queued-action-btn"
-                    title="Send now (steer)"
+                    title="Send now"
                     disabled={sessionId() == null}
                     onClick={() => void steerQueued(q)}
                   >
