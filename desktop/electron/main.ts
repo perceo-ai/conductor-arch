@@ -5,7 +5,14 @@ import fs from "node:fs";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { ArchcarBridge, loadRemoteConfig, remoteProfilePath } from "./archcar.js";
+import {
+  ArchcarBridge,
+  loadClients,
+  loadRemoteConfig,
+  remoteHandlerBlock,
+  saveClients,
+  upsertClient,
+} from "./archcar.js";
 import { parseGithubRepos } from "./githubRepos.js";
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
@@ -337,39 +344,19 @@ ipcMain.handle(
           "ARCHDUCTOR_ARCHCAR_REMOTE is set and overrides the profile; unset it to configure the connection here",
       };
     }
-    // Keep the previous profile so a typo doesn't destroy a working remote
-    // connection — restore it if the new daemon is unreachable.
-    let previous: string | null = null;
+    // Goes through the saved-client list so a connection made here also shows
+    // up in the switcher; `saveClients` writes the profile mirror. Keep the
+    // previous selection so a typo doesn't destroy a working connection.
     try {
-      previous = fs.readFileSync(remoteProfilePath(), "utf8");
-    } catch {
-      previous = null;
-    }
-    const restore = () => {
-      if (previous === null) fs.rmSync(remoteProfilePath(), { force: true });
-      else fs.writeFileSync(remoteProfilePath(), previous, { mode: 0o600 });
-    };
-    try {
-      // Persist, then verify through the bridge (it re-reads the profile per
-      // connection).
-      fs.mkdirSync(path.dirname(remoteProfilePath()), { recursive: true });
-      fs.writeFileSync(remoteProfilePath(), JSON.stringify({ address, token }, null, 2) + "\n", {
-        mode: 0o600,
-      });
-      const res = await bridge.request<{ type: string }, { type: string; message?: string }>({
-        type: "get_remote_access",
-      });
-      if (res.type === "error") {
-        restore();
-        return { ok: false, error: res.message ?? "remote daemon refused the connection" };
-      }
+      const previous = loadClients();
+      const next = loadClients();
+      const id = upsertClient(next, undefined, address, token);
+      next.active_id = id;
+      const res = await activateClients(next, previous, true);
+      if (!res.ok) return { ok: false, error: res.error };
       logLine("remote", `connected to archcar at ${address}`);
-      // Drop the local event stream; the auto-reconnect resubscribes against
-      // the new endpoint because open() re-reads the profile.
-      bridge.close();
       return { ok: true, address };
     } catch (err) {
-      restore();
       return { ok: false, error: (err as Error).message };
     }
   },
@@ -377,10 +364,161 @@ ipcMain.handle(
 
 ipcMain.handle("archcar:remote-clear", async () => {
   try {
-    fs.rmSync(remoteProfilePath(), { force: true });
+    const file = loadClients();
+    delete file.active_id;
+    saveClients(file);
     logLine("remote", "cleared remote profile; using the local daemon");
     bridge.close();
     return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+// --- Saved clients ---------------------------------------------------------
+// The switcher manages many daemons; `saveClients` keeps `remote.json` pointed
+// at the selected one so every other reader needs no changes.
+
+const envRemoteAddress = () => process.env.ARCHDUCTOR_ARCHCAR_REMOTE?.trim() || null;
+
+/** Tokens never cross to the renderer — the switcher only needs to label rows. */
+function clientSummaries(file: ReturnType<typeof loadClients>) {
+  return file.clients.map((c) => ({ id: c.id, label: c.label, address: c.address }));
+}
+
+/**
+ * Point the machine at `next`, prove the daemon answers, and roll the selection
+ * back if it does not — a switch that silently lands on a dead host would leave
+ * every surface empty with no explanation.
+ */
+async function activateClients(
+  next: ReturnType<typeof loadClients>,
+  previous: ReturnType<typeof loadClients>,
+  verify: boolean,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  saveClients(next);
+  if (!verify) {
+    bridge.close();
+    return { ok: true };
+  }
+  try {
+    const res = await bridge.request<{ type: string }, { type: string; message?: string }>({
+      type: "get_remote_access",
+    });
+    if (res.type === "error") {
+      saveClients(previous);
+      return { ok: false, error: res.message ?? "the daemon refused the connection" };
+    }
+  } catch (err) {
+    saveClients(previous);
+    return { ok: false, error: (err as Error).message };
+  }
+  // Drop the old event stream; auto-reconnect resubscribes against the new
+  // endpoint because open() re-reads the profile.
+  bridge.close();
+  return { ok: true };
+}
+
+ipcMain.handle("clients:list", async () => {
+  try {
+    const file = loadClients();
+    return {
+      ok: true,
+      activeId: file.active_id ?? null,
+      clients: clientSummaries(file),
+      envAddress: envRemoteAddress(),
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle(
+  "clients:add",
+  async (_evt, opts: { label?: string; address?: string; token?: string } | undefined) => {
+    const address = opts?.address?.trim();
+    const token = opts?.token?.trim();
+    if (!address || !token) return { ok: false, error: "address and token are required" };
+    if (envRemoteAddress()) {
+      return {
+        ok: false,
+        error:
+          "ARCHDUCTOR_ARCHCAR_REMOTE is set and overrides saved clients; unset it to manage them here",
+      };
+    }
+    try {
+      const previous = loadClients();
+      const next = loadClients();
+      const id = upsertClient(next, opts?.label, address, token);
+      next.active_id = id;
+      const res = await activateClients(next, previous, true);
+      if (!res.ok) return res;
+      logLine("remote", `connected to archcar at ${address}`);
+      return { ok: true, id, clients: clientSummaries(next), activeId: id };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  },
+);
+
+ipcMain.handle("clients:activate", async (_evt, id: string | null) => {
+  if (envRemoteAddress()) {
+    return {
+      ok: false,
+      error: "ARCHDUCTOR_ARCHCAR_REMOTE is set and overrides saved clients; unset it to switch here",
+    };
+  }
+  try {
+    const previous = loadClients();
+    const next = loadClients();
+    if (id === null) {
+      delete next.active_id;
+      saveClients(next);
+      bridge.close();
+      logLine("remote", "switched to the local daemon");
+      return { ok: true, activeId: null, clients: clientSummaries(next) };
+    }
+    const target = next.clients.find((c) => c.id === id);
+    if (!target) return { ok: false, error: `no saved client ${id}` };
+    next.active_id = id;
+    const res = await activateClients(next, previous, true);
+    if (!res.ok) return res;
+    logLine("remote", `switched to archcar at ${target.address}`);
+    return { ok: true, activeId: id, clients: clientSummaries(next) };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle("clients:remove", async (_evt, id: string) => {
+  try {
+    const file = loadClients();
+    if (!file.clients.some((c) => c.id === id)) return { ok: false, error: `no saved client ${id}` };
+    const wasActive = file.active_id === id;
+    file.clients = file.clients.filter((c) => c.id !== id);
+    if (wasActive) delete file.active_id;
+    saveClients(file);
+    if (wasActive) bridge.close();
+    return {
+      ok: true,
+      activeId: file.active_id ?? null,
+      clients: clientSummaries(file),
+    };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
+ipcMain.handle("clients:rename", async (_evt, opts: { id: string; label: string }) => {
+  const label = opts?.label?.trim();
+  if (!label) return { ok: false, error: "a name is required" };
+  try {
+    const file = loadClients();
+    const target = file.clients.find((c) => c.id === opts.id);
+    if (!target) return { ok: false, error: `no saved client ${opts.id}` };
+    target.label = label;
+    saveClients(file);
+    return { ok: true, activeId: file.active_id ?? null, clients: clientSummaries(file) };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }
@@ -434,6 +572,9 @@ ipcMain.handle(
   "gh:repo-avatar",
   async (_evt, opts: { rootPath: string; remoteName?: string }) => {
     try {
+      // The repo root belongs to the daemon's filesystem when a remote is
+      // configured; `git -C` here would fail with a confusing chdir error.
+      if (loadRemoteConfig()) return { ok: true, avatarUrl: "" };
       const remote = opts.remoteName?.trim() || "origin";
       const { stdout } = await execFileP(
         "git",
@@ -476,6 +617,11 @@ ipcMain.handle(
         author: r.author?.login ?? "",
       }));
     };
+    // `gh` resolves the repo from its working directory, which lives on the
+    // daemon's machine when a remote is configured. There is no daemon-side RPC
+    // for this listing yet, so say why instead of failing on a missing cwd.
+    const blocked = remoteHandlerBlock(loadRemoteConfig(), "Listing GitHub issues and pull requests");
+    if (blocked) return blocked;
     try {
       const [issues, prs] = await Promise.all([run("issue", []), run("pr", ["headRefName"])]);
       const items = [...prs, ...issues].sort((a, b) =>
@@ -490,9 +636,12 @@ ipcMain.handle(
 );
 
 // Check whether a filesystem path exists (used to prune repositories whose root
-// directory was deleted on disk).
+// directory was deleted on disk). While a remote daemon owns the workspaces the
+// path lives on its machine, so this process cannot judge it — answer "exists"
+// rather than reporting every remote repository as deleted.
 ipcMain.handle("fs:path-exists", async (_evt, p: string) => {
   try {
+    if (loadRemoteConfig()) return { exists: true, remote: true };
     return { exists: !!p && fs.existsSync(p) };
   } catch {
     return { exists: false };
@@ -509,6 +658,10 @@ ipcMain.handle("shell:open-external", async (_evt, target: string) => {
       await shell.openExternal(target);
       return { ok: true };
     }
+    // http(s)/mailto targets are machine-independent and handled above; a bare
+    // path is only openable when this machine holds the files.
+    const blocked = remoteHandlerBlock(loadRemoteConfig(), "Opening this path");
+    if (blocked) return blocked;
     if (target && fs.existsSync(target)) {
       const err = await shell.openPath(target);
       return err ? { ok: false, error: err } : { ok: true };
@@ -528,6 +681,8 @@ ipcMain.handle("shell:open-workspace-app", async (_evt, opts: { rootPath?: strin
   const rootPath = opts?.rootPath;
   const appId = opts?.appId;
   const command = appId ? WORKSPACE_APP_COMMANDS[appId] : undefined;
+  const blocked = remoteHandlerBlock(loadRemoteConfig(), "Opening the workspace in an editor");
+  if (blocked) return blocked;
   if (!rootPath || !fs.existsSync(rootPath) || !command) {
     return { ok: false, error: "invalid workspace app target" };
   }

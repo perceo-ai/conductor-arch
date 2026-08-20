@@ -7,6 +7,7 @@ import { createSignal } from "solid-js";
 
 export type DialogSpec =
   | { kind: "add-project" }
+  | { kind: "add-client" }
   | { kind: "create-workspace"; repository: string }
   | { kind: "workspace-actions"; workspace: string }
   | { kind: "background-task"; repository: string }

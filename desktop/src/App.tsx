@@ -10,6 +10,7 @@ import CommandPalette from "./components/CommandPalette";
 import ShortcutsHelp from "./components/ShortcutsHelp";
 import Icon from "./components/Icon";
 import { PageStack } from "./pages";
+import { runShellAction } from "./lib/shellAction";
 import {
   startStore,
   setupStore,
@@ -325,7 +326,7 @@ export default function App() {
         }
         case "open-in-app": {
           const path = activeWorkspace()?.path;
-          if (path) void openExternal(path);
+          if (path) runShellAction("Open workspace", openExternal(path));
           break;
         }
         case "open-menu":
@@ -349,14 +350,18 @@ export default function App() {
         <WindowControls />
       </Show>
       <div class="window-content">
-        <Sidebar
-          collapsed={sidebarCollapsed()}
-          onToggle={() => setSidebarCollapsed((c) => !c)}
-        />
-        <Show when={sidebarCollapsed()}>
-          <button class="ui-button-icon reopen-sidebar" onClick={() => setSidebarCollapsed(false)}>
-            <Icon name="panel-right" />
-          </button>
+        {/* Settings brings its own left column and takes over the window;
+            showing both would put two navigation rails side by side. */}
+        <Show when={nav.activePage() !== "settings"}>
+          <Sidebar
+            collapsed={sidebarCollapsed()}
+            onToggle={() => setSidebarCollapsed((c) => !c)}
+          />
+          <Show when={sidebarCollapsed()}>
+            <button class="ui-button-icon reopen-sidebar" onClick={() => setSidebarCollapsed(false)}>
+              <Icon name="panel-right" />
+            </button>
+          </Show>
         </Show>
         <PageStack />
       </div>

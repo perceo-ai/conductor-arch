@@ -170,20 +170,38 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RemoteCommand {
-    /// Save a remote daemon profile (and verify the daemon responds).
+    /// Save a remote daemon as a client and switch to it (verifies it responds).
     Connect {
         /// `host:port` of the remote archcar TCP listener.
         address: String,
         /// Access token (print it on the server with `archductor service token`).
         #[arg(long)]
         token: String,
-        /// Save the profile without contacting the daemon.
+        /// Name for this client in the switcher; defaults to the address.
+        #[arg(long)]
+        label: Option<String>,
+        /// Save the client without contacting the daemon.
         #[arg(long)]
         no_verify: bool,
     },
+    /// List the saved clients, marking the active one.
+    List,
+    /// Switch to a saved client by name or id.
+    Use {
+        /// Client name or id; `local` or `this-machine` selects the local daemon.
+        client: String,
+        /// Switch without contacting the daemon first.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Forget a saved client.
+    Remove {
+        /// Client name or id.
+        client: String,
+    },
     /// Show where archcar requests from this machine currently go.
     Status,
-    /// Remove the saved remote profile and use the local daemon again.
+    /// Switch back to this machine's local daemon (saved clients are kept).
     Disconnect,
 }
 
@@ -306,6 +324,28 @@ enum ArchcarCommand {
     InventorySnapshot,
     /// List repositories with workspace counts.
     Repositories,
+    /// Register a git repository with the daemon (paths resolve on the daemon's
+    /// machine, so this works against a remote where `repo add` cannot).
+    AddRepository {
+        /// Path to an existing git repository, on the daemon's filesystem.
+        path: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        remote_name: Option<String>,
+        #[arg(long)]
+        default_branch: Option<String>,
+        #[arg(long)]
+        workspace_parent: Option<String>,
+    },
+    /// Create a workspace (worktree + branch) on the daemon.
+    CreateWorkspace {
+        repository: String,
+        name: String,
+        branch: String,
+        #[arg(long)]
+        base_ref: Option<String>,
+    },
     /// List chat threads for a workspace.
     ChatThreads {
         workspace: String,
@@ -1230,6 +1270,19 @@ fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     let paths = AppPaths::from_env();
 
+    // These commands read this machine's SQLite database directly. Pointed at a
+    // remote daemon they would quietly maintain a second, divergent inventory
+    // while `remote status` and every `archcar` verb talk to the server.
+    if let Some(name) = local_store_command_name(&cli.command) {
+        if let Some(ArchcarEndpoint::Remote { address, .. }) = configured_remote_endpoint(&paths)? {
+            anyhow::bail!(
+                "`archductor {name}` reads this machine's database, but Archductor is connected to \
+                 the remote daemon at {address}.\nUse `archductor archcar <command>` for \
+                 remote-backed work, or run `archductor remote disconnect` first."
+            );
+        }
+    }
+
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
         Command::Setup { recheck } => print_setup(doctor::setup_report(recheck)),
@@ -1519,6 +1572,34 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Repositories => {
                     print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
+                }
+                ArchcarCommand::AddRepository {
+                    path,
+                    name,
+                    remote_name,
+                    default_branch,
+                    workspace_parent,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::AddRepository {
+                        path,
+                        name,
+                        remote_name,
+                        default_branch,
+                        workspace_parent,
+                    })?);
+                }
+                ArchcarCommand::CreateWorkspace {
+                    repository,
+                    name,
+                    branch,
+                    base_ref,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::CreateWorkspace {
+                        repository,
+                        name,
+                        branch,
+                        base_ref,
+                    })?);
                 }
                 ArchcarCommand::ChatThreads { workspace } => {
                     print_archcar_response(
@@ -2872,29 +2953,79 @@ fn run_cli() -> Result<()> {
             RemoteCommand::Connect {
                 address,
                 token,
+                label,
                 no_verify,
             } => {
                 let address = address.trim().to_owned();
                 let token = token.trim().to_owned();
                 if !no_verify {
-                    let client = ArchcarClient::remote(address.clone(), token.clone());
-                    match client.send(ArchcarRequest::GetRemoteAccess)? {
-                        ArchcarResponse::Error { message } => {
-                            anyhow::bail!("remote daemon at {address} refused: {message}")
-                        }
-                        _ => println!("Verified archcar at {address}."),
-                    }
+                    verify_client(&address, &token)?;
                 }
-                remote::save_profile(
-                    &paths,
-                    &remote::RemoteProfile {
-                        address: address.clone(),
-                        token,
-                    },
-                )?;
+                let mut clients = remote::load_clients(&paths)?;
+                let id = clients.upsert(label.as_deref(), &address, &token);
+                clients.active_id = Some(id);
+                remote::save_clients(&paths, &clients)?;
                 println!("Connected: this machine's Archductor clients now use {address}.");
-                println!("Profile: {}", remote::profile_path(&paths).display());
-                println!("Disconnect with `archductor remote disconnect`.");
+                println!("Saved clients: {}", remote::clients_path(&paths).display());
+                println!("Switch with `archductor remote use <client>` or `remote disconnect`.");
+            }
+            RemoteCommand::List => {
+                let clients = remote::load_clients(&paths)?;
+                let env_remote = std::env::var(remote::REMOTE_ENV)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty());
+                if let Some(address) = &env_remote {
+                    println!("  (environment)      {address}  <- overrides the selection below");
+                }
+                let marker = |active: bool| if active { "*" } else { " " };
+                println!(
+                    "{} this-machine       {}",
+                    marker(clients.active_id.is_none()),
+                    paths.archcar_endpoint_path().display()
+                );
+                for client in &clients.clients {
+                    println!(
+                        "{} {:<18} {}",
+                        marker(clients.active_id.as_deref() == Some(client.id.as_str())),
+                        client.id,
+                        client.address
+                    );
+                }
+            }
+            RemoteCommand::Use { client, no_verify } => {
+                let key = client.trim();
+                let mut clients = remote::load_clients(&paths)?;
+                if matches!(key, "local" | "this-machine" | "this machine") {
+                    clients.active_id = None;
+                    remote::save_clients(&paths, &clients)?;
+                    println!("Using this machine's local daemon.");
+                } else {
+                    let Some(target) = clients.find(key).cloned() else {
+                        anyhow::bail!(
+                            "no saved client named {key}; run `archductor remote list` to see them"
+                        );
+                    };
+                    if !no_verify {
+                        verify_client(&target.address, &target.token)?;
+                    }
+                    clients.active_id = Some(target.id.clone());
+                    remote::save_clients(&paths, &clients)?;
+                    println!("Switched to {} ({}).", target.label, target.address);
+                }
+            }
+            RemoteCommand::Remove { client } => {
+                let mut clients = remote::load_clients(&paths)?;
+                let was_active = clients
+                    .find(client.trim())
+                    .is_some_and(|c| clients.active_id.as_deref() == Some(c.id.as_str()));
+                if !clients.remove(client.trim()) {
+                    anyhow::bail!("no saved client named {client}");
+                }
+                remote::save_clients(&paths, &clients)?;
+                println!("Removed {client}.");
+                if was_active {
+                    println!("Now using this machine's local daemon.");
+                }
             }
             RemoteCommand::Status => {
                 let env_remote = std::env::var(remote::REMOTE_ENV)
@@ -2916,10 +3047,15 @@ fn run_cli() -> Result<()> {
                 }
             }
             RemoteCommand::Disconnect => {
-                if remote::clear_profile(&paths)? {
-                    println!("Removed the remote profile; using the local daemon.");
-                } else {
-                    println!("No remote profile was set.");
+                let mut clients = remote::load_clients(&paths)?;
+                match clients.active().map(|c| c.label.clone()) {
+                    Some(label) => {
+                        clients.active_id = None;
+                        remote::save_clients(&paths, &clients)?;
+                        println!("Left {label}; using this machine's local daemon.");
+                        println!("It stays saved — switch back with `archductor remote use`.");
+                    }
+                    None => println!("Already using this machine's local daemon."),
                 }
                 if std::env::var(remote::REMOTE_ENV).is_ok() {
                     println!(
@@ -3097,6 +3233,53 @@ fn change_scope(commit: Option<String>, default: WorkspaceChangeScope) -> Worksp
     match commit {
         Some(sha) => WorkspaceChangeScope::Commit { sha },
         None => default,
+    }
+}
+
+/// Contact a daemon before pointing this machine at it, so a typo or a dead
+/// host fails here instead of leaving every surface talking to nothing.
+fn verify_client(address: &str, token: &str) -> Result<()> {
+    let client = ArchcarClient::remote(address.to_owned(), token.to_owned());
+    match client.send(ArchcarRequest::GetRemoteAccess)? {
+        ArchcarResponse::Error { message } => {
+            anyhow::bail!("remote daemon at {address} refused: {message}")
+        }
+        _ => {
+            println!("Verified archcar at {address}.");
+            Ok(())
+        }
+    }
+}
+
+/// The commands that open `WorkspaceStore`/`RepositoryStore` against the local
+/// database instead of going through `ArchcarClient`. Returns the name to print
+/// in the refusal, or `None` for commands that are safe under a remote profile.
+///
+/// `archcar`, `remote`, `service`, and `mcp` are absent on purpose: they either
+/// speak to the configured daemon already or configure the connection itself.
+/// `doctor`/`setup`/`settings` only touch host state and config files.
+fn local_store_command_name(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::History { .. } => Some("history"),
+        Command::Repo { .. } => Some("repo"),
+        Command::Workspace { .. } => Some("workspace"),
+        Command::Run { .. } => Some("run"),
+        Command::Stop { .. } => Some("stop"),
+        Command::Logs { .. } => Some("logs"),
+        Command::Runs { .. } => Some("runs"),
+        Command::Diff { .. } => Some("diff"),
+        Command::Pr { .. } => Some("pr"),
+        Command::Session { .. } => Some("session"),
+        Command::Todo { .. } => Some("todo"),
+        Command::Checks { .. } => Some("checks"),
+        Command::Open { .. } => Some("open"),
+        Command::Review { .. } => Some("review"),
+        Command::Archive { .. } => Some("archive"),
+        Command::Status => Some("status"),
+        Command::Checkpoint { .. } => Some("checkpoint"),
+        Command::Conflicts { .. } => Some("conflicts"),
+        Command::Discard { .. } => Some("discard"),
+        _ => None,
     }
 }
 
@@ -5069,6 +5252,73 @@ mod tests {
 
     use super::*;
     use std::ffi::OsString;
+
+    fn command_of(args: &[&str]) -> Command {
+        Cli::try_parse_from(args).unwrap().command
+    }
+
+    #[test]
+    fn direct_store_commands_are_named_so_a_remote_profile_can_refuse_them() {
+        for (args, expected) in [
+            (vec!["archductor", "status"], "status"),
+            (vec!["archductor", "repo", "list"], "repo"),
+            (vec!["archductor", "workspace", "list"], "workspace"),
+            (vec!["archductor", "conflicts", "ws"], "conflicts"),
+        ] {
+            assert_eq!(
+                local_store_command_name(&command_of(&args)),
+                Some(expected),
+                "{args:?} opens the local store and must be refused under a remote profile"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_and_daemon_backed_commands_stay_usable_under_a_remote_profile() {
+        for args in [
+            vec!["archductor", "archcar", "workspaces"],
+            vec!["archductor", "remote", "status"],
+            vec!["archductor", "doctor"],
+            vec!["archductor", "mcp", "serve"],
+        ] {
+            assert_eq!(
+                local_store_command_name(&command_of(&args)),
+                None,
+                "{args:?} must keep working while a remote daemon is configured"
+            );
+        }
+    }
+
+    #[test]
+    fn archcar_gained_the_verbs_a_remote_only_client_needs_to_bootstrap() {
+        let add = command_of(&["archductor", "archcar", "add-repository", "/srv/repo"]);
+        let Command::Archcar {
+            command: ArchcarCommand::AddRepository { path, .. },
+        } = add
+        else {
+            panic!("expected archcar add-repository");
+        };
+        assert_eq!(path, "/srv/repo");
+
+        let create = command_of(&[
+            "archductor",
+            "archcar",
+            "create-workspace",
+            "demo",
+            "ws",
+            "feature/ws",
+        ]);
+        let Command::Archcar {
+            command: ArchcarCommand::CreateWorkspace {
+                repository, branch, ..
+            },
+        } = create
+        else {
+            panic!("expected archcar create-workspace");
+        };
+        assert_eq!(repository, "demo");
+        assert_eq!(branch, "feature/ws");
+    }
 
     #[test]
     fn parses_app_shared_settings_export() {

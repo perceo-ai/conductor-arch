@@ -2,6 +2,7 @@ import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "soli
 import { nav, workspacesStore, repositoriesStore } from "@/store";
 import { openExternal, openWorkspaceApp } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
+import { runShellAction } from "@/lib/shellAction";
 import ChatSurface from "./ChatSurface";
 import WorkspaceFiles from "./WorkspaceFiles";
 import { ChangesRows } from "./WorkspaceChanges";
@@ -48,14 +49,18 @@ function TopBar(props: {
         label: `Open in ${defaultOpener.label}`,
         iconSrc: defaultOpener.logoSrc,
         iconAlt: defaultOpener.label,
-        run: () => void openExternal(root),
+        run: () => runShellAction(`Open in ${defaultOpener.label}`, openExternal(root)),
       });
       for (const app of WORKSPACE_OPEN_APPS) {
         items.push({
           label: `Open in ${app.label}`,
           iconSrc: app.logoSrc,
           iconAlt: app.label,
-          run: () => void openWorkspaceApp({ rootPath: root, appId: app.id }),
+          run: () =>
+            runShellAction(
+              `Open in ${app.label}`,
+              openWorkspaceApp({ rootPath: root, appId: app.id }),
+            ),
         });
       }
     }

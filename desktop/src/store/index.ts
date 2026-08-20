@@ -17,6 +17,7 @@ export { actions } from "./actions";
 export { dialogs } from "./dialogs";
 export type { DialogSpec, ConfirmSpec } from "./dialogs";
 export { setupStore } from "./setup";
+export { clientsStore } from "./clients";
 export { threadsStore } from "./threads";
 export { terminalStore } from "./terminal";
 export { interactionsStore } from "./interactions";

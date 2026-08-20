@@ -12,6 +12,8 @@ import {
 } from "@/lib/workspaceStatus";
 import { deriveWorkspacePrAction, workspacePrActionInput, type WorkspacePrActionKind } from "@/lib/workspacePrAction";
 import { titleCaseWorkspace } from "@/lib/text";
+import { runShellAction } from "@/lib/shellAction";
+import ClientSwitcher from "./ClientSwitcher";
 
 // Run a lifecycle action and surface any failure as a toast rather than
 // swallowing it — a silently-failing remove/delete is how a dead workspace ends
@@ -98,7 +100,7 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
       label: "Open in editor",
       run: () => {
         const root = repositoriesStore.row(repo)?.rootPath;
-        if (root) runAction("Open", openExternal(root));
+        if (root) runShellAction("Open in editor", openExternal(root));
       },
     },
     {
@@ -284,6 +286,8 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           <Icon name="panel-left" />
         </button>
       </div>
+
+      <ClientSwitcher />
 
       <div class="sidebar-nav-group">
         <button
