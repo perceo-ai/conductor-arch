@@ -1086,6 +1086,12 @@ body.resizing-col {
 .ws-file-summary-row-content:hover {
   background: rgba(255, 255, 255, 0.05);
 }
+/* Marks the row whose diff is showing below, so a narrowed diff is legible
+   rather than looking like the scope silently lost most of its content. */
+.ws-file-summary-row-selected {
+  background: var(--lc-surface-selected, #232323);
+  box-shadow: inset 2px 0 0 var(--lc-accent, #d4a94f);
+}
 .ws-folder-toggle,
 .ws-folder-icon,
 .ws-file-icon {

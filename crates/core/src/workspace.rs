@@ -3705,33 +3705,43 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    /// Everything since the review base. Untracked files are appended for the
+    /// same reason as in `uncommitted_diff`: they appear in this scope's
+    /// summaries, so they have to appear in its patch.
     pub fn unified_diff_against_base(&self, name: &str, path: Option<&Path>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
-        if let Some(path) = path {
+        let mut diff = if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            return git_output_dynamic(
+            git_output_dynamic(
                 &workspace.path,
                 &["diff", base_ref, "--", path_value.as_str()],
-            );
-        }
-        git_output_dynamic(&workspace.path, &["diff", base_ref, "--"])
+            )?
+        } else {
+            git_output_dynamic(&workspace.path, &["diff", base_ref, "--"])?
+        };
+        diff.push_str(&untracked_patch(&workspace.path, path)?);
+        Ok(diff)
     }
 
     /// Every uncommitted change in one patch: `git diff HEAD` covers staged and
     /// unstaged together. Taking the staged and unstaged diffs separately and
     /// concatenating them would list a file that is both twice, with
     /// overlapping hunks, which is exactly what the changes panel must not show.
+    /// Untracked files are appended, since they appear in the matching summaries.
     pub fn uncommitted_diff(&self, name: &str, path: Option<&Path>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
-        if let Some(path) = path {
+        let mut diff = if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            return git_output_dynamic(
+            git_output_dynamic(
                 &workspace.path,
                 &["diff", "HEAD", "--", path_value.as_str()],
-            );
-        }
-        git_output_dynamic(&workspace.path, &["diff", "HEAD", "--"])
+            )?
+        } else {
+            git_output_dynamic(&workspace.path, &["diff", "HEAD", "--"])?
+        };
+        diff.push_str(&untracked_patch(&workspace.path, path)?);
+        Ok(diff)
     }
 
     /// One commit's patch, optionally narrowed to a single path.
@@ -10958,6 +10968,50 @@ fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
 
 fn git_output_dynamic(cwd: &Path, args: &[&str]) -> Result<String> {
     command_output(cwd, "git", args)
+}
+
+/// Render one untracked file as a new-file patch. `git diff` never reports
+/// untracked content, so `--no-index` against /dev/null is what turns it into a
+/// normal patch; git special-cases that path on every platform, including
+/// Windows. It exits 1 when the two sides differ, which is the expected result
+/// here rather than a failure, so this cannot go through `command_output`.
+fn git_diff_untracked_file(cwd: &Path, relative_path: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["diff", "--no-index", "--", "/dev/null", relative_path])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("run git diff --no-index in {}", cwd.display()))?;
+    match output.status.code() {
+        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&output.stdout).to_string()),
+        _ => anyhow::bail!(
+            "git diff --no-index failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
+/// Patches for the workspace's untracked files, optionally narrowed to one
+/// path. The summaries built by `file_change_summaries_from_numstat` list
+/// untracked files, so the scope's diff has to carry them or the viewer offers
+/// a row that opens to nothing. Filtering matches those summaries exactly.
+fn untracked_patch(workspace_path: &Path, only: Option<&Path>) -> Result<String> {
+    let only = only.map(|path| path.to_string_lossy().to_string());
+    let status = git_output(
+        workspace_path,
+        ["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    let mut patch = String::new();
+    for path in parse_untracked_status_paths(&status) {
+        if is_conductor_context_path(&path) {
+            continue;
+        }
+        if only.as_ref().is_some_and(|wanted| wanted != &path) {
+            continue;
+        }
+        patch.push_str(&git_diff_untracked_file(workspace_path, &path)?);
+    }
+    Ok(patch)
 }
 
 fn ensure_clean_git_tree(cwd: &Path, label: &str) -> Result<()> {
@@ -24598,6 +24652,56 @@ spotlight_testing = true
 
         assert!(diff.contains("a.txt"));
         assert!(!diff.contains("b.txt"));
+    }
+
+    #[test]
+    fn uncommitted_diff_includes_untracked_files() {
+        // The uncommitted summaries list untracked files, so the patch has to
+        // carry them too; `git diff HEAD` alone leaves them out and the viewer
+        // then shows "No diff" for a row it just listed.
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("tracked.txt"), "base\n").unwrap();
+        git_output(&workspace.path, ["add", "tracked.txt"]);
+        commit_staged(&workspace.path, "seed");
+        fs::write(workspace.path.join("tracked.txt"), "edited\n").unwrap();
+        fs::write(workspace.path.join("brand-new.txt"), "hello\n").unwrap();
+
+        let diff = store.uncommitted_diff("berlin", None).unwrap();
+
+        assert!(diff.contains("diff --git a/tracked.txt"));
+        assert!(diff.contains("diff --git a/brand-new.txt"));
+        assert!(diff.contains("new file mode"));
+        assert!(diff.contains("+hello"));
+    }
+
+    #[test]
+    fn uncommitted_diff_narrowed_to_an_untracked_path_returns_its_patch() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("brand-new.txt"), "hello\n").unwrap();
+        fs::write(workspace.path.join("other-new.txt"), "nope\n").unwrap();
+
+        let diff = store
+            .uncommitted_diff("berlin", Some(Path::new("brand-new.txt")))
+            .unwrap();
+
+        assert!(diff.contains("brand-new.txt"));
+        assert!(diff.contains("+hello"));
+        assert!(!diff.contains("other-new.txt"));
+    }
+
+    #[test]
+    fn diff_against_base_includes_untracked_files() {
+        // Same contract for the "all" scope, whose summaries list untracked too.
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("brand-new.txt"), "hello\n").unwrap();
+
+        let diff = store.unified_diff_against_base("berlin", None).unwrap();
+
+        assert!(diff.contains("brand-new.txt"));
+        assert!(diff.contains("+hello"));
     }
 
     #[test]
