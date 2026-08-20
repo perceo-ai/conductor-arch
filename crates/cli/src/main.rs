@@ -239,13 +239,13 @@ enum HistoryCommand {
 enum ArchcarCommand {
     Ensure {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
+        kind: SessionKind,
     },
     Spawn {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "shell")]
+        kind: SessionKind,
     },
     Status {
         session_id: i64,
@@ -811,8 +811,8 @@ enum ArchcarQueueCommand {
         thread_id: i64,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
         kind: CliArchcarInputKind,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
-        session_kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
+        session_kind: SessionKind,
         #[arg(long)]
         visible_input: Option<String>,
         input: Vec<String>,
@@ -1052,8 +1052,8 @@ enum WorkspaceBranchCommand {
 enum SessionCommand {
     Start {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "shell")]
+        kind: SessionKind,
         #[arg(long)]
         plan_mode: bool,
         #[arg(long)]
@@ -1075,8 +1075,8 @@ enum SessionCommand {
     },
     Open {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "shell")]
+        kind: SessionKind,
         #[arg(long)]
         terminal: Option<String>,
         #[arg(long)]
@@ -1112,8 +1112,8 @@ enum SessionCommand {
     },
     Send {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
+        kind: SessionKind,
         #[arg(long)]
         thread_id: Option<i64>,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
@@ -1210,13 +1210,6 @@ enum CheckpointCommand {
         workspace: String,
         id: i64,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum CliSessionKind {
-    Shell,
-    Codex,
-    Claude,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1352,7 +1345,7 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(client.send(
                         ArchcarRequest::EnsureWorkspaceDefaultSession {
                             workspace,
-                            kind: kind.into(),
+                            kind,
                             harness: None,
                         },
                     )?);
@@ -1360,7 +1353,7 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::Spawn { workspace, kind } => {
                     print_archcar_response(client.send(ArchcarRequest::SpawnSession {
                         workspace,
-                        kind: kind.into(),
+                        kind,
                         harness: None,
                     })?);
                 }
@@ -1408,7 +1401,7 @@ fn run_cli() -> Result<()> {
                         input: input.join(" "),
                         visible_input,
                         kind: kind.into(),
-                        session_kind: session_kind.into(),
+                        session_kind,
                     })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
@@ -2723,7 +2716,7 @@ fn run_cli() -> Result<()> {
                     let process = if cli_session_start_uses_archcar(kind) {
                         let existing_ids = running_session_ids(&store, &workspace)?;
                         let client = ArchcarClient::from_paths(&paths);
-                        let kind: SessionKind = kind.into();
+                        let kind: SessionKind = kind;
                         print_archcar_response(client.send(ArchcarRequest::SpawnSession {
                             workspace: workspace.clone(),
                             kind,
@@ -2737,7 +2730,7 @@ fn run_cli() -> Result<()> {
                             Duration::from_secs(5),
                         )?
                     } else {
-                        store.start_session_with_options(&workspace, kind.into(), harness)?
+                        store.start_session_with_options(&workspace, kind, harness)?
                     };
                     println!(
                         "Started session for {} as pid {} (log: {})",
@@ -2763,7 +2756,7 @@ fn run_cli() -> Result<()> {
                 } => {
                     let launch = store.session_launch_with_options(
                         &workspace,
-                        kind.into(),
+                        kind,
                         SessionHarnessOptions {
                             plan_mode,
                             fast_mode,
@@ -2821,7 +2814,7 @@ fn run_cli() -> Result<()> {
                     immediate,
                     message,
                 } => {
-                    let kind: SessionKind = kind.into();
+                    let kind: SessionKind = kind;
                     anyhow::ensure!(
                         matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE),
                         "session send supports codex and claude"
@@ -4217,8 +4210,20 @@ fn archcar_allow_resolution(always: bool) -> Result<ProviderInteractionResolutio
     Ok(ProviderInteractionResolution::Approve)
 }
 
-fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
-    matches!(kind, CliSessionKind::Codex | CliSessionKind::Claude)
+/// Only managed providers route through archcar; everything else, including
+/// registered agents with no adapter, runs as a local PTY session.
+fn cli_session_start_uses_archcar(kind: SessionKind) -> bool {
+    archductor_core::archcar::harness::managed_harness_for_kind(kind).is_some()
+}
+
+/// Builds the `--kind` parser from the registry, so `--help` lists every
+/// agent this build knows and an unknown value is rejected with that list
+/// rather than failing later as a missing executable.
+fn session_kind_parser() -> impl clap::builder::TypedValueParser<Value = SessionKind> {
+    use clap::builder::TypedValueParser as _;
+    let mut names = vec!["shell"];
+    names.extend(archductor_core::agent_tools::agent_tools().map(|tool| tool.provider_key));
+    clap::builder::PossibleValuesParser::new(names).map(|value| SessionKind::new(&value))
 }
 
 fn cli_session_stop_uses_archcar(kind: SessionKind) -> bool {
@@ -4568,16 +4573,6 @@ fn print_status(lines: Vec<WorkspaceStatusLine>) {
             "{:<16} {:<10} {:<28} {:<14} {:<10} {:<12} {} todo(s)  {}",
             ws.name, ws.status, ws.branch, push, run, sessions, line.open_todos, pr,
         );
-    }
-}
-
-impl From<CliSessionKind> for SessionKind {
-    fn from(value: CliSessionKind) -> Self {
-        match value {
-            CliSessionKind::Shell => Self::SHELL,
-            CliSessionKind::Codex => Self::CODEX,
-            CliSessionKind::Claude => Self::CLAUDE,
-        }
     }
 }
 
@@ -5535,9 +5530,9 @@ mod tests {
 
     #[test]
     fn cli_session_start_routes_provider_native_agents_through_archcar() {
-        assert!(cli_session_start_uses_archcar(CliSessionKind::Codex));
-        assert!(cli_session_start_uses_archcar(CliSessionKind::Claude));
-        assert!(!cli_session_start_uses_archcar(CliSessionKind::Shell));
+        assert!(cli_session_start_uses_archcar(SessionKind::CODEX));
+        assert!(cli_session_start_uses_archcar(SessionKind::CLAUDE));
+        assert!(!cli_session_start_uses_archcar(SessionKind::SHELL));
     }
 
     #[test]
@@ -5766,7 +5761,7 @@ mod tests {
         };
         assert_eq!(thread_id, 42);
         assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
-        assert_eq!(session_kind, CliSessionKind::Claude);
+        assert_eq!(session_kind, SessionKind::CLAUDE);
         assert_eq!(visible_input.as_deref(), Some("Review staged comments"));
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
 
@@ -5934,7 +5929,7 @@ mod tests {
         };
 
         assert_eq!(workspace, "berlin");
-        assert_eq!(kind, CliSessionKind::Claude);
+        assert_eq!(kind, SessionKind::CLAUDE);
         assert_eq!(thread_id, Some(42));
         assert_eq!(input_kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
@@ -6003,7 +5998,7 @@ mod tests {
         else {
             return None;
         };
-        if kind == CliSessionKind::Claude {
+        if kind == SessionKind::CLAUDE {
             thread_id.map(|thread_id| (thread_id, message.join(" ")))
         } else {
             None

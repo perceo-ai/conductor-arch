@@ -55,6 +55,36 @@ impl SessionKind {
         self == Self::SHELL
     }
 
+    /// True when this kind can actually be launched: either the built-in shell,
+    /// or an agent the registry knows a command for. Identity is open, but
+    /// starting a process is not — an unregistered key has nothing to run.
+    pub fn is_launchable(self) -> bool {
+        self == Self::SHELL || crate::agent_tools::tool_by_provider(self.0).is_some()
+    }
+
+    /// Parses a user-supplied provider name, resolving registry aliases, and
+    /// explains the valid options when it does not match. Used at the CLI and
+    /// RPC boundaries so a typo fails immediately with a list rather than
+    /// surfacing later as a failed exec.
+    pub fn parse_launchable(value: &str) -> Result<Self, String> {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err("session kind is empty".to_owned());
+        }
+        if trimmed.eq_ignore_ascii_case("shell") {
+            return Ok(Self::SHELL);
+        }
+        if let Some(canonical) = crate::agent_tools::canonical_provider_key(trimmed) {
+            return Ok(Self::new(canonical));
+        }
+        let mut known = vec!["shell".to_owned()];
+        known.extend(crate::agent_tools::agent_tools().map(|tool| tool.provider_key.to_owned()));
+        Err(format!(
+            "unknown session kind `{trimmed}`; expected one of: {}",
+            known.join(", ")
+        ))
+    }
+
     /// Human-readable name for prompts and logs. Shell is not a registry entry,
     /// and an unregistered provider falls back to its key so output degrades to
     /// something readable rather than blank.
@@ -156,6 +186,41 @@ mod tests {
                 .as_str(),
             "aider"
         );
+    }
+
+    /// Identity is open, launching is not. A key from a peer daemon still
+    /// decodes, but this build refuses to start a process for it.
+    #[test]
+    fn launchability_is_narrower_than_identity() {
+        assert!(SessionKind::SHELL.is_launchable());
+        assert!(SessionKind::CODEX.is_launchable());
+        assert!(SessionKind::new("aider").is_launchable());
+        assert!(!SessionKind::new("not-a-real-agent").is_launchable());
+    }
+
+    #[test]
+    fn parse_launchable_resolves_aliases_and_lists_options_on_failure() {
+        assert_eq!(
+            SessionKind::parse_launchable("shell"),
+            Ok(SessionKind::SHELL)
+        );
+        assert_eq!(
+            SessionKind::parse_launchable("Claude Code"),
+            Ok(SessionKind::CLAUDE)
+        );
+        assert_eq!(
+            SessionKind::parse_launchable("gemini-cli").map(SessionKind::as_str),
+            Ok("gemini")
+        );
+
+        let error = SessionKind::parse_launchable("nope").unwrap_err();
+        assert!(error.contains("unknown session kind `nope`"));
+        // The list is what makes the error actionable.
+        assert!(error.contains("shell"));
+        assert!(error.contains("codex"));
+        assert!(error.contains("aider"));
+
+        assert!(SessionKind::parse_launchable("  ").is_err());
     }
 
     #[test]

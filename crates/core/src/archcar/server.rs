@@ -3135,12 +3135,16 @@ fn queue_chat_input(
         let thread = store.get_chat_thread_record(thread_id)?;
         anyhow::ensure!(
             thread.provider == provider_name(session_kind),
-            "chat thread {thread_id} is not a {:?} thread",
-            session_kind
+            "chat thread {thread_id} is not a {} thread",
+            session_kind.display_name()
         );
+        // Queueing needs a turn boundary to drain against. A PTY-backed agent
+        // has none, so naming the provider is more useful than listing the two
+        // that happen to qualify today.
         anyhow::ensure!(
             managed_harness_for_kind(session_kind).is_some(),
-            "queued chat input is only supported for managed Codex and Claude sessions"
+            "{} sessions are not managed, so chat input cannot be queued for them",
+            session_kind.display_name()
         );
         anyhow::ensure!(
             kind != crate::archcar::protocol::ArchcarInputKind::RawTerminal,
@@ -5001,6 +5005,17 @@ fn spawn_session(
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
+    // Provider identity is open so sessions from other builds still decode, but
+    // spawning needs a command to run. Refusing here turns a confusing exec
+    // failure inside a background thread into an immediate, readable error.
+    if !kind.is_launchable() {
+        return ArchcarResponse::Error {
+            message: format!(
+                "{} is not a registered agent, so there is no command to launch",
+                kind.as_str()
+            ),
+        };
+    }
     let mut guard = state.lock().unwrap();
     let db_path = guard.db_path.clone();
     let logs_dir = guard.logs_dir.clone();
