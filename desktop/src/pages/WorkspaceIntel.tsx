@@ -1,249 +1,110 @@
-import { For, Show, createResource, createSignal } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal } from "solid-js";
+import type { JSX } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
-import { actions, workspacesStore } from "@/store";
+import { actions, nav, workspacesStore } from "@/store";
+import { intelStore } from "@/store/intel";
 import { TASK_STATUSES } from "@/bridge/protocol";
 import type {
   ArchcarChecksSummary,
   ContextAttachment,
   ContextKind,
-  DiffContribution,
   SessionContribution,
   SessionOverlap,
-  SessionRunRecord,
   Summary,
   Task,
   TaskStatus,
   TaskUpdate,
+  Todo,
 } from "@/bridge/protocol";
-import { TodosPanel, TimelinePanel } from "./WorkspaceTabs";
+import Icon from "@/components/Icon";
+import { renderMarkdown } from "@/lib/markdown";
+import { relativeTime } from "@/lib/relativeTime";
+import { mergeWorkItems, type SummaryWorkItem } from "@/lib/summaryWorkItems";
+import { CheckGlyph } from "./WorkspaceTabs";
 
-// Right-panel surfaces for the workspace-intelligence objects added in
-// crates/core/src/workspace_intel.rs: Tasks (who is doing what in this branch),
-// Summary (branch-local continuity + per-agent diff contributions), Context
-// (branch-local pinned notes/files, and Archivum context when connected), and
-// PR (the review handoff boundary).
+// The Summary tab: the agent-maintained context surface a human reads to
+// understand a workspace. It is a *reading* surface — the records come from
+// crates/core/src/workspace_intel.rs and are kept current by archcar, so this
+// panel renders them and stays out of the way. It carries no forms; the one
+// write it keeps is a task's status, because marking work done is the human's
+// job. Context/PR panels below remain for their data models but are not
+// registered as right-panel tabs.
+//
+// Layout follows the Checks tab: a flat scroll of quiet section labels and
+// single-line rows on one surface. No nested panels, no cards inside cards.
 
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// ---- Tasks ----------------------------------------------------------------
+// ---- Summary --------------------------------------------------------------
 
-export function TasksPanel(props: { workspace: string }) {
-  const [tasks, { refetch }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<Task[]> => {
-      try {
-        const res = await send({ type: "list_tasks", workspace: ws });
-        return res.type === "tasks" ? res.tasks : [];
-      } catch {
-        return [];
-      }
-    },
-  );
-  const [overlaps] = createResource(
-    () => props.workspace,
-    async (ws): Promise<SessionOverlap[]> => {
-      try {
-        const res = await send({ type: "list_session_overlaps", workspace: ws });
-        return res.type === "session_overlaps" ? res.overlaps : [];
-      } catch {
-        return [];
-      }
-    },
-  );
-  const [title, setTitle] = createSignal("");
-  const [areas, setAreas] = createSignal("");
-  const [feedback, setFeedback] = createSignal("");
-
-  async function create() {
-    const value = title().trim();
-    if (!value) {
-      setFeedback("Task title is required.");
-      return;
-    }
-    try {
-      await send({
-        type: "create_task",
-        workspace: props.workspace,
-        title: value,
-        body: "",
-        intended_areas: areas()
-          .split(",")
-          .map((area) => area.trim())
-          .filter(Boolean),
-      });
-      setTitle("");
-      setAreas("");
-      setFeedback("");
-      await refetch();
-    } catch (err) {
-      setFeedback(`Create task failed: ${errorText(err)}`);
-    }
-  }
-
-  async function update(task: Task, update: TaskUpdate) {
-    try {
-      const res = await send({
-        type: "update_task",
-        workspace: props.workspace,
-        task_id: task.id,
-        update,
-      });
-      if (res.type === "error") setFeedback(res.message);
-      else setFeedback("");
-      await refetch();
-    } catch (err) {
-      setFeedback(`Update task failed: ${errorText(err)}`);
-    }
-  }
-
-  async function setStatus(task: Task, status: TaskStatus) {
-    // Blocked tasks must carry a reason; ask for one rather than failing in core.
-    if (status === "blocked" && !task.blocked_reason) {
-      const reason = window.prompt(`Why is "${task.title}" blocked?`)?.trim();
-      if (!reason) return;
-      await update(task, { status, blocked_reason: reason });
-      return;
-    }
-    await update(task, {
-      status,
-      ...(status !== "blocked" && task.blocked_reason ? { blocked_reason: null } : {}),
-    });
-  }
-
-  async function setOwner(task: Task) {
-    const owner = window.prompt(`Who owns "${task.title}"?`, task.owner ?? "");
-    if (owner === null) return;
-    // An empty answer clears the owner (core treats blank as "no owner").
-    await update(task, { owner: owner.trim() || null });
-  }
-
-  async function setReviewNotes(task: Task) {
-    const notes = window.prompt(`Review notes for "${task.title}":`, task.review_notes);
-    if (notes === null) return;
-    await update(task, { review_notes: notes });
-  }
-
-  async function remove(task: Task) {
-    try {
-      await send({ type: "delete_task", workspace: props.workspace, task_id: task.id });
-      await refetch();
-    } catch (err) {
-      setFeedback(`Delete task failed: ${errorText(err)}`);
-    }
-  }
-
+/** One flat row: glyph, title, muted tail. The shape every section here uses. */
+function SummaryRow(props: {
+  tone?: SummaryWorkItem["tone"];
+  icon?: "brain";
+  title: string;
+  detail?: string;
+  children?: JSX.Element;
+}) {
   return (
-    <div class="ws-tab-panel command-panel">
-      <div class="section-title">Tasks</div>
-      <div class="action-row">
-        <input
-          class="ws-text-input"
-          placeholder="Task title…"
-          value={title()}
-          onInput={(e) => setTitle(e.currentTarget.value)}
-          onKeyDown={(e) => e.key === "Enter" && void create()}
-        />
-        <button class="suggested-action" onClick={() => void create()}>
-          Add task
-        </button>
-      </div>
-      <div class="action-row">
-        <input
-          class="ws-text-input"
-          placeholder="Intended areas (comma separated)"
-          value={areas()}
-          onInput={(e) => setAreas(e.currentTarget.value)}
-        />
-      </div>
-      <Show when={feedback()}>
-        <div class="card-meta">{feedback()}</div>
+    <div class="ws-summary-row">
+      <Show when={props.icon === "brain"} fallback={<CheckGlyph tone={props.tone ?? "unknown"} />}>
+        <Icon name="brain" class="ws-summary-row-icon" />
       </Show>
-      <Show
-        when={(tasks() ?? []).length > 0}
-        fallback={
-          <div class="empty-state">
-            {tasks.loading ? "Loading…" : "No tasks yet. Tasks organize intent inside this branch."}
-          </div>
-        }
-      >
-        <For each={tasks()}>
-          {(task) => (
-            <div class="ws-task-row" classList={{ "ws-task-blocked": task.status === "blocked" }}>
-              <div class="action-row">
-                <span class="detail-value" style={{ flex: "1 1 auto" }}>
-                  #{task.id} {task.title}
-                </span>
-                <select
-                  class="ws-text-input ws-task-status"
-                  value={task.status}
-                  onChange={(e) => void setStatus(task, e.currentTarget.value as TaskStatus)}
-                >
-                  <For each={TASK_STATUSES}>
-                    {(status) => <option value={status}>{status.replace("_", " ")}</option>}
-                  </For>
-                </select>
-                <button class="ui-button-destructive" onClick={() => void remove(task)}>
-                  Delete
-                </button>
-              </div>
-              <Show when={task.blocked_reason}>
-                <div class="card-meta">Blocked: {task.blocked_reason}</div>
-              </Show>
-              <Show when={task.intended_areas.length > 0}>
-                <div class="card-meta">Areas: {task.intended_areas.join(", ")}</div>
-              </Show>
-              <Show when={task.owner || task.linked_session_ids.length > 0}>
-                <div class="card-meta">
-                  {task.owner ? `Owner: ${task.owner}` : ""}
-                  {task.owner && task.linked_session_ids.length > 0 ? " · " : ""}
-                  {task.linked_session_ids.length > 0
-                    ? `Sessions: ${task.linked_session_ids.join(", ")}`
-                    : ""}
-                </div>
-              </Show>
-              <Show when={task.review_notes}>
-                <div class="card-meta">Review notes: {task.review_notes}</div>
-              </Show>
-              <div class="action-row">
-                <button class="ui-button" onClick={() => void setOwner(task)}>
-                  {task.owner ? "Change owner" : "Set owner"}
-                </button>
-                <button class="ui-button" onClick={() => void setReviewNotes(task)}>
-                  {task.review_notes ? "Edit review notes" : "Add review notes"}
-                </button>
-              </div>
-            </div>
-          )}
-        </For>
+      <span class="ws-summary-row-title" title={props.title}>
+        {props.title}
+      </span>
+      <Show when={props.detail}>
+        {(detail) => <span class="ws-summary-row-detail">{detail()}</span>}
       </Show>
-      <Show when={(overlaps() ?? []).length > 0}>
-        <div class="detail-label">Overlapping sessions</div>
-        <For each={overlaps()}>
-          {(overlap) => (
-            <div class="detail-row ws-overlap-row">
-              <span class="detail-label">
-                {overlap.session_title} ↔ {overlap.other_session_title}
-              </span>
-              <span class="detail-value">{overlap.paths.join(", ")}</span>
-            </div>
-          )}
-        </For>
-      </Show>
-      <TodosPanel workspace={props.workspace} />
+      {props.children}
     </div>
   );
 }
 
-// ---- Summary --------------------------------------------------------------
+/** Agent-written prose. Markdown so the reader sees structure, not syntax. */
+function Prose(props: { markdown: string }) {
+  return <div class="ws-summary-prose markdown-body" innerHTML={renderMarkdown(props.markdown)} />;
+}
+
+function WorkItemRow(props: {
+  item: SummaryWorkItem;
+  onStatus: (item: SummaryWorkItem, status: TaskStatus) => void;
+}) {
+  return (
+    <>
+      <SummaryRow tone={props.item.tone} title={props.item.title} detail={props.item.detail}>
+        {/* Todos have no update RPC, so only tasks get an editable status. */}
+        <Show
+          when={props.item.kind === "task"}
+          fallback={<span class="ws-summary-row-status">{props.item.status.replace("_", " ")}</span>}
+        >
+          <select
+            class="ws-summary-row-select"
+            title="Task status"
+            value={props.item.status}
+            onChange={(e) => props.onStatus(props.item, e.currentTarget.value as TaskStatus)}
+          >
+            <For each={TASK_STATUSES}>
+              {(status) => <option value={status}>{status.replace("_", " ")}</option>}
+            </For>
+          </select>
+        </Show>
+      </SummaryRow>
+      <Show when={props.item.blockedReason}>
+        {(reason) => <div class="ws-summary-row-note">Blocked: {reason()}</div>}
+      </Show>
+    </>
+  );
+}
 
 export function SummaryPanel(props: { workspace: string }) {
   const [stored, { refetch }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<Summary | null> => {
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<Summary | null> => {
       try {
-        const res = await send({ type: "list_summaries", workspace: ws });
+        const res = await send({ type: "list_summaries", workspace: props.workspace });
         if (res.type !== "summaries") return null;
         return res.summaries.find((summary) => summary.scope_type === "workspace") ?? null;
       } catch {
@@ -251,45 +112,98 @@ export function SummaryPanel(props: { workspace: string }) {
       }
     },
   );
-  const [storedContributions, { refetch: refetchStored }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<DiffContribution[]> => {
+  const [tasks, { refetch: refetchTasks }] = createResource(
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<Task[]> => {
       try {
-        const res = await send({ type: "list_diff_contributions", workspace: ws });
-        return res.type === "diff_contributions" ? res.contributions : [];
+        const res = await send({ type: "list_tasks", workspace: props.workspace });
+        return res.type === "tasks" ? res.tasks : [];
       } catch {
         return [];
       }
     },
   );
-  const [contributions, { refetch: refetchContributions }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<SessionContribution[]> => {
+  const [todos] = createResource(
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<Todo[]> => {
       try {
-        const res = await send({ type: "list_session_contributions", workspace: ws });
+        const res = await send({ type: "list_todos", workspace: props.workspace });
+        return res.type === "todos" ? res.todos : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const [overlaps] = createResource(
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<SessionOverlap[]> => {
+      try {
+        const res = await send({ type: "list_session_overlaps", workspace: props.workspace });
+        return res.type === "session_overlaps" ? res.overlaps : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const [contributions] = createResource(
+    () => `${props.workspace}:${intelStore.version()}`,
+    async (): Promise<SessionContribution[]> => {
+      try {
+        const res = await send({ type: "list_session_contributions", workspace: props.workspace });
         return res.type === "session_contributions" ? res.contributions : [];
       } catch {
         return [];
       }
     },
   );
-  const [body, setBody] = createSignal<string | null>(null);
+
+  const [editing, setEditing] = createSignal(false);
+  const [draftBody, setDraftBody] = createSignal<string | null>(null);
   const [feedback, setFeedback] = createSignal("");
 
-  // The editor shows unsaved edits when present, otherwise the stored summary.
-  const text = () => body() ?? stored()?.body_markdown ?? "";
+  const savedText = () => stored()?.body_markdown ?? "";
+  // While editing, unsaved keystrokes win; otherwise the stored summary shows.
+  const text = () => draftBody() ?? savedText();
+  const workItems = createMemo(() => mergeWorkItems(tasks() ?? [], todos() ?? []));
 
-  async function draft(sessionId?: number) {
-    setFeedback("Drafting…");
+  function startEditing() {
+    setDraftBody(savedText());
+    setFeedback("");
+    setEditing(true);
+  }
+
+  function cancelEditing() {
+    setDraftBody(null);
+    setFeedback("");
+    setEditing(false);
+  }
+
+  async function refresh() {
+    setFeedback("Refreshing…");
     try {
       const res = await send({
-        type: "draft_summary",
+        type: "refresh_summary",
         workspace: props.workspace,
-        ...(sessionId != null ? { session_id: sessionId } : {}),
+        scope_type: "workspace",
       });
+      if (res.type === "summary_refreshed") {
+        setFeedback(res.result.changed ? "" : "Already up to date.");
+        await refetch();
+      } else if (res.type === "error") {
+        setFeedback(res.message);
+      }
+    } catch (err) {
+      setFeedback(`Refresh failed: ${errorText(err)}`);
+    }
+  }
+
+  async function draft() {
+    setFeedback("Drafting…");
+    try {
+      const res = await send({ type: "draft_summary", workspace: props.workspace });
       if (res.type === "summary_draft") {
-        setBody(res.body_markdown);
-        setFeedback("Draft ready — review, then Save.");
+        setDraftBody(res.body_markdown);
+        setFeedback("Draft ready — review, then save.");
       } else if (res.type === "error") {
         setFeedback(res.message);
       }
@@ -310,205 +224,218 @@ export function SummaryPanel(props: { workspace: string }) {
         workspace: props.workspace,
         scope_type: "workspace",
         body_markdown: value,
-        source_refs: [],
+        source_refs: ["human:desktop"],
       });
-      if (res.type === "error") setFeedback(res.message);
-      else {
-        setBody(null);
-        setFeedback("Saved.");
-        await refetch();
+      if (res.type === "error") {
+        setFeedback(res.message);
+        return;
       }
+      setDraftBody(null);
+      setEditing(false);
+      setFeedback("");
+      await refetch();
     } catch (err) {
       setFeedback(`Save failed: ${errorText(err)}`);
     }
   }
 
-  async function snapshotContribution(contribution: SessionContribution) {
+  async function setStatus(item: SummaryWorkItem, status: TaskStatus) {
+    const task = (tasks() ?? []).find((candidate) => candidate.id === item.id);
+    if (!task) return;
+    // Core rejects a blocked task with no reason, so ask rather than fail.
+    let update: TaskUpdate = { status };
+    if (status === "blocked" && !task.blocked_reason) {
+      const reason = window.prompt(`Why is "${task.title}" blocked?`)?.trim();
+      if (!reason) return;
+      update = { status, blocked_reason: reason };
+    } else if (status !== "blocked" && task.blocked_reason) {
+      update = { status, blocked_reason: null };
+    }
     try {
       const res = await send({
-        type: "snapshot_diff_contribution",
+        type: "update_task",
         workspace: props.workspace,
-        session_id: contribution.session_id,
+        task_id: task.id,
+        update,
       });
-      if (res.type === "diff_contribution_saved") {
-        setFeedback(
-          `Snapshotted ${contribution.title}: ${res.contribution.files.length} file(s)` +
-            (res.contribution.patch_ref ? `, patch at ${res.contribution.patch_ref}` : ""),
-        );
-      } else if (res.type === "error") {
-        setFeedback(res.message);
-      }
-      await refetchStored();
+      setFeedback(res.type === "error" ? res.message : "");
+      await refetchTasks();
     } catch (err) {
-      setFeedback(`Snapshot failed: ${errorText(err)}`);
+      setFeedback(`Update task failed: ${errorText(err)}`);
     }
   }
 
-  async function saveSessionSummary(contribution: SessionContribution) {
-    setFeedback(`Drafting summary for ${contribution.title}…`);
-    try {
-      const drafted = await send({
-        type: "draft_summary",
-        workspace: props.workspace,
-        session_id: contribution.session_id,
-      });
-      if (drafted.type !== "summary_draft") {
-        setFeedback(drafted.type === "error" ? drafted.message : "Draft unavailable.");
-        return;
-      }
-      const res = await send({
-        type: "save_summary",
-        workspace: props.workspace,
-        scope_type: "session",
-        scope_id: contribution.session_id,
-        body_markdown: drafted.body_markdown,
-        source_refs: [],
-      });
-      setFeedback(res.type === "error" ? res.message : `Saved summary for ${contribution.title}.`);
-      await refetchContributions();
-    } catch (err) {
-      setFeedback(`Session summary failed: ${errorText(err)}`);
-    }
-  }
+  const provenance = () => {
+    const summary = stored();
+    if (!summary) return "No summary yet";
+    const author = summary.source_refs.includes("human:desktop") ? "Human-edited" : "Auto-maintained";
+    return `${author} · updated ${relativeTime(summary.updated_at)}`;
+  };
 
   return (
-    <div class="ws-tab-panel command-panel">
-      <div class="section-title">Summary</div>
-      <div class="action-row">
-        <button class="secondary-action" onClick={() => void draft()}>
-          Draft from workspace
+    <div class="ws-tab-panel ws-summary-panel">
+      <div class="ws-summary-status">
+        <span class="ws-summary-provenance">{provenance()}</span>
+        <button class="ws-check-open" title="Refresh summary" onClick={() => void refresh()}>
+          <Icon name="refresh" />
         </button>
-        <button class="suggested-action" onClick={() => void save()}>
-          Save
+        <button
+          class="ws-check-open"
+          title={editing() ? "Stop editing" : "Edit summary"}
+          classList={{ "ws-summary-edit-active": editing() }}
+          onClick={() => (editing() ? cancelEditing() : startEditing())}
+        >
+          <Icon name="pencil" />
         </button>
-        <Show when={body() != null}>
-          <button class="secondary-action" onClick={() => setBody(null)}>
-            Discard edits
-          </button>
-        </Show>
       </div>
+
       <Show when={feedback()}>
-        <div class="card-meta">{feedback()}</div>
+        <div class="ws-summary-feedback">{feedback()}</div>
       </Show>
-      <Show when={stored()}>
-        {(summary) => <div class="card-meta">Stored summary updated {summary().updated_at}</div>}
+
+      <Show
+        when={editing()}
+        fallback={
+          <Show
+            when={savedText().trim()}
+            fallback={
+              <div class="ws-check-empty">
+                {stored.loading
+                  ? "Loading…"
+                  : "No summary yet — it appears once the agent has something to record."}
+              </div>
+            }
+          >
+            <Prose markdown={savedText()} />
+          </Show>
+        }
+      >
+        <textarea
+          class="ws-summary-editor"
+          placeholder="Branch-local summary: goal, files touched, decisions, checks, blockers, next actions."
+          value={text()}
+          onInput={(e) => setDraftBody(e.currentTarget.value)}
+        />
+        <div class="ws-summary-edit-actions">
+          <button class="suggested-action" onClick={() => void save()}>
+            Save
+          </button>
+          <button class="secondary-action" onClick={() => void draft()}>
+            Draft for me
+          </button>
+          <button class="secondary-action" onClick={cancelEditing}>
+            Cancel
+          </button>
+        </div>
       </Show>
-      <textarea
-        class="ws-summary-editor"
-        placeholder="Branch-local summary: goal, files touched, decisions, checks, blockers, next actions."
-        value={text()}
-        onInput={(e) => setBody(e.currentTarget.value)}
-      />
-      <div class="detail-label">Agent contributions</div>
+
+      <CurrentChatSection workspace={props.workspace} />
+
+      <div class="ws-flat-section-label">Tasks</div>
+      <Show
+        when={workItems().length > 0}
+        fallback={
+          <div class="ws-check-empty">
+            {tasks.loading || todos.loading ? "Loading…" : "No open work tracked in this branch."}
+          </div>
+        }
+      >
+        <For each={workItems()}>
+          {(item) => <WorkItemRow item={item} onStatus={(i, s) => void setStatus(i, s)} />}
+        </For>
+      </Show>
+
+      <Show when={(overlaps() ?? []).length > 0}>
+        <div class="ws-flat-section-label">Overlapping sessions</div>
+        <For each={overlaps()}>
+          {(overlap) => (
+            <SummaryRow
+              tone="running"
+              title={`${overlap.session_title} ↔ ${overlap.other_session_title}`}
+              detail={`${overlap.paths.length} shared file${overlap.paths.length === 1 ? "" : "s"}`}
+            />
+          )}
+        </For>
+      </Show>
+
+      <div class="ws-flat-section-label">Agent contributions</div>
       <Show
         when={(contributions() ?? []).length > 0}
         fallback={
-          <div class="empty-state">
+          <div class="ws-check-empty">
             {contributions.loading ? "Loading…" : "No agent sessions in this workspace yet."}
           </div>
         }
       >
         <For each={contributions()}>
           {(contribution) => (
-            <div class="ws-contribution-row">
-              <div class="action-row">
-                <span class="detail-value" style={{ flex: "1 1 auto" }}>
-                  {contribution.title}
-                </span>
-                <button
-                  class="secondary-action"
-                  onClick={() => void saveSessionSummary(contribution)}
-                >
-                  Summarize
-                </button>
-                <button
-                  class="secondary-action"
-                  onClick={() => void snapshotContribution(contribution)}
-                >
-                  Snapshot diff
-                </button>
-              </div>
-              <div class="card-meta">
-                {contribution.provider} · {contribution.status} ·{" "}
-                {contribution.files_touched.length} file(s) touched ·{" "}
-                {contribution.still_present.length} still changed
-                <Show when={contribution.model}>{(m) => <> · model: {m()}</>}</Show>
-                <Show when={contribution.task_title}>{(t) => <> · task: {t()}</>}</Show>
-              </div>
-              <Show when={contribution.files_touched.length > 0}>
-                <div class="card-meta ws-contribution-files">
-                  {contribution.files_touched.slice(0, 8).join(", ")}
-                  {contribution.files_touched.length > 8
-                    ? ` +${contribution.files_touched.length - 8} more`
-                    : ""}
-                </div>
-              </Show>
-              <SessionRunHistory workspace={props.workspace} sessionId={contribution.session_id} />
-              <Show
-                when={(storedContributions() ?? []).find(
-                  (stored) => stored.session_id === contribution.session_id,
-                )}
-              >
-                {(stored) => (
-                  <div class="card-meta">
-                    Snapshot: {stored().files.length} file(s)
-                    {stored().patch_ref ? ` · patch ${stored().patch_ref}` : ""}
-                    {stored().risks.length > 0 ? ` · risks: ${stored().risks.join("; ")}` : ""}
-                    {stored().blockers.length > 0
-                      ? ` · blockers: ${stored().blockers.join("; ")}`
-                      : ""}
-                  </div>
-                )}
-              </Show>
-            </div>
+            <SummaryRow
+              icon="brain"
+              title={contribution.title}
+              detail={[
+                contribution.model || contribution.provider,
+                `${contribution.files_touched.length} file${contribution.files_touched.length === 1 ? "" : "s"}`,
+                contribution.still_present.length > 0
+                  ? `${contribution.still_present.length} live`
+                  : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            />
           )}
         </For>
       </Show>
-      <TimelinePanel workspace={props.workspace} />
     </div>
   );
 }
 
-/// On-demand run history for one session: the commands/checks/runs the daemon
-/// executed for it, from the first-class processes record.
-function SessionRunHistory(props: { workspace: string; sessionId: number }) {
-  const [open, setOpen] = createSignal(false);
-  const [runs] = createResource(
-    () => (open() ? `${props.workspace}:${props.sessionId}` : null),
-    async (): Promise<SessionRunRecord[]> => {
+/** Pull the `## Current chat` section out of a context briefing body. */
+function extractCurrentChatSection(markdown: string): string | null {
+  const match = markdown.match(/## Current chat\n\n([\s\S]*?)(?=\n## |$)/);
+  const section = match?.[1]?.trim();
+  return section ? section : null;
+}
+
+/** Read-only view of the selected chat thread's maintained context. */
+function CurrentChatSection(props: { workspace: string }) {
+  const threadId = () => nav.selectedChatThread();
+  const [chatContext] = createResource(
+    () => {
+      const id = threadId();
+      return id != null ? `${props.workspace}:${id}:${intelStore.version()}` : null;
+    },
+    async (): Promise<string | null> => {
+      const id = threadId();
+      if (id == null) return null;
       try {
         const res = await send({
-          type: "list_session_runs",
+          type: "get_context_briefing",
           workspace: props.workspace,
-          session_id: props.sessionId,
+          thread_id: id,
         });
-        return res.type === "session_runs" ? res.runs : [];
+        if (res.type !== "context_briefing") return null;
+        return extractCurrentChatSection(res.briefing.body_markdown);
       } catch {
-        return [];
+        return null;
       }
     },
   );
   return (
     <>
-      <button class="secondary-action" onClick={() => setOpen(!open())}>
-        {open() ? "Hide runs" : "Show runs"}
-      </button>
-      <Show when={open()}>
-        <Show
-          when={(runs() ?? []).length > 0}
-          fallback={
-            <div class="card-meta">{runs.loading ? "Loading…" : "No runs recorded."}</div>
-          }
-        >
-          <For each={runs()}>
-            {(run) => (
-              <div class="card-meta">
-                #{run.process_id} [{run.kind}] {run.command} — {run.status}
-                {run.exit_code != null ? ` (exit ${run.exit_code})` : ""}
-              </div>
-            )}
-          </For>
-        </Show>
+      <div class="ws-flat-section-label">Current chat</div>
+      <Show
+        when={chatContext()}
+        fallback={
+          <div class="ws-check-empty">
+            {threadId() == null
+              ? "Select a chat to see its maintained context here."
+              : chatContext.loading
+                ? "Loading…"
+                : "No maintained context for this chat yet — it appears after the next turn."}
+          </div>
+        }
+      >
+        {(context) => <Prose markdown={context()} />}
       </Show>
     </>
   );

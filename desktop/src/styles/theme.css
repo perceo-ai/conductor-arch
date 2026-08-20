@@ -4,32 +4,84 @@
    GTK @define-color -> CSS custom properties. Any @lc-name reference becomes var(--lc-name).
    Includes the extra runtime tokens from main.rs CUSTOM_COLOR_TOKENS (lc-accent, lc-accent-fg, lc-warning). */
 :root {
-    --lc-bg: #191919;
-    --lc-surface: #1e1e1e;
-    --lc-surface-raised: #202020;
-    --lc-surface-muted: #181818;
-    --lc-hover: #2a2a2a;
-    --lc-hover-soft: #242424;
-    --lc-border: #2a2a2a;
+    --lc-bg: #111111;
+    --lc-surface: #171717;
+    --lc-surface-raised: #1d1d1d;
+    --lc-surface-muted: #141414;
+    --lc-hover: #242424;
+    --lc-hover-soft: #1f1f1f;
+    --lc-border: #292929;
     --lc-border-strong: #3a3a3a;
-    --lc-text: #e4e4e4;
-    --lc-text-strong: #f8fafc;
+    --lc-text: #d8d8d8;
+    --lc-text-strong: #f0f0f0;
     --lc-text-muted: #8a8a8a;
-    --lc-accent: #c39b50;
+    --lc-accent: #d4a94f;
     --lc-accent-fg: #f5f5f5;
     --lc-success: #d0d0d0;
     --lc-warning: #f59e0b;
     --lc-danger: #ff8a8a;
 
-    --lc-surface-base: #191919;
-    --lc-surface-selected: #2a2a2a;
-    --lc-border-subtle: #2a2a2a;
+    --lc-surface-base: #111111;
+    --lc-surface-selected: #232323;
+    --lc-border-subtle: #262626;
     --lc-border-active: #3a3a3a;
-    --lc-text-primary: #e4e4e4;
+    --lc-text-primary: #d8d8d8;
     --lc-text-secondary: #8a8a8a;
     --lc-status-success: #d0d0d0;
     --lc-status-warning: #f59e0b;
     --lc-status-danger: #ff8a8a;
+
+    --ui-font-sans: "Mona Sans", "Inter", "SF Pro Text", "Segoe UI", sans-serif;
+    --ui-font-mono: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+    /* ── Code surface tokens ──
+       Every place the app shows code — the diff viewer, the file editor, and
+       markdown fences — reads these, so the three render identically.
+       --font-mono and --lc-mono are the names the older rules already ask for;
+       they were never defined, which silently dropped those surfaces to the
+       platform default monospace. Alias them here rather than chase every rule. */
+    --code-font: var(--ui-font-mono);
+    --font-mono: var(--ui-font-mono);
+    --lc-mono: var(--ui-font-mono);
+    --code-size: 12.5px;
+    --code-line: 1.5;
+    --code-tab: 2;
+    --code-surface: var(--ui-panel);
+    --code-fg: var(--lc-text);
+    --code-border: var(--lc-border);
+    --code-gutter-fg: #5f5f5f;
+    --code-line-active: rgba(255, 255, 255, 0.045);
+
+    /* Diff tints derived from the app's own change colors (--diff-add-accent /
+       --diff-del-accent, the same green and red the file-summary counts use)
+       laid over --ui-panel, so the diff reads as part of this app rather than a
+       transplanted GitHub surface. Row tint says "this line changed"; the
+       stronger word tint on top says "this is what changed in it". */
+    --diff-add-accent: #6cc58a;
+    --diff-del-accent: #e06f6f;
+    --diff-add-bg: #1c2a21;
+    --diff-add-fg: var(--lc-text);
+    --diff-add-word: rgba(108, 197, 138, 0.26);
+    --diff-del-bg: #2b1e1e;
+    --diff-del-fg: var(--lc-text);
+    --diff-del-word: rgba(224, 111, 111, 0.26);
+    --diff-hunk-bg: var(--ui-panel-3);
+    --diff-hunk-fg: var(--lc-text-muted);
+    --diff-header-bg: var(--ui-panel-2);
+    --ui-text: 13px;
+    --ui-text-sm: 12px;
+    --ui-text-xs: 11px;
+    --ui-line: 1.35;
+    --ui-radius: 6px;
+    --ui-control-h: 30px;
+    --ui-pad-x: 12px;
+    --ui-panel: #151515;
+    --ui-panel-2: #181818;
+    --ui-panel-3: #1d1d1d;
+    --ui-panel-hover: #222222;
+    --ui-border: #282828;
+    --ui-border-strong: #383838;
+    --ui-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.5);
 }
 
 .toast {
@@ -395,8 +447,6 @@ textarea:disabled {
 .workspace-list .row:hover .workspace-row-shell,
 .workspace-list .row.selected .workspace-row-shell {
     background-color: var(--lc-hover-soft);
-    border-color: var(--lc-border-strong);
-    padding-right: 14px;
 }
 
 .workspace-row-shell,
@@ -559,6 +609,8 @@ button.text-button.ui-button-xs label {
 
 button.icon-button,
 button.ui-button-icon {
+    width: 30px;
+    height: 30px;
     padding: 0;
     min-width: 30px;
     min-height: 30px;
@@ -1926,13 +1978,15 @@ button.ui-button-destructive:hover {
 .lc-theme-light .context-menu-item {
     color: #1f2328;
 }
-.lc-theme-light .context-menu-item:hover {
+.lc-theme-light .context-menu-item:hover,
+.lc-theme-light .context-menu-item-focused {
     background-color: #f1f5f9;
 }
 .lc-theme-light .context-menu-item-destructive {
     color: #cf222e;
 }
-.lc-theme-light .context-menu-item-destructive:hover {
+.lc-theme-light .context-menu-item-destructive:hover,
+.lc-theme-light .context-menu-item-destructive.context-menu-item-focused {
     background-color: #ffebe9;
 }
 .lc-theme-light .toast,
@@ -2048,38 +2102,31 @@ button.ui-button-destructive:hover {
 .lc-theme-light .chat-timeline-scroll {
     background-color: #ffffff;
 }
-/* Diff viewer: dark #151515 container + dark GitHub-style row tints. Map to the
-   GitHub light diff palette so diffs are readable in light mode. */
+/* Code surfaces in light mode: the GitHub light palette, set once on the shared
+   tokens so the diff viewer, file editor, and markdown fences all follow. */
+.lc-theme-light {
+    --code-surface: #ffffff;
+    --code-fg: #1f2328;
+    --code-border: #d9e0e8;
+    --code-gutter-fg: #9aa0a6;
+    --code-line-active: rgba(0, 0, 0, 0.04);
+
+    --diff-add-accent: #2e8b57;
+    --diff-del-accent: #c14545;
+    --diff-add-bg: #eaf7ee;
+    --diff-add-fg: #1f2328;
+    --diff-add-word: rgba(108, 197, 138, 0.45);
+    --diff-del-bg: #fdeded;
+    --diff-del-fg: #1f2328;
+    --diff-del-word: rgba(224, 111, 111, 0.35);
+    --diff-hunk-bg: #f1f3f5;
+    --diff-hunk-fg: #57606a;
+    --diff-header-bg: #f6f8fa;
+}
 .lc-theme-light .diff-view {
     background-color: #ffffff;
     color: #1f2328;
     border-color: #d9e0e8;
-}
-.lc-theme-light .chat-inline-event-code-row-context {
-    background-color: #ffffff;
-    color: #1f2328;
-}
-.lc-theme-light .chat-inline-event-code-row-added {
-    background-color: #e6ffec;
-    color: #1f2328;
-}
-.lc-theme-light .chat-inline-event-code-row-removed {
-    background-color: #ffebe9;
-    color: #1f2328;
-}
-.lc-theme-light .chat-inline-event-code-row-hunk {
-    background-color: #ddf4ff;
-    color: #0969da;
-}
-.lc-theme-light .chat-inline-event-code-row-meta {
-    background-color: #f6f8fa;
-    color: #57606a;
-}
-.lc-theme-light .diff-lineno {
-    color: #8c959f;
-}
-.lc-theme-light .diff-lineno-new {
-    border-right-color: #d9e0e8;
 }
 .lc-theme-light .ws-topbar {
     background-color: #ffffff;
@@ -2282,6 +2329,10 @@ button.ui-button-destructive:hover {
 .lc-theme-light .nav-button-active {
     color: #111827;
 }
+.lc-theme-light .ws-chat-tabs .ws-tab-shell.ws-tab-active {
+    background-color: transparent;
+    border-bottom-color: var(--lc-accent);
+}
 .lc-theme-light .settings-readiness-pill {
     background: #fff1f2;
     border-color: #fecdd3;
@@ -2331,7 +2382,7 @@ button.ui-button-destructive:hover {
 .lc-theme-light .workspace-row-shell,
 .lc-theme-light .sidebar .history-row {
     background-color: transparent;
-    border-color: #d9e0e8;
+    border-color: transparent;
     color: #1f2937;
 }
 .lc-theme-light .project-avatar,
@@ -2342,6 +2393,9 @@ button.ui-button-destructive:hover {
 .lc-theme-light .sidebar-nav-button:hover,
 .lc-theme-light .project-row:hover,
 .lc-theme-light .workspace-row-shell:hover {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .workspace-row-shell.selected {
     background-color: #e2e8f0;
 }
 .lc-theme-light .sidebar-nav-button.active {
@@ -2654,15 +2708,18 @@ button.ui-button-destructive:hover {
     opacity: 1;
 }
 .ws-tab-bar {
-    min-height: 46px;
-    padding: 0 18px;
+    min-height: 30px;
+    padding: 0 8px 0 0;
     background-color: #191919;
 }
 .ws-chat-tabs-scroll {
     background-color: transparent;
     border: none;
     box-shadow: none;
-    min-height: 46px;
+    height: 30px;
+    min-height: 30px;
+    overflow-x: auto;
+    overflow-y: hidden;
 }
 /* GTK scrollbar child -> native scrollbar; use ::-webkit-scrollbar */
 .ws-chat-tabs-scroll::-webkit-scrollbar {
@@ -2670,6 +2727,9 @@ button.ui-button-destructive:hover {
     min-width: 0;
 }
 .ws-chat-tabs {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
     background-color: transparent;
 }
 .ws-tab-sep {
@@ -2684,19 +2744,35 @@ button.ws-tab-shell {
     text-shadow: none;
 }
 .ws-tab-shell {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex: 0 0 132px;
+    width: 132px;
     min-width: 132px;
-    min-height: 46px;
+    max-width: 132px;
+    min-height: 30px;
     padding: 0 6px;
+    gap: 5px;
     border-bottom: 2px solid transparent;
     background-color: transparent;
+    overflow: hidden;
+    text-align: left;
 }
 .ws-tab-label {
-    min-width: 84px;
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
     font-size: 14px;
     font-weight: 400;
     color: #8a8a8a;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .ws-tab-close-button {
+    flex: 0 0 24px;
     background: transparent;
     border: none;
     box-shadow: none;
@@ -2724,6 +2800,7 @@ button.ws-tab-shell {
     color: #8fb5ff;
 }
 .ws-chat-tab-dot {
+    flex: 0 0 12px;
     min-width: 12px;
     min-height: 12px;
     color: #f0c36a;
@@ -2738,6 +2815,32 @@ button.ws-tab-shell {
 }
 .ws-chat-tab-meta-needs-input {
     color: #f2bf7e;
+}
+.ws-chat-tab-text {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.ws-file-tab-icon {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    color: #8a8a8a;
+}
+.ws-chat-new {
+    align-self: center;
+    flex: 0 0 28px;
+    width: 28px;
+    min-width: 28px;
+    min-height: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 5px;
+    margin: 0;
+}
+.ws-chat-new .ui-icon {
+    width: 15px;
+    height: 15px;
 }
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
@@ -2760,7 +2863,7 @@ button.ws-tab-shell {
     font-weight: 500;
 }
 .ws-tab-shell.ws-tab-active {
-    background-color: #242424;
+    background-color: transparent;
     border-bottom-color: #f0c36a;
 }
 .ws-tab-shell.ws-tab-active .ws-tab-label,
@@ -2786,13 +2889,12 @@ button.ws-tab-shell {
 
 /* ── Right panel ── */
 .ws-right-panel {
-    background-color: #151515;
-    border-left: 1px solid #000;
+    background-color: #171717;
+    border-left: 1px solid #272727;
 }
 .ws-right-tabs {
-    min-height: 46px;
-    padding: 0 10px;
-    background-color: #151515;
+    min-height: 40px;
+    background-color: #171717;
     border-bottom: 1px solid #232323;
 }
 .ws-right-tab-btn {
@@ -3172,12 +3274,13 @@ button.ws-tab-shell {
 .ws-run-tab-btn {
     background: transparent;
     border: none;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
+    border-bottom: none;
+    border-radius: 7px;
     color: #7a7a7a;
     font-size: 12px;
-    padding: 4px 12px;
-    min-height: 36px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 4px 7px;
     box-shadow: none;
     text-shadow: none;
 }
@@ -3458,32 +3561,32 @@ button.ws-tab-shell {
     background-color: #151515;
 }
 .chat-messages {
-    padding: 22px 24px 24px;
+    padding: 14px 22px 16px;
 }
 .chat-working-indicator {
-    margin: 2px 0 12px;
-    padding: 6px 0;
+    margin: 0 0 6px;
+    padding: 4px 0;
     color: #b8c7de;
 }
 .chat-working-indicator .card-meta {
     color: #b8c7de;
 }
 .chat-user-row {
-    margin-top: 12px;
-    margin-bottom: 10px;
+    margin-top: 5px;
+    margin-bottom: 5px;
 }
 .chat-user-bubble {
     background-color: #2e2e2e;
     color: #f4f7ff;
     border-radius: 14px;
-    padding: 11px 16px;
+    padding: 8px 14px;
     line-height: 1.4;
-    min-height: 42px;
+    min-height: 0;
 }
 .chat-queued-row {
-    margin-top: 8px;
-    margin-bottom: 8px;
-    padding: 8px 10px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+    padding: 6px 9px;
     border: 1px solid #2d2d2d;
     border-radius: 6px;
     background-color: #181818;
@@ -3500,8 +3603,8 @@ button.ws-tab-shell {
     padding: 0;
 }
 .chat-interrupted-row {
-    margin-top: 4px;
-    margin-bottom: 10px;
+    margin-top: 2px;
+    margin-bottom: 5px;
 }
 .chat-interrupted-pill {
     background-color: #262626;
@@ -3517,17 +3620,43 @@ button.ws-tab-shell {
     line-height: 1.55;
     margin-bottom: 0;
 }
+/* Prose needs breathing room from the actions above it; chips next to chips do
+   not. Spacing is charged at the boundary, not to every row. */
+.chat-agent-text:not(:first-child),
+.chat-reasoning-block:not(:first-child),
+.chat-user-row:not(:first-child) {
+    margin-top: 8px;
+}
+/* A chip that follows other content starts a new group and gets air; chips
+   inside the same run stack directly. Order matters: the adjacent-sibling rule
+   has to come last to win over the group rule. */
+.chat-inline-event:not(:first-child) {
+    margin-top: 6px;
+}
+.chat-inline-event + .chat-inline-event {
+    margin-top: 0;
+}
+.chat-inline-event + .chat-agent-text,
+.chat-inline-event + .chat-reasoning-block {
+    margin-top: 10px;
+}
+.chat-reasoning-block {
+    margin: 0;
+    max-width: 78ch;
+}
 .chat-reasoning-text {
-    color: #8f8f8f;
+    color: #818181;
     font-size: 13px;
+    font-weight: 400;
     line-height: 1.45;
-    margin: 0 0 8px 0;
+    margin: 0;
+    white-space: pre-wrap;
 }
 .chat-inline-event {
     background-color: transparent;
     border: none;
     border-radius: 0;
-    margin-bottom: 3px;
+    margin-bottom: 0;
     padding: 0;
 }
 .chat-inline-event-chip {
@@ -3551,24 +3680,20 @@ button.ws-tab-shell {
     padding: 0;
 }
 .chat-inline-event-expander {
-    background-color: #171717;
-    border: 1px solid #303030;
-    border-radius: 2px;
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
     box-shadow: none;
     color: #8f8f8f;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
-    font-size: 10px;
-    font-weight: 700;
-    min-height: 16px;
-    min-width: 16px;
+    min-height: 20px;
+    min-width: 20px;
     padding: 0;
 }
 button.chat-inline-event-expander {
-    border-radius: 2px;
-    font-size: 10px;
+    border-radius: 5px;
     line-height: 1;
-    min-height: 16px;
-    min-width: 16px;
+    min-height: 20px;
+    min-width: 20px;
     padding: 0;
 }
 button.chat-inline-event-expander label {
@@ -3581,7 +3706,7 @@ button.chat-inline-event-expander label {
 .chat-inline-event-expander:checked,
 .chat-inline-event-expander.checked {
     background-color: #202020;
-    border-color: #424242;
+    border-color: transparent;
     box-shadow: none;
     color: #e7e7e7;
 }
@@ -3683,62 +3808,15 @@ button.chat-inline-event-expander label {
     line-height: 1.25;
     padding: 0 2px;
 }
-.chat-inline-event-code,
+/* Diff row/gutter styling lives in base.css and reads the shared code tokens;
+   only the terminal surface still needs its own container chrome here. */
 .chat-inline-event-terminal {
-    background-color: #0d1117;
-    border: 1px solid #30363d;
+    background-color: var(--code-surface);
+    border: 1px solid var(--code-border);
     border-radius: 5px;
 }
-.chat-inline-event-code .viewport,
 .chat-inline-event-terminal .viewport {
-    background-color: #0d1117;
-}
-.chat-inline-event-code-rows {
-    background-color: #0d1117;
-}
-.chat-inline-event-code-row {
-    min-height: 18px;
-}
-.chat-inline-event-code-row-context {
-    background-color: #0d1117;
-    color: #c9d1d9;
-}
-.chat-inline-event-code-row-added {
-    background-color: #10281a;
-    color: #d6f5df;
-}
-.chat-inline-event-code-row-removed {
-    background-color: #2a1111;
-    color: #f5d6d6;
-}
-.chat-inline-event-code-row-hunk {
-    background-color: #111d2f;
-    color: #8db7e8;
-}
-.chat-inline-event-code-row-meta {
-    background-color: #161b22;
-    color: #8b949e;
-}
-.chat-inline-event-code-gutter {
-    border-right: 1px solid #30363d;
-    color: #6e7681;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
-    font-size: 10px;
-    min-width: 42px;
-    padding: 0 8px;
-}
-.chat-inline-event-code-sign {
-    color: #8b949e;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
-    font-size: 10px;
-    min-width: 18px;
-    padding: 0 4px;
-}
-.chat-inline-event-code-text {
-    color: inherit;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
-    font-size: 10px;
-    padding: 0 8px;
+    background-color: var(--code-surface);
 }
 .chat-inline-event-loading {
     color: #b6c7e8;
@@ -3747,7 +3825,7 @@ button.chat-inline-event-expander label {
     color: #f0a8a8;
 }
 .chat-composer {
-    padding: 0 16px 16px;
+    padding: 0 22px 14px;
     background-color: #151515;
 }
 .chat-queue-overlay {
@@ -3807,9 +3885,9 @@ button.chat-inline-event-expander label {
     background-color: #262626;
 }
 .chat-composer-box {
-    border: none;
-    border-radius: 14px;
-    background-color: #202020;
+    border: 1px solid #282828;
+    border-radius: 10px;
+    background-color: #1b1b1b;
 }
 .chat-placeholder {
     color: #7f7f7f;
@@ -3830,7 +3908,7 @@ button.chat-inline-event-expander label {
     min-height: 0;
 }
 .chat-toolbar {
-    padding: 6px 8px 8px;
+    padding: 2px 0 0;
     background-color: transparent;
 }
 .chat-footer-toggle .chat-mode-label,
@@ -3992,34 +4070,66 @@ button.chat-inline-event-expander label {
     border-color: #753838;
     color: #efb0b0;
 }
+.chat-context-usage {
+    gap: 4px;
+    min-width: 0;
+    height: 25px;
+    min-height: 25px;
+    padding: 0 7px;
+    border-color: #2b2b2b;
+    border-radius: 6px;
+    background-color: #171717;
+    color: #a8a8a8;
+}
+.chat-context-usage-icon {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 auto;
+    color: #858585;
+}
 .chat-context-details {
     min-width: 420px;
     padding: 14px;
 }
 .chat-send-btn {
+    width: 25px;
+    height: 25px;
     min-width: 0;
     min-height: 0;
-    border-radius: 8px;
-    background-color: #2e2e2e;
-    color: #8a8a8a;
-    border: none;
+    border-radius: 6px;
+    background-color: #171717;
+    color: #9a9a9a;
+    border: 1px solid #2d2d2d;
     box-shadow: none;
     text-shadow: none;
-    font-size: 16px;
-    font-weight: 700;
+    font-size: 13px;
+    font-weight: 650;
     padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.chat-stop-btn {
+    color: #e0b0b0;
+    border-color: #4d3030;
 }
 .chat-send-btn-active {
-    background-color: #333333;
-    color: #f5f5f5;
+    background-color: #e8e8e8;
+    border-color: #e8e8e8;
+    color: #151515;
 }
 .chat-send-btn:hover {
-    background-color: #383838;
+    background-color: #262626;
     color: #e4e4e4;
 }
 .chat-send-btn-active:hover {
-    background-color: #3f3f3f;
-    color: #ffffff;
+    background-color: #ffffff;
+    border-color: #ffffff;
+    color: #111111;
+}
+.chat-stop-btn:hover {
+    background-color: #2b1f1f;
+    color: #f2c2c2;
 }
 
 /* ── Diff view ── */
@@ -4134,10 +4244,15 @@ body,
 .session-transcript,
 .terminal-transcript-dark,
 .history-row,
-.project-row,
-.workspace-row-shell {
+.project-row {
     background-color: var(--lc-surface-muted);
     border-color: var(--lc-border);
+    color: var(--lc-text-strong);
+}
+
+.workspace-row-shell {
+    background-color: transparent;
+    border-color: transparent;
     color: var(--lc-text-strong);
 }
 
@@ -4149,6 +4264,12 @@ body,
     background-color: #1f1f1f;
     border: 1px solid #2b2b2b;
     box-shadow: none;
+}
+
+.chat-composer-box {
+    background-color: #1b1b1b;
+    border: 1px solid #282828;
+    border-radius: 10px;
 }
 
 .dashboard-title,
@@ -4280,15 +4401,13 @@ body,
     border-color: #454545;
 }
 
-.suggested-action,
-.chat-send-btn-active {
+.suggested-action {
     background-color: #282828;
     border-color: #4a4a4a;
     color: #f4f4f4;
 }
 
-.suggested-action:hover,
-.chat-send-btn-active:hover {
+.suggested-action:hover {
     background-color: #333333;
     border-color: #5a5a5a;
     color: #ffffff;
@@ -4323,6 +4442,7 @@ input.text,
     border: none;
     box-shadow: none;
     color: #f8fafc;
+    min-height: 36px;
 }
 
 input,
@@ -4364,7 +4484,7 @@ textarea:focus {
 }
 /* Composer has no boxed outline — keep it flat even when focused. */
 .chat-composer-box:focus-within {
-    border: none;
+    border: 1px solid #3a3a3a;
     box-shadow: none;
 }
 
@@ -4605,4 +4725,412 @@ textarea:focus {
 .lc-custom-colors .workspace-status-error,
 .lc-custom-colors .ws-check-icon-fail {
     color: var(--lc-danger);
+}
+
+.ws-folder-toggle,
+.ws-folder-icon,
+.ws-file-icon {
+    width: 14px;
+    height: 14px;
+    min-width: 14px;
+    min-height: 14px;
+}
+
+/* Conductor-style settings layout */
+.settings-page-shell {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    background: var(--lc-bg);
+    color: var(--lc-text);
+}
+
+.settings-sidebar {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--lc-border);
+    background: #171717;
+    padding: 14px 10px;
+    overflow: hidden;
+}
+
+.settings-back-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    border: 0;
+    background: transparent;
+    color: var(--lc-text);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 8px;
+    text-align: left;
+}
+
+.settings-back-row:disabled {
+    color: var(--lc-text-muted);
+}
+
+.settings-back-icon,
+.settings-search-icon,
+.settings-nav-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+}
+
+.settings-search {
+    height: 38px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 8px;
+    background: #101010;
+    padding: 0 10px;
+    margin: 12px 0 16px;
+}
+
+.settings-search input {
+    min-height: 0;
+    height: 34px;
+    flex: 1 1 auto;
+    border: 0;
+    background: transparent;
+    outline: none;
+    padding: 0;
+    color: var(--lc-text-strong);
+}
+
+.settings-search-icon {
+    color: var(--lc-text-muted);
+}
+
+.settings-nav-groups {
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding-right: 2px;
+}
+
+.settings-nav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.settings-nav-group-title {
+    color: var(--lc-text-muted);
+    font-size: 11px;
+    font-weight: 650;
+    padding: 0 8px 4px;
+}
+
+.settings-nav-button {
+    width: 100%;
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #a8a8a8;
+    text-align: left;
+    padding: 7px 9px;
+}
+
+.settings-nav-button:hover {
+    background: var(--lc-hover-soft);
+    color: var(--lc-text-strong);
+}
+
+.settings-nav-button.active {
+    background: #242121;
+    color: var(--lc-text-strong);
+    box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+.settings-nav-button.active .settings-nav-icon {
+    color: var(--lc-accent);
+}
+
+.settings-nav-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.settings-nav-label,
+.settings-nav-detail {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-nav-label {
+    font-size: 13px;
+    font-weight: 550;
+}
+
+.settings-nav-detail {
+    color: var(--lc-text-muted);
+    font-size: 11px;
+}
+
+.settings-main {
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 42px 56px;
+}
+
+.settings-main h1 {
+    margin: 0 0 28px;
+    color: var(--lc-text-strong);
+    font-size: 26px;
+    font-weight: 650;
+    letter-spacing: 0;
+}
+
+.settings-content-narrow,
+.settings-content-wide {
+    width: min(100%, 1120px);
+}
+
+.settings-content-narrow {
+    max-width: 920px;
+}
+
+.settings-section-block {
+    margin-bottom: 34px;
+}
+
+.settings-section-block h2 {
+    margin: 0 0 10px;
+    color: var(--lc-text-muted);
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0;
+}
+
+.settings-section-list {
+    border-top: 1px solid var(--lc-border);
+}
+
+.settings-row,
+.settings-section-list > .settings-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    min-height: 82px;
+    border-bottom: 1px solid var(--lc-border);
+    padding: 16px 0;
+    background: transparent;
+}
+
+.settings-section-list > .settings-field {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 10px;
+}
+
+.settings-row-accent {
+    box-shadow: inset 3px 0 0 var(--lc-accent);
+    padding-left: 12px;
+}
+
+.settings-row-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.settings-row-title {
+    color: var(--lc-text-strong);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.settings-row-description,
+.settings-row-meta {
+    color: var(--lc-text-muted);
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+.settings-row-meta {
+    font-size: 11px;
+}
+
+.settings-row-control {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    max-width: min(520px, 48vw);
+}
+
+.settings-control {
+    width: 270px;
+    min-height: 36px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 7px;
+    background: #101010;
+    color: var(--lc-text-strong);
+    padding: 0 10px;
+    font: inherit;
+}
+
+.settings-segmented {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 8px;
+    background: #101010;
+    padding: 3px;
+}
+
+.settings-segmented button {
+    min-height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--lc-text-muted);
+    padding: 0 10px;
+    font-size: 12px;
+}
+
+.settings-segmented button:hover {
+    color: var(--lc-text-strong);
+    background: var(--lc-hover-soft);
+}
+
+.settings-segmented button.active {
+    color: var(--lc-text-strong);
+    background: #2b2b2b;
+}
+
+.settings-swatch-row {
+    display: inline-flex;
+    gap: 8px;
+}
+
+.settings-swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid var(--lc-border-strong);
+    background: var(--swatch);
+    box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+
+.settings-swatch.active {
+    outline: 2px solid var(--lc-text-strong);
+    outline-offset: 2px;
+}
+
+.settings-keybinding-entry {
+    width: 100%;
+    resize: vertical;
+}
+
+.settings-repo-row {
+    width: 100%;
+    min-height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border: 0;
+    border-bottom: 1px solid var(--lc-border);
+    background: transparent;
+    color: var(--lc-text);
+    padding: 12px 0;
+    text-align: left;
+}
+
+.settings-repo-row:hover {
+    background: var(--lc-hover-soft);
+}
+
+.settings-repo-row.active {
+    color: var(--lc-text-strong);
+    box-shadow: inset 3px 0 0 var(--lc-accent);
+    padding-left: 12px;
+}
+
+.settings-repo-row span {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.settings-repo-row strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.settings-repo-row small {
+    color: var(--lc-text-muted);
+    font-size: 12px;
+}
+
+.settings-top-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 22px;
+}
+
+.settings-content-wide .settings-split {
+    height: min(620px, 58vh);
+    padding: 0;
+    margin-top: 10px;
+}
+
+@media (max-width: 920px) {
+    .settings-page-shell {
+        grid-template-columns: 240px minmax(0, 1fr);
+    }
+
+    .settings-main {
+        padding: 28px 24px;
+    }
+
+    .settings-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .settings-row-control {
+        width: 100%;
+        max-width: none;
+        justify-content: flex-start;
+    }
+
+    .settings-control {
+        width: 100%;
+    }
+
+    .settings-top-controls {
+        align-items: stretch;
+        flex-direction: column;
+    }
 }

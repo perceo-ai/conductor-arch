@@ -102,10 +102,17 @@ body {
 }
 
 /* --- sidebar --- */
+/* Column widths (see lib/panelWidths.ts): both side columns are drag-sized and
+   may give ground as the window narrows, but never below their minimum, and
+   never past the centre column's own minimum. */
 .sidebar {
   position: relative;
-  width: 320px;
-  min-width: 320px;
+  width: 280px;
+  min-width: 220px;
+  /* Cap by viewport share too: at the 900px minimum window the two side
+     columns and the centre's 360px minimum add up to exactly the width. */
+  max-width: min(420px, 30vw);
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -258,21 +265,31 @@ body.resizing-col {
 .workspace-row-shell {
   display: flex;
   flex-direction: column;
-  padding: 8px 10px;
+  padding: 7px 10px;
+  border: 0;
   border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
   cursor: default;
 }
 .workspace-row-shell:hover {
   background: var(--lc-hover-soft);
 }
+.workspace-row-shell:focus-visible,
+.project-row:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: 2px;
+}
 .workspace-row-shell.selected {
   background: var(--lc-hover);
+  box-shadow: none;
 }
 .workspace-row-head {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  width: 100%;
 }
 .workspace-status-dot {
   flex: 0 0 auto;
@@ -280,6 +297,25 @@ body.resizing-col {
   height: 8px;
   border-radius: 50%;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+.workspace-status-dot-spacer {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+}
+.workspace-git-state {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--lc-text-muted);
+}
+.workspace-git-state .ui-icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
 }
 .workspace-row-shell .row-name {
   color: var(--lc-text-strong);
@@ -289,9 +325,56 @@ body.resizing-col {
   white-space: nowrap;
 }
 .workspace-row-shell .row-meta {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  width: 100%;
+  min-width: 0;
+  min-height: 16px;
+  box-sizing: border-box;
   font-size: 12px;
   color: var(--lc-text-muted);
   padding-left: 16px; /* align under the name, past the status dot */
+  overflow: hidden;
+}
+.workspace-row-branch {
+  display: block;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 54px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-row-diff {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+.workspace-row-diff::before {
+  content: "·";
+  color: var(--lc-text-faint);
+  font-weight: 400;
+}
+.card-meta > .workspace-row-diff:first-child {
+  margin-left: 0;
+}
+.card-meta > .workspace-row-diff:first-child::before {
+  content: none;
+}
+.workspace-row-additions {
+  color: #6cc58a;
+}
+.workspace-row-deletions {
+  color: #e06f6f;
+}
+.workspace-row-shell .workspace-row-diff::before {
+  content: none;
 }
 
 /* --- project (repository) groups in the sidebar --- */
@@ -351,7 +434,9 @@ body.resizing-col {
 
 /* --- content / page stack --- */
 .content-area {
-  flex: 1 1 auto;
+  /* Basis 0 so the page never bids for its content width — with `auto` a wide
+     chat transcript out-argued the sidebar and squeezed it to its minimum. */
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -523,10 +608,14 @@ body.resizing-col {
   overflow: hidden;
 }
 .ws-center {
-  flex: 1 1 auto;
+  /* Basis 0, not auto: the centre takes the leftover space rather than bidding
+     for its content width, which otherwise squeezed the inspector to its min. */
+  flex: 1 1 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  /* Chat stops being usable narrower than this; the tab strip scrolls rather
+     than widening the column, so adding chats never resizes the layout. */
+  min-width: 360px;
   min-height: 0;
 }
 .ws-header {
@@ -558,8 +647,10 @@ body.resizing-col {
 }
 .ws-right-panel {
   position: relative;
-  flex: 0 0 340px;
-  width: 340px;
+  flex: 0 1 320px;
+  width: 320px;
+  min-width: 260px;
+  max-width: min(440px, 30vw);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -569,8 +660,8 @@ body.resizing-col {
 .command-center-strip {
   display: flex;
   flex-direction: row;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 4px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
 }
 .ws-right-tabs {
@@ -581,10 +672,24 @@ body.resizing-col {
 .ws-right-tabs .nav-button {
   flex: 0 0 auto;
   white-space: nowrap;
+  padding: 6px 8px;
+  font-size: 12px;
 }
 .ws-right-body {
   flex: 1 1 auto;
   overflow: auto;
+}
+
+/* The inspector only drops out when the three minimums genuinely cannot fit
+   (below Electron's 900px floor, e.g. a zoomed-in renderer). Above that it
+   shrinks instead — hiding it at 1100px made the centre column jump. */
+@media (max-width: 880px) {
+  .ws-right-panel {
+    display: none;
+  }
+  .chat-toolbar-left {
+    flex-wrap: wrap;
+  }
 }
 
 /* ---- Chat surface ---- */
@@ -593,10 +698,50 @@ body.resizing-col {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
+}
+/* Vertical order of the chat column: the timeline absorbs the slack, an agent
+   ask (permission / question / plan) is capped and scrolls, and the composer
+   keeps its height no matter what. Without the cap a long plan card pushed the
+   composer clean off the bottom of a short window. */
+.chat-surface > .chat-interaction,
+.chat-surface > .chat-plan-card {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45%;
+  overflow-y: auto;
+}
+.chat-surface > .chat-composer {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+/* A long queue is the other way the composer grows without bound. */
+.chat-queue-overlay {
+  max-height: 26vh;
+  overflow-y: auto;
+}
+/* Tab bar: the tab strip scrolls on its own, the new-chat button is pinned so
+   it stays reachable no matter how many chats are open. */
+.ws-chat-tab-bar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
 }
 .ws-chat-tabs-scroll {
   overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  scrollbar-width: none;
+}
+.ws-chat-tabs-scroll::-webkit-scrollbar {
+  height: 0;
+}
+.ws-chat-tab-bar > .ws-chat-new {
   flex: 0 0 auto;
+  margin-left: 4px;
 }
 .ws-chat-tabs {
   display: flex;
@@ -611,7 +756,10 @@ body.resizing-col {
   gap: 6px;
   cursor: pointer;
   white-space: nowrap;
-  min-width: 154px;
+  /* Tabs give up width before the strip starts scrolling, so a handful of
+     chats stay visible at once instead of scrolling after three. */
+  flex: 0 1 auto;
+  min-width: 96px;
   max-width: 230px;
 }
 .ws-chat-tab-dot {
@@ -624,12 +772,13 @@ body.resizing-col {
 .ws-chat-tab-spinner {
   background: #6f8fbd;
 }
+.ws-chat-tab-needs-input {
+  background: #d97706;
+}
 .ws-chat-tab-text {
   min-width: 0;
   flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+  display: block;
 }
 .ws-chat-tab-meta {
   min-width: 0;
@@ -641,38 +790,123 @@ body.resizing-col {
   line-height: 1.15;
 }
 .chat-timeline-scroll {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
 }
+/* Transcript rhythm: rows are tight by default and only earn space where the
+   content changes register (prose after a run of tool chips, or a new user
+   message). A uniform gap makes ten one-line chips read like ten paragraphs. */
 .chat-messages {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 18px 22px;
+  gap: 2px;
+  padding: 14px 20px 16px;
 }
 .chat-user-row {
   display: flex;
   justify-content: flex-end;
 }
+
+/* ---- New-chat screen (empty chat): branch header + context chips ---- */
+.new-chat-intro {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 40px 4px 8px;
+}
+.new-chat-title {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: #ededed;
+}
+.new-chat-branch {
+  color: var(--lc-accent, #c39b50);
+}
+.new-chat-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.new-chat-section-label {
+  color: #7d7d7d;
+  font-size: var(--ui-text-xs, 11px);
+  font-weight: 550;
+}
+.new-chat-hint {
+  color: #6c6c6c;
+  font-size: var(--ui-text-sm, 12px);
+}
+.new-chat-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* Flat tag, not an outlined pill: no border until it is selected, and the fill
+   carries the state so a row of chips reads as one surface. */
+.new-chat-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 320px;
+  padding: 6px 11px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: #1a1a1a;
+  color: #c9c9c9;
+  font-size: var(--ui-text-sm, 12px);
+  font-weight: 500;
+  cursor: pointer;
+}
+.new-chat-chip:hover {
+  background: #212121;
+  color: #ededed;
+}
+.new-chat-chip-on,
+.new-chat-chip-on:hover {
+  background: rgba(195, 155, 80, 0.14);
+  color: var(--lc-accent, #c39b50);
+}
+.new-chat-chip .ui-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+.new-chat-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.new-chat-chip-detail {
+  color: #6f6f6f;
+  flex: 0 0 auto;
+}
+.new-chat-chip-on .new-chat-chip-detail {
+  color: inherit;
+  opacity: 0.75;
+}
 .chat-composer {
   display: flex;
   flex-direction: column;
-  border-top: 1px solid var(--lc-border, #2a2a2a);
+  border-top: none;
 }
 .chat-composer-box {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 16px 14px 16px;
+  gap: 6px;
+  padding: 8px 22px 14px;
 }
 .chat-input-shell {
-  display: flex;
+  display: grid;
+  position: relative;
 }
+.chat-input-render,
 .chat-input-view {
+  grid-area: 1 / 1;
   width: 100%;
-  resize: none;
-  min-height: 54px;
+  min-height: 48px;
   max-height: 160px;
   padding: 10px 12px;
   border-radius: 10px;
@@ -682,39 +916,127 @@ body.resizing-col {
   font-family: inherit;
   font-size: 14px;
   line-height: 1.4;
+}
+.chat-input-render {
+  min-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+.chat-input-render p {
+  display: inline;
+  margin: 0;
+}
+.chat-input-view {
+  resize: none;
+  caret-color: var(--lc-text, #e4e4e4);
   outline: none;
+}
+.chat-input-view-has-preview {
+  color: transparent;
 }
 .chat-input-view:focus {
   border: none;
   outline: none;
+}
+.chat-file-mention-menu {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  padding: 4px;
+  overflow-y: auto;
+  border: 1px solid var(--lc-border, #303030);
+  border-radius: 6px;
+  background: #181818;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.38);
+}
+.chat-file-mention-item {
+  display: grid;
+  grid-template-columns: minmax(0, 0.42fr) minmax(0, 0.58fr);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lc-text, #e4e4e4);
+  font: inherit;
+  text-align: left;
+}
+.chat-file-mention-item:hover,
+.chat-file-mention-item-active {
+  background: rgba(255, 255, 255, 0.08);
+}
+.chat-file-mention-name,
+.chat-file-mention-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-file-mention-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.chat-file-mention-path {
+  color: var(--lc-text-muted, #9a9a9a);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
 }
 .chat-toolbar {
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 8px;
+  min-height: 28px;
 }
 .chat-toolbar-left {
   flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 .chat-toolbar-right {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 .chat-status-hint {
+  flex: 1 1 auto;
+  min-width: 90px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 11px;
   color: var(--lc-text-muted, #8a8a8a);
 }
 .chat-send-btn {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
   border-radius: 8px;
   border: 1px solid var(--lc-border, #2f2f2f);
   background: #242424;
   color: #cfcfcf;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.chat-send-btn:disabled {
+  cursor: default;
+  opacity: 0.48;
 }
 .chat-send-btn-active {
   background: #3a5a86;
@@ -764,13 +1086,19 @@ body.resizing-col {
 .ws-file-summary-row-content:hover {
   background: rgba(255, 255, 255, 0.05);
 }
+/* Marks the row whose diff is showing below, so a narrowed diff is legible
+   rather than looking like the scope silently lost most of its content. */
+.ws-file-summary-row-selected {
+  background: var(--lc-surface-selected, #232323);
+  box-shadow: inset 2px 0 0 var(--lc-accent, #d4a94f);
+}
 .ws-folder-toggle,
 .ws-folder-icon,
 .ws-file-icon {
   flex: 0 0 auto;
   color: var(--lc-text-muted, #8a8a8a);
-  width: 12px;
-  text-align: center;
+  width: 14px;
+  height: 14px;
 }
 .ws-file-name,
 .ws-folder-name {
@@ -798,6 +1126,23 @@ body.resizing-col {
   gap: 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+/* Scope picker sits to the right of the title and takes the leftover width, so
+   a long commit subject truncates instead of pushing the title around. */
+.ws-changes-scope {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 60%;
+}
+/* Which scope an opened file's diff is showing. */
+.ws-file-view-scope {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--code-border);
+  border-radius: 999px;
+  color: var(--lc-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
 }
 .ws-commit-box {
   display: flex;
@@ -1033,13 +1378,13 @@ body.resizing-col {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-bottom: 3px;
+  margin-bottom: 0;
 }
 .chat-inline-event-header {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
 }
 /* Small square toggle (GTK inline_event expander). */
 .chat-inline-event-expander {
@@ -1047,27 +1392,49 @@ body.resizing-col {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 16px;
-  height: 16px;
+  min-width: 18px;
+  width: 18px;
+  height: 18px;
   padding: 0;
-  border-radius: 3px;
-  border: 1px solid #303030;
-  background: #171717;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
   color: #8f8f8f;
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 11px;
-  font-weight: 700;
   line-height: 1;
   cursor: pointer;
 }
 .chat-inline-event-expander:hover:not(:disabled) {
   background: #202020;
-  border-color: #424242;
   color: #e7e7e7;
 }
 .chat-inline-event-expander:disabled {
   opacity: 0.5;
   cursor: default;
+}
+.chat-inline-event-expander .ui-icon,
+.chat-inline-event-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+.chat-inline-event-expander-glyph {
+  display: block;
+  color: inherit;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+.chat-inline-event-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #5e5e5e;
+}
+.chat-inline-event-icon {
+  color: #777777;
 }
 /* Verb (Ran / Read / Edited …). */
 .chat-inline-event-action {
@@ -1098,7 +1465,7 @@ body.resizing-col {
 .chat-inline-event-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  margin-left: 20px;
+  margin-left: 18px;
   border: 1px solid #2a2a2a;
   border-radius: 5px;
   background: #181818;
@@ -1109,42 +1476,227 @@ body.resizing-col {
   max-height: 320px;
   overflow-y: auto;
 }
-.chat-inline-event-code,
-.chat-inline-event-code-rows {
+/* ---- Diff viewer ----
+   Layout follows the conventions of GitHub and editor diff panes: a collapsible
+   block per file with a sticky path header, collapsible hunks, old/new line
+   number columns pinned against horizontal scroll, and word-level tints inside
+   changed lines. Colors come from the shared code tokens in theme.css. */
+.diff {
   display: flex;
   flex-direction: column;
-  font-family: var(--font-mono, ui-monospace, monospace);
+  gap: 10px;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
+  tab-size: var(--code-tab);
+  color: var(--code-fg);
+}
+.diff-preamble {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
+  font-size: 11px;
+}
+.diff-note {
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
   font-size: 12px;
-  line-height: 1.4;
+}
+
+.diff-file {
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  background: var(--code-surface);
+  /* Clips the rounded corners and, as a scrollport, scopes the sticky header
+     to its own file the way GitHub's per-file headers behave. */
+  overflow: hidden;
+}
+.diff-file-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--code-border);
+  background: var(--diff-header-bg);
+  color: var(--lc-text);
+  font-family: var(--ui-font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-file-header:hover {
+  box-shadow: inset 0 0 0 999px var(--code-line-active);
+}
+.diff-chevron,
+.diff-file-icon {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--lc-text-muted);
+}
+.diff-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--code-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-file-oldpath {
+  color: var(--lc-text-muted);
+  text-decoration: line-through;
+}
+.diff-file-arrow {
+  margin: 0 4px;
+  color: var(--lc-text-muted);
+}
+.diff-file-status {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--code-border);
+  border-radius: 999px;
+  color: var(--lc-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.diff-file-status-added {
+  border-color: var(--diff-add-word);
+  color: var(--diff-add-accent);
+}
+.diff-file-status-deleted {
+  border-color: var(--diff-del-word);
+  color: var(--diff-del-accent);
+}
+.diff-file-counts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  font-family: var(--code-font);
+  font-size: 11px;
+}
+.diff-file-add {
+  color: var(--diff-add-accent);
+}
+.diff-file-del {
+  color: var(--diff-del-accent);
+}
+.diff-file-body {
   overflow-x: auto;
 }
-.chat-inline-event-code-row {
+.diff-file-empty {
+  padding: 8px 12px;
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
+  font-size: 12px;
+}
+
+/* One width for every row, taken from the longest line and never narrower than
+   the scrollport. Rows and hunk headers then take 100% of it, so their tints
+   run the whole scroll extent instead of stopping at the fold. */
+.diff-file-rows {
+  width: max-content;
+  min-width: 100%;
+}
+.diff-hunk-header {
+  display: block;
+  width: 100%;
+  padding: 1px 0;
+  border: 0;
+  background: var(--diff-hunk-bg);
+  color: var(--diff-hunk-fg);
+  font-family: var(--code-font);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-hunk-inner {
+  position: sticky;
+  left: 0;
   display: flex;
-  flex-direction: row;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0 10px 0 6px;
+}
+.diff-hunk-section {
+  overflow: hidden;
+  color: var(--lc-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-row {
+  display: flex;
+  width: 100%;
+  background: var(--code-surface);
+  color: var(--code-fg);
   white-space: pre;
 }
-.chat-inline-event-code-sign {
-  flex: 0 0 auto;
-  width: 10px;
-  text-align: center;
-  color: var(--lc-text-muted, #8a8a8a);
+.diff-row-added {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-fg);
 }
-.diff-lineno {
+.diff-row-removed {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-fg);
+}
+
+/* The three gutter columns stay pinned while the code scrolls sideways. Their
+   text is drawn as generated content: user-select: none still lands in
+   Selection.toString(), but ::before content never does, so copying a diff
+   yields code without line numbers or +/- signs. */
+.diff-gutter,
+.diff-sign {
+  position: sticky;
+  z-index: 1;
   flex: 0 0 auto;
-  width: 3ch;
-  text-align: right;
-  color: var(--lc-text-muted, #6a6a6a);
-  opacity: 0.7;
+  background: inherit;
+  color: var(--code-gutter-fg);
   user-select: none;
   -webkit-user-select: none;
 }
-.diff-lineno-new {
-  padding-right: 4px;
-  border-right: 1px solid var(--lc-border, #2a2a2a);
+.diff-gutter::before,
+.diff-sign::before {
+  content: attr(data-n);
 }
-.chat-inline-event-code-text {
-  white-space: pre;
+.diff-gutter {
+  width: calc(var(--diff-gutter-w, 2ch) + 12px);
+  padding: 0 6px;
+  text-align: right;
+}
+.diff-gutter-old {
+  left: 0;
+}
+.diff-gutter-new {
+  left: calc(var(--diff-gutter-w, 2ch) + 12px);
+  border-right: 1px solid var(--code-border);
+}
+.diff-sign {
+  left: calc((var(--diff-gutter-w, 2ch) + 12px) * 2);
+  width: 2ch;
+  padding-left: 4px;
+}
+.diff-code {
+  flex: 1 1 auto;
+  padding: 0 10px 0 2px;
+}
+.diff-word {
+  border-radius: 2px;
+}
+.diff-row-added .diff-word {
+  background: var(--diff-add-word);
+}
+.diff-row-removed .diff-word {
+  background: var(--diff-del-word);
 }
 .chat-inline-event-terminal {
   font-family: var(--font-mono, ui-monospace, monospace);
@@ -1433,8 +1985,18 @@ body.resizing-col {
   width: 28px;
   height: 28px;
   border-radius: 6px;
-  flex-shrink: 0;
+  flex: 0 0 auto;
   background: #2a2a2a;
+  object-fit: cover;
+}
+
+.repo-card-avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #cfcfcf;
+  font-size: 10px;
+  font-weight: 720;
 }
 .repo-card-text {
   display: flex;
@@ -1594,12 +2156,12 @@ body.resizing-col {
 /* ---- Command-center top bar (aligned height + draggable) ---- */
 .ws-topbar {
   flex: 0 0 auto;
-  height: 52px;
+  height: 46px;
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  padding: 0 12px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--lc-border, #2a2a2a);
   -webkit-app-region: drag;
 }
@@ -1609,6 +2171,7 @@ body.resizing-col {
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 100%;
   overflow: hidden;
 }
 .ws-topbar-status-dot {
@@ -1618,7 +2181,11 @@ body.resizing-col {
   border-radius: 999px;
 }
 .ws-topbar-repo {
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  font-size: 13px;
+  line-height: 1;
   font-weight: 600;
   color: var(--lc-text, #e4e4e4);
   white-space: nowrap;
@@ -1627,10 +2194,18 @@ body.resizing-col {
   max-width: 60%;
 }
 .ws-topbar-sep {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  line-height: 1;
   color: var(--lc-text-muted, #7a7a7a);
 }
 .ws-topbar-branch {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
   font-size: 12px;
+  line-height: 1;
   color: var(--lc-text-muted, #9a9a9a);
   white-space: nowrap;
   overflow: hidden;
@@ -1639,18 +2214,47 @@ body.resizing-col {
 .ws-topbar-summary {
   flex: 0 1 auto;
   min-width: 0;
-  font-size: 12px;
+  font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ws-topbar-actions {
   display: flex;
+  align-items: center;
   gap: 4px;
   -webkit-app-region: no-drag;
 }
 .ws-topbar-btn {
   -webkit-app-region: no-drag;
+}
+.ws-open-menu-button {
+  height: var(--ui-control-h);
+  min-height: var(--ui-control-h);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid #2f2f2f;
+  border-radius: 6px;
+  background: #191919;
+  color: #cfcfcf;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.ws-open-menu-button:hover {
+  background: #222222;
+  border-color: #3a3a3a;
+  color: #f0f0f0;
+}
+.ws-open-menu-button svg {
+  width: 14px;
+  height: 14px;
+}
+.ws-open-menu-chevron {
+  width: 11px !important;
+  height: 11px !important;
+  color: #8f8f8f;
 }
 
 .ws-briefing {
@@ -1735,26 +2339,6 @@ body.resizing-col {
   }
 }
 
-.ws-checks-readiness {
-  display: grid;
-  gap: 8px;
-}
-
-.ws-blocker-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.ws-blocker-chip {
-  min-height: 28px;
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 12px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
 .ws-pr-actions-row {
   align-items: center;
 }
@@ -1773,20 +2357,24 @@ body.resizing-col {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+  gap: 6px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 2px;
+  border-bottom: 0;
   background: transparent;
+  -webkit-app-region: no-drag;
 }
 .ws-pr-chip {
   flex: 0 0 auto;
-  font-size: 12px;
+  height: 24px;
+  font-size: 11px;
   font-weight: 600;
-  padding: 2px 8px;
+  padding: 0 7px;
   border-radius: 6px;
-  border: 1px solid var(--lc-border, #333);
-  background: #232323;
-  color: #cfcfcf;
+  border: 1px solid #2b2b2b;
+  background: #1c1c1c;
+  color: #bdbdbd;
   cursor: pointer;
 }
 .ws-pr-chip-empty {
@@ -1796,8 +2384,9 @@ body.resizing-col {
 .ws-pr-status-title {
   flex: 1 1 auto;
   min-width: 0;
+  max-width: 132px;
   font-size: 12px;
-  color: var(--lc-text, #d4d4d4);
+  color: #9b9b9b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1816,14 +2405,19 @@ body.resizing-col {
 }
 .ws-pr-action-button {
   flex: 0 0 auto;
+  height: 28px;
   font-size: 12px;
   font-weight: 600;
-  padding: 4px 10px;
+  padding: 0 10px;
   border-radius: 6px;
-  border: 1px solid #3a5a86;
-  background: #2f4a72;
-  color: #fff;
+  border: 1px solid #3a3a3a;
+  background: #242424;
+  color: #eeeeee;
   cursor: pointer;
+}
+.ws-pr-action-button:hover:not(:disabled) {
+  background: #2c2c2c;
+  border-color: #4a4a4a;
 }
 .ws-pr-action-button:disabled {
   opacity: 0.5;
@@ -1831,20 +2425,20 @@ body.resizing-col {
 }
 /* status color accents apply to the action button */
 .ws-pr-status-pending .ws-pr-action-button {
-  border-color: #7a6a2a;
-  background: #4a411f;
+  border-color: #4a4430;
+  background: #29261d;
 }
 .ws-pr-status-failed .ws-pr-action-button {
-  border-color: #7a3a3a;
-  background: #4a2323;
+  border-color: #553333;
+  background: #2a1e1e;
 }
 .ws-pr-status-merged .ws-pr-status-title,
 .ws-pr-status-ready .ws-pr-status-title {
   color: #8fbf8f;
 }
 .ws-pr-status-ready .ws-pr-action-button {
-  border-color: #3a7a4a;
-  background: #234a2f;
+  border-color: #31553a;
+  background: #1f2b22;
 }
 .ws-pr-status-failed .ws-pr-status-title {
   color: #d98a8a;
@@ -1867,6 +2461,9 @@ body.resizing-col {
 .ws-run-section-expanded {
   min-height: 120px;
 }
+.ws-run-section:not(.ws-run-section-expanded) {
+  flex: 0 0 auto;
+}
 .ws-run-tab-bar {
   flex: 0 0 auto;
   display: flex;
@@ -1886,12 +2483,15 @@ body.resizing-col {
   gap: 4px;
   overflow-x: auto;
 }
-/* Setup/Run/terminal tab buttons — flat pill, GTK ws-run-tab-btn. */
+/* Setup/Run/terminal tab buttons — compact utility controls. */
 .ws-run-tab-btn {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 4px;
-  padding: 4px 10px;
+  min-width: 28px;
+  min-height: 26px;
+  padding: 4px 7px;
   border: none;
   border-radius: 7px;
   background: transparent;
@@ -1913,6 +2513,17 @@ body.resizing-col {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .ws-run-collapse-btn {
   flex: 0 0 auto;
   min-width: 30px;
@@ -1922,6 +2533,9 @@ body.resizing-col {
   background: transparent;
   color: #8e8e8e;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .ws-run-collapse-btn:hover {
   background: #242424;
@@ -2003,6 +2617,127 @@ body.resizing-col {
 }
 .chat-picker:hover {
   border-color: var(--lc-border-strong, #3a3a3a);
+}
+
+.ui-icon,
+button.ui-button-icon .ui-icon,
+.ws-tab-close-button .ui-icon,
+.chat-queued-action-btn .ui-icon,
+.chat-attachment-chip-remove .ui-icon,
+.ws-run-collapse-btn .ui-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  display: block;
+}
+
+.compact-select {
+  position: relative;
+  min-width: 0;
+}
+
+.compact-select-trigger {
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 168px;
+  padding: 0 7px 0 9px;
+  border: 1px solid var(--lc-border, #2b2b2b);
+  border-radius: 6px;
+  background: #181818;
+  color: var(--lc-text, #d8d8d8);
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.compact-select-trigger:hover,
+.compact-select:focus-within .compact-select-trigger {
+  background: #202020;
+  border-color: #373737;
+  color: #eeeeee;
+}
+
+.compact-select-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-select-caret {
+  width: 12px;
+  height: 12px;
+  color: #8a8a8a;
+}
+
+.compact-select-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: #9a9a9a;
+}
+
+.compact-select-agent-model .compact-select-trigger,
+.compact-select-model .compact-select-trigger {
+  max-width: 210px;
+}
+
+.compact-select-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 5px);
+  z-index: 80;
+  min-width: max(100%, 180px);
+  max-width: 280px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid #343434;
+  border-radius: 8px;
+  background: #1b1b1b;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+}
+/* Portalled to <body> and positioned against the trigger from JS, so a
+   scrolling ancestor cannot clip it. Above the popover layer. */
+.compact-select-menu-floating {
+  z-index: 220;
+}
+.compact-select-group {
+  padding: 7px 8px 3px;
+  color: #858585;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.compact-select-option-grouped {
+  padding-left: 18px;
+}
+
+.compact-select-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #c8c8c8;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.compact-select-option:hover,
+.compact-select-option-focused,
+.compact-select-option-active {
+  background: #2a2a2a;
+  color: #f0f0f0;
 }
 .ws-new-provider {
   margin-left: 4px;
@@ -2244,6 +2979,12 @@ body.resizing-col {
   color: var(--lc-text-muted, #b0b0b0);
 }
 
+.settings-shortcuts-preview {
+  max-height: 180px;
+  overflow: auto;
+  padding: 6px 0 0;
+}
+
 .ws-readiness {
   margin: 6px 0;
   padding: 6px 10px;
@@ -2308,33 +3049,60 @@ body.resizing-col {
   display: flex;
   flex-direction: column;
 }
-/* Editor = a transparent textarea layered over a highlighted <pre>. Both share
-   these exact metrics so the caret and glyphs register 1:1. */
+/* Editor = a transparent textarea layered over a highlighted <pre>, with a
+   line-number gutter pinned to the left. All three layers share these exact
+   metrics so the caret, the glyphs, and the numbers register 1:1. */
 .ws-file-editor-scroll {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
-  background: var(--lc-surface, #161616);
+  background: var(--code-surface);
   overflow: hidden;
 }
+.ws-file-editor-gutter,
 .ws-file-editor-highlight,
 .ws-file-editor-area {
   margin: 0;
   border: 0;
-  padding: 12px 14px;
-  font-family: var(--lc-mono, ui-monospace, monospace);
-  font-size: 12.5px;
-  line-height: 1.5;
-  tab-size: 2;
+  padding: 12px 0;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
+  tab-size: var(--code-tab);
   white-space: pre;
   word-wrap: normal;
+}
+/* Reserve the gutter's width on the text layers rather than shifting them, so
+   a long line scrolls under the numbers instead of pushing them off. */
+.ws-file-editor-highlight,
+.ws-file-editor-area {
+  padding-left: calc(var(--editor-gutter-w, 3ch) + 22px);
+  padding-right: 14px;
+}
+.ws-file-editor-gutter {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  width: calc(var(--editor-gutter-w, 3ch) + 16px);
+  padding-right: 8px;
+  overflow: hidden;
+  border-right: 1px solid var(--code-border);
+  background: var(--code-surface);
+  color: var(--code-gutter-fg);
+  text-align: right;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.ws-file-editor-gutter-line-active {
+  color: var(--lc-text);
 }
 pre.ws-file-editor-highlight.hljs {
   position: absolute;
   inset: 0;
   overflow: hidden;
   background: transparent;
-  color: var(--lc-text, #e6e6e6);
+  color: var(--code-fg);
   pointer-events: none;
 }
 .ws-file-editor-highlight code {
@@ -2354,6 +3122,18 @@ pre.ws-file-editor-highlight.hljs {
 .ws-file-editor-area::selection {
   background: rgba(120, 140, 255, 0.32);
 }
+/* Preview mode: a reading column over the same surface as the editor, so
+   switching Edit <-> Preview doesn't change the page under you. */
+.ws-file-preview {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 20px 24px 32px;
+  overflow-y: auto;
+  background: var(--code-surface);
+}
+.ws-file-preview .markdown-body {
+  max-width: 78ch;
+}
 .ws-file-editor-footer {
   flex: 0 0 auto;
   display: flex;
@@ -2365,20 +3145,6 @@ pre.ws-file-editor-highlight.hljs {
 }
 .ws-file-editor-footer .card-meta {
   margin-right: auto;
-}
-
-/* ---- Diff meta rows (headers) ---- */
-.chat-inline-event-code-row-meta {
-  color: var(--lc-text-muted, #7a7a7a);
-}
-.chat-inline-event-code-row-meta .chat-inline-event-code-text {
-  opacity: 0.75;
-}
-/* highlight.js sets a container background; keep the diff surface flush so the
-   per-line +/- tints still read through. */
-.chat-inline-event-code.hljs {
-  background: transparent;
-  padding: 0;
 }
 
 /* ---- Markdown-rendered assistant/reasoning text ---- */
@@ -2451,18 +3217,37 @@ pre.ws-file-editor-highlight.hljs {
   background: rgba(255, 255, 255, 0.08);
   color: #e6b673;
 }
+.chat-inline-file-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 24ch;
+  margin: 0 2px;
+  padding: 1px 5px;
+  vertical-align: 0.08em;
+  overflow: hidden;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--lc-text, #e6e6e6);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78em;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 /* fenced code block (highlighted) */
 .markdown-body pre.md-code {
   margin: 8px 0;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid var(--lc-border, #2a2a2a);
+  border: 1px solid var(--code-border);
   overflow-x: auto;
+  tab-size: var(--code-tab);
 }
 .markdown-body pre.md-code code {
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 12.5px;
-  line-height: 1.5;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
   background: transparent;
   padding: 0;
 }
@@ -2572,40 +3357,53 @@ pre.ws-file-editor-highlight.hljs {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
 }
 .context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
   text-align: left;
   padding: 6px 10px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--lc-text, #e4e4e4);
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 16px;
   cursor: pointer;
 }
-.context-menu-item:hover {
+.context-menu-item-icon,
+.context-menu-item-logo {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+}
+.context-menu-item-icon {
+  color: #bdbdbd;
+}
+.context-menu-item-logo {
+  display: block;
+  object-fit: contain;
+}
+.context-menu-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-menu-item:hover,
+.context-menu-item-focused {
   background: var(--lc-hover, rgba(255, 255, 255, 0.08));
 }
 .context-menu-item-destructive {
   color: #f0a8a8;
 }
-.context-menu-item-destructive:hover {
+.context-menu-item-destructive:hover,
+.context-menu-item-destructive.context-menu-item-focused {
   background: rgba(255, 120, 120, 0.14);
 }
 
 
-/* ---- Workspace intelligence panels (Tasks / Summary / Context / PR) ---- */
-.ws-task-row,
-.ws-contribution-row {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--lc-border, #2a2a2a);
-}
-.ws-task-blocked {
-  border-left: 2px solid #d97706;
-  padding-left: 6px;
-}
-.ws-task-status,
+/* ---- Workspace intelligence panels (Summary / Context / PR) ---- */
 .ws-context-kind {
   max-width: 120px;
   flex: 0 0 auto;
@@ -2623,48 +3421,13 @@ pre.ws-file-editor-highlight.hljs {
   background: var(--lc-surface-muted, #141414);
   color: inherit;
 }
-.ws-contribution-files {
-  word-break: break-all;
-}
 .ws-pr-draft-toggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
 }
-.ws-overlap-row .detail-value {
-  word-break: break-all;
-}
 
-
-/* ---- Left-rail workspace indicators ---- */
-.row-indicators {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 2px;
-}
-.row-chip {
-  font-size: 10px;
-  line-height: 1.4;
-  padding: 0 5px;
-  border-radius: 8px;
-  border: 1px solid var(--lc-border, #2a2a2a);
-  color: var(--lc-text-muted, #9a9a9a);
-  white-space: nowrap;
-}
-.row-chip-agent {
-  border-color: #3fb27f;
-  color: #3fb27f;
-}
-.row-chip-blocked {
-  border-color: #d97706;
-  color: #d97706;
-}
-.row-chip-pr {
-  border-color: #5b8def;
-  color: #5b8def;
-}
 
 .dialog-check {
   display: flex;
@@ -2747,4 +3510,2028 @@ pre.ws-file-editor-highlight.hljs {
 .settings-hint {
   font-size: 11px;
   opacity: 0.8;
+}
+
+/* ---- Professional charcoal pass -----------------------------------------
+   Late normalization for the main Electron surface. Older GTK-port rules above
+   use many one-off sizes; these tokens make the visible app read as one system. */
+body {
+  font-family: var(--ui-font-sans);
+  font-size: var(--ui-text);
+  line-height: var(--ui-line);
+  background: var(--lc-bg);
+  color: var(--lc-text);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+.window-content,
+.content-area,
+.page-shell,
+.ws-command-center,
+.chat-surface {
+  background: var(--lc-bg);
+}
+
+.sidebar {
+  background: #141414;
+  border-right-color: var(--ui-border);
+}
+
+.sidebar-chrome {
+  height: 50px;
+  min-height: 50px;
+  padding: 0 12px;
+}
+
+.sidebar-nav-group {
+  gap: 1px;
+  padding: 6px 8px;
+}
+
+.sidebar-nav-button {
+  min-height: 34px;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: var(--ui-radius);
+  color: #a4a4a4;
+  font-size: var(--ui-text);
+  font-weight: 500;
+}
+
+.sidebar-nav-button:hover {
+  background: #1d1d1d;
+  color: #dcdcdc;
+}
+
+.sidebar-nav-button.active {
+  background: #202020;
+  color: #f0f0f0;
+  box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+.sidebar-nav-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: #8d8d8d;
+}
+
+.sidebar-nav-button.active .sidebar-nav-icon {
+  color: var(--lc-accent);
+}
+
+.projects-header {
+  padding: 12px 14px 5px;
+}
+
+.projects-header .title,
+.project-row .project-name {
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.workspace-list {
+  gap: 3px;
+  padding: 4px 8px 10px;
+}
+
+.project-row {
+  min-height: 32px;
+  padding: 5px 8px;
+  border-radius: var(--ui-radius);
+}
+
+.project-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+}
+
+.workspace-row-shell {
+  min-height: 48px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-row-shell:hover {
+  background: #1d1d1d;
+}
+
+.workspace-row-shell.selected {
+  background: #1d1d1d;
+  box-shadow: none;
+}
+
+.workspace-status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.workspace-status-dot-spacer {
+  width: 7px;
+  height: 7px;
+}
+
+.workspace-git-state-create,
+.workspace-git-state-push {
+  color: var(--lc-accent);
+}
+
+.workspace-git-state-merge {
+  color: #72c293;
+}
+
+.workspace-git-state-view {
+  color: #9aa6b8;
+}
+
+.workspace-git-state-none {
+  color: #6f6f6f;
+}
+
+.workspace-row-shell .row-name {
+  font-size: var(--ui-text);
+  font-weight: 560;
+}
+
+.workspace-row-shell .row-meta {
+  padding-left: 15px;
+  font-size: var(--ui-text-sm);
+  line-height: 1.25;
+}
+
+.sidebar-footer {
+  padding: 7px 8px;
+  border-top-color: var(--ui-border);
+}
+
+.ws-center {
+  background: #111111;
+}
+
+.ws-topbar {
+  height: 50px;
+  padding: 0 16px;
+  gap: 10px;
+  border-bottom-color: var(--ui-border);
+  background: #151515;
+}
+
+.ws-topbar-breadcrumb {
+  gap: 7px;
+}
+
+.ws-topbar-status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.ws-topbar-repo {
+  font-size: 14px;
+  font-weight: 650;
+  color: #eeeeee;
+}
+
+.ws-topbar-branch,
+.ws-topbar-summary {
+  font-size: var(--ui-text-sm);
+  color: #8d8d8d;
+}
+
+.ui-button-icon,
+button.ui-button-icon {
+  width: var(--ui-control-h);
+  min-width: var(--ui-control-h);
+  height: var(--ui-control-h);
+  min-height: var(--ui-control-h);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: var(--ui-radius);
+}
+
+.ws-chat-tabs-scroll {
+  min-height: 44px;
+  background: #121212;
+  border-bottom: 1px solid #202020;
+}
+
+.ws-chat-tabs {
+  gap: 0;
+}
+
+.ws-tab-shell,
+button.ws-tab-shell {
+  min-height: 44px;
+  min-width: 176px;
+  max-width: 260px;
+  padding: 0 10px;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+}
+
+.ws-tab-shell:hover {
+  background: #191919;
+}
+.ws-chat-tab-shell:focus-visible,
+.ws-file-tab:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: -2px;
+}
+
+.ws-tab-shell.ws-tab-active {
+  background: #1d1d1d;
+  border-bottom-color: var(--lc-accent);
+}
+
+.ws-tab-label {
+  min-width: 0;
+  font-size: var(--ui-text);
+  font-weight: 560;
+  color: #cfcfcf;
+}
+
+.ws-chat-tab-meta {
+  font-size: var(--ui-text-xs);
+  font-weight: 520;
+  color: #777777;
+}
+.ws-chat-tab-count {
+  min-width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #303030;
+  color: #d6d6d6;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.ws-tab-close-button {
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 5px;
+}
+
+/* Conductor parity: chat tabs are a slim rail, not two-line cards. */
+.ws-chat-tabs-scroll {
+  min-height: 36px;
+  height: 36px;
+  background: #111111;
+  border-bottom: 1px solid #252525;
+}
+
+.ws-chat-tabs {
+  height: 36px;
+  gap: 0;
+}
+
+.ws-chat-tab-shell.ws-tab-shell,
+.ws-file-tab.ws-tab-shell,
+button.ws-tab-shell.ws-chat-new {
+  min-height: 36px;
+  height: 36px;
+  min-width: 0;
+  max-width: 238px;
+  padding: 0 9px;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+}
+
+.ws-chat-tab-shell.ws-tab-shell {
+  gap: 7px;
+}
+
+.ws-chat-tab-shell.ws-tab-shell:hover,
+.ws-file-tab.ws-tab-shell:hover,
+button.ws-tab-shell.ws-chat-new:hover {
+  background: #171717;
+}
+
+.ws-chat-tab-shell.ws-tab-active,
+.ws-file-tab.ws-tab-active {
+  background: transparent;
+  border-bottom-color: var(--lc-accent);
+}
+
+.ws-chat-tab-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.ws-tab-label {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.ws-tab-close-button {
+  min-width: 22px;
+  width: 22px;
+  min-height: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 5px;
+}
+
+.ws-tab-close-button .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.ws-chat-new.ui-button-icon {
+  width: 34px;
+  min-width: 34px;
+}
+
+.ws-tab-sep-v {
+  height: 18px;
+}
+
+/* Rows carry their own spacing (see the transcript-rhythm block above): a
+   uniform gap here would put a paragraph's worth of air between one-line tool
+   chips. */
+.chat-messages {
+  gap: 2px;
+  padding: 18px 28px;
+}
+
+.empty-state {
+  color: #858585;
+  font-size: var(--ui-text);
+}
+
+.chat-composer {
+  padding: 0 28px 18px;
+}
+
+.chat-composer-box {
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: #181818;
+}
+
+.chat-input-view {
+  min-height: 74px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #dedede;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.chat-input-view::placeholder {
+  color: #767676;
+}
+
+.chat-toolbar {
+  min-height: var(--ui-control-h);
+  gap: 8px;
+}
+
+.chat-toolbar-left,
+.chat-toolbar-right {
+  gap: 8px;
+}
+
+.chat-context-usage {
+  height: var(--ui-control-h);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius);
+  color: #8a8a8a;
+  font-size: var(--ui-text-xs);
+  font-weight: 560;
+}
+
+.chat-send-btn {
+  width: var(--ui-control-h);
+  min-width: var(--ui-control-h);
+  height: var(--ui-control-h);
+  border-radius: var(--ui-radius);
+  border-color: #303030;
+  background: #202020;
+  color: #a7a7a7;
+}
+
+.chat-send-btn-active {
+  background: #f0f0f0;
+  border-color: #f0f0f0;
+  color: #161616;
+}
+
+.chat-send-btn:hover {
+  background: #282828;
+  color: #eeeeee;
+}
+
+.chat-send-btn-active:hover {
+  background: #ffffff;
+  color: #111111;
+}
+
+.compact-select-trigger {
+  height: var(--ui-control-h);
+  min-height: var(--ui-control-h);
+  padding: 0 9px;
+  border: 1px solid #303030;
+  border-radius: var(--ui-radius);
+  background: #1b1b1b;
+  color: #d8d8d8;
+  font-size: var(--ui-text-sm);
+  font-weight: 560;
+}
+
+.compact-select-trigger:hover,
+.compact-select-trigger[aria-expanded="true"] {
+  background: #222222;
+  border-color: #3c3c3c;
+}
+
+.compact-select-menu {
+  padding: 5px;
+  border-color: #343434;
+  border-radius: 8px;
+  background: #1a1a1a;
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.compact-select-option {
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: var(--ui-radius);
+  color: #cfcfcf;
+  font-size: var(--ui-text-sm);
+}
+
+.compact-select-option:hover,
+.compact-select-option-focused,
+.compact-select-option-active {
+  background: #292929;
+  color: #f0f0f0;
+}
+
+.ws-right-panel {
+  background: #151515;
+  border-left-color: var(--ui-border);
+}
+
+.ws-right-topbar {
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  background: #121212;
+  border-bottom: 1px solid #252525;
+}
+
+.ws-right-topbar .ws-pr-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ws-right-topbar .ws-pr-action-button {
+  min-width: 70px;
+  justify-content: center;
+}
+
+.ws-right-tabs {
+  min-height: 42px;
+  padding: 6px 12px;
+  background: #121212;
+  border-bottom-color: var(--ui-border);
+}
+
+.nav-button,
+.ws-right-tabs .nav-button,
+.ws-changes-scope .nav-button {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: var(--ui-radius);
+  font-size: var(--ui-text-sm);
+  font-weight: 540;
+  color: #969696;
+}
+
+.ws-right-tabs .nav-button:hover,
+.ws-changes-scope .nav-button:hover {
+  background: #202020;
+  color: #dadada;
+}
+
+.nav-button-active {
+  background: #232323;
+  color: #eeeeee;
+}
+
+.nav-button-count {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  background: #353535;
+  color: #d6d6d6;
+}
+
+.ws-file-summary-panel,
+.ws-tab-panel {
+  padding: 14px 16px;
+  background: #151515;
+}
+
+.ws-checks-panel-flat,
+.ws-review-action-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #151515;
+}
+
+.ws-flat-section-label {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  color: #8a8a8a;
+}
+
+.ws-git-status-line,
+.ws-check-row-flat {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 7px;
+  border-radius: 5px;
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ws-check-row-flat {
+  padding: 0 2px;
+}
+
+.ws-check-row-flat:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ws-check-glyph {
+  flex: 0 0 13px;
+  width: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.ws-check-glyph-passed {
+  color: #46c978;
+}
+
+.ws-check-glyph-failed {
+  color: #f06464;
+}
+
+.ws-check-glyph-running {
+  color: #d6a84f;
+}
+
+.ws-check-glyph-unknown {
+  color: #777777;
+}
+
+.ws-check-provider-icon {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  opacity: 0.78;
+}
+
+.ws-check-provider-local {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b8b8b;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.ws-check-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-check-status {
+  flex: 0 1 auto;
+  max-width: 82px;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-check-open {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  padding: 0;
+  background: transparent;
+  color: #8c8c8c;
+  cursor: pointer;
+}
+
+.ws-check-open:hover {
+  background: #222222;
+  color: #d8d8d8;
+}
+
+.ws-check-open .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.ws-check-empty {
+  padding: 2px 0;
+  color: #747474;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* ---- Summary tab ----
+   Same flat vocabulary as the Checks tab above: one surface, quiet section
+   labels, single-line rows. Nothing here draws its own card. */
+.ws-summary-panel {
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.ws-summary-status {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 4px;
+}
+
+.ws-summary-provenance {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-edit-active {
+  background: #222222;
+  color: #d8d8d8;
+}
+
+.ws-summary-feedback {
+  color: #8a8a8a;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* Agent prose. The panel is ~300px wide, so the shared .markdown-body sizes
+   are stepped down and headings stop competing with the section labels. */
+.ws-summary-prose {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #c6c6c6;
+  overflow-wrap: anywhere;
+}
+
+.ws-summary-prose h1,
+.ws-summary-prose h2,
+.ws-summary-prose h3 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e0e0e0;
+}
+
+.ws-summary-prose > :first-child {
+  margin-top: 0;
+}
+
+.ws-summary-prose ul,
+.ws-summary-prose ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.ws-summary-prose li {
+  margin: 1px 0;
+}
+
+.ws-summary-prose p {
+  margin: 4px 0;
+}
+
+.ws-summary-row {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 7px;
+  padding: 0 2px;
+  border-radius: 5px;
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ws-summary-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ws-summary-row-icon {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  color: #777777;
+}
+
+.ws-summary-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-row-detail,
+.ws-summary-row-status {
+  flex: 0 1 auto;
+  max-width: 96px;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one write this panel keeps. Chromeless until hovered so a column of
+   these does not read as a form. */
+.ws-summary-row-select {
+  flex: 0 0 auto;
+  max-width: 88px;
+  /* The native arrow makes a column of these read as a form; the control is
+     still discoverable because the whole row lifts on hover. */
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: transparent;
+  color: #858585;
+  font: inherit;
+  font-size: 11px;
+  text-align: right;
+  cursor: pointer;
+}
+
+.ws-summary-row:hover .ws-summary-row-select,
+.ws-summary-row-select:focus {
+  background: #222222;
+  color: #d8d8d8;
+  outline: none;
+}
+
+.ws-summary-row-note {
+  padding: 0 2px 2px 22px;
+  color: #c08a4a;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.ws-summary-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ws-review-prompt-button {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--lc-accent);
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ws-review-prompt-button:hover {
+  background: transparent;
+  color: #f0c36a;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.ws-review-prompt-button:disabled {
+  cursor: default;
+  opacity: 0.56;
+}
+
+.ws-changes-header,
+.ws-pr-nav,
+.ws-run-header {
+  min-height: 42px;
+  padding: 0 0 12px;
+  border-bottom-color: #272727;
+}
+
+.ws-changes-title,
+.section-title,
+.detail-label {
+  font-size: var(--ui-text-sm);
+  font-weight: 700;
+  letter-spacing: 0;
+  color: #e0e0e0;
+}
+
+.ws-file-summary-row-content,
+.ws-file-summary-row {
+  min-height: 30px;
+  padding: 5px 7px;
+  border-radius: var(--ui-radius);
+}
+
+.ws-file-name,
+.ws-file-summary-counts,
+.card-branch,
+.commit-list,
+.ws-run-prompt,
+.terminal-panel {
+  font-family: var(--ui-font-mono);
+}
+
+.ws-file-name {
+  font-size: var(--ui-text-sm);
+}
+
+.ws-run-section {
+  background: #121212;
+  border-top-color: var(--ui-border);
+}
+
+.ws-run-tab-bar {
+  min-height: 40px;
+  padding: 5px 10px;
+  background: #151515;
+  border-top-color: transparent;
+  border-bottom-color: #272727;
+}
+
+.ws-run-tabs-row {
+  gap: 6px;
+}
+
+.ws-run-tab-btn {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: var(--ui-radius);
+  color: #8f8f8f;
+}
+
+.ws-run-tab-btn:hover,
+.ws-run-tab-active {
+  background: #242424;
+  color: #eeeeee;
+}
+
+.ws-run-collapse-btn {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: var(--ui-radius);
+}
+
+.dashboard-header {
+  gap: 8px;
+  padding: 14px 20px 10px;
+  background: #151515;
+  border-bottom-color: var(--ui-border);
+}
+
+.dashboard-title {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.dashboard-subtitle {
+  display: none;
+}
+
+.project-tabs {
+  gap: 8px;
+}
+
+.project-tabs .ws-tab-shell {
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.dashboard .page-board {
+  padding: 18px 22px;
+}
+
+.kanban-board {
+  gap: 18px;
+  background: #111111;
+}
+
+.kanban-column {
+  min-width: 220px;
+  padding: 0;
+  gap: 10px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.kanban-column-header {
+  min-height: 30px;
+  padding: 0;
+  margin: 0;
+  border-bottom: none;
+}
+
+.column-title {
+  font-size: 13px;
+  font-weight: 620;
+  color: #dcdcdc;
+}
+
+.column-count {
+  color: #858585;
+  font-size: 12px;
+}
+
+.kanban-column .workspace-card,
+.workspace-card-action .workspace-card {
+  min-height: 92px;
+  padding: 12px;
+  border: 1px solid #303030;
+  border-left-width: 3px;
+  border-radius: 7px;
+  background: #1d1d1d;
+}
+
+.kanban-column .workspace-card:hover,
+.workspace-card-action:hover .workspace-card {
+  background: #242424;
+  border-color: #3a3a3a;
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 650;
+}
+
+/* Populated workspace polish: chat remains the primary surface, while queue,
+   dock, and inspector content read as state instead of stacked command cards. */
+.chat-composer {
+  padding: 0 28px 14px;
+  background: #111111;
+}
+
+.chat-queue-overlay {
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.chat-queue-heading {
+  margin: 0 0 4px;
+  padding: 0 2px;
+  color: #777777;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.chat-queued-composer-row {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #292929;
+  border-radius: 7px;
+  background: #181818;
+}
+
+.chat-queued-composer-body {
+  color: #d4d4d4;
+  font-size: 13px;
+}
+
+.chat-composer-box {
+  gap: 8px;
+  padding: 10px 12px;
+  border-color: #2b2b2b;
+  border-radius: 8px;
+  background: #181818;
+}
+
+/* Plan mode: the proposed plan reads as a document, and the review bar puts
+   approve next to the composer where the revision is typed. */
+.chat-plan-card {
+  margin: 0 16px 8px;
+  border: 1px solid #2f3a2f;
+  border-radius: 8px;
+  background: #171c17;
+  overflow: hidden;
+}
+
+.chat-plan-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #263026;
+  background: #1b211b;
+}
+
+.chat-plan-card-icon {
+  width: 14px;
+  height: 14px;
+  color: #8fbf8f;
+}
+
+.chat-plan-card-title {
+  color: #cfe3cf;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-plan-card-path {
+  overflow: hidden;
+  color: #7d8f7d;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-plan-card-body {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  color: #d4d4d4;
+  font-size: 13px;
+}
+
+.chat-plan-review {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.chat-plan-review-label {
+  flex: 1;
+  color: #9fb69f;
+  font-size: 12px;
+}
+
+.chat-plan-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #8d8d8d;
+  font-size: var(--ui-text-xs, 11px);
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.chat-plan-toggle:hover {
+  border-color: transparent;
+  background: #202020;
+  color: #ededed;
+}
+
+.chat-plan-toggle-on,
+.chat-plan-toggle-on:hover {
+  border-color: transparent;
+  background: rgba(195, 155, 80, 0.14);
+  color: var(--lc-accent, #c39b50);
+}
+
+.chat-plan-toggle .ui-icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.9;
+}
+
+.chat-interaction-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+}
+
+.chat-interaction-other {
+  display: flex;
+  gap: 6px;
+}
+
+.chat-interaction-other-input {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #2b2b2b;
+  border-radius: 6px;
+  background: #131313;
+  color: #d4d4d4;
+  font-size: 12px;
+}
+
+/* Session failures (spawn refused, provider auth, fatal stream error) surface
+   right above the composer, next to the retry that fixes them. */
+.chat-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid #5a2a2a;
+  border-radius: 7px;
+  background: #241818;
+}
+
+.chat-error-banner-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: #e07070;
+}
+
+.chat-error-banner-text {
+  flex: 1;
+  overflow: hidden;
+  color: #e8c4c4;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+}
+
+.chat-error-banner-btn {
+  padding: 3px 8px;
+  border: 1px solid #5a2a2a;
+  border-radius: 6px;
+  background: #2e1c1c;
+  color: #f0d4d4;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-error-banner-btn:hover {
+  background: #3a2222;
+}
+
+.chat-error-banner-dismiss {
+  display: flex;
+  align-items: center;
+  padding: 3px 5px;
+}
+
+.chat-input-view {
+  min-height: 42px;
+  max-height: 112px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-toolbar {
+  min-height: 30px;
+}
+
+.ws-file-summary-panel {
+  gap: 12px;
+}
+
+.ws-file-summary-row-content {
+  min-height: 32px;
+  gap: 8px;
+  padding: 0;
+  border-bottom: 1px solid #252525;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ws-file-summary-row-content:hover {
+  background: transparent;
+}
+
+.ws-file-name {
+  color: #d0d0d0;
+}
+
+.ws-file-summary-state,
+.ws-file-summary-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ws-file-additions {
+  color: #6cc58a;
+}
+
+.ws-file-deletions {
+  color: #e06f6f;
+}
+
+.ws-run-section {
+  background: #111111;
+  border-top-color: #252525;
+}
+
+.ws-run-tab-bar {
+  min-height: 34px;
+  padding: 2px 10px;
+  background: #111111;
+  border-bottom: 0;
+}
+
+.ws-run-tabs-row-collapsed {
+  flex: 1 1 auto;
+}
+
+.ws-run-tab-btn,
+.ws-run-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: #858585;
+}
+
+.ws-run-tab-active,
+.ws-run-tab-btn:hover,
+.ws-run-collapse-btn:hover {
+  background: #1f1f1f;
+  color: #dedede;
+}
+
+/* Neutral charcoal pass: avoid slate/blue casts in the workspace chrome. */
+:root {
+  --lc-bg: #0f0f0f;
+  --lc-surface: #151515;
+  --lc-surface-raised: #1a1a1a;
+  --lc-surface-muted: #121212;
+  --lc-hover: #202020;
+  --lc-hover-soft: #1a1a1a;
+  --lc-border: #262626;
+  --lc-border-strong: #363636;
+  --ui-panel: #121212;
+  --ui-panel-2: #151515;
+  --ui-panel-3: #1a1a1a;
+  --ui-panel-hover: #202020;
+  --ui-border: #262626;
+}
+
+.ws-command-center,
+.chat-surface,
+.ws-center,
+.ws-right-panel,
+.ws-file-summary-panel,
+.ws-tab-panel {
+  background: #0f0f0f;
+}
+
+.ws-topbar,
+.ws-chat-tab-bar {
+  background: #121212;
+  border-color: #252525;
+}
+
+.ws-right-tabs,
+.ws-run-section,
+.ws-run-tab-bar {
+  background: #0f0f0f;
+}
+
+.triage-badge-pr,
+.triage-badge-todo {
+  background: #202020;
+  border-color: #333333;
+  color: #d0d0d0;
+}
+
+.ws-tab-shell.ws-tab-active,
+.nav-button-active {
+  background: #202020;
+}
+
+/* ---- Dense Conductor-style chrome pass ---- */
+.sidebar {
+  background: #121212;
+}
+
+.sidebar-chrome,
+.window-controls {
+  height: 40px;
+  min-height: 40px;
+}
+
+.sidebar-chrome {
+  padding: 0 8px;
+}
+
+.sidebar-nav-group {
+  padding: 6px;
+  gap: 1px;
+}
+
+.sidebar-nav-button {
+  min-height: 30px;
+  gap: 8px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.sidebar-nav-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.projects-header {
+  padding: 10px 12px 4px;
+}
+
+.workspace-list {
+  padding: 3px 6px 8px;
+}
+
+.project-row {
+  min-height: 28px;
+  padding: 4px 6px;
+}
+
+.project-avatar {
+  width: 16px;
+  height: 16px;
+}
+
+.workspace-row-shell {
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.workspace-row-head {
+  gap: 7px;
+}
+
+.workspace-row-shell .row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.workspace-row-indicators {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  color: #9b9b9b;
+}
+
+.workspace-row-indicator {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: #9a9a9a;
+  background: transparent;
+}
+
+.workspace-row-indicator .ui-icon {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.1;
+}
+
+.workspace-row-indicator-agent,
+.workspace-row-indicator-run {
+  color: #72c293;
+}
+
+.workspace-row-indicator-pr {
+  color: #9aa6b8;
+}
+
+.workspace-row-shell .row-meta {
+  padding-left: 14px;
+  padding-right: 0;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.workspace-row-branch {
+  padding-right: 50px;
+}
+
+.workspace-row-diff {
+  gap: 4px;
+  min-width: max-content;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.workspace-row-additions {
+  color: #74d69a;
+}
+
+.workspace-row-deletions {
+  color: #f17f7f;
+}
+
+.sidebar-footer {
+  padding: 5px 6px;
+}
+
+.ws-topbar {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 10px;
+  gap: 8px;
+  background: #111111;
+}
+
+.ws-topbar-repo {
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.ws-topbar-branch,
+.ws-topbar-summary {
+  font-size: 11px;
+}
+
+.ws-topbar-actions {
+  height: 100%;
+  gap: 5px;
+}
+
+.ws-topbar-actions .ui-button-icon {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 5px;
+}
+
+.ws-open-menu-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  border-radius: 5px;
+  color: #d7d7d7;
+}
+
+.ws-open-menu-button .ui-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  opacity: 1;
+}
+
+.ws-open-menu-chevron {
+  display: none;
+}
+
+.ws-right-topbar {
+  min-height: 40px;
+  height: 40px;
+  padding: 0 10px;
+  gap: 6px;
+  background: #111111;
+}
+
+.ws-pr-bar {
+  height: 28px;
+  gap: 5px;
+}
+
+.ws-pr-status-title {
+  font-size: 11px;
+  max-width: none;
+}
+
+.ws-pr-action-button {
+  height: 24px;
+  min-height: 24px;
+  max-height: 24px;
+  padding: 0 8px;
+  font-size: 10px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+}
+
+.ws-right-tabs {
+  min-height: 40px;
+  height: 40px;
+  padding: 5px 10px;
+  background: #111111;
+}
+
+.nav-button,
+.ws-right-tabs .nav-button,
+.ws-changes-scope .nav-button {
+  min-height: 24px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 10px;
+}
+
+.nav-button-count {
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  font-size: 9px;
+}
+
+.dashboard-header,
+.page-header {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.dashboard .page-board {
+  padding-top: 12px;
+}
+
+.kanban-board {
+  gap: 10px;
+}
+
+.kanban-column {
+  gap: 6px;
+}
+
+.workspace-card {
+  gap: 8px;
+}
+
+.card-meta,
+.card-activity,
+.column-empty {
+  font-size: 12px;
+  color: #858585;
+}
+
+/* Final chat-tab rail override: keep workspace tabs flat even when global tab
+   styles change elsewhere. The band owns the background; the strip inside it
+   scrolls, because clipping it hid every tab past the first on a narrow
+   window. */
+.ws-chat-tab-bar {
+  height: 30px;
+  min-height: 30px;
+  padding-right: 6px;
+  background: #111111;
+}
+
+.ws-chat-tabs-scroll {
+  height: 30px;
+  min-height: 30px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: transparent;
+  border: none;
+}
+
+.ws-chat-tabs {
+  height: 30px;
+  padding: 0 8px;
+  width: max-content;
+}
+
+.ws-chat-tabs .ws-tab-shell,
+.ws-chat-tabs button.ws-tab-shell {
+  height: 30px;
+  min-height: 30px;
+  min-width: 0;
+  padding: 0 6px;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+}
+
+.ws-chat-tabs .ws-chat-tab-shell.ws-tab-shell {
+  gap: 5px;
+}
+
+.ws-chat-tabs .ws-tab-shell.ws-tab-active {
+  background: transparent;
+  border-bottom-color: var(--lc-accent);
+  box-shadow: inset 0 -1px 0 var(--lc-accent);
+}
+
+.ws-chat-tabs .ws-tab-shell:hover {
+  background: #171717;
+}
+
+.ws-chat-tabs .ws-tab-close-button {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  opacity: 0;
+}
+
+.ws-chat-tabs .ws-tab-close-button .ui-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.ws-chat-tabs .ws-tab-shell:hover .ws-tab-close-button,
+.ws-chat-tabs .ws-tab-shell.ws-tab-active .ws-tab-close-button {
+  opacity: 0.55;
+}
+
+/* Conductor-density composer and selectors. */
+.chat-composer {
+  padding: 0 12px 12px;
+  background: #151515;
+}
+
+.chat-composer-box {
+  gap: 7px;
+  padding: 10px 12px 8px;
+  border-color: #242424;
+  border-radius: 12px;
+  background: #161616;
+  box-shadow: none;
+}
+
+.chat-composer-box:focus-within {
+  border-color: #303030;
+}
+
+.chat-input-view {
+  min-height: 36px;
+  max-height: 116px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-toolbar {
+  min-height: 25px;
+  gap: 6px;
+}
+
+.chat-toolbar-left,
+.chat-toolbar-right {
+  gap: 5px;
+}
+
+.compact-select-trigger {
+  height: 25px;
+  min-height: 25px;
+  max-width: 154px;
+  gap: 5px;
+  padding: 0 7px;
+  border-color: #2b2b2b;
+  border-radius: 6px;
+  background: #171717;
+  color: #cfcfcf;
+  font-size: 10px;
+}
+
+.compact-select-trigger:hover,
+.compact-select-trigger[aria-expanded="true"] {
+  background: #1d1d1d;
+  border-color: #3a3a3a;
+  color: #eeeeee;
+}
+
+.compact-select-icon {
+  width: 13px;
+  height: 13px;
+  color: #8f8f8f;
+}
+
+.compact-select-caret {
+  width: 11px;
+  height: 11px;
+  color: #737373;
+}
+
+/* Composer controls read as labelled icons, not boxed dropdowns: no border, no
+   fill until hover, and no chevrons — four carets in a row is pure noise when
+   the label already says what the control is. Scoped to the composer so the
+   boxed CompactSelect stays intact everywhere else. */
+.chat-toolbar .compact-select-trigger {
+  height: 26px;
+  min-height: 26px;
+  gap: 6px;
+  padding: 0 8px;
+  border-color: transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #8d8d8d;
+  font-size: var(--ui-text-xs, 11px);
+  font-weight: 550;
+}
+
+.chat-toolbar .compact-select-trigger:hover,
+.chat-toolbar .compact-select-trigger[aria-expanded="true"] {
+  border-color: transparent;
+  background: #202020;
+  color: #ededed;
+}
+
+.chat-toolbar .compact-select-caret {
+  display: none;
+}
+
+.chat-toolbar .compact-select-icon {
+  width: 14px;
+  height: 14px;
+  color: inherit;
+  opacity: 0.9;
+}
+
+.chat-toolbar-left,
+.chat-toolbar-right {
+  gap: 2px;
+}
+
+.chat-toolbar .chat-context-usage {
+  height: 26px;
+  border-radius: 7px;
+  color: #7d7d7d;
+}
+
+.chat-toolbar .chat-plan-toggle {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.chat-agent-select .compact-select-trigger,
+.chat-effort-select .compact-select-trigger {
+  max-width: 112px;
+}
+
+.compact-select-agent-model .compact-select-trigger,
+.compact-select-model .compact-select-trigger {
+  max-width: 178px;
+}
+
+.chat-send-btn {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  margin-left: 6px;
+  border-color: transparent;
+  border-radius: 8px;
+  background: #242424;
+  color: #9d9d9d;
+}
+
+.chat-send-btn-active {
+  border-color: transparent;
+  background: #f2f2f2;
+  color: #141414;
+}
+
+.chat-send-btn:hover {
+  background: #2c2c2c;
+  color: #efefef;
+}
+
+.chat-send-btn-active:hover {
+  background: #ffffff;
+  color: #111111;
+}
+
+.chat-send-btn .ui-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.ws-material-icon,
+.ws-folder-icon,
+.ws-file-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  opacity: 0.94;
+}
+
+.ws-file-icon {
+  color: #c0c6cf;
+  fill: rgba(192, 198, 207, 0.24);
+}
+
+.ws-file-list {
+  padding: 6px;
+}
+
+.ws-dir-row,
+.ws-file-row {
+  min-height: 22px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  gap: 5px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.ws-folder-name,
+.ws-file-name {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.ws-checks-panel-flat.command-panel,
+.ws-review-action-panel.command-panel {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.ws-right-body .ws-checks-panel-flat,
+.ws-right-body .ws-review-action-panel {
+  padding: 12px 14px;
+}
+
+.ws-right-body .ws-review-prompt-button {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.ws-right-tabs .ws-review-prompt-button {
+  flex: 0 0 auto;
+  align-self: center;
+  height: 24px;
+  min-height: 24px;
+  margin-left: 2px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 540;
+  white-space: nowrap;
+}
+
+.ws-right-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: hidden;
+}
+
+.ws-right-tabs .nav-button {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.ws-right-tabs .nav-button > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-run-tab-bar {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ws-run-tabs-row {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ws-run-terminal-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 92px;
+}
+
+.ws-run-terminal-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-run-terminal-tab .ws-tab-close-button {
+  display: none;
+}
+
+.ws-run-terminal-tab:hover .ws-tab-close-button,
+.ws-run-terminal-tab.ws-run-tab-active .ws-tab-close-button {
+  display: inline-flex;
+}
+
+.ws-run-add,
+.ws-run-collapse-btn,
+.ws-run-tabs-row > .ws-run-tab-btn:not(.ws-run-terminal-tab) {
+  flex: 0 0 28px;
+}
+
+@media (max-width: 1100px) {
+  .chat-composer {
+    padding: 0 18px 16px;
+  }
+
+  .chat-messages {
+    padding: 20px 18px;
+  }
+}
+
+.ws-changes-commit-open {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lc-text-muted);
+  cursor: pointer;
+}
+.ws-changes-commit-open:hover {
+  color: var(--lc-text);
 }

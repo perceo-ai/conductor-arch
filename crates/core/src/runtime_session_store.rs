@@ -121,6 +121,46 @@ impl RuntimeSessionStore {
         self.provider_input_store.mark_failed(id, error)
     }
 
+    /// Whether this chat is planning rather than building.
+    pub fn chat_thread_plan_mode(&self, thread_id: i64) -> Result<bool> {
+        self.open()?.chat_thread_plan_mode(thread_id)
+    }
+
+    /// Write a plan into the workspace checkout and return its workspace-
+    /// relative path. `.context` is the workspace's scratch area, so plans live
+    /// beside the other agent artifacts instead of in the provider's own state
+    /// directory.
+    pub fn save_chat_plan(
+        &self,
+        thread_id: i64,
+        interaction_id: &str,
+        plan_markdown: &str,
+    ) -> Result<String> {
+        let store = self.open()?;
+        let thread = store.get_chat_thread_record(thread_id)?;
+        let workspace = store.get_workspace_record(thread.workspace_id)?;
+        let relative = format!(
+            ".context/plans/thread-{thread_id}-{}.md",
+            interaction_id.split('-').next().unwrap_or("plan")
+        );
+        let absolute = std::path::Path::new(&workspace.path).join(&relative);
+        if let Some(parent) = absolute.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&absolute, plan_markdown)?;
+        store.set_chat_thread_plan_path(thread_id, Some(&relative))?;
+        Ok(relative)
+    }
+
+    pub fn attach_interaction_plan_path(
+        &self,
+        interaction_id: &str,
+        plan_path: &str,
+    ) -> Result<ProviderInteractionRecord> {
+        self.provider_interaction_store
+            .attach_plan_path(interaction_id, plan_path)
+    }
+
     pub fn register_provider_interaction(
         &self,
         draft: crate::archcar::harness_contract::ProviderInteractionDraft,
@@ -170,6 +210,16 @@ impl RuntimeSessionStore {
     ) -> Result<()> {
         self.open()?
             .mark_session_process_exited(process_id, exit_code)?;
+        Ok(())
+    }
+
+    pub fn update_chat_thread_harness_metadata(
+        &self,
+        thread_id: i64,
+        harness_metadata: Option<&str>,
+    ) -> Result<()> {
+        self.open()?
+            .update_chat_thread_harness_metadata(thread_id, harness_metadata)?;
         Ok(())
     }
 

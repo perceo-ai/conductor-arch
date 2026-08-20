@@ -1,12 +1,8 @@
 export const PRODUCT_RIGHT_PANEL_TABS = [
-  { id: "tasks", label: "Tasks" },
   { id: "summary", label: "Summary" },
   { id: "files", label: "Files" },
   { id: "changes", label: "Changes" },
   { id: "checks", label: "Checks" },
-  { id: "context", label: "Context" },
-  { id: "review", label: "Review" },
-  { id: "pr", label: "PR" },
 ] as const;
 
 export type RightPanelTab = (typeof PRODUCT_RIGHT_PANEL_TABS)[number]["id"];

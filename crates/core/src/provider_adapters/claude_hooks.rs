@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value};
 
-use crate::archcar::harness_contract::ProviderInteractionResolution;
+use crate::archcar::harness_contract::{InteractionAnswer, ProviderInteractionResolution};
 
 const ARCHCAR_CLAUDE_HOOK_FLAG: &str = "--archcar-claude-hook";
 
@@ -191,10 +191,13 @@ fn permission_suggestions(request: &Value) -> Value {
         .unwrap_or_else(|| json!([]))
 }
 
-fn answers_object(answers: &[(String, String)]) -> Value {
+fn answers_object(answers: &[InteractionAnswer]) -> Value {
     let mut object = Map::new();
-    for (key, value) in answers {
-        object.insert(key.clone(), Value::String(value.clone()));
+    for answer in answers {
+        object.insert(
+            answer.question_id.clone(),
+            Value::String(answer.values.join(", ")),
+        );
     }
     Value::Object(object)
 }
@@ -260,7 +263,10 @@ mod tests {
             encode_claude_hook_resolution(
                 &input,
                 &ProviderInteractionResolution::Answer {
-                    answers: vec![("scope".to_owned(), "yes".to_owned())]
+                    answers: vec![InteractionAnswer {
+                        question_id: "scope".to_owned(),
+                        values: vec!["yes".to_owned()],
+                    }]
                 }
             ),
             json!({

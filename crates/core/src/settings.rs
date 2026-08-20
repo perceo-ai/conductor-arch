@@ -53,6 +53,10 @@ pub struct PromptSettings {
     pub resolve_merge_conflicts: Option<String>,
     pub rename_branch: Option<String>,
     pub commit_generation: Option<String>,
+    pub push_branch: Option<String>,
+    pub merge_pr: Option<String>,
+    pub revert_changes: Option<String>,
+    pub review_comments: Option<String>,
     pub test_fixing: Option<String>,
     pub refactor_style: Option<String>,
     pub setup_script: Option<String>,
@@ -87,6 +91,14 @@ pub enum PromptKind {
     RenameBranch,
     /// Prompt used when asking an agent to produce a commit.
     CommitGeneration,
+    /// Prompt used when asking an agent to push a branch.
+    PushBranch,
+    /// Prompt used when asking an agent to merge a pull request.
+    MergePr,
+    /// Prompt used when asking an agent to safely revert changes.
+    RevertChanges,
+    /// Prompt used when asking an agent to address local review comments.
+    ReviewComments,
     /// Prompt used when asking an agent to repair tests.
     TestFixing,
     /// Prompt used when asking an agent to perform style refactors.
@@ -112,6 +124,10 @@ impl PromptKind {
             Self::ResolveMergeConflicts => "resolve_merge_conflicts",
             Self::RenameBranch => "rename_branch",
             Self::CommitGeneration => "commit_generation",
+            Self::PushBranch => "push_branch",
+            Self::MergePr => "merge_pr",
+            Self::RevertChanges => "revert_changes",
+            Self::ReviewComments => "review_comments",
             Self::TestFixing => "test_fixing",
             Self::RefactorStyle => "refactor_style",
             Self::SetupScript => "setup_script",
@@ -135,6 +151,10 @@ impl PromptSettings {
             PromptKind::ResolveMergeConflicts => self.resolve_merge_conflicts.as_deref(),
             PromptKind::RenameBranch => self.rename_branch.as_deref(),
             PromptKind::CommitGeneration => self.commit_generation.as_deref(),
+            PromptKind::PushBranch => self.push_branch.as_deref(),
+            PromptKind::MergePr => self.merge_pr.as_deref(),
+            PromptKind::RevertChanges => self.revert_changes.as_deref(),
+            PromptKind::ReviewComments => self.review_comments.as_deref(),
             PromptKind::TestFixing => self.test_fixing.as_deref(),
             PromptKind::RefactorStyle => self.refactor_style.as_deref(),
             PromptKind::SetupScript => self.setup_script.as_deref(),
@@ -949,16 +969,32 @@ fn default_prompt_settings() -> PromptSettings {
                 .to_owned(),
         ),
         code_review: Some(
-            "Focus on correctness, behavior changes, missing tests, and regressions.".to_owned(),
+            "Review the current workspace like a code reviewer. Start from the provided workspace context, inspect the diff against the base branch, prioritize correctness regressions, user-visible behavior changes, missing tests, data/security risk, and unclear ownership. Leave concise findings with file/line references where possible, then summarize residual risk and verification gaps.".to_owned(),
         ),
-        create_pr: Some("Write a concise PR body with summary, tests, and risk.".to_owned()),
-        fix_errors: Some("Reproduce the failure, then make the smallest safe fix.".to_owned()),
+        review_comments: Some(
+            "Address the provided open review comments. For each comment, inspect the referenced file and surrounding diff, make the smallest appropriate change, run focused verification, and report which comments were resolved or still need human input.".to_owned(),
+        ),
+        create_pr: Some(
+            "Prepare this workspace for review. Inspect the branch diff, recent commits, summaries, todos, checks, and open review comments. Commit only appropriate changes, push the branch, create or update the PR using a clear title/body with Summary, What Changed, Validation, and Risk sections, refresh PR state, and report the final URL plus anything still blocked.".to_owned(),
+        ),
+        fix_errors: Some(
+            "Reproduce the reported failure first. Use logs/check output from the workspace context, identify the root cause, make the smallest safe fix, rerun the focused check, and report the command evidence.".to_owned(),
+        ),
         resolve_merge_conflicts: Some(
-            "Preserve user changes and explain any conflict resolution choices.".to_owned(),
+            "Resolve merge conflicts carefully. Inspect both sides, preserve user intent and existing behavior, avoid dropping unrelated changes, run focused verification after resolving, and explain any non-obvious conflict choices.".to_owned(),
         ),
         rename_branch: Some("Use a short descriptive branch name.".to_owned()),
         commit_generation: Some(
-            "Write a conventional commit message that matches the actual diff.".to_owned(),
+            "Write a commit message that matches the actual staged diff. Prefer concise imperative subject text, include scope only when it clarifies ownership, and do not mention files or tests that are not represented in the diff.".to_owned(),
+        ),
+        push_branch: Some(
+            "Prepare this branch for remote review. Inspect uncommitted changes, stage and commit only appropriate work, avoid committing unrelated local edits, push to the configured remote/upstream, refresh PR state if present, and report commit hash, remote branch, and PR/check status.".to_owned(),
+        ),
+        merge_pr: Some(
+            "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action.".to_owned(),
+        ),
+        revert_changes: Some(
+            "Revert changes only after identifying the requested scope. Prefer targeted git restore/revert over broad resets, preserve unrelated user changes, show what will be removed, run focused verification when behavior changes, and report exactly what was reverted.".to_owned(),
         ),
         test_fixing: Some(
             "Run the failing test first, fix the root cause, then rerun focused tests.".to_owned(),
@@ -1213,6 +1249,14 @@ struct RawPromptSettings {
     rename_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     commit_generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_pr: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revert_changes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_comments: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_fixing: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2101,6 +2145,10 @@ impl RawPromptSettings {
                 .or(self.resolve_merge_conflicts),
             rename_branch: local.rename_branch.or(self.rename_branch),
             commit_generation: local.commit_generation.or(self.commit_generation),
+            push_branch: local.push_branch.or(self.push_branch),
+            merge_pr: local.merge_pr.or(self.merge_pr),
+            revert_changes: local.revert_changes.or(self.revert_changes),
+            review_comments: local.review_comments.or(self.review_comments),
             test_fixing: local.test_fixing.or(self.test_fixing),
             refactor_style: local.refactor_style.or(self.refactor_style),
             setup_script: local.setup_script.or(self.setup_script),
@@ -2121,6 +2169,10 @@ impl RawPromptSettings {
             resolve_merge_conflicts: self.resolve_merge_conflicts,
             rename_branch: self.rename_branch,
             commit_generation: self.commit_generation,
+            push_branch: self.push_branch,
+            merge_pr: self.merge_pr,
+            revert_changes: self.revert_changes,
+            review_comments: self.review_comments,
             test_fixing: self.test_fixing,
             refactor_style: self.refactor_style,
             setup_script: self.setup_script,
@@ -2141,6 +2193,10 @@ impl RawPromptSettings {
             resolve_merge_conflicts: settings.resolve_merge_conflicts.clone(),
             rename_branch: settings.rename_branch.clone(),
             commit_generation: settings.commit_generation.clone(),
+            push_branch: settings.push_branch.clone(),
+            merge_pr: settings.merge_pr.clone(),
+            revert_changes: settings.revert_changes.clone(),
+            review_comments: settings.review_comments.clone(),
             test_fixing: settings.test_fixing.clone(),
             refactor_style: settings.refactor_style.clone(),
             setup_script: settings.setup_script.clone(),
@@ -3172,6 +3228,7 @@ mod tests {
         let prompts = PromptSettings {
             continue_work: Some("Inspect current changes.".to_owned()),
             create_pr: Some("Write a concise PR.".to_owned()),
+            revert_changes: Some("Revert scoped changes.".to_owned()),
             ..PromptSettings::default()
         };
 
@@ -3182,6 +3239,10 @@ mod tests {
         assert_eq!(
             prompts.get(PromptKind::CreatePr),
             Some("Write a concise PR.")
+        );
+        assert_eq!(
+            prompts.get(PromptKind::RevertChanges),
+            Some("Revert scoped changes.")
         );
     }
 
@@ -3203,6 +3264,10 @@ mod tests {
             PromptKind::ResolveMergeConflicts,
             PromptKind::RenameBranch,
             PromptKind::CommitGeneration,
+            PromptKind::PushBranch,
+            PromptKind::MergePr,
+            PromptKind::RevertChanges,
+            PromptKind::ReviewComments,
             PromptKind::TestFixing,
             PromptKind::RefactorStyle,
             PromptKind::SetupScript,
@@ -4504,6 +4569,10 @@ LOCAL_ONLY = "1"
                 resolve_merge_conflicts: Some("Preserve user changes.".to_owned()),
                 rename_branch: Some("Use short feature names.".to_owned()),
                 commit_generation: None,
+                push_branch: None,
+                merge_pr: None,
+                revert_changes: None,
+                review_comments: None,
                 test_fixing: None,
                 refactor_style: None,
                 setup_script: Some("Use the configured setup script.".to_owned()),

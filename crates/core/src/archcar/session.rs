@@ -20,7 +20,7 @@ use crate::archcar::harness::{
 use crate::archcar::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessControl, HarnessControlPlan,
     HarnessEffect, HarnessInput, HarnessSignal, HarnessTurnStatus, ManagedHarnessAdapter,
-    NativeRecord,
+    NativeRecord, ProviderInteractionKind,
 };
 use crate::archcar::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarEvent, ArchcarInputDelivery,
@@ -142,12 +142,15 @@ struct ProviderProcessConnection {
     stdout_rx: Receiver<String>,
     next_read_line: usize,
     native_thread_id: Option<String>,
+    program: PathBuf,
+    env: Vec<(String, OsString)>,
     cwd: PathBuf,
     model: Option<String>,
     approval_policy: Option<String>,
     reasoning_mode: Option<String>,
     effort_mode: Option<String>,
     personality: Option<String>,
+    fast_mode: bool,
     pending_recovery_context: Option<String>,
 }
 
@@ -435,12 +438,15 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         stdout_rx,
         next_read_line: 0,
         native_thread_id: start.launch.session_resume_id.clone(),
+        program: start.launch.program.clone(),
+        env: start.launch.env.clone(),
         cwd: start.launch.cwd.clone(),
         model: model_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         approval_policy: approval_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         reasoning_mode: reasoning_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         effort_mode: effort_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         personality: personality_from_harness_metadata(start.launch.harness_metadata.as_deref()),
+        fast_mode: fast_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         pending_recovery_context: start.startup_recovery_context.clone(),
     };
     let connection = match start.kind {
@@ -674,8 +680,20 @@ fn apply_harness_effect(
             });
         }
         HarnessEffect::InteractionRequested(draft) => {
+            let plan_markdown = (draft.kind == ProviderInteractionKind::PlanApproval)
+                .then(|| draft.detail.clone())
+                .filter(|plan| !plan.trim().is_empty());
             match runtime_store.register_provider_interaction(draft) {
                 Ok(interaction) => {
+                    // The plan is written into the workspace by us, not by the
+                    // agent: agents scatter plans into their own state
+                    // directories, and the chat needs a stable path to show and
+                    // to build from.
+                    let interaction = match plan_markdown {
+                        Some(plan) => save_interaction_plan(runtime_store, &interaction, &plan)
+                            .unwrap_or(interaction),
+                        None => interaction,
+                    };
                     let _ =
                         event_tx.send(ArchcarEvent::ProviderInteractionRequested { interaction });
                 }
@@ -987,8 +1005,22 @@ fn claude_stream_session_launch(
     launch.args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
         persistent_input: true,
         replay_user_messages: true,
+        // Route tool permission through our stdin. This is also what makes
+        // AskUserQuestion / EnterPlanMode / ExitPlanMode exist at all: without
+        // a permission prompt tool claude drops them from the tool list, and
+        // plan mode has no way to ask or to hand a plan back.
+        permission_prompt_tool: Some("stdio".to_owned()),
         resume: thread_record.native_thread_id.clone(),
-        permission_mode: claude_stream_permission_mode(&harness),
+        permission_mode: Some(
+            if store
+                .chat_thread_plan_mode(thread_record.id)
+                .unwrap_or(false)
+            {
+                CLAUDE_PLAN_PERMISSION_MODE.to_owned()
+            } else {
+                CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()
+            },
+        ),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
         append_system_prompt: None,
@@ -1142,9 +1174,11 @@ fn non_interactive_harness_metadata(
     Some(entries.join(";"))
 }
 
-fn claude_stream_permission_mode(_harness: &SessionHarnessOptions) -> Option<String> {
-    Some("bypassPermissions".to_owned())
-}
+/// A thread in plan mode launches claude in its own plan mode, so the agent
+/// researches read-only and proposes through ExitPlanMode; everything else
+/// stays wide open.
+pub(crate) const CLAUDE_PLAN_PERMISSION_MODE: &str = "plan";
+pub(crate) const CLAUDE_DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
 fn claude_stream_effort_mode(harness: &SessionHarnessOptions) -> Option<String> {
     sanitize_harness_text(harness.effort_mode.as_deref()).or_else(|| {
@@ -1154,6 +1188,73 @@ fn claude_stream_effort_mode(harness: &SessionHarnessOptions) -> Option<String> 
             sanitize_harness_text(harness.reasoning_mode.as_deref())
         }
     })
+}
+
+fn claude_stream_connection_effort(connection: &ProviderProcessConnection) -> Option<String> {
+    connection.effort_mode.clone().or_else(|| {
+        if connection.fast_mode {
+            Some("low".to_owned())
+        } else {
+            connection.reasoning_mode.clone()
+        }
+    })
+}
+
+fn restart_claude_stream_connection(
+    connection: &mut ProviderProcessConnection,
+    thread_id: i64,
+) -> Result<u32> {
+    let native_thread_id = connection
+        .native_thread_id
+        .clone()
+        .context("Claude session has no native session id to resume")?;
+    let hook_settings = std::env::current_exe().ok().and_then(|executable| {
+        serde_json::to_string(&build_claude_hook_settings(&executable, thread_id)).ok()
+    });
+    let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
+        persistent_input: true,
+        replay_user_messages: true,
+        permission_prompt_tool: Some("stdio".to_owned()),
+        resume: Some(native_thread_id),
+        permission_mode: Some(CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+        model: connection.model.clone(),
+        effort: claude_stream_connection_effort(connection),
+        append_system_prompt: None,
+        settings_json: hook_settings,
+    });
+
+    let _ = crate::platform::terminate_process_group(connection.child.id(), false);
+    let _ = connection.child.kill();
+    let _ = connection.child.wait();
+
+    let mut command = ProcessCommand::new(&connection.program);
+    command
+        .args(args)
+        .current_dir(&connection.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    for (key, value) in &connection.env {
+        command.env(key, value);
+    }
+    crate::platform::configure_new_process_group(&mut command);
+    let mut child = command
+        .spawn()
+        .context("restart Claude stream-json process")?;
+    let pid = child.id();
+    let stdin = child
+        .stdin
+        .take()
+        .context("restarted Claude stdin was not piped")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("restarted Claude stdout was not piped")?;
+    connection.child = child;
+    connection.stdin = stdin;
+    connection.stdout_rx = spawn_stdout_line_reader(stdout);
+    connection.next_read_line = 0;
+    Ok(pid)
 }
 
 fn sanitize_harness_text(value: Option<&str>) -> Option<String> {
@@ -1175,6 +1276,15 @@ fn set_provider_connection_effort(
     connection.effort_mode = sanitize_harness_text(effort.as_deref());
 }
 
+fn set_provider_connection_fast_mode(
+    connection: &mut ProviderProcessConnection,
+    fast_mode: Option<bool>,
+) {
+    if let Some(fast_mode) = fast_mode {
+        connection.fast_mode = fast_mode;
+    }
+}
+
 fn set_provider_connection_permission_mode(
     connection: &mut ProviderProcessConnection,
     _permission_mode: Option<String>,
@@ -1188,7 +1298,26 @@ fn apply_provider_connection_controls(
 ) {
     set_provider_connection_model(connection, controls.model);
     set_provider_connection_effort(connection, controls.effort);
+    set_provider_connection_fast_mode(connection, controls.fast_mode);
     set_provider_connection_permission_mode(connection, controls.permission_mode);
+}
+
+fn provider_connection_harness_metadata(
+    harness_name: &str,
+    connection: &ProviderProcessConnection,
+) -> Option<String> {
+    let options = SessionHarnessOptions {
+        plan_mode: false,
+        fast_mode: connection.fast_mode,
+        model: connection.model.clone(),
+        approval_mode: connection.approval_policy.clone(),
+        reasoning_mode: connection.reasoning_mode.clone(),
+        effort_mode: connection.effort_mode.clone(),
+        codex_personality: connection.personality.clone(),
+        codex_goals: None,
+        codex_skills: None,
+    };
+    non_interactive_harness_metadata(harness_name, &options)
 }
 
 fn apply_provider_control_plan(
@@ -1197,9 +1326,13 @@ fn apply_provider_control_plan(
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
     connection: &mut ProviderProcessConnection,
+    harness_name: &str,
     plan: HarnessControlPlan,
 ) {
     match plan {
+        // Nothing to send: the adapter changed how it will build the next
+        // request (codex's plan-mode sandbox, for instance).
+        HarnessControlPlan::Applied => {}
         HarnessControlPlan::NativeWrite(native_write) => {
             if let Err(err) = connection
                 .stdin
@@ -1232,6 +1365,12 @@ fn apply_provider_control_plan(
                 return;
             }
             apply_provider_connection_controls(connection, controls);
+            let metadata = provider_connection_harness_metadata(harness_name, connection);
+            let _ = runtime_store
+                .update_chat_thread_harness_metadata(started.thread_id, metadata.as_deref());
+            let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
+                thread_id: started.thread_id,
+            });
         }
         HarnessControlPlan::Emulated(effect) => {
             let mut native_thread_id = connection.native_thread_id.clone();
@@ -1274,6 +1413,10 @@ fn reasoning_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
 
 fn effort_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
     metadata_value(metadata, "effort")
+}
+
+fn fast_from_harness_metadata(metadata: Option<&str>) -> bool {
+    metadata_value(metadata, "fast").is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 fn personality_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
@@ -2051,6 +2194,7 @@ fn run_codex_app_server_session_loop(
             model: connection.model.clone(),
             effort: connection.effort_mode.clone(),
             permission_mode: connection.approval_policy.clone(),
+            fast_mode: Some(connection.fast_mode),
         },
     });
 
@@ -2307,8 +2451,7 @@ fn run_codex_app_server_session_loop(
                     let local_input_id =
                         provider_input_local_id(started.session_id, next_input_sequence);
                     let request_id = next_turn_request_id(next_input_sequence);
-                    let auto_active = snapshot.lock().map(|state| !state.ready).unwrap_or(false);
-                    let route = codex_input_route(delivery, active_turn_id.as_deref(), auto_active);
+                    let route = codex_input_route(delivery, active_turn_id.as_deref());
                     let recovery_context = matches!(route, CodexInputRoute::Start)
                         .then(|| connection.pending_recovery_context.as_deref())
                         .flatten();
@@ -2431,6 +2574,7 @@ fn run_codex_app_server_session_loop(
                         &event_tx,
                         &started,
                         &mut connection,
+                        "codex-app-server",
                         plan,
                     );
                     if let Ok(mut state) = snapshot.lock() {
@@ -2446,6 +2590,7 @@ fn run_codex_app_server_session_loop(
                         &event_tx,
                         &started,
                         &mut connection,
+                        "codex-app-server",
                         plan,
                     );
                 }
@@ -2519,8 +2664,29 @@ fn run_claude_stream_session_loop(
             model: connection.model.clone(),
             effort: connection.effort_mode.clone(),
             permission_mode: connection.approval_policy.clone(),
+            fast_mode: Some(connection.fast_mode),
         },
     });
+    // `claude --input-format stream-json` emits `system/init` only after it
+    // reads the first user message, so waiting for init before reporting ready
+    // deadlocks the queue: the first message is never delivered. Its stdin
+    // accepts input as soon as the transport is up, so that is the moment the
+    // session is ready.
+    adapter.note_transport_started();
+    adapter.note_plan_mode(
+        runtime_store
+            .chat_thread_plan_mode(started.thread_id)
+            .unwrap_or(false),
+    );
+    apply_harness_effect(
+        &runtime_store,
+        &snapshot,
+        &event_tx,
+        &started,
+        &mut connection.native_thread_id,
+        HarnessEffect::Ready,
+    );
+    let mut pending_restart = false;
 
     loop {
         drain_claude_stdout(
@@ -2650,21 +2816,77 @@ fn run_claude_stream_session_loop(
                         &event_tx,
                         &started,
                         &mut connection,
+                        "claude-stream-json",
                         plan,
                     );
                 }
                 SessionCommand::ApplyControl(control) => {
                     let plan = adapter.plan_control(control);
+                    let restart_required = matches!(plan, HarnessControlPlan::RestartRequired(_));
                     apply_provider_control_plan(
                         &runtime_store,
                         &snapshot,
                         &event_tx,
                         &started,
                         &mut connection,
+                        "claude-stream-json",
                         plan,
                     );
+                    if restart_required {
+                        pending_restart = true;
+                    }
                 }
                 SessionCommand::Resize { .. } => {}
+            }
+        }
+
+        if pending_restart && adapter.tracker.ready() {
+            match restart_claude_stream_connection(&mut connection, started.thread_id) {
+                Ok(pid) => {
+                    pending_restart = false;
+                    adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+                        session_id: started.session_id,
+                        thread_id: started.thread_id,
+                        workspace: started.workspace.clone(),
+                        native_session_id: connection.native_thread_id.clone(),
+                        controls: DesiredHarnessControls {
+                            model: connection.model.clone(),
+                            effort: connection.effort_mode.clone(),
+                            permission_mode: connection.approval_policy.clone(),
+                            fast_mode: Some(connection.fast_mode),
+                        },
+                    });
+                    adapter.note_transport_started();
+                    adapter.note_plan_mode(
+                        runtime_store
+                            .chat_thread_plan_mode(started.thread_id)
+                            .unwrap_or(false),
+                    );
+                    let _ = runtime_store.append_provider_native_output(
+                        started.session_id,
+                        "claude-stream-json",
+                        "transport restarted: claude -p stream-json",
+                    );
+                    if let Ok(mut state) = snapshot.lock() {
+                        state.pid = pid;
+                        state.ready = true;
+                        state.runtime_state = AgentSessionState::WaitingForInput;
+                    }
+                    let _ = event_tx.send(ArchcarEvent::SessionReady {
+                        session_id: started.session_id,
+                        thread_id: started.thread_id,
+                    });
+                }
+                Err(err) => {
+                    let _ = connection.child.kill();
+                    mark_provider_session_failed(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        format!("Claude stream restart failed: {err:#}"),
+                    );
+                }
             }
         }
 
@@ -2718,6 +2940,30 @@ fn drain_claude_stdout(
         }) {
             Ok(effects) => {
                 for effect in effects {
+                    // A routine tool permission in the wide-open default is
+                    // answered here, in the loop, without touching the database
+                    // or the UI: every Claude tool call round-trips through us
+                    // once the permission prompt tool is on, so anything slower
+                    // would tax every tool call in every chat.
+                    if let HarnessEffect::InteractionRequested(draft) = &effect {
+                        if let Some(resolution) = adapter.auto_resolution_for(draft) {
+                            let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+                                native_id: draft.native_id.clone(),
+                                resolution,
+                            });
+                            apply_provider_control_plan(
+                                runtime_store,
+                                snapshot,
+                                event_tx,
+                                started,
+                                connection,
+                                "claude-stream-json",
+                                plan,
+                            );
+                            continue;
+                        }
+                        mark_snapshot_awaiting_input(snapshot);
+                    }
                     apply_harness_effect(
                         runtime_store,
                         snapshot,
@@ -2791,10 +3037,8 @@ enum CodexInputResponseAction {
 fn codex_input_route(
     delivery: ArchcarInputDelivery,
     active_turn_id: Option<&str>,
-    auto_active: bool,
 ) -> CodexInputRoute {
-    let should_steer = delivery == ArchcarInputDelivery::Immediate || auto_active;
-    if should_steer {
+    if delivery == ArchcarInputDelivery::Immediate {
         if let Some(turn_id) = active_turn_id {
             return CodexInputRoute::Steer {
                 expected_turn_id: turn_id.to_owned(),
@@ -2810,7 +3054,10 @@ fn codex_input_response_action(
 ) -> CodexInputResponseAction {
     if !failed {
         CodexInputResponseAction::Complete
-    } else if pending.kind == CodexInputRequestKind::ImmediateSteer {
+    } else if matches!(
+        pending.kind,
+        CodexInputRequestKind::ImmediateSteer | CodexInputRequestKind::AutoSteer
+    ) {
         CodexInputResponseAction::RetryStart
     } else {
         CodexInputResponseAction::ReportError
@@ -3000,6 +3247,7 @@ fn codex_turn_start_params(
         effort: codex_turn_effort(connection),
         summary: None,
         personality: connection.personality.clone(),
+        fast_mode: connection.fast_mode,
     }
 }
 
@@ -3053,6 +3301,37 @@ fn persist_runtime_user_input(
         }),
         "provider_native_user_input",
     );
+}
+
+/// Write a proposed plan into the workspace's `.context/plans/` and record the
+/// path on both the interaction and the thread.
+fn save_interaction_plan(
+    runtime_store: &RuntimeSessionStore,
+    interaction: &crate::provider_interactions::ProviderInteractionRecord,
+    plan_markdown: &str,
+) -> Option<crate::provider_interactions::ProviderInteractionRecord> {
+    match runtime_store.save_chat_plan(interaction.thread_id, &interaction.id, plan_markdown) {
+        Ok(plan_path) => runtime_store
+            .attach_interaction_plan_path(&interaction.id, &plan_path)
+            .ok(),
+        Err(err) => {
+            warn!(
+                thread_id = interaction.thread_id,
+                error = %format!("{err:#}"),
+                "archcar could not save a proposed plan into the workspace"
+            );
+            None
+        }
+    }
+}
+
+/// The provider asked the human something and is holding its turn until it is
+/// answered. Distinct from "busy": the agent is not working, it is waiting.
+fn mark_snapshot_awaiting_input(snapshot: &Arc<Mutex<SessionSnapshot>>) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.ready = false;
+        state.runtime_state = AgentSessionState::WaitingForInput;
+    }
 }
 
 fn mark_snapshot_ready(snapshot: &Arc<Mutex<SessionSnapshot>>) {
@@ -3691,12 +3970,15 @@ mod tests {
             stdout_rx: native_rx,
             next_read_line: 0,
             native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("claude-sonnet-fixture".to_owned()),
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot = Arc::new(Mutex::new(running_session_snapshot(
@@ -3721,11 +4003,13 @@ mod tests {
             )
         });
 
+        // Claude in stream-json input mode does not emit system/init until it
+        // has read a message, so readiness comes from the transport being up.
         recv_archcar_event_until(
             &event_rx,
-            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
         );
-        assert!(!snapshot.lock().unwrap().ready);
+        wait_for_snapshot_readiness(&snapshot, true);
 
         command_tx
             .send(SessionCommand::SendInput {
@@ -3771,21 +4055,24 @@ mod tests {
 
         assert!(
             !ready_after_init,
-            "startup init must not restore readiness after the first input"
+            "init arriving mid-turn must not restore readiness before the turn ends"
         );
     }
 
     #[test]
-    fn managed_claude_lifecycle_waits_for_init_and_completes_turn_once() {
+    fn managed_claude_delivers_the_first_input_before_init_and_completes_turn_once() {
         let temp = tempfile::tempdir().unwrap();
         let fake_claude = temp.path().join("claude");
+        // Mirrors the real `claude --input-format stream-json`: it prints hook
+        // records at startup and withholds system/init until it has read a user
+        // message. Gating readiness on init would deadlock here — nothing would
+        // ever write the message that produces the init.
         fs::write(
             &fake_claude,
             r#"#!/usr/bin/env bash
 printf '%s\n' '{"type":"system","subtype":"hook_started","session_id":"fake-session","hook":"startup"}'
-while [ ! -f "$ARCHDUCTOR_TEST_INIT_GATE" ]; do sleep 0.02; done
-printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake-session","model":"claude-sonnet-fixture","capabilities":["streaming"]}'
 IFS= read -r _line
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"fake-session","model":"claude-sonnet-fixture","capabilities":["streaming"]}'
 printf '%s\n' '{"type":"user","session_id":"fake-session","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"hello lifecycle"}]}}'
 printf '%s\n' '{"type":"assistant","session_id":"fake-session","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"done"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session","result":"ok","duration_ms":1}'
@@ -3800,13 +4087,11 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             fs::set_permissions(&fake_claude, perms).unwrap();
         }
 
-        let init_gate = temp.path().join("allow-claude-init");
         let store = seeded_workspace_store(temp.path());
         let thread = store
             .create_chat_thread("berlin", "claude", "Claude", None)
             .unwrap();
         let mut child = ProcessCommand::new(&fake_claude)
-            .env("ARCHDUCTOR_TEST_INIT_GATE", &init_gate)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -3821,12 +4106,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx: spawn_stdout_line_reader(stdout),
             next_read_line: 0,
             native_thread_id: None,
+            program: fake_claude.clone(),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("claude-sonnet-fixture".to_owned()),
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot = Arc::new(Mutex::new(running_session_snapshot(
@@ -3855,23 +4143,13 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             &event_rx,
             |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
         );
-        let no_ready_deadline = std::time::Instant::now() + Duration::from_millis(180);
-        while std::time::Instant::now() < no_ready_deadline {
-            if let Ok(event) = event_rx.recv_timeout(Duration::from_millis(20)) {
-                assert!(
-                    !matches!(event, ArchcarEvent::SessionReady { session_id, .. } if session_id == process.id),
-                    "managed Claude must not become ready before system/init: {event:?}"
-                );
-            }
-        }
-        assert!(!snapshot.lock().unwrap().ready);
-        fs::write(&init_gate, b"ready").unwrap();
-
+        // Ready on transport start, before any init record: the first queued
+        // message has to be deliverable or the session never starts a turn.
         recv_archcar_event_until(
             &event_rx,
             |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
         );
-        assert!(snapshot.lock().unwrap().ready);
+        wait_for_snapshot_readiness(&snapshot, true);
 
         command_tx
             .send(SessionCommand::SendInput {
@@ -3977,12 +4255,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx,
             next_read_line: 0,
             native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("gpt-5.4".to_owned()),
             approval_policy: Some("never".to_owned()),
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot =
@@ -4045,12 +4326,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx,
             next_read_line: 0,
             native_thread_id: Some("thr_existing".to_owned()),
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: None,
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot =
@@ -4178,12 +4462,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx,
             next_read_line: 0,
             native_thread_id: Some("thr_existing".to_owned()),
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("gpt-5.6-sol".to_owned()),
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
 
@@ -4206,6 +4493,136 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         );
 
         assert_eq!(connection.model, None);
+
+        let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn provider_connection_controls_update_fast_mode_and_metadata() {
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stdout_rx = spawn_stdout_line_reader(stdout);
+        let mut connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx,
+            next_read_line: 0,
+            native_thread_id: Some("thr_existing".to_owned()),
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: Some("gpt-5.6-sol".to_owned()),
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: Some("high".to_owned()),
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some("gpt-5.6-sol".to_owned()),
+                effort: Some("high".to_owned()),
+                fast_mode: Some(true),
+                ..DesiredHarnessControls::default()
+            },
+        );
+
+        assert!(connection.fast_mode);
+        assert_eq!(
+            provider_connection_harness_metadata("codex-app-server", &connection).as_deref(),
+            Some("harness=codex-app-server;fast=true;model=gpt-5.6-sol;approval=never;effort=high")
+        );
+
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some("gpt-5.6-sol".to_owned()),
+                effort: Some("high".to_owned()),
+                fast_mode: Some(false),
+                ..DesiredHarnessControls::default()
+            },
+        );
+
+        assert!(!connection.fast_mode);
+
+        let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn claude_restart_relaunches_with_resume_and_updated_controls() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_claude = temp.path().join("fake-claude.sh");
+        fs::write(
+            &fake_claude,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\"\ncat >/dev/null\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_claude).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_claude, perms).unwrap();
+        }
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stdout_rx = spawn_stdout_line_reader(stdout);
+        let mut connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx,
+            next_read_line: 0,
+            native_thread_id: Some("claude-session-1".to_owned()),
+            program: fake_claude,
+            env: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            model: Some("claude-opus-5".to_owned()),
+            approval_policy: Some(CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: true,
+            pending_recovery_context: None,
+        };
+
+        restart_claude_stream_connection(&mut connection, 99).unwrap();
+
+        let mut args = Vec::new();
+        for _ in 0..20 {
+            match connection.stdout_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(arg) => args.push(arg),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "claude-session-1"]),
+            "captured args: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--model", "claude-opus-5"]),
+            "captured args: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--effort", "low"]),
+            "captured args: {args:?}"
+        );
 
         let _ = connection.child.kill();
     }
@@ -5086,13 +5503,17 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
     #[test]
     fn codex_immediate_input_routes_to_active_turn_or_new_turn() {
         assert_eq!(
-            codex_input_route(ArchcarInputDelivery::Immediate, Some("turn-7"), false),
+            codex_input_route(ArchcarInputDelivery::Immediate, Some("turn-7")),
             CodexInputRoute::Steer {
                 expected_turn_id: "turn-7".to_owned(),
             }
         );
         assert_eq!(
-            codex_input_route(ArchcarInputDelivery::Immediate, None, false),
+            codex_input_route(ArchcarInputDelivery::Immediate, None),
+            CodexInputRoute::Start
+        );
+        assert_eq!(
+            codex_input_route(ArchcarInputDelivery::Auto, Some("turn-7")),
             CodexInputRoute::Start
         );
     }
@@ -5106,6 +5527,16 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         };
         assert_eq!(
             codex_input_response_action(&immediate, true),
+            CodexInputResponseAction::RetryStart
+        );
+
+        let auto = PendingCodexInputRequest {
+            kind: CodexInputRequestKind::AutoSteer,
+            local_input_id: "input-1".to_owned(),
+            input: "adjust course".to_owned(),
+        };
+        assert_eq!(
+            codex_input_response_action(&auto, true),
             CodexInputResponseAction::RetryStart
         );
 

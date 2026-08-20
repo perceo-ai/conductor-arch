@@ -1,8 +1,9 @@
-import { connectEvents, onWindowFocus } from "@/bridge/client";
+import { connectEvents, onWindowFocus, send } from "@/bridge/client";
 import { applyEvent } from "./reducer";
 import { nav } from "./nav";
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
+import { threadsStore } from "./threads";
 
 export { nav } from "./nav";
 export { chatStore } from "./chat";
@@ -19,6 +20,7 @@ export { setupStore } from "./setup";
 export { threadsStore } from "./threads";
 export { terminalStore } from "./terminal";
 export { interactionsStore } from "./interactions";
+export { newChatContextStore } from "./newChatContext";
 export { toastsStore } from "./toasts";
 export type { Toast } from "./toasts";
 export { prefsStore } from "./prefs";
@@ -37,7 +39,29 @@ let startPromise: Promise<void> | null = null;
  * action — hiding it stranded a dead workspace with no way to delete it.
  */
 export async function refreshInventory(): Promise<void> {
+  if (await refreshInventorySnapshot()) return;
   await Promise.all([workspacesStore.refresh(), repositoriesStore.refresh()]);
+  await refreshWorkspaceChats();
+}
+
+async function refreshInventorySnapshot(): Promise<boolean> {
+  try {
+    const res = await send({ type: "get_inventory_snapshot" });
+    if (res.type !== "inventory_snapshot") return false;
+    repositoriesStore.setSummaries(res.repositories);
+    workspacesStore.setSummaries(res.workspaces);
+    threadsStore.setMany(res.chat_threads);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function refreshWorkspaceChats(): Promise<void> {
+  const activeWorkspaces = workspacesStore.state.order.filter(
+    (name) => workspacesStore.row(name)?.status !== "archived",
+  );
+  await threadsStore.refreshMany(activeWorkspaces);
 }
 
 /**

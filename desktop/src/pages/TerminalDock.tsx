@@ -1,12 +1,12 @@
-import { For, Match, Show, Switch, createResource, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { send } from "@/bridge/client";
 import { terminalStore, nav, threadsStore, toastsStore } from "@/store";
 import TerminalPanel from "./TerminalPanel";
 import type { ArchcarRunScript } from "@/bridge/protocol";
 import { runScriptAvailabilityLabel, runScriptStatusText } from "@/lib/runScripts";
-import { ProcessesPanel } from "./WorkspaceTabs";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
+import Icon from "@/components/Icon";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
 // collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
@@ -17,9 +17,10 @@ import { createPersistedWidth } from "@/lib/persistedWidth";
 const MAX_TERMINALS = 6;
 const DOCK_MIN = 120;
 const DOCK_MAX = 700;
+const DOCK_EXPANDED_KEY = "archductor.terminalDock.expanded";
 
-// Active tab is either a prompt/processes tab or a specific terminal id.
-type RunTab = "setup" | "run" | "processes" | { term: string };
+// Active tab is either a prompt tab or a specific terminal id.
+type RunTab = "setup" | "run" | { term: string };
 
 function providerKind(provider: string): "codex" | "claude" | "shell" {
   return provider === "claude" || provider === "shell" ? provider : "codex";
@@ -172,9 +173,16 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
 }
 
 export default function TerminalDock(props: { workspace: string }) {
-  // Expanded by default so the run console is visible (matches GTK). Terminals
-  // are still spawned lazily; the Setup tab is the default landing tab.
-  const [expanded, setExpanded] = createSignal(true);
+  // Collapsed by default so the chat remains primary; terminals/scripts are a
+  // utility drawer the user opens when needed.
+  const [expanded, setExpandedRaw] = createSignal(localStorage.getItem(DOCK_EXPANDED_KEY) === "1");
+  const setExpanded = (next: boolean | ((value: boolean) => boolean)) => {
+    setExpandedRaw((prev) => {
+      const value = typeof next === "function" ? next(prev) : next;
+      localStorage.setItem(DOCK_EXPANDED_KEY, value ? "1" : "0");
+      return value;
+    });
+  };
   const [tab, setTab] = createSignal<RunTab>("setup");
   // Right-panel density is high, so the dock split is draggable and persisted.
   const [height, setHeight] = createPersistedWidth("terminalDock.height", 280, DOCK_MIN, DOCK_MAX);
@@ -203,9 +211,22 @@ export default function TerminalDock(props: { workspace: string }) {
     setExpanded((e) => !e);
   }
 
+  onMount(() => {
+    const onToggle = () => {
+      setExpanded((expanded) => !expanded);
+      queueMicrotask(() => {
+        document.querySelector<HTMLElement>("[data-focus-target='terminal-dock']")?.focus();
+      });
+    };
+    window.addEventListener("archductor:toggle-terminal-dock", onToggle);
+    onCleanup(() => window.removeEventListener("archductor:toggle-terminal-dock", onToggle));
+  });
+
   return (
     <div
       class="ws-run-section"
+      data-focus-target="terminal-dock"
+      tabIndex={-1}
       classList={{ "ws-run-section-expanded": expanded() }}
       style={expanded() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
     >
@@ -213,72 +234,79 @@ export default function TerminalDock(props: { workspace: string }) {
         <ResizeHandle edge="top" width={height} min={DOCK_MIN} max={DOCK_MAX} onChange={setHeight} />
       </Show>
       <div class="ws-run-tab-bar">
-        <div class="ws-run-tabs-row">
-          <button
-            class="ws-run-tab-btn"
-            classList={{ "ws-run-tab-active": tab() === "setup" }}
-            onClick={() => {
-              setTab("setup");
-              setExpanded(true);
-            }}
-          >
-            Setup
-          </button>
-          <button
-            class="ws-run-tab-btn"
-            classList={{ "ws-run-tab-active": tab() === "run" }}
-            onClick={() => {
-              setTab("run");
-              setExpanded(true);
-            }}
-          >
-            Run
-          </button>
-          <button
-            class="ws-run-tab-btn"
-            classList={{ "ws-run-tab-active": tab() === "processes" }}
-            onClick={() => {
-              setTab("processes");
-              setExpanded(true);
-            }}
-          >
-            Processes
-          </button>
-          <For each={terms()}>
-            {(t, i) => (
-              <div
-                class="ws-run-tab-btn ws-run-terminal-tab"
-                classList={{ "ws-run-tab-active": activeTermId() === t.id }}
-                onClick={() => {
-                  setTab({ term: t.id });
-                  setExpanded(true);
-                }}
-              >
-                <span class="ws-run-terminal-tab-label">Terminal {i() + 1}</span>
-                <button
-                  class="ws-tab-close-button"
-                  title="Close terminal"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    closeTerm(t.id);
+        <Show
+          when={expanded()}
+          fallback={
+            <div class="ws-run-tabs-row ws-run-tabs-row-collapsed">
+              <button class="ws-run-tab-btn" title="Open terminal dock" onClick={() => setExpanded(true)}>
+                <Icon name="terminal" />
+                <span class="sr-only">Terminal dock</span>
+              </button>
+            </div>
+          }
+        >
+          <div class="ws-run-tabs-row">
+            <button
+              class="ws-run-tab-btn"
+              classList={{ "ws-run-tab-active": tab() === "setup" }}
+              title="Setup prompt"
+              onClick={() => {
+                setTab("setup");
+                setExpanded(true);
+              }}
+            >
+              <Icon name="bolt" />
+              <span class="sr-only">Setup</span>
+            </button>
+            <button
+              class="ws-run-tab-btn"
+              classList={{ "ws-run-tab-active": tab() === "run" }}
+              title="Run prompt"
+              onClick={() => {
+                setTab("run");
+                setExpanded(true);
+              }}
+            >
+              <Icon name="play" />
+              <span class="sr-only">Run</span>
+            </button>
+            <For each={terms()}>
+              {(t, i) => (
+                <div
+                  class="ws-run-tab-btn ws-run-terminal-tab"
+                  classList={{ "ws-run-tab-active": activeTermId() === t.id }}
+                  title={`Terminal ${i() + 1}`}
+                  onClick={() => {
+                    setTab({ term: t.id });
+                    setExpanded(true);
                   }}
                 >
-                  ×
-                </button>
-              </div>
-            )}
-          </For>
-          <button
-            class="ui-button-icon ws-run-add"
-            title="New terminal"
-            disabled={terms().length >= MAX_TERMINALS}
-            onClick={addTerm}
-          >
-            +
-          </button>
-        </div>
+                  <span class="ws-run-terminal-tab-label">{i() + 1}</span>
+                  <button
+                    class="ws-tab-close-button"
+                    title="Close terminal"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTerm(t.id);
+                    }}
+                  >
+                    <Icon name="x" />
+                  </button>
+                </div>
+              )}
+            </For>
+            <button
+              class="ui-button-icon ws-run-add"
+              title="New terminal"
+              disabled={terms().length >= MAX_TERMINALS}
+              onClick={addTerm}
+            >
+              <Icon name="plus" />
+            </button>
+          </div>
+        </Show>
         <button class="ws-run-collapse-btn" title={expanded() ? "Collapse" : "Expand"} onClick={toggle}>
-          {expanded() ? "▾" : "▴"}
+          <Icon name={expanded() ? "chevron-down" : "chevron-up"} />
         </button>
       </div>
       <Show when={expanded()}>
@@ -289,9 +317,6 @@ export default function TerminalDock(props: { workspace: string }) {
             </Match>
             <Match when={tab() === "run"}>
               <PromptTab workspace={props.workspace} kind="run" />
-            </Match>
-            <Match when={tab() === "processes"}>
-              <ProcessesPanel workspace={props.workspace} />
             </Match>
             <Match when={activeTermId() != null}>
               {/* Keep every terminal mounted so xterm buffers/sessions survive tab

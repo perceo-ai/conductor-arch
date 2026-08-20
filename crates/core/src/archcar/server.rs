@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -14,21 +14,26 @@ use uuid::Uuid;
 
 use crate::archcar::harness::{managed_harness_for_kind, provider_name};
 use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
+use crate::archcar::harness_contract::{
+    ProviderInteractionKind, ProviderInteractionResolution as InteractionResolution,
+};
 use crate::archcar::protocol::{
     archcar_event_summary, archcar_request_summary, archcar_response_summary,
-    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarChecksSummary,
-    ArchcarEvent, ArchcarMessage, ArchcarProcessSummary, ArchcarProjectionItem,
-    ArchcarRepositorySummary, ArchcarRequest, ArchcarResponse, ArchcarRunScript,
-    ArchcarWorkspaceSummary, QueuedArchcarInput, RpcEnvelope, WorkspaceChangeScope,
+    ArchcarChatLiveSession, ArchcarChatSnapshot, ArchcarChatThread, ArchcarChatTranscriptMessage,
+    ArchcarChatTranscriptSummary, ArchcarChecksSummary, ArchcarContextPlan, ArchcarEvent,
+    ArchcarMessage, ArchcarProcessSummary, ArchcarProjectionItem, ArchcarRepositorySummary,
+    ArchcarRequest, ArchcarResponse, ArchcarRunScript, ArchcarWorkspaceSummary, QueuedArchcarInput,
+    RpcEnvelope, WorkspaceChangeScope, WorkspaceGitAction,
 };
 use crate::archcar::remote;
 use crate::archcar::session::{
-    restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread, SessionHandle,
+    restore_managed_session, spawn_managed_session, spawn_managed_session_for_thread,
+    SessionCommand, SessionHandle,
 };
 use crate::archcar::transport::{self, DuplexStream, LocalListener};
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
-use crate::provider_interactions::ProviderInteractionStore;
+use crate::provider_interactions::{ProviderInteractionRecord, ProviderInteractionStore};
 use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
     provider_projection_item_text,
@@ -60,6 +65,10 @@ struct ServerState {
     queued_defaults: HashSet<String>,
     queued_threads: HashSet<i64>,
     draining_threads: HashSet<i64>,
+    /// Threads whose drain was requested while a drain was already running.
+    /// Without this, the second request is dropped and its input sits in the
+    /// queue until some later event happens to trigger another drain.
+    drain_reruns: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
     subscribers: Vec<Sender<ArchcarEvent>>,
 }
@@ -74,9 +83,15 @@ struct QueueDrainGuard {
 
 impl QueueDrainGuard {
     fn begin(state: &Arc<Mutex<ServerState>>, thread_id: i64) -> Option<Self> {
-        if !state.lock().ok()?.draining_threads.insert(thread_id) {
+        let mut guard = state.lock().ok()?;
+        if !guard.draining_threads.insert(thread_id) {
+            // A drain is already running for this thread; record the request so
+            // the running drain re-runs instead of losing the wakeup.
+            guard.drain_reruns.insert(thread_id);
             return None;
         }
+        guard.drain_reruns.remove(&thread_id);
+        drop(guard);
         Some(Self {
             state: Arc::clone(state),
             thread_id,
@@ -154,6 +169,7 @@ impl ArchcarServer {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -167,6 +183,7 @@ impl ArchcarServer {
 
     pub fn serve(mut self) -> Result<()> {
         let shutdown = Arc::new(AtomicBool::new(false));
+        spawn_queued_input_startup_sweep(&self.state);
         spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
         if let Some(remote) = self.remote.take() {
             spawn_remote_listener(remote, &self.state, Arc::clone(&shutdown));
@@ -322,12 +339,22 @@ fn tick_background_tasks(
     // Every advance is broadcast so clients can refresh their strips and
     // notify the user when a task reaches ready/failed.
     if !advanced.is_empty() {
-        let mut guard = state.lock().unwrap();
-        for task in &advanced {
-            broadcast(
-                &mut guard,
-                ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
-            );
+        {
+            let mut guard = state.lock().unwrap();
+            for task in &advanced {
+                broadcast(
+                    &mut guard,
+                    ArchcarEvent::BackgroundTaskUpdated { task: task.clone() },
+                );
+            }
+        }
+        // Background progress is summary evidence too.
+        let workspaces: std::collections::BTreeSet<String> = advanced
+            .iter()
+            .filter_map(|task| task.workspace_name.clone())
+            .collect();
+        for workspace in workspaces {
+            refresh_workspace_context_after_change(state, &workspace, None);
         }
     }
     Ok(advanced)
@@ -361,6 +388,51 @@ fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: A
     });
 }
 
+/// Deliver messages that were queued before this daemon started.
+///
+/// The queue is durable, but drains are event-driven: without this sweep a
+/// message queued right before a restart (or one whose session died) waits for
+/// an event that will never arrive, and the chat shows it stuck in "Queued"
+/// forever. Runs off-thread so binding the socket is not delayed by session
+/// spawns.
+fn spawn_queued_input_startup_sweep(state: &Arc<Mutex<ServerState>>) {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || drain_every_queued_chat_thread(&state));
+}
+
+fn drain_every_queued_chat_thread(state: &Arc<Mutex<ServerState>>) {
+    let db_path = match state.lock() {
+        Ok(guard) => guard.db_path.clone(),
+        Err(_) => return,
+    };
+    let thread_ids = match WorkspaceStore::open_app(&db_path)
+        .and_then(|store| store.list_queued_chat_thread_ids())
+    {
+        Ok(thread_ids) => thread_ids,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "archcar could not list queued chat threads at startup");
+            return;
+        }
+    };
+    if thread_ids.is_empty() {
+        return;
+    }
+    info!(
+        threads = thread_ids.len(),
+        "archcar delivering chat inputs queued before startup"
+    );
+    for thread_id in thread_ids {
+        if state
+            .lock()
+            .map(|guard| guard.shutting_down)
+            .unwrap_or(true)
+        {
+            return;
+        }
+        drain_queued_input_for_thread(state, thread_id);
+    }
+}
+
 fn handle_connection<S: DuplexStream>(stream: S, state: Arc<Mutex<ServerState>>) -> Result<()> {
     let mut writer = stream.try_clone_stream()?;
     let mut reader = BufReader::new(stream);
@@ -381,6 +453,7 @@ fn handle_connection<S: DuplexStream>(stream: S, state: Arc<Mutex<ServerState>>)
         ArchcarRequest::Subscribe => {
             let (tx, rx) = mpsc::channel();
             register_subscriber_with_snapshot(&mut state.lock().unwrap(), tx);
+            spawn_queued_input_startup_sweep(&state);
             while let Ok(event) = rx.recv() {
                 let envelope = RpcEnvelope {
                     id: Uuid::new_v4().to_string(),
@@ -465,7 +538,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             message: "archcar is shutting down".to_owned(),
         };
     }
-    match request {
+    let response = match request {
         ArchcarRequest::EnsureWorkspaceDefaultSession {
             workspace,
             kind,
@@ -565,6 +638,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::SetSessionEffort { session_id, effort } => {
             send_session_control(state, session_id, HarnessControl::SetEffort(effort))
         }
+        ArchcarRequest::SetSessionFastMode {
+            session_id,
+            fast_mode,
+        } => send_session_control(state, session_id, HarnessControl::SetFastMode(fast_mode)),
         ArchcarRequest::SetSessionPermissionMode { session_id, mode } => send_session_control(
             state,
             session_id,
@@ -632,7 +709,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetSessionMessages { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match session_messages_for_thread(&db_path, thread_id) {
+            // Rendering applies any agent naming directive, so this read can
+            // rename the workspace or retitle the chat.
+            let before = thread_naming_snapshot(&db_path, thread_id);
+            let response = match session_messages_for_thread(&db_path, thread_id) {
                 Ok(messages) => ArchcarResponse::SessionMessages {
                     thread_id,
                     messages,
@@ -640,7 +720,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
-            }
+            };
+            broadcast_naming_changes(state, &db_path, thread_id, before);
+            response
         }
         ArchcarRequest::GetChatSnapshot { thread_id } => {
             let (db_path, live_session) = {
@@ -650,12 +732,15 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     live_session_snapshot_for_thread(&guard, thread_id),
                 )
             };
-            match chat_snapshot_for_thread(&db_path, thread_id, live_session) {
+            let before = thread_naming_snapshot(&db_path, thread_id);
+            let response = match chat_snapshot_for_thread(&db_path, thread_id, live_session) {
                 Ok(snapshot) => ArchcarResponse::ChatSnapshot { snapshot },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
-            }
+            };
+            broadcast_naming_changes(state, &db_path, thread_id, before);
+            response
         }
         ArchcarRequest::QueueChatInput {
             thread_id,
@@ -771,32 +856,24 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetInventorySnapshot => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match inventory_snapshot(&db_path) {
+                Ok((repositories, workspaces, chat_threads)) => {
+                    ArchcarResponse::InventorySnapshot {
+                        repositories,
+                        workspaces,
+                        chat_threads,
+                    }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListWorkspaces => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path).and_then(|store| {
-                let lines = store.list_status()?;
-                let task_counts = store.task_counts_by_workspace().unwrap_or_default();
-                Ok(lines
-                    .into_iter()
-                    .map(|line| {
-                        // Match the GTK dashboard card: changed-file count for the
-                        // diff badge (only meaningful for active checkouts).
-                        let changed_files = if line.workspace.status == "active" {
-                            store
-                                .changed_files(&line.workspace.name)
-                                .map(|files| files.len())
-                                .unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        let tasks = task_counts
-                            .get(&line.workspace.id)
-                            .copied()
-                            .unwrap_or_default();
-                        workspace_summary_from_status_line(line, changed_files, tasks)
-                    })
-                    .collect::<Vec<_>>())
-            }) {
+            match workspace_summaries(&db_path) {
                 Ok(workspaces) => ArchcarResponse::Workspaces { workspaces },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -805,23 +882,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::ListRepositories => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match RepositoryStore::open(&db_path)
-                .and_then(|store| store.list_with_workspace_counts())
-            {
-                Ok(rows) => ArchcarResponse::Repositories {
-                    repositories: rows
-                        .into_iter()
-                        .map(|(repo, active, total)| ArchcarRepositorySummary {
-                            id: repo.id,
-                            name: repo.name,
-                            root_path: repo.root_path.to_string_lossy().into_owned(),
-                            default_branch: repo.default_branch,
-                            remote_name: repo.remote_name,
-                            active_workspaces: active,
-                            total_workspaces: total,
-                        })
-                        .collect(),
-                },
+            match repository_summaries(&db_path) {
+                Ok(repositories) => ArchcarResponse::Repositories { repositories },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -829,24 +891,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::ListChatThreads { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|store| store.list_chat_threads(&workspace))
-            {
-                Ok(threads) => ArchcarResponse::ChatThreads {
-                    workspace,
-                    threads: threads
-                        .into_iter()
-                        .map(|t| ArchcarChatThread {
-                            id: t.id,
-                            provider: t.provider,
-                            title: t.title,
-                            status: t.status,
-                            model: t.model,
-                            updated_at: t.updated_at,
-                            archived_at: t.archived_at,
-                        })
-                        .collect(),
-                },
+            match chat_threads_for_workspace(&db_path, &workspace) {
+                Ok(threads) => ArchcarResponse::ChatThreads { workspace, threads },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -859,26 +905,96 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     let projection = provider_projection_from_records(&records);
                     ArchcarResponse::ChatProjection {
                         thread_id,
-                        items: projection
-                            .items
-                            .into_iter()
-                            // Drop parser noise (MCP loading/loaded, skill/diff
-                            // duplicates, fallback + irrelevant status cards) so the
-                            // desktop timeline matches the GTK surface.
-                            .filter(provider_projection_item_is_relevant_chat_event)
-                            .map(|item| ArchcarProjectionItem {
-                                id: item.id,
-                                sequence: item.sequence,
-                                render_class: item.render_class.as_str().to_owned(),
-                                role_label: item.render_class.role_label().to_owned(),
-                                title: item.title,
-                                body: item.body,
-                                status: item.status.as_str().to_owned(),
-                                stream_state: item.stream_state.as_str().to_owned(),
-                            })
-                            .collect(),
+                        items: crate::provider_projection::drop_echoed_user_messages(
+                            projection.items,
+                        )
+                        .into_iter()
+                        // Drop parser noise (MCP loading/loaded, skill/diff
+                        // duplicates, fallback + irrelevant status cards) so the
+                        // desktop timeline matches the GTK surface.
+                        .filter(provider_projection_item_is_relevant_chat_event)
+                        .map(|item| ArchcarProjectionItem {
+                            id: item.id,
+                            sequence: item.sequence,
+                            render_class: item.render_class.as_str().to_owned(),
+                            role_label: item.render_class.role_label().to_owned(),
+                            title: item.title,
+                            body: item.body,
+                            status: item.status.as_str().to_owned(),
+                            stream_state: item.stream_state.as_str().to_owned(),
+                        })
+                        .collect(),
                     }
                 }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListChatTranscripts { workspace, limit } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let limit = limit.unwrap_or(crate::workspace::DEFAULT_CHAT_TRANSCRIPT_LIMIT);
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_chat_transcripts(&workspace, limit))
+            {
+                Ok(transcripts) => ArchcarResponse::ChatTranscripts {
+                    workspace,
+                    transcripts: transcripts
+                        .into_iter()
+                        .map(|t| ArchcarChatTranscriptSummary {
+                            thread_id: t.thread_id,
+                            title: t.title,
+                            provider: t.provider,
+                            message_count: t.message_count,
+                            updated_at: t.updated_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetChatTranscript { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                let thread = store.get_chat_thread_record(thread_id)?;
+                let messages = store.chat_transcript_messages(thread_id)?;
+                Ok((thread, messages))
+            }) {
+                Ok((thread, messages)) => ArchcarResponse::ChatTranscript {
+                    thread_id,
+                    title: thread.title,
+                    messages: messages
+                        .into_iter()
+                        .map(|m| ArchcarChatTranscriptMessage {
+                            role: m.role,
+                            content: m.content,
+                            created_at: m.created_at,
+                        })
+                        .collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ListContextPlans { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.list_context_plans(&workspace))
+            {
+                Ok(plans) => ArchcarResponse::ContextPlans {
+                    workspace,
+                    plans: plans
+                        .into_iter()
+                        .map(|plan| ArchcarContextPlan {
+                            name: plan.name,
+                            path: plan.path,
+                            title: plan.title,
+                        })
+                        .collect(),
+                },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -925,9 +1041,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetWorkspaceChanges { workspace, scope } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path).and_then(|store| match scope {
+            match WorkspaceStore::open_app(&db_path).and_then(|store| match &scope {
                 WorkspaceChangeScope::All => store.all_file_change_summaries(&workspace),
                 WorkspaceChangeScope::Uncommitted => store.diff_file_summaries(&workspace),
+                WorkspaceChangeScope::Commit { sha } => {
+                    store.file_summaries_for_commit(&workspace, sha)
+                }
             }) {
                 Ok(files) => ArchcarResponse::WorkspaceChanges {
                     workspace,
@@ -939,13 +1058,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetWorkspaceDiff { workspace, path } => {
+        ArchcarRequest::GetWorkspaceDiff {
+            workspace,
+            path,
+            scope,
+        } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path) {
-                Ok(store) => ArchcarResponse::WorkspaceDiff {
-                    diff: workspace_diff_sections(&store, &workspace, path.as_deref()),
-                    workspace,
-                },
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                scoped_workspace_diff(&store, &workspace, path.as_deref(), &scope)
+            }) {
+                Ok(diff) => ArchcarResponse::WorkspaceDiff { workspace, diff },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1121,11 +1243,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetCommitDiff { workspace, commit } => {
+        ArchcarRequest::GetCommitDiff {
+            workspace,
+            commit,
+            path,
+        } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|s| s.git_show_commit(&workspace, &commit))
-            {
+            match WorkspaceStore::open_app(&db_path).and_then(|s| match path.as_deref() {
+                Some(path) => s.commit_diff(&workspace, &commit, Some(Path::new(path))),
+                None => s.git_show_commit(&workspace, &commit),
+            }) {
                 Ok(diff) => ArchcarResponse::CommitDiff {
                     workspace,
                     commit,
@@ -1205,6 +1332,31 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 .and_then(|s| s.pull_request_readiness_text(&workspace))
             {
                 Ok(text) => ArchcarResponse::PullRequestReadiness { workspace, text },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetWorkspaceGitActionPrompt { workspace, action } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result = WorkspaceStore::open_app(&db_path).and_then(|s| {
+                let prompt = match action {
+                    WorkspaceGitAction::CreatePr => {
+                        s.create_pull_request_agent_prompt(&workspace)?
+                    }
+                    WorkspaceGitAction::PushBranch => s.push_branch_agent_prompt(&workspace)?,
+                    WorkspaceGitAction::MergePr => s.merge_pull_request_agent_prompt(&workspace)?,
+                    WorkspaceGitAction::OpenPr => s.review_pull_request_agent_prompt(&workspace)?,
+                };
+                Ok(prompt)
+            });
+            match result {
+                Ok(prompt) => ArchcarResponse::WorkspaceGitActionPrompt {
+                    workspace,
+                    action,
+                    prompt,
+                    visible_input: workspace_git_action_visible_input(action).to_owned(),
+                },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -1439,6 +1591,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         changed_files: summary.changed_files,
                         run_status: summary.run_status.map(|s| s.as_str().to_owned()),
                         check_status: summary.check_status.map(|s| s.as_str().to_owned()),
+                        check_exit_code: summary.check_exit_code,
                         session_status: summary.session_status.map(|s| s.as_str().to_owned()),
                         active_sessions: summary.active_sessions,
                         open_todos: summary.open_todos,
@@ -1654,17 +1807,24 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             match WorkspaceStore::open_app(&db_path)
                 .and_then(|s| s.create_chat_thread(&workspace, &provider, &title, None))
             {
-                Ok(t) => ArchcarResponse::ChatThreadCreated {
-                    thread: ArchcarChatThread {
-                        id: t.id,
-                        provider: t.provider,
-                        title: t.title,
-                        status: t.status,
-                        model: t.model,
-                        updated_at: t.updated_at,
-                        archived_at: t.archived_at,
-                    },
-                },
+                Ok(t) => {
+                    let harness = crate::workspace::SessionHarnessOptions::from_metadata(
+                        t.harness_metadata.as_deref(),
+                    );
+                    ArchcarResponse::ChatThreadCreated {
+                        thread: ArchcarChatThread {
+                            id: t.id,
+                            provider: t.provider,
+                            title: t.title,
+                            status: t.status,
+                            model: t.model,
+                            effort_mode: harness.effort_mode,
+                            fast_mode: harness.fast_mode,
+                            updated_at: t.updated_at,
+                            archived_at: t.archived_at,
+                        },
+                    }
+                }
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -2056,6 +2216,32 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::SetChatPlanMode {
+            thread_id,
+            plan_mode,
+        } => set_chat_plan_mode(state, thread_id, plan_mode),
+        ArchcarRequest::GetChatPlan { thread_id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                let plan_mode = store.chat_thread_plan_mode(thread_id)?;
+                let plan_path = store.chat_thread_plan_path(thread_id)?;
+                let plan_markdown = match plan_path.as_deref() {
+                    Some(path) => read_thread_plan_markdown(&store, thread_id, path)?,
+                    None => None,
+                };
+                Ok((plan_mode, plan_path, plan_markdown))
+            }) {
+                Ok((plan_mode, plan_path, plan_markdown)) => ArchcarResponse::ChatPlan {
+                    thread_id,
+                    plan_mode,
+                    plan_path,
+                    plan_markdown,
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterProviderInteraction { interaction } => {
             let store = {
                 let guard = state.lock().unwrap();
@@ -2114,8 +2300,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 let guard = state.lock().unwrap();
                 ProviderInteractionStore::new(guard.db_path.clone())
             };
-            match store.resolve(&interaction_id, resolution) {
+            match store.resolve(&interaction_id, resolution.clone()) {
                 Ok(interaction) => {
+                    // Storing the answer is not answering: the provider is
+                    // holding its turn open for a native reply keyed by the id
+                    // it asked with.
+                    deliver_interaction_resolution(state, &interaction, &resolution);
                     broadcast(
                         &mut state.lock().unwrap(),
                         ArchcarEvent::ProviderInteractionResolved {
@@ -2199,17 +2389,40 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             title,
             body,
             draft,
-        } => with_store(state, |store| {
-            let output =
-                store.create_pull_request(&workspace, title.as_deref(), body.as_deref(), draft)?;
-            Ok(ArchcarResponse::PullRequestCreated { workspace, output })
-        }),
+        } => {
+            let requested = workspace.clone();
+            let db_path = state.lock().unwrap().db_path.clone();
+            // Creating the PR renames the workspace to the PR title, which is the
+            // best name this work ever gets. Capture the id so we can report the
+            // new name to clients that only know the old one.
+            let workspace_id = WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.get_by_name(&requested))
+                .map(|workspace| workspace.id)
+                .ok();
+            let response = with_store(state, |store| {
+                let output = store.create_pull_request(
+                    &workspace,
+                    title.as_deref(),
+                    body.as_deref(),
+                    draft,
+                )?;
+                Ok(ArchcarResponse::PullRequestCreated { workspace, output })
+            });
+            if let Some(new_name) = workspace_id.and_then(|id| {
+                WorkspaceStore::open_app(&db_path)
+                    .and_then(|store| store.workspace_name_by_id(id))
+                    .ok()
+            }) {
+                broadcast_workspace_renamed(state, &requested, &new_name);
+            }
+            response
+        }
         ArchcarRequest::GetPullRequestDraft { workspace } => with_store(state, |store| {
-            let (title, body) = store.draft_pull_request(&workspace)?;
+            let template = store.render_pull_request_template(&workspace)?;
             Ok(ArchcarResponse::PullRequestDraft {
                 workspace,
-                title,
-                body,
+                title: template.title,
+                body: template.body,
             })
         }),
         // ---- Workspace intelligence -------------------------------------
@@ -2222,32 +2435,63 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             title,
             body,
             intended_areas,
-        } => with_store(state, |store| {
-            let task = store.create_task(&workspace, &title, &body, &intended_areas)?;
-            Ok(ArchcarResponse::TaskSaved { task })
-        }),
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let task = store.create_task(&workspace, &title, &body, &intended_areas)?;
+                Ok(ArchcarResponse::TaskSaved { task })
+            });
+            if let ArchcarResponse::TaskSaved { task } = &response {
+                broadcast_task_updated(state, &workspace_name, task.id, &task.status);
+                refresh_workspace_context_after_change(state, &workspace_name, None);
+            }
+            response
+        }
         // Every id below is a global primary key, so the store resolves it
         // against the workspace the request named.
         ArchcarRequest::UpdateTask {
             workspace,
             task_id,
             update,
-        } => with_store(state, |store| {
-            let task = store.update_task(&workspace, task_id, update)?;
-            Ok(ArchcarResponse::TaskSaved { task })
-        }),
-        ArchcarRequest::DeleteTask { workspace, task_id } => with_store(state, |store| {
-            store.delete_task(&workspace, task_id)?;
-            Ok(ArchcarResponse::TaskDeleted { task_id })
-        }),
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let task = store.update_task(&workspace, task_id, update)?;
+                Ok(ArchcarResponse::TaskSaved { task })
+            });
+            if let ArchcarResponse::TaskSaved { task } = &response {
+                broadcast_task_updated(state, &workspace_name, task.id, &task.status);
+                refresh_workspace_context_after_change(state, &workspace_name, None);
+            }
+            response
+        }
+        ArchcarRequest::DeleteTask { workspace, task_id } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                store.delete_task(&workspace, task_id)?;
+                Ok(ArchcarResponse::TaskDeleted { task_id })
+            });
+            if matches!(response, ArchcarResponse::TaskDeleted { .. }) {
+                broadcast_task_updated(state, &workspace_name, task_id, "deleted");
+                refresh_workspace_context_after_change(state, &workspace_name, None);
+            }
+            response
+        }
         ArchcarRequest::AssignSessionTask {
             workspace,
             session_id,
             task_id,
-        } => with_store(state, |store| {
-            store.assign_session_task(&workspace, session_id, task_id)?;
-            Ok(ArchcarResponse::Ack)
-        }),
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                store.assign_session_task(&workspace, session_id, task_id)?;
+                Ok(ArchcarResponse::Ack)
+            });
+            if matches!(response, ArchcarResponse::Ack) {
+                refresh_workspace_context_after_change(state, &workspace_name, Some(session_id));
+            }
+            response
+        }
         ArchcarRequest::SetSessionIntendedAreas {
             workspace,
             session_id,
@@ -2299,6 +2543,50 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 body_markdown,
             })
         }),
+        ArchcarRequest::RefreshSummary {
+            workspace,
+            scope_type,
+            scope_id,
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let scope = summary_refresh_scope(workspace.clone(), &scope_type, scope_id)?;
+                let result = store.refresh_summary(scope)?;
+                Ok(ArchcarResponse::SummaryRefreshed { workspace, result })
+            });
+            if let ArchcarResponse::SummaryRefreshed { result, .. } = &response {
+                if result.changed {
+                    broadcast_summary_updated(state, &workspace_name, &result.summary);
+                }
+            }
+            response
+        }
+        ArchcarRequest::GetContextBriefing {
+            workspace,
+            thread_id,
+        } => with_store(state, |store| {
+            let briefing = store.context_briefing(&workspace, thread_id)?;
+            Ok(ArchcarResponse::ContextBriefing { briefing })
+        }),
+        ArchcarRequest::SyncChatTasks {
+            workspace,
+            thread_id,
+        } => {
+            let workspace_name = workspace.clone();
+            let response = with_store(state, |store| {
+                let result = store.sync_chat_tasks(&workspace, thread_id)?;
+                Ok(ArchcarResponse::TasksSynced { result })
+            });
+            if let ArchcarResponse::TasksSynced { result } = &response {
+                for task_id in &result.task_ids {
+                    broadcast_task_updated(state, &workspace_name, *task_id, "todo");
+                }
+                if result.created > 0 {
+                    refresh_workspace_context_after_change(state, &workspace_name, thread_id);
+                }
+            }
+            response
+        }
         ArchcarRequest::ListContextAttachments { workspace } => with_store(state, |store| {
             let attachments = store.list_context_attachments(&workspace)?;
             Ok(ArchcarResponse::ContextAttachments {
@@ -2376,6 +2664,48 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::Subscribe => ArchcarResponse::Error {
             message: "subscribe must use a persistent connection".to_owned(),
         },
+    };
+    broadcast_inventory_change_for_response(state, &response);
+    response
+}
+
+fn broadcast_inventory_change_for_response(
+    state: &Arc<Mutex<ServerState>>,
+    response: &ArchcarResponse,
+) {
+    let event = match response {
+        ArchcarResponse::RepositoryAdded { name } | ArchcarResponse::RepositoryRemoved { name } => {
+            Some(ArchcarEvent::InventoryChanged {
+                scope: "repositories".to_owned(),
+                workspace: None,
+                repository: Some(name.clone()),
+            })
+        }
+        ArchcarResponse::WorkspaceCreated { name }
+        | ArchcarResponse::WorkspaceUpdated { name }
+        | ArchcarResponse::WorkspaceRemoved { name } => Some(ArchcarEvent::InventoryChanged {
+            scope: "workspaces".to_owned(),
+            workspace: Some(name.clone()),
+            repository: None,
+        }),
+        ArchcarResponse::WorkspaceCommitted { workspace, .. }
+        | ArchcarResponse::RunScriptStarted { workspace, .. }
+        | ArchcarResponse::RunScriptStopped { workspace, .. }
+        | ArchcarResponse::WorkspaceProcessStarted { workspace, .. }
+        | ArchcarResponse::WorkspaceProcessStopped { workspace, .. }
+        | ArchcarResponse::CheckStarted { workspace, .. }
+        | ArchcarResponse::PullRequestCreated { workspace, .. }
+        | ArchcarResponse::WorkspaceFileWritten { workspace, .. } => {
+            Some(ArchcarEvent::InventoryChanged {
+                scope: "workspaces".to_owned(),
+                workspace: Some(workspace.clone()),
+                repository: None,
+            })
+        }
+        _ => None,
+    };
+    if let Some(event) = event {
+        broadcast(&mut state.lock().unwrap(), event);
     }
 }
 
@@ -2595,6 +2925,166 @@ fn abort_background_agents(state: &Arc<Mutex<ServerState>>, thread_ids: &[i64]) 
     }
 }
 
+/// Map a wire scope to a refresh scope. `session` and `current_chat` are
+/// aliases so MCP clients can name the concept they mean.
+fn summary_refresh_scope(
+    workspace: String,
+    scope_type: &str,
+    scope_id: Option<i64>,
+) -> Result<crate::workspace_intel::SummaryRefreshScope> {
+    use crate::workspace_intel::SummaryRefreshScope;
+    match scope_type {
+        "workspace" => Ok(SummaryRefreshScope::Workspace { workspace }),
+        "session" | "current_chat" => Ok(SummaryRefreshScope::CurrentChat {
+            workspace,
+            thread_id: scope_id.context("session summaries require scope_id")?,
+        }),
+        "task" => Ok(SummaryRefreshScope::Task {
+            workspace,
+            task_id: scope_id.context("task summaries require scope_id")?,
+        }),
+        other => anyhow::bail!("unsupported summary refresh scope `{other}`"),
+    }
+}
+
+fn broadcast_summary_updated(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    summary: &crate::workspace_intel::Summary,
+) {
+    let mut guard = state.lock().unwrap();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::SummaryUpdated {
+            workspace: workspace.to_owned(),
+            summary_id: summary.id,
+            scope_type: summary.scope_type.clone(),
+            scope_id: summary.scope_id,
+        },
+    );
+}
+
+/// The workspace name and chat title a thread carries right now. Agent metadata
+/// can change both while a thread is rendered, so callers snapshot before and
+/// after and tell clients what moved.
+fn thread_naming_snapshot(db_path: &Path, thread_id: i64) -> Option<(String, String)> {
+    let store = WorkspaceStore::open_app(db_path).ok()?;
+    let thread = store.get_chat_thread_record(thread_id).ok()?;
+    let workspace = store.workspace_name_by_id(thread.workspace_id).ok()?;
+    Some((workspace, thread.title))
+}
+
+fn broadcast_naming_changes(
+    state: &Arc<Mutex<ServerState>>,
+    db_path: &Path,
+    thread_id: i64,
+    before: Option<(String, String)>,
+) {
+    let Some((old_workspace, old_title)) = before else {
+        return;
+    };
+    let Some((new_workspace, new_title)) = thread_naming_snapshot(db_path, thread_id) else {
+        return;
+    };
+    let mut guard = state.lock().unwrap();
+    if new_workspace != old_workspace {
+        broadcast(
+            &mut guard,
+            ArchcarEvent::WorkspaceRenamed {
+                old_name: old_workspace,
+                new_name: new_workspace,
+            },
+        );
+    }
+    if new_title != old_title {
+        broadcast(
+            &mut guard,
+            ArchcarEvent::ChatThreadRenamed {
+                thread_id,
+                title: new_title,
+            },
+        );
+    }
+}
+
+fn broadcast_workspace_renamed(state: &Arc<Mutex<ServerState>>, old_name: &str, new_name: &str) {
+    if old_name == new_name {
+        return;
+    }
+    let mut guard = state.lock().unwrap();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::WorkspaceRenamed {
+            old_name: old_name.to_owned(),
+            new_name: new_name.to_owned(),
+        },
+    );
+}
+
+fn broadcast_task_updated(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    task_id: i64,
+    status: &str,
+) {
+    let mut guard = state.lock().unwrap();
+    broadcast(
+        &mut guard,
+        ArchcarEvent::TaskUpdated {
+            workspace: workspace.to_owned(),
+            task_id,
+            status: status.to_owned(),
+        },
+    );
+}
+
+/// Continuous summary maintenance: refresh the workspace summary (and, when a
+/// thread is known, that current chat's summary) after evidence-changing
+/// daemon events. Best effort — a refresh failure logs a warning and never
+/// fails the action that triggered it.
+fn refresh_workspace_context_after_change(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    thread_id: Option<i64>,
+) {
+    use crate::workspace_intel::SummaryRefreshScope;
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = match WorkspaceStore::open_app(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            warn!(error = %err, workspace, "summary refresh skipped: store unavailable");
+            return;
+        }
+    };
+    let mut scopes = vec![SummaryRefreshScope::Workspace {
+        workspace: workspace.to_owned(),
+    }];
+    if let Some(thread_id) = thread_id {
+        scopes.push(SummaryRefreshScope::CurrentChat {
+            workspace: workspace.to_owned(),
+            thread_id,
+        });
+    }
+    for scope in scopes {
+        match store.refresh_summary(scope) {
+            Ok(result) if result.changed => {
+                broadcast_summary_updated(state, workspace, &result.summary);
+            }
+            Ok(_) => {}
+            Err(err) => warn!(error = %err, workspace, "summary refresh failed"),
+        }
+    }
+}
+
+/// Resolve a chat thread to its workspace name, for event-driven refreshes.
+fn workspace_name_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64) -> Option<String> {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = WorkspaceStore::open_app(&db_path).ok()?;
+    let thread = store.get_chat_thread_record(thread_id).ok()?;
+    let workspace = store.get_workspace_record(thread.workspace_id).ok()?;
+    Some(workspace.name)
+}
+
 /// Open the app store and map any failure to a protocol error response. Keeps
 /// the workspace-intelligence handlers to their happy path.
 fn with_store(
@@ -2658,6 +3148,21 @@ fn queue_chat_input(
             kind != crate::archcar::protocol::ArchcarInputKind::RawTerminal,
             "raw terminal input cannot be queued"
         );
+        // The first human message of a chat carries a hidden request for real
+        // workspace/branch/chat names. It rides the provider-bound text only; the
+        // transcript keeps the visible text, so the user never sees the block.
+        let (input, visible_input) = match kind {
+            crate::archcar::protocol::ArchcarInputKind::User => {
+                match store.decorate_first_chat_input(thread_id, &input)? {
+                    Some(decorated) => (
+                        decorated,
+                        Some(visible_input.clone().unwrap_or_else(|| input.clone())),
+                    ),
+                    None => (input.clone(), visible_input.clone()),
+                }
+            }
+            _ => (input.clone(), visible_input.clone()),
+        };
         store.enqueue_chat_input(
             thread_id,
             &input,
@@ -2687,6 +3192,19 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
     let Some(_guard) = QueueDrainGuard::begin(state, thread_id) else {
         return;
     };
+    loop {
+        drain_queued_input_once(state, thread_id);
+        let rerun = state
+            .lock()
+            .map(|mut guard| guard.drain_reruns.remove(&thread_id))
+            .unwrap_or(false);
+        if !rerun {
+            return;
+        }
+    }
+}
+
+fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
     let db_path = state.lock().unwrap().db_path.clone();
     let store = match WorkspaceStore::open_app(&db_path) {
         Ok(store) => store,
@@ -2716,6 +3234,9 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
     let handle = ready_session_handle_for_thread(state, thread_id, session_kind)
         .or_else(|| restore_ready_session_handle_for_queue(state, &store, thread_id, session_kind));
     let Some(handle) = handle else {
+        // No live session at all → nothing will ever drain this queue. Start the
+        // thread's session; SessionReady drains the queue once it comes up.
+        start_session_for_queued_thread(state, &store, thread_id, session_kind);
         return;
     };
     if let Err(err) = validate_send_input_delivery(
@@ -2748,14 +3269,12 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
                 &mut state.lock().unwrap(),
                 ArchcarEvent::ChatQueueUpdated { thread_id },
             );
-            if store
-                .peek_next_queued_chat_input(thread_id)
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                note_session_not_ready_for_queue(&handle);
-            }
+            // One queued input per turn. The session does not report "busy"
+            // until the provider starts the turn, so a message queued in that
+            // gap would otherwise be written into the same turn — which merges
+            // two prompts and leaves the harness's turn accounting waiting for
+            // a completion that never comes. TurnCompleted drains the next one.
+            note_session_not_ready_for_queue(&handle);
         }
         Err(err) => {
             if let Err(restore_err) = store.requeue_claimed_chat_input_front(&queued) {
@@ -2774,6 +3293,307 @@ fn drain_queued_input_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64
             );
         }
     }
+}
+
+/// After a codex planning turn, take the plan it just proposed and raise the
+/// same PlanApproval a Claude ExitPlanMode would have.
+fn raise_codex_plan_approval(state: &Arc<Mutex<ServerState>>, thread_id: i64, session_id: i64) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let Ok(store) = WorkspaceStore::open_app(&db_path) else {
+        return;
+    };
+    if !store.chat_thread_plan_mode(thread_id).unwrap_or(false) {
+        return;
+    }
+    let Ok(thread) = store.get_chat_thread_record(thread_id) else {
+        return;
+    };
+    if thread.provider != "codex" {
+        return;
+    }
+    let interactions = ProviderInteractionStore::new(db_path.clone());
+    if interactions
+        .list(Some(thread_id), true)
+        .map(|pending| {
+            pending
+                .iter()
+                .any(|interaction| interaction.kind == ProviderInteractionKind::PlanApproval)
+        })
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(plan_markdown) = latest_assistant_text(&db_path, thread_id) else {
+        return;
+    };
+    let Ok(workspace) = store.get_workspace_record(thread.workspace_id) else {
+        return;
+    };
+    let draft = crate::archcar::harness_contract::ProviderInteractionDraft {
+        provider_key: "codex".to_owned(),
+        workspace: workspace.name.clone(),
+        thread_id,
+        session_id,
+        native_session_id: thread.native_thread_id.clone(),
+        // Codex is not holding a request open for this, so the id only has to
+        // be unique to the plan it belongs to.
+        native_id: format!(
+            "codex-plan-{thread_id}-{}",
+            plan_fingerprint(&plan_markdown)
+        ),
+        kind: ProviderInteractionKind::PlanApproval,
+        title: "Plan ready for review".to_owned(),
+        detail: plan_markdown.clone(),
+        questions: Vec::new(),
+        auto_resolution_ms: None,
+        native_request: serde_json::json!({ "source": "codex-plan-turn" }),
+    };
+    let runtime_store = crate::runtime_session_store::RuntimeSessionStore::new(db_path);
+    match runtime_store.register_provider_interaction(draft) {
+        Ok(interaction) => {
+            let interaction = runtime_store
+                .save_chat_plan(thread_id, &interaction.id, &plan_markdown)
+                .and_then(|plan_path| {
+                    runtime_store.attach_interaction_plan_path(&interaction.id, &plan_path)
+                })
+                .unwrap_or(interaction);
+            broadcast(
+                &mut state.lock().unwrap(),
+                ArchcarEvent::ProviderInteractionRequested { interaction },
+            );
+        }
+        Err(err) => {
+            warn!(thread_id, error = %format!("{err:#}"), "archcar could not raise a codex plan approval");
+        }
+    }
+}
+
+/// The assistant's last word in a thread — for a planning turn, that is the plan.
+fn latest_assistant_text(db_path: &Path, thread_id: i64) -> Option<String> {
+    let projection = provider_projection_from_records(
+        &ProviderEventStore::new(db_path)
+            .list_for_chat_thread(thread_id)
+            .ok()?,
+    );
+    projection
+        .items
+        .iter()
+        .rev()
+        .find(|item| {
+            item.render_class == crate::provider_projection::ProjectionRenderClass::AssistantChat
+                && !item.body.trim().is_empty()
+        })
+        .map(|item| item.body.clone())
+}
+
+fn plan_fingerprint(plan_markdown: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    plan_markdown.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Fail pending asks whose session has exited: their native request ids died
+/// with the process, so they can never be answered.
+fn expire_pending_interactions_for_session(state: &Arc<Mutex<ServerState>>, session_id: i64) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = ProviderInteractionStore::new(db_path);
+    let Ok(pending) = store.list(None, true) else {
+        return;
+    };
+    for interaction in pending
+        .into_iter()
+        .filter(|interaction| interaction.session_id == session_id)
+    {
+        match store.expire(&interaction.id) {
+            Ok(expired) => broadcast(
+                &mut state.lock().unwrap(),
+                ArchcarEvent::ProviderInteractionResolved {
+                    interaction: expired,
+                },
+            ),
+            Err(err) => {
+                warn!(interaction = %interaction.id, error = %format!("{err:#}"), "archcar could not expire a pending interaction");
+            }
+        }
+    }
+}
+
+/// Enter or leave plan mode. Both providers switch mid-session, so a live
+/// session is told directly rather than restarted; the thread flag makes it
+/// stick for future sessions.
+fn set_chat_plan_mode(
+    state: &Arc<Mutex<ServerState>>,
+    thread_id: i64,
+    plan_mode: bool,
+) -> ArchcarResponse {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = match WorkspaceStore::open_app(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            return ArchcarResponse::Error {
+                message: err.to_string(),
+            }
+        }
+    };
+    if let Err(err) = store.set_chat_thread_plan_mode(thread_id, plan_mode) {
+        return ArchcarResponse::Error {
+            message: err.to_string(),
+        };
+    }
+    for kind in [SessionKind::Claude, SessionKind::Codex] {
+        if let Some(handle) = live_session_handle_for_thread(state, thread_id, kind) {
+            let mode = match kind {
+                SessionKind::Claude if plan_mode => {
+                    Some(crate::archcar::session::CLAUDE_PLAN_PERMISSION_MODE.to_owned())
+                }
+                SessionKind::Claude => {
+                    Some(crate::archcar::session::CLAUDE_DEFAULT_PERMISSION_MODE.to_owned())
+                }
+                // Codex carries plan mode as a read-only sandbox on the turns
+                // it starts; the adapter only needs to know which mode it is in.
+                SessionKind::Codex if plan_mode => Some(
+                    crate::provider_adapters::codex_app_server::CODEX_PLAN_PERMISSION_MODE
+                        .to_owned(),
+                ),
+                SessionKind::Codex => Some("default".to_owned()),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                let _ = handle.command_tx.send(SessionCommand::ApplyControl(
+                    crate::archcar::harness_contract::HarnessControl::SetPermissionMode(Some(mode)),
+                ));
+            }
+        }
+    }
+    let plan_path = store.chat_thread_plan_path(thread_id).ok().flatten();
+    broadcast(
+        &mut state.lock().unwrap(),
+        ArchcarEvent::ChatPlanUpdated {
+            thread_id,
+            plan_mode,
+            plan_path: plan_path.clone(),
+        },
+    );
+    ArchcarResponse::ChatPlan {
+        thread_id,
+        plan_mode,
+        plan_path,
+        plan_markdown: None,
+    }
+}
+
+/// Read a plan back out of the workspace checkout.
+fn read_thread_plan_markdown(
+    store: &WorkspaceStore,
+    thread_id: i64,
+    plan_path: &str,
+) -> Result<Option<String>> {
+    let thread = store.get_chat_thread_record(thread_id)?;
+    let workspace = store.get_workspace_record(thread.workspace_id)?;
+    let absolute = Path::new(&workspace.path).join(plan_path);
+    Ok(std::fs::read_to_string(absolute).ok())
+}
+
+/// Send a resolved interaction back to the provider that asked, and carry out
+/// what approving a plan means: leave plan mode and start building from the
+/// plan we saved.
+fn deliver_interaction_resolution(
+    state: &Arc<Mutex<ServerState>>,
+    interaction: &ProviderInteractionRecord,
+    resolution: &InteractionResolution,
+) {
+    let Some(handle) = live_session_handle_for_session(state, interaction.session_id) else {
+        warn!(
+            interaction = %interaction.id,
+            session_id = interaction.session_id,
+            "archcar could not answer a provider interaction: its session is gone"
+        );
+        return;
+    };
+    if let Err(err) = handle.command_tx.send(SessionCommand::ApplyControl(
+        crate::archcar::harness_contract::HarnessControl::ResolveInteraction {
+            native_id: interaction.native_id.clone(),
+            resolution: resolution.clone(),
+        },
+    )) {
+        warn!(
+            interaction = %interaction.id,
+            error = %err,
+            "archcar could not deliver an interaction resolution to its session"
+        );
+        return;
+    }
+    let approved = matches!(
+        resolution,
+        InteractionResolution::Approve | InteractionResolution::ApproveForSession
+    );
+    if interaction.kind == ProviderInteractionKind::PlanApproval && approved {
+        start_building_approved_plan(state, interaction);
+    }
+}
+
+/// Approving a plan ends planning: the thread leaves plan mode and the agent is
+/// told to build what was agreed, pointing at the saved file rather than
+/// re-pasting the plan.
+fn start_building_approved_plan(
+    state: &Arc<Mutex<ServerState>>,
+    interaction: &ProviderInteractionRecord,
+) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = match WorkspaceStore::open_app(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "archcar could not open store to start an approved plan");
+            return;
+        }
+    };
+    if let Err(err) = store.set_chat_thread_plan_mode(interaction.thread_id, false) {
+        warn!(error = %format!("{err:#}"), "archcar could not clear plan mode after approval");
+    }
+    broadcast(
+        &mut state.lock().unwrap(),
+        ArchcarEvent::ChatPlanUpdated {
+            thread_id: interaction.thread_id,
+            plan_mode: false,
+            plan_path: interaction.plan_path.clone(),
+        },
+    );
+    let Some(plan_path) = interaction.plan_path.clone() else {
+        return;
+    };
+    let input = format!("Implement the plan at {plan_path}.");
+    if let Err(err) = store.enqueue_chat_input(
+        interaction.thread_id,
+        &input,
+        Some("Implement the approved plan"),
+        crate::archcar::protocol::ArchcarInputKind::User,
+        session_kind_for_provider(&interaction.provider_key),
+    ) {
+        warn!(error = %format!("{err:#}"), "archcar could not queue the approved plan's build step");
+        return;
+    }
+    broadcast(
+        &mut state.lock().unwrap(),
+        ArchcarEvent::ChatQueueUpdated {
+            thread_id: interaction.thread_id,
+        },
+    );
+    drain_queued_input_for_thread(state, interaction.thread_id);
+}
+
+fn session_kind_for_provider(provider_key: &str) -> SessionKind {
+    match provider_key {
+        "claude" => SessionKind::Claude,
+        _ => SessionKind::Codex,
+    }
+}
+
+fn live_session_handle_for_session(
+    state: &Arc<Mutex<ServerState>>,
+    session_id: i64,
+) -> Option<SessionHandle> {
+    state.lock().ok()?.sessions.get(&session_id).cloned()
 }
 
 fn ready_session_handle_for_thread(
@@ -2803,6 +3623,82 @@ fn restore_ready_session_handle_for_queue(
     ready_session_handle_for_thread(state, thread_id, kind)
 }
 
+/// Any live (running) session for this thread, ready or not. A busy session
+/// still drains the queue when its turn completes, so it must not be treated as
+/// "no session" and re-spawned.
+fn live_session_handle_for_thread(
+    state: &Arc<Mutex<ServerState>>,
+    thread_id: i64,
+    kind: SessionKind,
+) -> Option<SessionHandle> {
+    state.lock().ok()?.sessions.values().find_map(|handle| {
+        let snapshot = handle.snapshot.lock().ok()?.clone();
+        (snapshot.thread_id == thread_id
+            && snapshot.kind == kind
+            && snapshot.status == crate::workspace::ProcessStatus::Running)
+            .then_some(handle.clone())
+    })
+}
+
+/// The workspace whose thread session must be started so a queued input can be
+/// delivered, or `None` when a session already exists (or the kind cannot be
+/// auto-started).
+fn workspace_needing_session_for_queue(
+    state: &Arc<Mutex<ServerState>>,
+    store: &WorkspaceStore,
+    thread_id: i64,
+    kind: SessionKind,
+) -> Option<String> {
+    if !matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+        return None;
+    }
+    if live_session_handle_for_thread(state, thread_id, kind).is_some() {
+        return None;
+    }
+    let thread = store.get_chat_thread_record(thread_id).ok()?;
+    let workspace = store.get_workspace_record(thread.workspace_id).ok()?;
+    Some(workspace.name)
+}
+
+/// Start the session a queued input needs. Runs off-thread: spawning takes
+/// seconds and `ensure_chat_thread_session` drains the queue itself, which
+/// would re-enter the drain guard if it ran inline.
+fn start_session_for_queued_thread(
+    state: &Arc<Mutex<ServerState>>,
+    store: &WorkspaceStore,
+    thread_id: i64,
+    kind: SessionKind,
+) {
+    let Some(workspace) = workspace_needing_session_for_queue(state, store, thread_id, kind) else {
+        return;
+    };
+    info!(
+        %workspace,
+        thread_id,
+        ?kind,
+        "archcar starting chat-thread session to deliver queued input"
+    );
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        let response = ensure_chat_thread_session(
+            &state,
+            workspace.clone(),
+            thread_id,
+            kind,
+            crate::workspace::SessionHarnessOptions::default(),
+        );
+        if let ArchcarResponse::Error { message } = response {
+            warn!(
+                %workspace,
+                thread_id,
+                ?kind,
+                error = %message,
+                "archcar could not start session for queued chat input"
+            );
+        }
+    });
+}
+
 fn note_session_not_ready_for_queue(handle: &SessionHandle) {
     let Ok(mut snapshot) = handle.snapshot.lock() else {
         return;
@@ -2819,6 +3715,30 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         | ArchcarEvent::TurnCompleted { thread_id, .. } => Some(*thread_id),
         _ => None,
     };
+    // Codex has no ExitPlanMode: a planning turn simply ends with the plan as
+    // its answer, so the plan approval is raised here instead of by the
+    // provider. Same card, same buttons, different transport.
+    if let ArchcarEvent::TurnCompleted {
+        thread_id,
+        session_id,
+        ..
+    } = &event
+    {
+        raise_codex_plan_approval(state, *thread_id, *session_id);
+    }
+    // An ask can only be answered on the connection it arrived on; once the
+    // session is gone the request id means nothing, so pending asks must not
+    // linger in the UI as if they were still answerable.
+    if let ArchcarEvent::SessionExited { session_id, .. } = &event {
+        expire_pending_interactions_for_session(state, *session_id);
+    }
+    // Continuous context maintenance: turn boundaries and message updates are
+    // the evidence streams behind workspace/current-chat summaries.
+    let refresh_thread_id = match &event {
+        ArchcarEvent::TurnCompleted { thread_id, .. }
+        | ArchcarEvent::SessionMessagesUpdated { thread_id } => Some(*thread_id),
+        _ => None,
+    };
     {
         let mut guard = state.lock().unwrap();
         if let ArchcarEvent::SessionExited { session_id, .. } = &event {
@@ -2828,6 +3748,11 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
     }
     if let Some(thread_id) = drain_thread_id {
         drain_queued_input_for_thread(state, thread_id);
+    }
+    if let Some(thread_id) = refresh_thread_id {
+        if let Some(workspace) = workspace_name_for_thread(state, thread_id) {
+            refresh_workspace_context_after_change(state, &workspace, Some(thread_id));
+        }
     }
 }
 
@@ -2905,17 +3830,85 @@ fn open_lifecycle_workspace_store(state: &Arc<Mutex<ServerState>>) -> Result<Wor
     Ok(store)
 }
 
-/// Clone a remote repository into `dest` using the system `git` binary. The
-/// caller then registers the cloned path with `RepositoryStore::add`.
+struct RepositoryCloneCommand {
+    program: &'static str,
+    args: Vec<String>,
+    failure_context: &'static str,
+}
+
+fn clone_command_for_url(url: &str, dest: &str) -> RepositoryCloneCommand {
+    if is_github_remote_url(url) {
+        return RepositoryCloneCommand {
+            program: "gh",
+            args: vec![
+                "repo".to_owned(),
+                "clone".to_owned(),
+                url.to_owned(),
+                dest.to_owned(),
+            ],
+            failure_context: "run gh repo clone",
+        };
+    }
+
+    RepositoryCloneCommand {
+        program: "git",
+        args: vec!["clone".to_owned(), url.to_owned(), dest.to_owned()],
+        failure_context: "run git clone",
+    }
+}
+
+fn is_github_remote_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://github.com/")
+        || lower.starts_with("http://github.com/")
+        || lower.starts_with("ssh://git@github.com/")
+        || lower.starts_with("git@github.com:")
+}
+
+fn command_failure_message(
+    program: &str,
+    args: &[String],
+    output: &std::process::Output,
+) -> String {
+    let mut message = format!("{program} {} failed ({})", args.join(" "), output.status);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if !stderr.is_empty() {
+        message.push_str(": ");
+        message.push_str(&stderr);
+        return message;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !stdout.is_empty() {
+        message.push_str(": ");
+        message.push_str(&stdout);
+    }
+    message
+}
+
+/// Clone a remote repository into `dest`. GitHub remotes go through `gh` so the
+/// desktop Clone tab uses the same local GitHub CLI auth it used to list repos.
+/// The caller then registers the cloned path with `RepositoryStore::add`.
 fn clone_repository(url: &str, dest: &str) -> Result<()> {
-    let status = std::process::Command::new("git")
-        .arg("clone")
-        .arg(url)
-        .arg(dest)
-        .status()
-        .context("run git clone")?;
-    anyhow::ensure!(status.success(), "git clone failed ({status})");
+    let command = clone_command_for_url(url, dest);
+    let output = std::process::Command::new(command.program)
+        .args(&command.args)
+        .output()
+        .with_context(|| command.failure_context)?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        command_failure_message(command.program, &command.args, &output)
+    );
     Ok(())
+}
+
+fn workspace_git_action_visible_input(action: WorkspaceGitAction) -> &'static str {
+    match action {
+        WorkspaceGitAction::CreatePr => "Create pull request",
+        WorkspaceGitAction::PushBranch => "Push branch",
+        WorkspaceGitAction::MergePr => "Merge pull request",
+        WorkspaceGitAction::OpenPr => "Review pull request",
+    }
 }
 
 fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
@@ -2927,10 +3920,14 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSessionMessages { .. }
             | ArchcarRequest::GetChatSnapshot { .. }
             | ArchcarRequest::ListQueuedChatInputs { .. }
+            | ArchcarRequest::GetInventorySnapshot
             | ArchcarRequest::ListWorkspaces
             | ArchcarRequest::ListRepositories
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
+            | ArchcarRequest::ListChatTranscripts { .. }
+            | ArchcarRequest::GetChatTranscript { .. }
+            | ArchcarRequest::ListContextPlans { .. }
             | ArchcarRequest::ListWorkspaceFiles { .. }
             | ArchcarRequest::ReadWorkspaceFile { .. }
             | ArchcarRequest::GetWorkspaceChanges { .. }
@@ -2943,6 +3940,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListLinkedDirectories { .. }
             | ArchcarRequest::GetSpotlightStatus { .. }
             | ArchcarRequest::GetPullRequestReadiness { .. }
+            | ArchcarRequest::GetWorkspaceGitActionPrompt { .. }
             | ArchcarRequest::GetRecentCommits { .. }
             | ArchcarRequest::GetCommitMessageDraft { .. }
             | ArchcarRequest::GetCommitDiff { .. }
@@ -2964,6 +3962,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListTasks { .. }
             | ArchcarRequest::ListSummaries { .. }
             | ArchcarRequest::DraftSummary { .. }
+            | ArchcarRequest::GetContextBriefing { .. }
             | ArchcarRequest::ListContextAttachments { .. }
             | ArchcarRequest::ListSessionContributions { .. }
             | ArchcarRequest::ListSessionOverlaps { .. }
@@ -2975,54 +3974,40 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
 
 const DIFF_RENDER_LIMIT_BYTES: usize = 200_000;
 
-/// Compose the three-section unified diff (working tree / unstaged / staged)
-/// the GTK Changes tab shows. Ported from workspace_command_center::
-/// workspace_diff_sections so both surfaces render identical diff text.
-fn workspace_diff_sections(store: &WorkspaceStore, name: &str, path: Option<&str>) -> String {
+/// The unified diff for one scope, which is what a client actually renders.
+///
+/// This replaced a three-section document (working tree / unstaged / staged
+/// concatenated under headings). That shape forced every caller to pick a
+/// section, and the sections overlap — a file that is both staged and unstaged
+/// appeared twice with overlapping hunks. Returning exactly the scope that was
+/// asked for lets the changes panel and the file view agree on what is shown.
+fn scoped_workspace_diff(
+    store: &WorkspaceStore,
+    name: &str,
+    path: Option<&str>,
+    scope: &WorkspaceChangeScope,
+) -> Result<String> {
     let path_ref = path.map(Path::new);
-    let target = path.unwrap_or("workspace");
-    let base_ref = store
-        .workspace_base_ref(name)
-        .unwrap_or_else(|_| "base".to_owned());
-    let mut out =
-        format!("Target: {target}\nBranch head comparison: HEAD\nReview base: {base_ref}\n\n");
-    out.push_str(&format_diff_section(
-        "Working tree changes",
-        store.unified_diff_against_base(name, path_ref),
-    ));
-    out.push('\n');
-    out.push_str(&format_diff_section(
-        "Unstaged changes",
-        store.unified_diff(name, path_ref),
-    ));
-    out.push('\n');
-    out.push_str(&format_diff_section(
-        "Staged changes",
-        store.staged_diff(name, path_ref),
-    ));
-    out
+    let diff = match scope {
+        WorkspaceChangeScope::All => store.unified_diff_against_base(name, path_ref)?,
+        WorkspaceChangeScope::Uncommitted => store.uncommitted_diff(name, path_ref)?,
+        WorkspaceChangeScope::Commit { sha } => store.commit_diff(name, sha, path_ref)?,
+    };
+    Ok(truncate_diff_for_render(diff))
 }
 
-fn format_diff_section(title: &str, result: Result<String>) -> String {
-    let text = match result {
-        Ok(text) => text,
-        Err(err) => return format!("{title}\nCould not read diff: {err:#}\n"),
-    };
-    if text.trim().is_empty() {
-        return format!("{title}\nNo changes.\n");
+fn truncate_diff_for_render(text: String) -> String {
+    if text.len() <= DIFF_RENDER_LIMIT_BYTES {
+        return text;
     }
-    if text.len() > DIFF_RENDER_LIMIT_BYTES {
-        let mut end = DIFF_RENDER_LIMIT_BYTES;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!(
-            "{title}\n{}\n[Diff truncated after {DIFF_RENDER_LIMIT_BYTES} bytes. Open the file for full context.]\n",
-            &text[..end]
-        )
-    } else {
-        format!("{title}\n{text}")
+    let mut end = DIFF_RENDER_LIMIT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
     }
+    format!(
+        "{}\n[Diff truncated after {DIFF_RENDER_LIMIT_BYTES} bytes. Open the file for full context.]\n",
+        &text[..end]
+    )
 }
 
 fn exit_code_label(exit_code: Option<i32>) -> String {
@@ -3230,6 +4215,7 @@ fn workspace_summary_from_status_line(
         id: workspace.id,
         name: workspace.name,
         repository_name,
+        path: workspace.path.display().to_string(),
         branch: workspace.branch,
         base_ref: workspace.base_ref,
         status: workspace.status,
@@ -3248,6 +4234,97 @@ fn workspace_summary_from_status_line(
         branch_behind: branch_push_state.map(|s| s.behind),
         updated_at: workspace.updated_at,
     }
+}
+
+fn workspace_summaries(db_path: &Path) -> Result<Vec<ArchcarWorkspaceSummary>> {
+    WorkspaceStore::open_app(db_path).and_then(|store| {
+        let lines = store.list_status()?;
+        let task_counts = store.task_counts_by_workspace().unwrap_or_default();
+        Ok(lines
+            .into_iter()
+            .map(|line| {
+                // Match the GTK dashboard card: changed-file count for the diff
+                // badge, only meaningful for active checkouts.
+                let changed_files = if line.workspace.status == "active" {
+                    store
+                        .changed_files(&line.workspace.name)
+                        .map(|files| files.len())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                let tasks = task_counts
+                    .get(&line.workspace.id)
+                    .copied()
+                    .unwrap_or_default();
+                workspace_summary_from_status_line(line, changed_files, tasks)
+            })
+            .collect())
+    })
+}
+
+fn repository_summaries(db_path: &Path) -> Result<Vec<ArchcarRepositorySummary>> {
+    RepositoryStore::open(db_path)
+        .and_then(|store| store.list_with_workspace_counts())
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(repo, active, total)| ArchcarRepositorySummary {
+                    id: repo.id,
+                    name: repo.name,
+                    root_path: repo.root_path.to_string_lossy().into_owned(),
+                    default_branch: repo.default_branch,
+                    remote_name: repo.remote_name,
+                    active_workspaces: active,
+                    total_workspaces: total,
+                })
+                .collect()
+        })
+}
+
+fn chat_threads_for_workspace(db_path: &Path, workspace: &str) -> Result<Vec<ArchcarChatThread>> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.list_chat_threads(workspace))
+        .map(|threads| {
+            threads
+                .into_iter()
+                .map(|t| {
+                    let harness = crate::workspace::SessionHarnessOptions::from_metadata(
+                        t.harness_metadata.as_deref(),
+                    );
+                    ArchcarChatThread {
+                        id: t.id,
+                        provider: t.provider,
+                        title: t.title,
+                        status: t.status,
+                        model: t.model,
+                        effort_mode: harness.effort_mode,
+                        fast_mode: harness.fast_mode,
+                        updated_at: t.updated_at,
+                        archived_at: t.archived_at,
+                    }
+                })
+                .collect()
+        })
+}
+
+/// Repositories, workspaces, and each workspace's chat threads, as one bundle.
+type InventorySnapshot = (
+    Vec<ArchcarRepositorySummary>,
+    Vec<ArchcarWorkspaceSummary>,
+    BTreeMap<String, Vec<ArchcarChatThread>>,
+);
+
+fn inventory_snapshot(db_path: &Path) -> Result<InventorySnapshot> {
+    let repositories = repository_summaries(db_path)?;
+    let workspaces = workspace_summaries(db_path)?;
+    let mut chat_threads = BTreeMap::new();
+    for workspace in workspaces.iter().filter(|ws| ws.status != "archived") {
+        chat_threads.insert(
+            workspace.name.clone(),
+            chat_threads_for_workspace(db_path, &workspace.name)?,
+        );
+    }
+    Ok((repositories, workspaces, chat_threads))
 }
 
 fn begin_shutdown(state: &Arc<Mutex<ServerState>>) {
@@ -4190,6 +5267,44 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn clone_command_prefers_gh_for_github_remotes() {
+        for url in [
+            "git@github.com:perceo-ai/conductor-arch.git",
+            "https://github.com/perceo-ai/conductor-arch.git",
+            "ssh://git@github.com/perceo-ai/conductor-arch.git",
+        ] {
+            let command = clone_command_for_url(url, "/tmp/conductor-arch");
+            assert_eq!(command.program, "gh");
+            assert_eq!(
+                command.args,
+                vec![
+                    "repo".to_owned(),
+                    "clone".to_owned(),
+                    url.to_owned(),
+                    "/tmp/conductor-arch".to_owned()
+                ]
+            );
+            assert_eq!(command.failure_context, "run gh repo clone");
+        }
+    }
+
+    #[test]
+    fn clone_command_keeps_git_for_non_github_remotes() {
+        let command = clone_command_for_url("ssh://git@example.test/team/repo.git", "/tmp/repo");
+
+        assert_eq!(command.program, "git");
+        assert_eq!(
+            command.args,
+            vec![
+                "clone".to_owned(),
+                "ssh://git@example.test/team/repo.git".to_owned(),
+                "/tmp/repo".to_owned()
+            ]
+        );
+        assert_eq!(command.failure_context, "run git clone");
+    }
+
+    #[test]
     fn provider_interaction_dispatch_registers_lists_and_resolves() {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("state.db");
@@ -4202,6 +5317,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -4218,7 +5334,8 @@ mod tests {
                     kind: ProviderInteractionKind::Permission,
                     title: "Permission".to_owned(),
                     detail: "Allow?".to_owned(),
-                    choices: Vec::new(),
+                    questions: Vec::new(),
+                    auto_resolution_ms: None,
                     native_request: json!({"tool": "bash"}),
                 },
             },
@@ -4288,6 +5405,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
         }));
@@ -4306,7 +5424,11 @@ mod tests {
             panic!("expected queued chat input response");
         };
         assert_eq!(input.thread_id, thread.id);
-        assert_eq!(input.input, "run tests");
+        // First human message of the chat: the provider-bound text carries the
+        // hidden naming request, the transcript keeps what the user typed.
+        assert!(input.input.starts_with("run tests"));
+        assert!(input.input.contains("<archductor_hidden_instruction>"));
+        assert_eq!(input.visible_input.as_deref(), Some("run tests"));
         assert!(matches!(
             subscriber_rx.try_recv(),
             Ok(ArchcarEvent::ChatQueueUpdated { thread_id }) if thread_id == thread.id
@@ -4323,6 +5445,96 @@ mod tests {
         };
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0].id, input.id);
+
+        // A second send stacked behind the first must not ask for names again.
+        let second = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "and lint".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::Codex,
+            },
+            &state,
+        );
+        let ArchcarResponse::QueuedChatInput { input: second } = second else {
+            panic!("expected queued chat input response");
+        };
+        assert_eq!(second.input, "and lint");
+        assert!(!second.input.contains("<archductor_hidden_instruction>"));
+    }
+
+    #[test]
+    fn a_rename_between_snapshots_is_broadcast_to_clients() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        // Agent metadata is applied while a thread renders, so a read can rename
+        // the workspace and retitle the chat. Clients hold names, not ids.
+        let before = thread_naming_snapshot(&db_path, thread.id);
+        store.rename("berlin", "billing-webhook-fix").unwrap();
+        store
+            .update_chat_thread_title(thread.id, "Billing Webhook Fix")
+            .unwrap();
+        broadcast_naming_changes(&state, &db_path, thread.id, before);
+
+        let events = subscriber_rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::WorkspaceRenamed { old_name, new_name }
+                    if old_name == "berlin" && new_name == "billing-webhook-fix"
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::ChatThreadRenamed { thread_id, title }
+                    if *thread_id == thread.id && title == "Billing Webhook Fix"
+            )),
+            "{events:?}"
+        );
+
+        // Nothing moved this time, so clients are left alone.
+        let before = thread_naming_snapshot(&db_path, thread.id);
+        broadcast_naming_changes(&state, &db_path, thread.id, before);
+        assert!(subscriber_rx.try_iter().next().is_none());
     }
 
     #[test]
@@ -4421,6 +5633,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -4511,6 +5724,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -4602,6 +5816,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: vec![subscriber_tx],
         }));
@@ -4642,6 +5857,471 @@ mod tests {
             thread_id: thread.id,
         }));
         assert_ne!(first.id, second.id);
+    }
+
+    fn interaction_draft_for(
+        thread_id: i64,
+        session_id: i64,
+        kind: ProviderInteractionKind,
+        native_id: &str,
+    ) -> crate::archcar::harness_contract::ProviderInteractionDraft {
+        crate::archcar::harness_contract::ProviderInteractionDraft {
+            provider_key: "claude".to_owned(),
+            workspace: "berlin".to_owned(),
+            thread_id,
+            session_id,
+            native_session_id: None,
+            native_id: native_id.to_owned(),
+            kind,
+            title: "Plan ready for review".to_owned(),
+            detail: "# Plan\n\n- do the thing".to_owned(),
+            questions: Vec::new(),
+            auto_resolution_ms: None,
+            native_request: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn resolving_an_interaction_answers_the_session_that_asked() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Claude,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+        let interaction = ProviderInteractionStore::new(db_path.clone())
+            .register(interaction_draft_for(
+                thread.id,
+                9,
+                ProviderInteractionKind::UserQuestion,
+                "req-1",
+            ))
+            .unwrap();
+
+        dispatch_request(
+            ArchcarRequest::ResolveProviderInteraction {
+                interaction_id: interaction.id.clone(),
+                resolution: InteractionResolution::Deny {
+                    reason: Some("not that one".to_owned()),
+                },
+            },
+            &state,
+        );
+
+        // Storing the answer is not answering: the provider holds its turn open
+        // until the reply reaches the session that asked.
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::ApplyControl(
+                crate::archcar::harness_contract::HarnessControl::ResolveInteraction {
+                    native_id,
+                    ..
+                }
+            )) if native_id == "req-1"
+        ));
+    }
+
+    #[test]
+    fn approving_a_plan_leaves_plan_mode_and_queues_the_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        store.set_chat_thread_plan_mode(thread.id, true).unwrap();
+        let (command_tx, _command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
+                    session_id: 9,
+                    thread_id: thread.id,
+                    workspace: "berlin".to_owned(),
+                    kind: SessionKind::Claude,
+                    pid: 12345,
+                    status: ProcessStatus::Running,
+                    runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+                    ready: false,
+                    capabilities: None,
+                    screen: String::new(),
+                })),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+        let interactions = ProviderInteractionStore::new(db_path.clone());
+        let interaction = interactions
+            .register(interaction_draft_for(
+                thread.id,
+                9,
+                ProviderInteractionKind::PlanApproval,
+                "req-plan",
+            ))
+            .unwrap();
+        let interaction = interactions
+            .attach_plan_path(&interaction.id, ".context/plans/thread-1-abc.md")
+            .unwrap();
+
+        dispatch_request(
+            ArchcarRequest::ResolveProviderInteraction {
+                interaction_id: interaction.id.clone(),
+                resolution: InteractionResolution::Approve,
+            },
+            &state,
+        );
+
+        assert!(!store.chat_thread_plan_mode(thread.id).unwrap());
+        let queued = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(queued.len(), 1, "approving a plan starts the build");
+        assert!(
+            queued[0].input.contains(".context/plans/thread-1-abc.md"),
+            "the build step points at the saved plan, not a re-pasted copy: {}",
+            queued[0].input
+        );
+    }
+
+    #[test]
+    fn a_dead_session_expires_the_asks_it_was_holding() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+        let interactions = ProviderInteractionStore::new(db_path.clone());
+        interactions
+            .register(interaction_draft_for(
+                thread.id,
+                9,
+                ProviderInteractionKind::UserQuestion,
+                "req-1",
+            ))
+            .unwrap();
+
+        expire_pending_interactions_for_session(&state, 9);
+
+        // The request id died with the process; leaving it pending would show a
+        // question that can never be answered.
+        assert!(interactions.list(Some(thread.id), true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn startup_sweep_delivers_inputs_queued_before_the_daemon_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        // Queued while the previous daemon was alive; nothing will emit a
+        // session event for it after the restart.
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "left over from before the restart",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        drain_every_queued_chat_thread(&state);
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(crate::archcar::session::SessionCommand::SendInput { input, .. })
+                if input == "left over from before the restart"
+        ));
+        assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_second_queued_input_waits_for_the_first_turn_instead_of_joining_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Claude,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let handle_snapshot = Arc::new(Mutex::new(snapshot));
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::clone(&handle_snapshot),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        // Two sends back to back, the way a user types a follow-up right after
+        // the first message: the provider has not started the turn yet, so the
+        // session still looks ready when the second one arrives.
+        for input in ["first", "second"] {
+            dispatch_request(
+                ArchcarRequest::QueueChatInput {
+                    thread_id: thread.id,
+                    input: input.to_owned(),
+                    visible_input: None,
+                    kind: ArchcarInputKind::User,
+                    session_kind: SessionKind::Claude,
+                },
+                &state,
+            );
+        }
+
+        let sent = command_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(sent.len(), 1, "only the first input may reach the session");
+        assert!(!handle_snapshot.lock().unwrap().ready);
+        assert_eq!(
+            store
+                .list_queued_chat_inputs(thread.id)
+                .unwrap()
+                .into_iter()
+                .map(|queued| queued.input)
+                .collect::<Vec<_>>(),
+            vec!["second".to_owned()]
+        );
+    }
+
+    #[test]
+    fn queued_input_without_any_session_requests_a_thread_session_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "first message",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::Codex,
+            )
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        // A brand-new chat thread has no session, so nothing would ever deliver
+        // the first message unless the queue starts one.
+        assert_eq!(
+            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::Codex),
+            Some("berlin".to_owned())
+        );
+    }
+
+    #[test]
+    fn queued_input_with_a_busy_session_does_not_request_another_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::Codex,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            // Mid-turn: not ready, but TurnCompleted will drain the queue.
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        };
+        let (command_tx, _command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        assert_eq!(
+            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::Codex),
+            None
+        );
+    }
+
+    #[test]
+    fn drain_requested_during_a_drain_reruns_instead_of_being_dropped() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let guard = QueueDrainGuard::begin(&state, thread.id).expect("first drain runs");
+        assert!(
+            QueueDrainGuard::begin(&state, thread.id).is_none(),
+            "a second concurrent drain must not run"
+        );
+        assert!(
+            state.lock().unwrap().drain_reruns.contains(&thread.id),
+            "the skipped drain must be recorded so the running drain repeats"
+        );
+        drop(guard);
+
+        // The rerun flag is cleared when the next drain actually starts.
+        let guard = QueueDrainGuard::begin(&state, thread.id).expect("drain runs again");
+        assert!(!state.lock().unwrap().drain_reruns.contains(&thread.id));
+        drop(guard);
     }
 
     #[test]
@@ -4708,6 +6388,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -4757,6 +6438,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -4798,6 +6480,7 @@ mod tests {
             queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::Codex)]),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![event_tx],
         }));
@@ -4837,6 +6520,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -5055,6 +6739,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5114,6 +6799,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::from([
                 (
                     9,
@@ -5172,6 +6858,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
         }));
@@ -5233,6 +6920,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::from([(
                 process.id,
                 crate::archcar::session::SessionHandle {
@@ -5317,6 +7005,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5368,6 +7057,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5421,6 +7111,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
         }));
@@ -5490,6 +7181,7 @@ mod tests {
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::from([requested_thread.id]),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -5900,6 +7592,7 @@ icon = "cloud"
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -5985,6 +7678,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6077,6 +7771,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6177,6 +7872,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6277,6 +7973,50 @@ default = true
             "save_summary got {saved:?}"
         );
 
+        let refreshed = dispatch_request(
+            ArchcarRequest::RefreshSummary {
+                workspace: "berlin".to_owned(),
+                scope_type: "workspace".to_owned(),
+                scope_id: None,
+            },
+            &state,
+        );
+        let ArchcarResponse::SummaryRefreshed { result, .. } = refreshed else {
+            panic!("refresh_summary got {refreshed:?}");
+        };
+        assert_eq!(result.summary.scope_type, "workspace");
+        assert_eq!(result.state.source, "auto");
+        assert!(!result.state.evidence_hash.is_empty());
+
+        // Session-scoped refresh without a scope_id is refused, not guessed.
+        let refused = dispatch_request(
+            ArchcarRequest::RefreshSummary {
+                workspace: "berlin".to_owned(),
+                scope_type: "session".to_owned(),
+                scope_id: None,
+            },
+            &state,
+        );
+        assert!(
+            matches!(refused, ArchcarResponse::Error { ref message } if message.contains("scope_id")),
+            "refresh_summary without scope_id got {refused:?}"
+        );
+
+        let briefed = dispatch_request(
+            ArchcarRequest::GetContextBriefing {
+                workspace: "berlin".to_owned(),
+                thread_id: None,
+            },
+            &state,
+        );
+        let ArchcarResponse::ContextBriefing { briefing } = briefed else {
+            panic!("get_context_briefing got {briefed:?}");
+        };
+        assert!(briefing.body_markdown.contains("## Workspace"));
+        assert!(briefing.body_markdown.contains("## Tasks"));
+        assert!(briefing.body_markdown.contains("Port the right panel"));
+        assert_eq!(briefing.task_ids, vec![task.id]);
+
         let attached = dispatch_request(
             ArchcarRequest::AddContextAttachment {
                 workspace: "berlin".to_owned(),
@@ -6340,6 +8080,7 @@ default = true
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
         }));
@@ -6431,6 +8172,149 @@ default = true
             matches!(listed, ArchcarResponse::Workspaces { ref workspaces } if workspaces.is_empty()),
             "list_workspaces got {listed:?}"
         );
+    }
+
+    #[test]
+    fn workspace_lifecycle_broadcasts_inventory_change_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+
+        let events = subscriber_rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ArchcarEvent::InventoryChanged {
+                        scope,
+                        repository: Some(repository),
+                        workspace: None,
+                    } if scope == "repositories" && repository == "demo"
+                )
+            }),
+            "expected repository inventory change, got {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    ArchcarEvent::InventoryChanged {
+                        scope,
+                        repository: None,
+                        workspace: Some(workspace),
+                    } if scope == "workspaces" && workspace == "berlin"
+                )
+            }),
+            "expected workspace inventory change, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn inventory_snapshot_lists_repositories_workspaces_and_chat_threads() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: Some(
+                    temp.path()
+                        .join("workspaces/demo")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
+            &state,
+        );
+        dispatch_request(
+            ArchcarRequest::CreateWorkspace {
+                repository: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            },
+            &state,
+        );
+        let created = dispatch_request(
+            ArchcarRequest::CreateChatThread {
+                workspace: "berlin".to_owned(),
+                provider: "codex".to_owned(),
+                title: "remote client prep".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(created, ArchcarResponse::ChatThreadCreated { .. }),
+            "create_chat_thread got {created:?}"
+        );
+
+        let snapshot = dispatch_request(ArchcarRequest::GetInventorySnapshot, &state);
+        let ArchcarResponse::InventorySnapshot {
+            repositories,
+            workspaces,
+            chat_threads,
+        } = snapshot
+        else {
+            panic!("get_inventory_snapshot got {snapshot:?}");
+        };
+
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].name, "demo");
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].name, "berlin");
+        assert_eq!(chat_threads.get("berlin").map(Vec::len), Some(1));
     }
 
     #[cfg(unix)]

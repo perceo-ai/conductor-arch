@@ -38,3 +38,28 @@ export function renderMarkdown(md: string): string {
     return escapeHtml(md);
   }
 }
+
+/**
+ * Render a markdown *file* rather than a chat message. Same renderer and the
+ * same raw-HTML escaping, but without `breaks` — in a message a newline is
+ * intentional, while a .md file wraps its source, so honouring single newlines
+ * there breaks sentences mid-line and gives away that the preview isn't
+ * faithful to how the file renders anywhere else.
+ */
+export function renderMarkdownDocument(md: string): string {
+  try {
+    return marked.parse(md, { breaks: false }) as string;
+  } catch {
+    return escapeHtml(md);
+  }
+}
+
+const INLINE_FILE_MARKER =
+  /\{([A-Za-z0-9_.@+ -]+\.(?:c|cc|cpp|css|gif|go|h|hpp|html|jpeg|jpg|js|jsx|json|md|pdf|png|py|rs|scss|sh|sql|toml|ts|tsx|txt|webp|ya?ml))\}/g;
+
+export function renderMarkdownWithInlineFileChips(md: string): string {
+  return renderMarkdown(md).replace(INLINE_FILE_MARKER, (_match, label: string) => {
+    const safe = escapeHtml(label);
+    return `<span class="chat-inline-file-chip" title="${safe}">${safe}</span>`;
+  });
+}

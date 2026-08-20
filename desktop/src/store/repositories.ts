@@ -4,7 +4,7 @@ import { send } from "@/bridge/client";
 import { logState } from "@/lib/log";
 import type { ArchcarRepositorySummary } from "@/bridge/protocol";
 
-// Keyed repository store for the sidebar projects list.
+// Keyed repository store for the sidebar workspace grouping.
 
 export interface RepositoryRow {
   id: number;
@@ -47,6 +47,10 @@ export const repositoriesStore = {
     logState("repositories.setAll", { count: rows.length });
   },
 
+  setSummaries(summaries: ArchcarRepositorySummary[]) {
+    this.setAll(summaries.map(rowFromSummary));
+  },
+
   row(name: string): RepositoryRow | undefined {
     return state.byName[name];
   },
@@ -67,6 +71,6 @@ export const repositoriesStore = {
   async refresh(): Promise<void> {
     const res = await send({ type: "list_repositories" });
     if (res.type !== "repositories") return;
-    this.setAll(res.repositories.map(rowFromSummary));
+    this.setSummaries(res.repositories);
   },
 };

@@ -2,7 +2,12 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize, ready_for_review, converted_to_draft]
+    # Commits only. `edited`, `ready_for_review` and `converted_to_draft` carry
+    # the same commits as the run before them, but the concurrency group below
+    # is keyed on the PR, so each one cancelled whatever full run was in flight
+    # and replaced it with a run that had nothing to do. Losing the matrix that
+    # way is worse than not re-checking the description on an edit.
+    types: [opened, reopened, synchronize]
   push:
     branches: [main]
   schedule:
@@ -36,7 +41,6 @@ jobs:
       checkout_ref: ${{ steps.checkout-ref.outputs.ref }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       docs_changed: ${{ steps.scope.outputs.docs_changed }}
-      metadata_only: ${{ steps.scope.outputs.metadata_only }}
       run_rust: ${{ steps.scope.outputs.run_rust }}
     steps:
       - name: Resolve checkout ref
@@ -49,7 +53,7 @@ jobs:
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ steps.checkout-ref.outputs.ref }}
           fetch-depth: 0
@@ -59,10 +63,6 @@ jobs:
         id: scope
         env:
           EVENT_NAME: ${{ github.event_name }}
-          PR_ACTION: ${{ github.event.action }}
-          # `edited` also fires when the PR's base branch changes, which does
-          # change what CI must validate.
-          PR_BASE_CHANGED: ${{ github.event.action == 'edited' && github.event.changes.base != null }}
           PUSH_BASE: ${{ github.event_name == 'push' && github.event.before || '' }}
           PR_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
         run: |
@@ -70,16 +70,6 @@ jobs:
 
           docs_only=false
           docs_changed=true
-
-          # A title/body edit carries the same commits as the run before it. The
-          # `edited` trigger exists for the PR-description check; re-running the
-          # build matrix for it only supersedes the in-flight run.
-          metadata_only=false
-          if [ "$EVENT_NAME" = "pull_request" ] \
-            && [ "$PR_ACTION" = "edited" ] \
-            && [ "$PR_BASE_CHANGED" != "true" ]; then
-            metadata_only=true
-          fi
 
           if [ "$EVENT_NAME" != "workflow_dispatch" ]; then
             base="$PR_BASE"
@@ -114,14 +104,13 @@ jobs:
           fi
 
           run_rust=true
-          if [ "$docs_only" = "true" ] || [ "$metadata_only" = "true" ]; then
+          if [ "$docs_only" = "true" ]; then
             run_rust=false
           fi
 
           {
             echo "docs_only=$docs_only"
             echo "docs_changed=$docs_changed"
-            echo "metadata_only=$metadata_only"
             echo "run_rust=$run_rust"
           } >> "$GITHUB_OUTPUT"
 
@@ -166,7 +155,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -175,7 +164,7 @@ jobs:
         uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2
 
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@6599ee8b7a49aef6a770f63d261d214911a7ce02 # v0.6.0
+        uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
         with:
           persona: pedantic
           min-severity: high
@@ -195,7 +184,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -260,20 +249,20 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
         with:
           languages: rust
           queries: security-extended,security-and-quality
           build-mode: none
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4
         with:
           category: /language:rust
           output: codeql-results
@@ -311,7 +300,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -332,7 +321,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -376,7 +365,7 @@ jobs:
             command: cargo test -p archductor-core -p archductor -p archcar --locked -- --test-threads=1
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -412,7 +401,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -465,7 +454,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -582,7 +571,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -640,7 +629,7 @@ jobs:
       PKG_CONFIG_ALLOW_CROSS: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -748,7 +737,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
@@ -812,7 +801,7 @@ jobs:
         run: apk add --no-cache bash ca-certificates curl gcompat git gcc musl-dev rustup pkgconf
 
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false

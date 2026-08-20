@@ -1,4 +1,4 @@
-import { createSignal, createResource, Show, Switch, Match, For } from "solid-js";
+import { createSignal, createResource, Show, Switch, Match, For, onCleanup, onMount } from "solid-js";
 import { actions, dialogs, workspacesStore, repositoriesStore, type ConfirmSpec } from "@/store";
 import {
   selectFolder,
@@ -14,9 +14,26 @@ import {
 // re-pulls the inventory on success.
 
 function Modal(props: { title: string; onClose: () => void; children: any }) {
+  let body: HTMLDivElement | undefined;
+  onMount(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        props.onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    queueMicrotask(() => {
+      const target = body?.querySelector<HTMLElement>(
+        "input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled])",
+      );
+      target?.focus();
+    });
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
   return (
     <div class="modal-scrim" onClick={props.onClose}>
-      <div class="modal-body dialog-card" onClick={(e) => e.stopPropagation()}>
+      <div class="modal-body dialog-card" ref={body} onClick={(e) => e.stopPropagation()}>
         <div class="dialog-header">
           <span class="dialog-title">{props.title}</span>
           <button class="ui-button-icon" title="Close" onClick={props.onClose}>
@@ -72,6 +89,19 @@ function relTime(iso: string): string {
     if (secs >= size) return `${Math.floor(secs / size)}${label} ago`;
   }
   return "just now";
+}
+
+function RepoCardAvatar(props: { repo: GithubRepo }) {
+  const [broken, setBroken] = createSignal(false);
+  const initials = () => (props.repo.owner || props.repo.name || "?").slice(0, 2).toUpperCase();
+  return (
+    <Show
+      when={props.repo.avatarUrl && !broken()}
+      fallback={<span class="repo-card-avatar repo-card-avatar-fallback">{initials()}</span>}
+    >
+      <img class="repo-card-avatar" src={props.repo.avatarUrl} alt="" loading="lazy" onError={() => setBroken(true)} />
+    </Show>
+  );
 }
 
 function AddProjectForm(props: { onDone: () => void }) {
@@ -185,9 +215,9 @@ function AddProjectForm(props: { onDone: () => void }) {
                         classList={{ selected: selected() }}
                         onClick={() => onSelectRepo(selected() ? undefined : repo)}
                       >
-                        <img class="repo-card-avatar" src={repo.avatarUrl} alt="" loading="lazy" />
+                        <RepoCardAvatar repo={repo} />
                         <div class="repo-card-text">
-                          <span class="repo-card-title">{repo.name}</span>
+                          <span class="repo-card-title">{repo.nameWithOwner || repo.name}</span>
                           <span class="repo-card-sub">{repo.owner} · edited {relTime(repo.pushedAt)}</span>
                         </div>
                         <span class="repo-card-action">{selected() ? "Selected" : "Select"}</span>

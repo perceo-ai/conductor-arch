@@ -1,5 +1,6 @@
-import { For, Show, createMemo, createResource, createSignal } from "solid-js";
-import { send } from "@/bridge/client";
+import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
+import { listWorkspaceFiles, send } from "@/bridge/client";
+import { materialFileIcon, materialFolderIcon } from "@/lib/materialFileIcons";
 
 // Right-panel "Browse" file tree — port of ws_simple_file_list. Core returns a
 // flat, capped file list (list_workspace_files); the tree is built client-side
@@ -42,6 +43,21 @@ function buildTree(paths: string[]): TreeNode[] {
   return root.children;
 }
 
+function collectDirPaths(nodes: TreeNode[], into = new Set<string>()): Set<string> {
+  for (const node of nodes) {
+    if (!node.dir) continue;
+    into.add(node.path);
+    collectDirPaths(node.children, into);
+  }
+  return into;
+}
+
+function MaterialIcon(props: { icon: () => { src: string; title: string }; class: string }) {
+  return (
+    <img class={`ws-material-icon ${props.class}`} src={props.icon().src} title={props.icon().title} alt="" loading="lazy" />
+  );
+}
+
 function Row(props: {
   node: TreeNode;
   depth: number;
@@ -56,14 +72,16 @@ function Row(props: {
       when={props.node.dir}
       fallback={
         <button class="ws-file-row" style={indent()} onClick={() => props.openFile(props.node.path)}>
-          <span class="ws-file-icon">·</span>
+          <MaterialIcon icon={() => materialFileIcon(props.node.path)} class="ws-file-kind-icon" />
           <span class="ws-file-name">{props.node.name}</span>
         </button>
       }
     >
       <button class="ws-dir-row" style={indent()} onClick={() => props.toggle(props.node.path)}>
-        <span class="ws-folder-toggle">{isCollapsed() ? "▸" : "▾"}</span>
-        <span class="ws-folder-icon">▪</span>
+        <MaterialIcon
+          icon={() => materialFolderIcon(props.node.path, !isCollapsed())}
+          class="ws-folder-kind-icon"
+        />
         <span class="ws-folder-name">{props.node.name}</span>
       </button>
       <Show when={!isCollapsed()}>
@@ -83,12 +101,16 @@ function Row(props: {
   );
 }
 
-export default function WorkspaceFiles(props: { workspace: string; openFile?: (path: string) => void }) {
+export default function WorkspaceFiles(props: { workspace: string; rootPath?: string; openFile?: (path: string) => void }) {
   const [files] = createResource(
-    () => props.workspace,
-    async (ws) => {
+    () => ({ workspace: props.workspace, rootPath: props.rootPath }),
+    async ({ workspace, rootPath }) => {
       try {
-        const res = await send({ type: "list_workspace_files", workspace: ws });
+        if (rootPath) {
+          const local = await listWorkspaceFiles({ rootPath, cap: 400 });
+          if (local.ok) return local.files;
+        }
+        const res = await send({ type: "list_workspace_files", workspace });
         return res.type === "workspace_files" ? res.files : [];
       } catch {
         // Daemon/socket unavailable — render an empty tree instead of throwing.
@@ -98,6 +120,15 @@ export default function WorkspaceFiles(props: { workspace: string; openFile?: (p
   );
   const tree = createMemo(() => buildTree(files() ?? []));
   const [collapsed, setCollapsed] = createSignal(new Set<string>());
+  let collapseSeed = "";
+  createEffect(() => {
+    const paths = files();
+    if (!paths) return;
+    const nextSeed = `${props.workspace}\0${paths.join("\0")}`;
+    if (collapseSeed === nextSeed) return;
+    collapseSeed = nextSeed;
+    setCollapsed(collectDirPaths(tree()));
+  });
   const toggle = (path: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);

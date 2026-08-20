@@ -11,6 +11,7 @@ import type { ArchcarWorkspaceSummary } from "@/bridge/protocol";
 export interface WorkspaceRow {
   id: number;
   name: string;
+  path: string;
   branch: string;
   baseRef: string;
   status: string; // "active" | "archived" | ...
@@ -23,6 +24,8 @@ export interface WorkspaceRow {
   activeSessions: number;
   runRunning: boolean;
   changedFiles: number;
+  branchAhead?: number;
+  branchBehind?: number;
   prNumber?: number;
   prState?: string;
   prUrl?: string;
@@ -40,6 +43,7 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
   return {
     id: s.id,
     name: s.name,
+    path: s.path,
     branch: s.branch,
     baseRef: s.base_ref,
     status: s.status,
@@ -52,6 +56,8 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
     activeSessions: s.active_sessions,
     runRunning: s.run_running,
     changedFiles: s.changed_files,
+    branchAhead: s.branch_ahead,
+    branchBehind: s.branch_behind,
     prNumber: s.pull_request_number,
     prState: s.pull_request_state,
     prUrl: s.pull_request_url,
@@ -72,6 +78,10 @@ export const workspacesStore = {
     logState("workspaces.setAll", { count: rows.length });
   },
 
+  setSummaries(summaries: ArchcarWorkspaceSummary[]) {
+    this.setAll(summaries.map(rowFromSummary));
+  },
+
   /** Patch a single field on one row — touches only that row. */
   patch(name: string, patch: Partial<WorkspaceRow>) {
     if (!state.byName[name]) return;
@@ -88,6 +98,6 @@ export const workspacesStore = {
   async refresh(): Promise<void> {
     const res = await send({ type: "list_workspaces" });
     if (res.type !== "workspaces") return;
-    this.setAll(res.workspaces.map(rowFromSummary));
+    this.setSummaries(res.workspaces);
   },
 };

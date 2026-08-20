@@ -280,6 +280,36 @@ pub fn render_provider_event_projection(
     ProviderProjection { items, signature }
 }
 
+/// Drop user messages the provider echoes back to us.
+///
+/// Archcar records a user event the moment it writes an input — that is what
+/// makes a sent message appear instantly. Claude, run with
+/// `--replay-user-messages`, then echoes the same text back as its own user
+/// record, so the timeline would show the message twice. Two user messages with
+/// the same body inside one turn (no assistant reply between them) are that
+/// echo; a genuine repeat send lands after the agent has answered.
+pub fn drop_echoed_user_messages(
+    items: Vec<ProviderProjectionItem>,
+) -> Vec<ProviderProjectionItem> {
+    let mut kept: Vec<ProviderProjectionItem> = Vec::with_capacity(items.len());
+    let mut turn_user_bodies: Vec<String> = Vec::new();
+    for item in items {
+        match item.render_class {
+            ProjectionRenderClass::UserChat => {
+                let body = item.body.trim().to_owned();
+                if !body.is_empty() && turn_user_bodies.contains(&body) {
+                    continue;
+                }
+                turn_user_bodies.push(body);
+            }
+            ProjectionRenderClass::AssistantChat => turn_user_bodies.clear(),
+            _ => {}
+        }
+        kept.push(item);
+    }
+    kept
+}
+
 pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjectionItem) -> bool {
     if provider_projection_item_is_parser_noise(item) {
         return false;
@@ -292,6 +322,12 @@ pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjection
                 item.status,
                 ProviderProjectionStatus::Failed | ProviderProjectionStatus::Canceled
             ) || (item.title == "Turn" && !item.body.trim().is_empty())
+        }
+        // An assistant message whose content was only tool calls, or a thinking
+        // block the provider withheld, projects to a bubble with nothing in it.
+        // Empty prose is never worth a row.
+        ProjectionRenderClass::AssistantChat | ProjectionRenderClass::ReasoningCard => {
+            !item.body.trim().is_empty()
         }
         _ => true,
     }
@@ -640,7 +676,17 @@ fn projection_item_from_event(
     event: ProviderProjectionEvent,
 ) -> ProviderProjectionItem {
     let render_class = render_class_for_category(event.category);
-    let title = projection_title(event.category, &event.title);
+    let mut title_source = event.title;
+    let mut body = event.body;
+    if event.category == ProviderProjectionCategory::Reasoning
+        && body.trim().is_empty()
+        && !title_source.trim().is_empty()
+        && title_source.trim() != "Reasoning"
+    {
+        body = title_source;
+        title_source = String::new();
+    }
+    let title = projection_title(event.category, &title_source);
     let raw_payload = event
         .raw_payload
         .as_ref()
@@ -665,7 +711,7 @@ fn projection_item_from_event(
         category: event.category,
         render_class,
         title,
-        body: event.body,
+        body,
         status: event.status,
         stream_state: event.stream_state,
         parent_id: event.parent_id,
@@ -1074,6 +1120,136 @@ mod tests {
             .unwrap();
 
         assert!(provider_projection_item_is_relevant_chat_event(&item));
+    }
+
+    #[test]
+    fn reasoning_projection_renders_title_only_summary_as_body_text() {
+        let mut event = record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Delta,
+            "item/reasoning/summaryTextDelta",
+        );
+        event.normalized_payload = json!({
+            "title": "Acknowledging ambiguous queue message",
+            "body": "",
+        });
+
+        let item = provider_projection_from_records(&[event])
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(item.render_class, ProjectionRenderClass::ReasoningCard);
+        assert_eq!(item.title, "Reasoning");
+        assert_eq!(item.body, "Acknowledging ambiguous queue message");
+        assert!(provider_projection_item_is_relevant_chat_event(&item));
+    }
+
+    #[test]
+    fn reasoning_projection_prefers_body_summary_over_generic_title() {
+        let mut event = record(
+            ProviderEventKind::PlanningReasoning,
+            ProviderEventPhase::Completed,
+            "item/reasoning/completed",
+        );
+        event.normalized_payload = json!({
+            "title": "Reasoning",
+            "body": "**Acknowledging ambiguous queue message**\n**Preparing status update**",
+        });
+
+        let item = provider_projection_from_records(&[event])
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(item.render_class, ProjectionRenderClass::ReasoningCard);
+        assert_eq!(
+            item.body,
+            "**Acknowledging ambiguous queue message**\n**Preparing status update**"
+        );
+    }
+
+    #[test]
+    fn chat_projection_drops_the_provider_echo_of_a_sent_user_message() {
+        let mut sent = record(
+            ProviderEventKind::UserInput,
+            ProviderEventPhase::Started,
+            "user_send",
+        );
+        sent.identity_key = "claude:7:archcar-session-9-user_send:input-1:stream".to_owned();
+        sent.provider_item_id = Some("archcar-session-9-user_send:input-1".to_owned());
+        sent.normalized_payload = json!({ "title": "User input", "body": "run the tests" });
+        let mut echo = record(
+            ProviderEventKind::UserInput,
+            ProviderEventPhase::Completed,
+            "user",
+        );
+        echo.identity_key = "claude:7:claude-echo-1:completed".to_owned();
+        echo.provider_item_id = Some("claude-echo-1".to_owned());
+        echo.provider_sequence = Some(2);
+        echo.received_sequence = 2;
+        echo.timeline_seq = Some(2);
+        echo.normalized_payload = json!({ "title": "User", "body": "run the tests" });
+
+        let items =
+            drop_echoed_user_messages(provider_projection_from_records(&[sent, echo]).items);
+
+        let user_bodies = items
+            .iter()
+            .filter(|item| item.render_class == ProjectionRenderClass::UserChat)
+            .map(|item| item.body.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(user_bodies, vec!["run the tests".to_owned()]);
+    }
+
+    #[test]
+    fn chat_projection_keeps_a_repeated_prompt_sent_after_the_agent_replied() {
+        let mut first = record(
+            ProviderEventKind::UserInput,
+            ProviderEventPhase::Started,
+            "user_send",
+        );
+        first.identity_key = "claude:7:archcar-session-9-user_send:input-1:stream".to_owned();
+        first.provider_item_id = Some("archcar-session-9-user_send:input-1".to_owned());
+        first.normalized_payload = json!({ "title": "User input", "body": "continue" });
+        let mut reply = record(
+            ProviderEventKind::AssistantOutput,
+            ProviderEventPhase::Completed,
+            "assistant",
+        );
+        reply.identity_key = "claude:7:assistant-1:completed".to_owned();
+        reply.provider_item_id = Some("assistant-1".to_owned());
+        reply.provider_sequence = Some(2);
+        reply.received_sequence = 2;
+        reply.timeline_seq = Some(2);
+        reply.normalized_payload = json!({ "title": "Assistant", "body": "done" });
+        let mut second = record(
+            ProviderEventKind::UserInput,
+            ProviderEventPhase::Started,
+            "user_send",
+        );
+        second.identity_key = "claude:7:archcar-session-9-user_send:input-2:stream".to_owned();
+        second.provider_item_id = Some("archcar-session-9-user_send:input-2".to_owned());
+        second.provider_sequence = Some(3);
+        second.received_sequence = 3;
+        second.timeline_seq = Some(3);
+        second.normalized_payload = json!({ "title": "User input", "body": "continue" });
+
+        let items = drop_echoed_user_messages(
+            provider_projection_from_records(&[first, reply, second]).items,
+        );
+
+        let user_bodies = items
+            .iter()
+            .filter(|item| item.render_class == ProjectionRenderClass::UserChat)
+            .map(|item| item.body.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            user_bodies,
+            vec!["continue".to_owned(), "continue".to_owned()]
+        );
     }
 
     #[test]

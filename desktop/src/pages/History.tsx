@@ -51,7 +51,6 @@ export function HistoryPage() {
     <div class="page-shell history-view">
       <div class="page-header dashboard-header">
         <div class="dashboard-title">History</div>
-        <div class="dashboard-subtitle">Workspaces across your projects, most active first.</div>
         <div class="project-tabs">
           <For each={FILTERS}>
             {(f) => (
@@ -75,11 +74,16 @@ export function HistoryPage() {
             {(r) => (
               <button class="history-row" onClick={() => nav.selectWorkspace(r.name)}>
                 <span class="history-row-head">
-                  <span
-                    class="workspace-status-dot"
-                    style={{ "background-color": STATUS_COLOR[workspaceStatusKind(r)] }}
-                    title={STATUS_LABEL[workspaceStatusKind(r)]}
-                  />
+                  <Show
+                    when={nav.selectedWorkspace() !== r.name}
+                    fallback={<span class="workspace-status-dot-spacer" aria-hidden="true" />}
+                  >
+                    <span
+                      class="workspace-status-dot"
+                      style={{ "background-color": STATUS_COLOR[workspaceStatusKind(r)] }}
+                      title={STATUS_LABEL[workspaceStatusKind(r)]}
+                    />
+                  </Show>
                   <span class="workspace-name">{titleCaseWorkspace(r.name)}</span>
                 </span>
                 <span class="workspace-meta">
@@ -87,7 +91,10 @@ export function HistoryPage() {
                 </span>
                 <span class="card-meta">
                   <Show when={r.additions || r.deletions}>
-                    +{r.additions} −{r.deletions}
+                    <span class="workspace-row-diff">
+                      <span class="workspace-row-additions">+{r.additions}</span>
+                      <span class="workspace-row-deletions">-{r.deletions}</span>
+                    </span>
                     <Show when={r.openTodos > 0}> · </Show>
                   </Show>
                   <Show when={r.openTodos > 0}>

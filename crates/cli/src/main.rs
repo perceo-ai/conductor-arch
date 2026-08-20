@@ -2,10 +2,12 @@ use anyhow::{Context, Result};
 use archductor_core::archcar::client::{
     configured_remote_endpoint, ArchcarClient, ArchcarEndpoint,
 };
-use archductor_core::archcar::harness_contract::ProviderInteractionResolution;
+use archductor_core::archcar::harness_contract::{
+    InteractionAnswer, ProviderInteractionResolution,
+};
 use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
-    QueuedArchcarInput, WorkspaceChangeScope,
+    QueuedArchcarInput, WorkspaceChangeScope, WorkspaceGitAction,
 };
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -90,6 +92,13 @@ enum Command {
         name_only: bool,
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Include staged changes too, diffing everything against HEAD
+        /// (default: unstaged only).
+        #[arg(long)]
+        uncommitted: bool,
+        /// Diff one commit's changes. Takes precedence over --uncommitted.
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
     },
     Pr {
         #[command(subcommand)]
@@ -258,6 +267,11 @@ enum ArchcarCommand {
         session_id: i64,
         level: String,
     },
+    Fast {
+        session_id: i64,
+        #[arg(long)]
+        off: bool,
+    },
     PermissionMode {
         session_id: i64,
         mode: String,
@@ -273,8 +287,23 @@ enum ArchcarCommand {
     Kill {
         session_id: i64,
     },
+    /// Put a chat into or out of plan mode (agent researches and proposes
+    /// instead of building).
+    PlanMode {
+        thread_id: i64,
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        #[arg(long)]
+        off: bool,
+    },
+    /// Show the plan a chat is working from.
+    Plan {
+        thread_id: i64,
+    },
     /// List all workspaces with status counts.
     Workspaces,
+    /// List repositories, workspaces, and active chat strips in one request.
+    InventorySnapshot,
     /// List repositories with workspace counts.
     Repositories,
     /// List chat threads for a workspace.
@@ -284,6 +313,20 @@ enum ArchcarCommand {
     /// Print the projected chat timeline for a thread.
     ChatProjection {
         thread_id: i64,
+    },
+    /// List recent non-empty chats offered as attachable transcripts.
+    ChatTranscripts {
+        workspace: String,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Print one chat's user/agent transcript (no tool calls).
+    ChatTranscript {
+        thread_id: i64,
+    },
+    /// List plan markdown saved under the workspace's .context/plans/.
+    ContextPlans {
+        workspace: String,
     },
     /// List files in a workspace checkout (for the file browser).
     WorkspaceFiles {
@@ -327,6 +370,9 @@ enum ArchcarCommand {
     CommitDiff {
         workspace: String,
         commit: String,
+        /// Limit the patch to one file.
+        #[arg(long)]
+        path: Option<String>,
     },
     /// List a workspace's configured check commands.
     CheckList {
@@ -356,6 +402,12 @@ enum ArchcarCommand {
     /// Print GitHub PR readiness detail (gh pr view) for a workspace.
     PrReadiness {
         workspace: String,
+    },
+    /// Print the prompt-pack-resolved agent prompt for a workspace Git action.
+    GitActionPrompt {
+        workspace: String,
+        #[arg(long, value_enum)]
+        action: CliWorkspaceGitAction,
     },
     /// Show spotlight-testing status for a workspace.
     SpotlightStatus {
@@ -387,11 +439,20 @@ enum ArchcarCommand {
         /// Show all changes vs the review base (default: uncommitted only).
         #[arg(long)]
         all: bool,
+        /// Show one commit's changes instead. Takes precedence over --all.
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
     },
-    /// Print the three-section unified diff for a workspace.
+    /// Print the unified diff for a workspace, or for one file in it.
     WorkspaceDiff {
         workspace: String,
         path: Option<String>,
+        /// Diff uncommitted changes only (default: everything vs the review base).
+        #[arg(long)]
+        uncommitted: bool,
+        /// Diff one commit's changes. Takes precedence over --uncommitted.
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
     },
     /// List todos for a workspace.
     Todos {
@@ -628,6 +689,27 @@ enum ArchcarCommand {
         workspace: String,
         #[arg(long = "session")]
         session_id: Option<i64>,
+    },
+    /// Refresh and store a continuously maintained summary.
+    RefreshSummary {
+        workspace: String,
+        /// workspace | session | current_chat | task
+        #[arg(long = "scope-type", default_value = "workspace")]
+        scope_type: String,
+        #[arg(long = "scope-id")]
+        scope_id: Option<i64>,
+    },
+    /// Print the combined workspace/current-chat/tasks context briefing.
+    ContextBriefing {
+        workspace: String,
+        #[arg(long = "thread-id")]
+        thread_id: Option<i64>,
+    },
+    /// Create native tasks from clear action items in chat.
+    SyncChatTasks {
+        workspace: String,
+        #[arg(long = "thread-id")]
+        thread_id: Option<i64>,
     },
     /// List branch-local context attachments.
     Context {
@@ -1105,6 +1187,14 @@ enum CliArchcarInputKind {
     RawTerminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliWorkspaceGitAction {
+    CreatePr,
+    PushBranch,
+    MergePr,
+    OpenPr,
+}
+
 #[cfg(windows)]
 fn main() -> Result<()> {
     thread::Builder::new()
@@ -1237,6 +1327,22 @@ fn run_cli() -> Result<()> {
                         response => print_archcar_response(response),
                     }
                 }
+                ArchcarCommand::PlanMode { thread_id, on, off } => {
+                    let plan_mode = if off { false } else { on || !off };
+                    match client.send(ArchcarRequest::SetChatPlanMode {
+                        thread_id,
+                        plan_mode,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::Plan { thread_id } => {
+                    match client.send(ArchcarRequest::GetChatPlan { thread_id })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
                 ArchcarCommand::Queue { command } => match command {
                     ArchcarQueueCommand::Add {
                         thread_id,
@@ -1363,6 +1469,15 @@ fn run_cli() -> Result<()> {
                         response => print_archcar_response(response),
                     }
                 }
+                ArchcarCommand::Fast { session_id, off } => {
+                    match client.send(ArchcarRequest::SetSessionFastMode {
+                        session_id,
+                        fast_mode: !off,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
                 ArchcarCommand::PermissionMode { session_id, mode } => {
                     match client
                         .send(ArchcarRequest::SetSessionPermissionMode { session_id, mode })?
@@ -1396,6 +1511,12 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::Workspaces => {
                     print_archcar_response(client.send(ArchcarRequest::ListWorkspaces)?);
                 }
+                ArchcarCommand::InventorySnapshot => {
+                    match client.send(ArchcarRequest::GetInventorySnapshot)? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
                 ArchcarCommand::Repositories => {
                     print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
                 }
@@ -1407,6 +1528,21 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::ChatProjection { thread_id } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetChatProjection { thread_id })?,
+                    );
+                }
+                ArchcarCommand::ChatTranscripts { workspace, limit } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListChatTranscripts { workspace, limit })?,
+                    );
+                }
+                ArchcarCommand::ChatTranscript { thread_id } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetChatTranscript { thread_id })?,
+                    );
+                }
+                ArchcarCommand::ContextPlans { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListContextPlans { workspace })?,
                     );
                 }
                 ArchcarCommand::WorkspaceFiles { workspace } => {
@@ -1452,10 +1588,16 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::GetCommitMessageDraft { workspace })?,
                     );
                 }
-                ArchcarCommand::CommitDiff { workspace, commit } => {
-                    print_archcar_response(
-                        client.send(ArchcarRequest::GetCommitDiff { workspace, commit })?,
-                    );
+                ArchcarCommand::CommitDiff {
+                    workspace,
+                    commit,
+                    path,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetCommitDiff {
+                        workspace,
+                        commit,
+                        path,
+                    })?);
                 }
                 ArchcarCommand::CheckList { workspace } => {
                     print_archcar_response(
@@ -1499,6 +1641,14 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::GetPullRequestReadiness { workspace })?,
                     );
                 }
+                ArchcarCommand::GitActionPrompt { workspace, action } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::GetWorkspaceGitActionPrompt {
+                            workspace,
+                            action: action.into(),
+                        },
+                    )?);
+                }
                 ArchcarCommand::SpotlightStatus { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSpotlightStatus { workspace })?,
@@ -1538,20 +1688,42 @@ fn run_cli() -> Result<()> {
                         content,
                     })?);
                 }
-                ArchcarCommand::WorkspaceChanges { workspace, all } => {
-                    let scope = if all {
-                        WorkspaceChangeScope::All
-                    } else {
-                        WorkspaceChangeScope::Uncommitted
-                    };
+                ArchcarCommand::WorkspaceChanges {
+                    workspace,
+                    all,
+                    commit,
+                } => {
+                    let scope = change_scope(
+                        commit,
+                        if all {
+                            WorkspaceChangeScope::All
+                        } else {
+                            WorkspaceChangeScope::Uncommitted
+                        },
+                    );
                     print_archcar_response(
                         client.send(ArchcarRequest::GetWorkspaceChanges { workspace, scope })?,
                     );
                 }
-                ArchcarCommand::WorkspaceDiff { workspace, path } => {
-                    print_archcar_response(
-                        client.send(ArchcarRequest::GetWorkspaceDiff { workspace, path })?,
+                ArchcarCommand::WorkspaceDiff {
+                    workspace,
+                    path,
+                    uncommitted,
+                    commit,
+                } => {
+                    let scope = change_scope(
+                        commit,
+                        if uncommitted {
+                            WorkspaceChangeScope::Uncommitted
+                        } else {
+                            WorkspaceChangeScope::All
+                        },
                     );
+                    print_archcar_response(client.send(ArchcarRequest::GetWorkspaceDiff {
+                        workspace,
+                        path,
+                        scope,
+                    })?);
                 }
                 ArchcarCommand::Todos { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::ListTodos { workspace })?);
@@ -1765,6 +1937,35 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(client.send(ArchcarRequest::DraftSummary {
                         workspace,
                         session_id,
+                    })?);
+                }
+                ArchcarCommand::RefreshSummary {
+                    workspace,
+                    scope_type,
+                    scope_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::RefreshSummary {
+                        workspace,
+                        scope_type,
+                        scope_id,
+                    })?);
+                }
+                ArchcarCommand::ContextBriefing {
+                    workspace,
+                    thread_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetContextBriefing {
+                        workspace,
+                        thread_id,
+                    })?);
+                }
+                ArchcarCommand::SyncChatTasks {
+                    workspace,
+                    thread_id,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::SyncChatTasks {
+                        workspace,
+                        thread_id,
                     })?);
                 }
                 ArchcarCommand::Context { workspace } => {
@@ -2311,12 +2512,21 @@ fn run_cli() -> Result<()> {
             workspace,
             name_only,
             file,
+            uncommitted,
+            commit,
         } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             if name_only {
                 for path in store.changed_files(&workspace)? {
                     println!("{path}");
                 }
+            } else if let Some(commit) = commit {
+                print!(
+                    "{}",
+                    store.commit_diff(&workspace, &commit, file.as_deref())?
+                );
+            } else if uncommitted {
+                print!("{}", store.uncommitted_diff(&workspace, file.as_deref())?);
             } else {
                 print!("{}", store.unified_diff(&workspace, file.as_deref())?);
             }
@@ -2881,6 +3091,15 @@ fn refresh_all_repository_prompt_snapshots(paths: &AppPaths) -> Result<usize> {
     })
 }
 
+/// Resolve a change scope from CLI flags. Naming a commit is unambiguous about
+/// which changes are wanted, so it wins over the working-tree flags.
+fn change_scope(commit: Option<String>, default: WorkspaceChangeScope) -> WorkspaceChangeScope {
+    match commit {
+        Some(sha) => WorkspaceChangeScope::Commit { sha },
+        None => default,
+    }
+}
+
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
@@ -2969,6 +3188,31 @@ fn print_archcar_response(response: ArchcarResponse) {
                 );
             }
         }
+        ArchcarResponse::InventorySnapshot {
+            repositories,
+            workspaces,
+            chat_threads,
+        } => {
+            println!(
+                "inventory_snapshot repositories={} workspaces={} chat_workspaces={}",
+                repositories.len(),
+                workspaces.len(),
+                chat_threads.len()
+            );
+            for repo in repositories {
+                println!(
+                    "repo {} active_workspaces={} total_workspaces={}",
+                    repo.name, repo.active_workspaces, repo.total_workspaces
+                );
+            }
+            for ws in workspaces {
+                let chat_count = chat_threads.get(&ws.name).map(Vec::len).unwrap_or(0);
+                println!(
+                    "workspace {} repo={} branch={} status={} chats={}",
+                    ws.name, ws.repository_name, ws.branch, ws.status, chat_count
+                );
+            }
+        }
         ArchcarResponse::ChatThreads { workspace, threads } => {
             println!("chat_threads {} {}", workspace, threads.len());
             for t in threads {
@@ -2984,6 +3228,36 @@ fn print_archcar_response(response: ArchcarResponse) {
                 let preview = item.body.replace('\n', " ");
                 let preview: String = preview.chars().take(80).collect();
                 println!("[{}] {} {}", item.render_class, item.status, preview);
+            }
+        }
+        ArchcarResponse::ChatTranscripts {
+            workspace,
+            transcripts,
+        } => {
+            println!("chat_transcripts {} {}", workspace, transcripts.len());
+            for t in transcripts {
+                println!(
+                    "{} provider={} messages={} updated={} {}",
+                    t.thread_id, t.provider, t.message_count, t.updated_at, t.title
+                );
+            }
+        }
+        ArchcarResponse::ChatTranscript {
+            thread_id,
+            title,
+            messages,
+        } => {
+            println!("chat_transcript {} {} {}", thread_id, messages.len(), title);
+            for message in messages {
+                let preview = message.content.replace('\n', " ");
+                let preview: String = preview.chars().take(120).collect();
+                println!("[{}] {}", message.role, preview);
+            }
+        }
+        ArchcarResponse::ContextPlans { workspace, plans } => {
+            println!("context_plans {} {}", workspace, plans.len());
+            for plan in plans {
+                println!("{} {}", plan.path, plan.title);
             }
         }
         ArchcarResponse::WorkspaceFiles { workspace, files } => {
@@ -3355,6 +3629,16 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("title: {title}");
             println!("{body}");
         }
+        ArchcarResponse::WorkspaceGitActionPrompt {
+            workspace,
+            action,
+            prompt,
+            visible_input,
+        } => {
+            println!("workspace_git_action_prompt workspace={workspace} action={action:?}");
+            println!("visible_input: {visible_input}");
+            println!("{prompt}");
+        }
         ArchcarResponse::Tasks { workspace, tasks } => {
             println!("tasks workspace={workspace} count={}", tasks.len());
             for task in tasks {
@@ -3423,6 +3707,29 @@ fn print_archcar_response(response: ArchcarResponse) {
         } => {
             println!("summary_draft workspace={workspace}");
             println!("{body_markdown}");
+        }
+        ArchcarResponse::SummaryRefreshed { workspace, result } => {
+            println!(
+                "summary_refreshed workspace={workspace} scope={} scope_id={} changed={} summary=#{}",
+                result.summary.scope_type,
+                result.summary.scope_id,
+                result.changed,
+                result.summary.id
+            );
+        }
+        ArchcarResponse::ContextBriefing { briefing } => {
+            println!(
+                "context_briefing workspace={} chars={}",
+                briefing.workspace,
+                briefing.body_markdown.chars().count()
+            );
+            println!("{}", briefing.body_markdown);
+        }
+        ArchcarResponse::TasksSynced { result } => {
+            println!(
+                "tasks_synced workspace={} created={} updated={} task_ids={:?}",
+                result.workspace, result.created, result.updated, result.task_ids
+            );
         }
         ArchcarResponse::ContextAttachments {
             workspace,
@@ -3570,6 +3877,20 @@ fn print_archcar_response(response: ArchcarResponse) {
                 );
             }
         }
+        ArchcarResponse::ChatPlan {
+            thread_id,
+            plan_mode,
+            plan_path,
+            plan_markdown,
+        } => {
+            println!(
+                "chat_plan thread={thread_id} plan_mode={plan_mode} path={}",
+                plan_path.as_deref().unwrap_or("-")
+            );
+            if let Some(markdown) = plan_markdown {
+                println!("{markdown}");
+            }
+        }
         ArchcarResponse::Error { message } => {
             eprintln!("{message}");
         }
@@ -3676,21 +3997,30 @@ fn provider_interaction_status_label(interaction: &ProviderInteractionRecord) ->
     }
 }
 
-fn parse_answers_json(value: &str) -> Result<Vec<(String, String)>> {
+/// `{"question-id": "answer"}` or `{"question-id": ["a", "b"]}` — providers
+/// allow more than one choice per question.
+fn parse_answers_json(value: &str) -> Result<Vec<InteractionAnswer>> {
     let json = serde_json::from_str::<serde_json::Value>(value).context("parse --answers-json")?;
     let object = json
         .as_object()
         .context("--answers-json must be a JSON object")?;
     Ok(object
         .iter()
-        .map(|(key, value)| {
-            (
-                key.clone(),
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| value.to_string()),
-            )
+        .map(|(key, value)| InteractionAnswer {
+            question_id: key.clone(),
+            values: match value {
+                serde_json::Value::Array(values) => values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| value.to_string())
+                    })
+                    .collect(),
+                serde_json::Value::String(value) => vec![value.clone()],
+                other => vec![other.to_string()],
+            },
         })
         .collect())
 }
@@ -4075,6 +4405,17 @@ impl From<CliArchcarInputKind> for ArchcarInputKind {
             CliArchcarInputKind::ReviewPrompt => Self::ReviewPrompt,
             CliArchcarInputKind::ControlCommand => Self::ControlCommand,
             CliArchcarInputKind::RawTerminal => Self::RawTerminal,
+        }
+    }
+}
+
+impl From<CliWorkspaceGitAction> for WorkspaceGitAction {
+    fn from(value: CliWorkspaceGitAction) -> Self {
+        match value {
+            CliWorkspaceGitAction::CreatePr => Self::CreatePr,
+            CliWorkspaceGitAction::PushBranch => Self::PushBranch,
+            CliWorkspaceGitAction::MergePr => Self::MergePr,
+            CliWorkspaceGitAction::OpenPr => Self::OpenPr,
         }
     }
 }
@@ -5081,6 +5422,26 @@ mod tests {
         assert_eq!(session_id, 7);
         assert_eq!(level, "high");
 
+        let fast = Cli::try_parse_from(["archductor", "archcar", "fast", "7"]).unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::Fast { session_id, off },
+        } = fast.command
+        else {
+            panic!("expected archcar fast");
+        };
+        assert_eq!(session_id, 7);
+        assert!(!off);
+
+        let slow = Cli::try_parse_from(["archductor", "archcar", "fast", "7", "--off"]).unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::Fast { session_id, off },
+        } = slow.command
+        else {
+            panic!("expected archcar fast --off");
+        };
+        assert_eq!(session_id, 7);
+        assert!(off);
+
         let permission =
             Cli::try_parse_from(["archductor", "archcar", "permission-mode", "7", "default"])
                 .unwrap();
@@ -5238,7 +5599,10 @@ mod tests {
         assert_eq!(interaction_id, "interaction-1");
         assert_eq!(
             parse_answers_json(&answers_json).unwrap(),
-            vec![("scope".to_owned(), "yes".to_owned())]
+            vec![InteractionAnswer {
+                question_id: "scope".to_owned(),
+                values: vec!["yes".to_owned()],
+            }]
         );
 
         let always = Cli::try_parse_from([
@@ -5672,7 +6036,26 @@ mod tests {
             kind: archductor_core::archcar::harness_contract::ProviderInteractionKind::UserQuestion,
             title: "Need input".to_owned(),
             detail: "Pick a scope".to_owned(),
-            choices: vec!["yes".to_owned(), "no".to_owned()],
+            questions: vec![
+                archductor_core::archcar::harness_contract::InteractionQuestion {
+                    id: "scope".to_owned(),
+                    header: "Scope".to_owned(),
+                    question: "Pick a scope".to_owned(),
+                    options: ["yes", "no"]
+                        .into_iter()
+                        .map(|label| {
+                            archductor_core::archcar::harness_contract::InteractionOption {
+                                label: label.to_owned(),
+                                description: String::new(),
+                            }
+                        })
+                        .collect(),
+                    allow_other: false,
+                    multi_select: false,
+                },
+            ],
+            auto_resolution_ms: None,
+            plan_path: None,
             native_request: serde_json::json!({"secret": "raw"}),
             request_fingerprint: "fingerprint".to_owned(),
             status: archductor_core::provider_interactions::ProviderInteractionStatus::Pending,

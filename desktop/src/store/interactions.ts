@@ -19,6 +19,14 @@ export const interactionsStore = {
     return state.byThread[threadId];
   },
 
+  /** Seed from a fetch — the window may have missed the original event. */
+  setPending(threadId: number, pending: ProviderInteractionRecord[]) {
+    const next = pending.find((rec) => rec.status === "pending");
+    if (next) setState("byThread", threadId, next);
+    else if (state.byThread[threadId]) setState("byThread", threadId, undefined!);
+    recordUpdate(`interactions.setPending.${threadId}`);
+  },
+
   request(rec: ProviderInteractionRecord) {
     setState("byThread", rec.thread_id, rec);
     recordUpdate(`interactions.request.${rec.thread_id}`);

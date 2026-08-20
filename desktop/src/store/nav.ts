@@ -6,11 +6,11 @@ import { normalizeRightPanelTab, type RightPanelTab } from "@/lib/rightPanelTabs
 // reading `activePage` does not couple a component to `selectedChatThread`, etc.
 // This is the fine-grained equivalent of the AppStateEvent selection events.
 
-export type AppPage = "dashboard" | "projects" | "workspace" | "history" | "settings" | "review";
+export type AppPage = "dashboard" | "workspace" | "history" | "settings" | "review";
 
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");
-const [rightPanelTab, setRightPanelTabRaw] = createSignal<RightPanelTab>("summary");
+const [rightPanelTab, setRightPanelTabRaw] = createSignal<RightPanelTab>("changes");
 const [selectedChatThread, setSelectedChatThread] = createSignal<number | null>(null);
 const [windowFocused, setWindowFocused] = createSignal(true);
 

@@ -67,7 +67,8 @@ schema is `crates/core/src/archcar/protocol.rs` (`ArchcarRequest`,
 `ArchcarResponse`, `ArchcarEvent`), mirrored for TypeScript clients in
 `desktop/src/bridge/protocol.ts`. A `subscribe` request upgrades the
 connection to a stream of `ArchcarEvent` envelopes (session lifecycle, queue
-updates, provider interactions, background-task updates).
+updates, provider interactions, background-task updates, inventory
+invalidation).
 
 Errors are always `{"type": "error", "message": "..."}` — never a dropped
 connection for a well-formed request.
@@ -76,6 +77,9 @@ connection for a well-formed request.
 
 Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
 
+- Startup sync: `get_inventory_snapshot` returns repositories, workspaces, and
+  chat-thread strips for active workspaces in one response; follow with
+  `subscribe` and refresh narrowly on `inventory_changed` events.
 - Repositories and workspaces: add/clone, create (branch, prompt, GitHub
   issue/PR, Linear), lifecycle (archive/restore/rename/duplicate/delete),
   branches, linked directories.
@@ -85,11 +89,34 @@ Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
 - Tasks: CRUD with status, human `owner`, `owner_session_id`, linked
   sessions, intended areas, blocked reason, review notes.
 - Summaries: workspace/session/task/review/handoff scopes, drafting.
+- Context briefing: `get_context_briefing` returns the current workspace,
+  current-chat, task, and next-action context for AI clients without exposing
+  UI state.
+- Summary maintenance: `refresh_summary` updates workspace/session/task
+  summaries from local evidence and is used by the desktop Summary tab plus
+  MCP clients; changed summaries broadcast `summary_updated` events.
+- Chat task sync: `sync_chat_tasks` creates native workspace tasks from clear
+  action items in chat and deduplicates by normalized title.
+- Chat transcripts: `list_chat_transcripts` (recent non-empty chats, default 8)
+  and `get_chat_transcript` (one chat's user/agent messages, tool calls
+  excluded) back the new-chat screen's attachable context.
+- Plans: `list_context_plans` lists `.context/plans/*.md` for a workspace; read
+  a plan body with `read_workspace_file`.
 - Context attachments: branch-local notes/files/pins (`archivum` source is
   reserved for the future integration).
 - Diffs and provenance: branch diff, per-session contributions,
   `snapshot_diff_contribution` / `list_diff_contributions` (durable patch +
   risks/blockers), checkpoints incl. `compare_checkpoint`.
+- Change scopes: `get_workspace_changes` and `get_workspace_diff` both take a
+  `scope` — `"all"` (vs the review base), `"uncommitted"` (staged + unstaged
+  against HEAD, as one patch), or `{"commit": {"sha": "..."}}`. The file list
+  and the diff for a file picked out of it share the scope, so a file opened
+  from a commit shows that commit's changes rather than everything since the
+  base. `get_workspace_diff` returns the single diff for the requested scope;
+  it previously returned a three-section document (working tree / unstaged /
+  staged concatenated under headings), whose sections overlapped. `scope`
+  defaults to `"all"`, so clients that omit it keep the old default view.
+  `get_commit_diff` takes an optional `path` to narrow a commit to one file.
 - Checks and review: configured check list/run/logs, review comments, PR
   draft/create/refresh/merge, readiness detail.
 - Background tasks: `start_background_task` (one or more managed agents via

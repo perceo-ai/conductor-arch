@@ -1,5 +1,6 @@
 // Renderer-side wrapper around the preload bridge (window.archductor).
 import type { ArchcarRequest, ArchcarResponse, ArchcarEvent } from "./protocol";
+import type { WorkspaceOpenAppId } from "@/lib/workspaceOpenApps";
 
 export interface GithubRepo {
   nameWithOwner: string;
@@ -31,10 +32,14 @@ interface ArchductorApi {
     { ok: true; items: GithubWorkItem[] } | { ok: false; error: string }
   >;
   pathExists(p: string): Promise<{ exists: boolean }>;
+  listWorkspaceFiles(opts: { rootPath: string; cap?: number }): Promise<
+    { ok: true; files: string[] } | { ok: false; error: string }
+  >;
   repoAvatar(opts: { rootPath: string; remoteName?: string }): Promise<
     { ok: true; avatarUrl: string } | { ok: false; error: string }
   >;
   openExternal(target: string): Promise<{ ok: boolean; error?: string }>;
+  openWorkspaceApp(opts: { rootPath: string; appId: WorkspaceOpenAppId }): Promise<{ ok: boolean; error?: string }>;
   checkForUpdates(): Promise<
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
@@ -100,12 +105,20 @@ export const listGithubWork = (opts: { rootPath: string }) => api().listGithubWo
 /** Check whether a filesystem path currently exists. */
 export const pathExists = (p: string) => api().pathExists(p);
 
+/** Fast local file list for the workspace browser. */
+export const listWorkspaceFiles = (opts: { rootPath: string; cap?: number }) =>
+  api().listWorkspaceFiles(opts);
+
 /** Resolve a local repo's owner avatar URL from its git remote. */
 export const repoAvatar = (opts: { rootPath: string; remoteName?: string }) =>
   api().repoAvatar(opts);
 
 /** Open a URL in the browser or a filesystem path in the OS default app. */
 export const openExternal = (target: string) => api().openExternal(target);
+
+/** Open a workspace in a registered local editor app. */
+export const openWorkspaceApp = (opts: { rootPath: string; appId: WorkspaceOpenAppId }) =>
+  api().openWorkspaceApp(opts);
 
 /** Check GitHub releases for a newer packaged Archductor build. */
 export const checkForUpdates = () => api().checkForUpdates();

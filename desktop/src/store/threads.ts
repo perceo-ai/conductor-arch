@@ -12,6 +12,7 @@ interface ThreadsState {
 }
 
 const [state, setState] = createStore<ThreadsState>({ byWorkspace: {} });
+const workspaceByThread = new Map<number, string>();
 
 export const threadsStore = {
   state,
@@ -21,8 +22,25 @@ export const threadsStore = {
   },
 
   setThreads(workspace: string, threads: ArchcarChatThread[]) {
+    for (const [threadId, owner] of workspaceByThread) {
+      if (owner === workspace) workspaceByThread.delete(threadId);
+    }
+    for (const thread of threads) workspaceByThread.set(thread.id, workspace);
     setState("byWorkspace", workspace, reconcile(threads, { key: "id", merge: true }));
     recordUpdate(`threads.${workspace}`);
+  },
+
+  setMany(threadsByWorkspace: Record<string, ArchcarChatThread[]>) {
+    for (const [workspace, threads] of Object.entries(threadsByWorkspace)) {
+      this.setThreads(
+        workspace,
+        threads.filter((t) => t.status !== "closed"),
+      );
+    }
+  },
+
+  workspaceForThread(threadId: number): string | undefined {
+    return workspaceByThread.get(threadId);
   },
 
   async refresh(workspace: string): Promise<ArchcarChatThread[]> {
@@ -33,5 +51,9 @@ export const threadsStore = {
     const open = res.threads.filter((t) => t.status !== "closed");
     this.setThreads(workspace, open);
     return open;
+  },
+
+  async refreshMany(workspaces: string[]): Promise<void> {
+    await Promise.all(workspaces.map((workspace) => this.refresh(workspace).catch(() => [])));
   },
 };

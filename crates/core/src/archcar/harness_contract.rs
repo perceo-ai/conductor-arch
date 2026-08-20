@@ -171,6 +171,7 @@ pub struct DesiredHarnessControls {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    pub fast_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +215,35 @@ pub enum ProviderInteractionKind {
     PlanApproval,
 }
 
+/// One selectable answer for an interaction question. Both providers describe
+/// options as a short label plus a longer description.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractionOption {
+    pub label: String,
+    pub description: String,
+}
+
+/// One question inside an interaction. Providers ask in batches (codex's
+/// `item/tool/requestUserInput`, Claude's `AskUserQuestion`), each question
+/// carrying its own options, so a flat choice list cannot represent them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractionQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Vec<InteractionOption>,
+    /// The asker accepts free text beyond the listed options.
+    pub allow_other: bool,
+    /// More than one option may be chosen.
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractionAnswer {
+    pub question_id: String,
+    pub values: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderInteractionDraft {
     pub provider_key: String,
@@ -225,7 +255,10 @@ pub struct ProviderInteractionDraft {
     pub kind: ProviderInteractionKind,
     pub title: String,
     pub detail: String,
-    pub choices: Vec<String>,
+    pub questions: Vec<InteractionQuestion>,
+    /// How long the provider will wait before resolving the ask itself
+    /// (codex's `autoResolutionMs`). `None` means it waits indefinitely.
+    pub auto_resolution_ms: Option<u64>,
     pub native_request: serde_json::Value,
 }
 
@@ -233,8 +266,9 @@ pub struct ProviderInteractionDraft {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderInteractionResolution {
     Approve,
+    ApproveForSession,
     Deny { reason: Option<String> },
-    Answer { answers: Vec<(String, String)> },
+    Answer { answers: Vec<InteractionAnswer> },
     Defer,
 }
 
@@ -283,18 +317,30 @@ pub enum HarnessControl {
     Kill,
     SetModel(Option<String>),
     SetEffort(Option<String>),
+    SetFastMode(bool),
     SetPermissionMode(Option<String>),
-    ResolveInteraction(ProviderInteractionResolution),
+    ResolveInteraction {
+        /// The provider's own id for the ask (JSON-RPC request id for codex,
+        /// `control_request.request_id` for Claude) — the answer is worthless
+        /// unless it can be correlated back to what was asked.
+        native_id: String,
+        resolution: ProviderInteractionResolution,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum HarnessControlPlan {
     NativeWrite(NativeWrite),
+    /// Handled inside the adapter with nothing to send: the control changes
+    /// how the next request is built rather than producing one now.
+    Applied,
     Signal(HarnessSignal),
     RestartRequired(DesiredHarnessControls),
     Emulated(HarnessEffect),
-    Unsupported { reason: String },
+    Unsupported {
+        reason: String,
+    },
 }
 
 pub trait ManagedHarness: HarnessController {
