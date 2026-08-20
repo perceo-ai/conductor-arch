@@ -3286,6 +3286,11 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Ack => println!("ok"),
         ArchcarResponse::SessionSpawnQueued { workspace, kind } => {
             println!("queued {} session for {}", kind.display_name(), workspace);
+            // The id does not exist until the spawn lands, and `send` needs
+            // one — say where to get it rather than leaving a dead end.
+            println!(
+                "session id appears in `archductor archcar processes {workspace}` once it starts"
+            );
         }
         ArchcarResponse::SessionSpawned {
             session_id,
@@ -3354,7 +3359,7 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspaces {}", workspaces.len());
             for ws in workspaces {
                 println!(
-                    "{} repo={} branch={} status={} +{} -{} todos={} sessions={}{}",
+                    "{} repo={} branch={} status={} +{} -{} todos={} sessions={}{}{}",
                     ws.name,
                     ws.repository_name,
                     ws.branch,
@@ -3363,6 +3368,13 @@ fn print_archcar_response(response: ArchcarResponse) {
                     ws.diff_deletions,
                     ws.open_todos,
                     ws.active_sessions,
+                    // A blocked agent reads as busy without this; it is the
+                    // difference between "wait" and "go answer it".
+                    if ws.awaiting_input {
+                        " awaiting-input"
+                    } else {
+                        ""
+                    },
                     ws.pull_request_number
                         .map(|n| format!(" pr=#{n}"))
                         .unwrap_or_default()
@@ -3534,7 +3546,9 @@ fn print_archcar_response(response: ArchcarResponse) {
         }
         ArchcarResponse::CommitMessageDraft { workspace, message } => {
             println!("commit_message_draft {workspace}");
-            print!("{message}");
+            // Drafts have no trailing newline of their own, so printing them
+            // raw ran the message into the next shell prompt.
+            println!("{}", message.trim_end());
         }
         ArchcarResponse::CommitDiff {
             workspace,

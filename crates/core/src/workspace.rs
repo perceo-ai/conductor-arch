@@ -17,6 +17,8 @@ use crate::local_chat::{
     local_chat_agent_type, parse_local_chat_transcript, session_events_to_local_chat_messages,
     truncate_chars,
 };
+use crate::provider_events::ProviderEventStore;
+use crate::provider_projection::{provider_projection_from_records, ProjectionRenderClass};
 use crate::redaction::redact_sensitive_text;
 use crate::session_event::{
     codex_parsed_item_to_session_event, SessionEvent, SessionEventPayload, SessionEventSource,
@@ -3591,6 +3593,32 @@ impl WorkspaceStore {
             .collect())
     }
 
+    /// Every file this branch touches relative to where it forked, plus
+    /// anything still uncommitted. This is the set a reviewer sees, so it is
+    /// what the pull-request draft and summaries describe.
+    pub fn branch_changed_files(&self, name: &str) -> Result<Vec<String>> {
+        let workspace = self.get_by_name(name)?;
+        let base_ref = workspace_base_ref(&workspace);
+        let base_commit =
+            workspace_merge_base_ref(&workspace, base_ref).unwrap_or_else(|| base_ref.to_owned());
+        let mut files = BTreeSet::new();
+        // A brand-new branch with no base yet still has its working tree.
+        if let Ok(committed) = git_output_dynamic(
+            &workspace.path,
+            &["diff", "--name-only", &base_commit, "HEAD"],
+        ) {
+            files.extend(
+                committed
+                    .lines()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        files.extend(self.changed_files(name)?);
+        Ok(files.into_iter().collect())
+    }
+
     pub fn git_status_short(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         git_output_dynamic(&workspace.path, &["status", "--short"])
@@ -4307,8 +4335,11 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
+        // A pull request describes the branch, not the working tree. Using
+        // `changed_files` (git status) meant the draft went empty the moment
+        // the work was committed — which is exactly when a PR gets opened.
         let changed_files = self
-            .changed_files(name)?
+            .branch_changed_files(name)?
             .into_iter()
             .filter(|path| !is_conductor_context_path(path))
             .collect::<Vec<_>>();
@@ -5134,17 +5165,31 @@ mutation($threadId: ID!) {{
         }
     }
 
+    /// What the agent last said, for the pull-request body.
+    ///
+    /// This used to be the last non-empty line of the raw session log, which
+    /// for a stream-json provider is the protocol framing itself — PR bodies
+    /// were coming out with `[/claude-stream-json]` under "Session summary".
+    /// The agent's own closing message is the thing worth quoting, so read it
+    /// from the projection and fall back to nothing rather than to noise.
     fn latest_session_summary(&self, workspace: &Workspace) -> Result<Option<String>> {
-        let Some(process) = self
-            .list_processes(&workspace.name, ProcessKind::Session)?
+        let Some(thread) = self
+            .list_chat_threads(&workspace.name)?
             .into_iter()
-            .next()
+            .max_by_key(|thread| thread.id)
         else {
             return Ok(None);
         };
-        let transcript = fs::read_to_string(&process.log_path).unwrap_or_default();
-        let summary = terminal_log_preview(&transcript);
-        Ok((!summary.trim().is_empty()).then_some(summary))
+        let records = ProviderEventStore::new(self.db_path()).list_for_chat_thread(thread.id)?;
+        let summary = provider_projection_from_records(&records)
+            .items
+            .into_iter()
+            .map(|item| (item.render_class, item.body.trim().to_owned()))
+            .rfind(|(render_class, body)| {
+                *render_class == ProjectionRenderClass::AssistantChat && !body.is_empty()
+            })
+            .map(|(_, body)| body);
+        Ok(summary)
     }
 
     fn record_pull_request(&self, workspace_id: i64, url: &str) -> Result<PullRequest> {
@@ -21906,6 +21951,118 @@ pr_title_template = "{workspace}: {branch} ({changed_files_count})"
         assert!(template
             .body
             .contains("No saved agent session summary yet."));
+    }
+
+    /// Stage and commit everything in a worktree with an explicit identity, so
+    /// the test does not depend on the machine's git config.
+    fn commit_all_in(path: &Path, message: &str) {
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["add", "-A"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                message,
+            ])
+            .status()
+            .unwrap();
+    }
+
+    #[test]
+    fn pull_request_draft_still_describes_the_branch_after_the_work_is_committed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nchanged\n").unwrap();
+
+        // Uncommitted: the draft has always handled this case.
+        assert!(store
+            .render_pull_request_template("berlin")
+            .unwrap()
+            .body
+            .contains("- README.md"));
+
+        commit_all_in(&workspace.path, "Update the readme");
+
+        // Committing is the normal precondition for opening a PR, so the draft
+        // has to keep describing the work rather than going blank.
+        let template = store.render_pull_request_template("berlin").unwrap();
+        assert!(
+            template.body.contains("- README.md"),
+            "committed work vanished from the draft: {}",
+            template.body
+        );
+        assert!(
+            !template.body.contains("No changed files detected."),
+            "draft claimed an empty branch: {}",
+            template.body
+        );
+    }
+
+    #[test]
+    fn branch_changed_files_unions_committed_and_uncommitted_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("committed.txt"), "one\n").unwrap();
+        commit_all_in(&workspace.path, "Add committed file");
+        fs::write(workspace.path.join("pending.txt"), "two\n").unwrap();
+
+        let files = store.branch_changed_files("berlin").unwrap();
+
+        assert!(files.contains(&"committed.txt".to_owned()), "{files:?}");
+        assert!(files.contains(&"pending.txt".to_owned()), "{files:?}");
     }
 
     #[test]

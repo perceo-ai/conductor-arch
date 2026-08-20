@@ -1319,6 +1319,12 @@ pub struct ArchcarWorkspaceSummary {
     #[serde(default)]
     pub blocked_tasks: usize,
     pub active_sessions: usize,
+    /// An agent here is blocked on a question or permission prompt. Distinct
+    /// from `active_sessions`: a blocked agent is still "active" but is burning
+    /// wall-clock waiting for a human, and looks identical to a working one
+    /// unless it is called out.
+    #[serde(default)]
+    pub awaiting_input: bool,
     pub run_running: bool,
     pub changed_files: usize,
     pub diff_additions: usize,

@@ -170,6 +170,16 @@ function WorkspaceRow(props: { name: string }) {
           <Icon name={WORKSPACE_GIT_STATE_ICON[gitState().action]} />
         </span>
         <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
+        {/* A blocked agent is otherwise indistinguishable from a working one
+            in this list, which is how a session sits parked for minutes. */}
+        <Show when={row()?.awaitingInput}>
+          <span
+            class="workspace-row-indicator workspace-row-awaiting"
+            title="An agent is waiting for your answer"
+          >
+            <Icon name="alert" />
+          </span>
+        </Show>
         <Show when={compactBadges().length > 0}>
           <span class="workspace-row-indicators">
             <For each={compactBadges()}>

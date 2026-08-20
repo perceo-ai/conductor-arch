@@ -36,7 +36,7 @@ use crate::provider_events::ProviderEventStore;
 use crate::provider_interactions::{ProviderInteractionRecord, ProviderInteractionStore};
 use crate::provider_projection::{
     provider_projection_from_records, provider_projection_item_is_relevant_chat_event,
-    provider_projection_item_text,
+    provider_projection_item_text, ProjectionRenderClass,
 };
 use crate::repository::{AddRepository, RepositoryStore};
 use crate::session_state::AgentSessionState;
@@ -960,18 +960,30 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 let messages = store.chat_transcript_messages(thread_id)?;
                 Ok((thread, messages))
             }) {
-                Ok((thread, messages)) => ArchcarResponse::ChatTranscript {
-                    thread_id,
-                    title: thread.title,
-                    messages: messages
-                        .into_iter()
-                        .map(|m| ArchcarChatTranscriptMessage {
-                            role: m.role,
-                            content: m.content,
-                            created_at: m.created_at,
-                        })
-                        .collect(),
-                },
+                Ok((thread, messages)) => {
+                    // `chat_messages` only carries agent rows for the legacy
+                    // Codex screen parser; every modern provider records its
+                    // turns as projection events. Reading just the table gives
+                    // a transcript with the prompt and none of the replies, so
+                    // fall back to the projection when no agent row exists.
+                    let messages = if messages.iter().any(|m| m.role == "agent") {
+                        messages
+                            .into_iter()
+                            .map(|m| ArchcarChatTranscriptMessage {
+                                role: m.role,
+                                content: m.content,
+                                created_at: m.created_at,
+                            })
+                            .collect()
+                    } else {
+                        chat_transcript_from_projection(&db_path, thread_id)
+                    };
+                    ArchcarResponse::ChatTranscript {
+                        thread_id,
+                        title: thread.title,
+                        messages,
+                    }
+                }
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -3086,6 +3098,38 @@ fn workspace_name_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64) ->
     Some(workspace.name)
 }
 
+/// Rebuild a user/agent transcript from the projection, for threads whose
+/// provider records turns as events rather than `chat_messages` rows. Tool
+/// calls, reasoning, and status cards are dropped — a transcript is the
+/// conversation, not the trace.
+fn chat_transcript_from_projection(
+    db_path: &Path,
+    thread_id: i64,
+) -> Vec<ArchcarChatTranscriptMessage> {
+    let Ok(records) = ProviderEventStore::new(db_path).list_for_chat_thread(thread_id) else {
+        return Vec::new();
+    };
+    let projection = provider_projection_from_records(&records);
+    crate::provider_projection::drop_echoed_user_messages(projection.items)
+        .into_iter()
+        .filter_map(|item| {
+            let role = match item.render_class {
+                ProjectionRenderClass::UserChat => "user",
+                ProjectionRenderClass::AssistantChat => "agent",
+                _ => return None,
+            };
+            let content = item.body.trim().to_owned();
+            (!content.is_empty()).then(|| ArchcarChatTranscriptMessage {
+                role: role.to_owned(),
+                content,
+                // The projection carries ordering, not wall-clock time; the
+                // sequence keeps the rendering stable without inventing a date.
+                created_at: item.sequence.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// Open the app store and map any failure to a protocol error response. Keeps
 /// the workspace-intelligence handlers to their happy path.
 fn with_store(
@@ -4201,10 +4245,28 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     out
 }
 
+/// Workspaces whose agents are parked on a question or permission prompt.
+/// Resolved once per listing rather than per row — a pending interaction knows
+/// its thread, and the thread knows its workspace.
+fn workspaces_awaiting_input(db_path: &Path, store: &WorkspaceStore) -> HashSet<String> {
+    let Ok(pending) = ProviderInteractionStore::new(db_path.to_path_buf()).list(None, true) else {
+        return HashSet::new();
+    };
+    pending
+        .into_iter()
+        .filter_map(|record| {
+            let thread = store.get_chat_thread_record(record.thread_id).ok()?;
+            let workspace = store.get_workspace_record(thread.workspace_id).ok()?;
+            Some(workspace.name)
+        })
+        .collect()
+}
+
 fn workspace_summary_from_status_line(
     line: WorkspaceStatusLine,
     changed_files: usize,
     tasks: crate::workspace_intel::TaskCounts,
+    awaiting_input: bool,
 ) -> ArchcarWorkspaceSummary {
     let WorkspaceStatusLine {
         workspace,
@@ -4229,6 +4291,7 @@ fn workspace_summary_from_status_line(
         open_tasks: tasks.open,
         blocked_tasks: tasks.blocked,
         active_sessions,
+        awaiting_input,
         run_running,
         changed_files,
         diff_additions,
@@ -4246,6 +4309,7 @@ fn workspace_summaries(db_path: &Path) -> Result<Vec<ArchcarWorkspaceSummary>> {
     WorkspaceStore::open_app(db_path).and_then(|store| {
         let lines = store.list_status()?;
         let task_counts = store.task_counts_by_workspace().unwrap_or_default();
+        let awaiting = workspaces_awaiting_input(db_path, &store);
         Ok(lines
             .into_iter()
             .map(|line| {
@@ -4263,7 +4327,8 @@ fn workspace_summaries(db_path: &Path) -> Result<Vec<ArchcarWorkspaceSummary>> {
                     .get(&line.workspace.id)
                     .copied()
                     .unwrap_or_default();
-                workspace_summary_from_status_line(line, changed_files, tasks)
+                let awaiting_input = awaiting.contains(&line.workspace.name);
+                workspace_summary_from_status_line(line, changed_files, tasks, awaiting_input)
             })
             .collect())
     })

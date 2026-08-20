@@ -22,6 +22,8 @@ export interface WorkspaceRow {
   openTasks: number;
   blockedTasks: number;
   activeSessions: number;
+  /** An agent here is blocked on a question — it needs a human, not time. */
+  awaitingInput: boolean;
   runRunning: boolean;
   changedFiles: number;
   branchAhead?: number;
@@ -54,6 +56,7 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
     openTasks: s.open_tasks ?? 0,
     blockedTasks: s.blocked_tasks ?? 0,
     activeSessions: s.active_sessions,
+    awaitingInput: s.awaiting_input ?? false,
     runRunning: s.run_running,
     changedFiles: s.changed_files,
     branchAhead: s.branch_ahead,

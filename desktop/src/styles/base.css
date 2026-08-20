@@ -4983,6 +4983,11 @@ button.ws-tab-shell.ws-chat-new:hover {
   color: #9aa6b8;
 }
 
+/* Waiting on a human, not on time — the one row state worth interrupting for. */
+.workspace-row-awaiting {
+  color: #e0b341;
+}
+
 .workspace-row-shell .row-meta {
   padding-left: 14px;
   padding-right: 0;
