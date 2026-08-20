@@ -30,7 +30,7 @@ pub fn build_session_harness_launch_plan(
     let bootstrap_payload = build_bootstrap_payload(kind, harness);
     let harness_metadata = build_harness_metadata(kind, harness);
     let session_resume_id = match kind {
-        SessionKind::Claude => Some(Uuid::new_v4().to_string()),
+        SessionKind::CLAUDE => Some(Uuid::new_v4().to_string()),
         _ => None,
     };
     let mut env = Vec::new();
@@ -42,13 +42,13 @@ pub fn build_session_harness_launch_plan(
     }
 
     let args = match kind {
-        SessionKind::Shell => Vec::new(),
-        SessionKind::Codex => build_codex_args(cwd, harness),
-        SessionKind::Claude => build_claude_args(
+        SessionKind::CODEX => build_codex_args(cwd, harness),
+        SessionKind::CLAUDE => build_claude_args(
             harness,
             bootstrap_payload.as_deref(),
             session_resume_id.as_deref(),
         ),
+        _ => Vec::new(),
     };
 
     SessionHarnessLaunchPlan {
@@ -78,13 +78,13 @@ pub fn build_session_resume_launch_plan(
     }
 
     let args = match kind {
-        SessionKind::Shell => Vec::new(),
-        SessionKind::Codex => build_codex_resume_args(cwd, harness, session_resume_id.as_deref()),
-        SessionKind::Claude => build_claude_resume_args(
+        SessionKind::CODEX => build_codex_resume_args(cwd, harness, session_resume_id.as_deref()),
+        SessionKind::CLAUDE => build_claude_resume_args(
             harness,
             bootstrap_payload.as_deref(),
             session_resume_id.as_deref(),
         ),
+        _ => Vec::new(),
     };
 
     SessionHarnessLaunchPlan {
@@ -113,8 +113,8 @@ pub fn build_harness_metadata(
         entries.push(format!("model={}", sanitize_metadata_value(&value)));
     }
     let approval_mode = match kind {
-        SessionKind::Codex | SessionKind::Claude => Some(FORCED_APPROVAL_MODE),
-        SessionKind::Shell => harness.approval_mode.as_deref(),
+        SessionKind::CODEX | SessionKind::CLAUDE => Some(FORCED_APPROVAL_MODE),
+        _ => harness.approval_mode.as_deref(),
     };
     if let Some(value) = sanitize_text(approval_mode) {
         entries.push(format!("approval={value}"));
@@ -158,20 +158,9 @@ pub fn build_bootstrap_payload(
     };
 
     match kind {
-        SessionKind::Shell => {
-            push_line(if harness.plan_mode {
-                Some("plan mode: enabled".to_owned())
-            } else {
-                None
-            });
-            push_line(if harness.fast_mode {
-                Some("fast mode: enabled".to_owned())
-            } else {
-                None
-            });
-        }
-        SessionKind::Codex => return None,
-        SessionKind::Claude => {
+        // Codex carries these natively, so a bootstrap line would duplicate it.
+        SessionKind::CODEX => return None,
+        _ => {
             push_line(if harness.plan_mode {
                 Some("plan mode: enabled".to_owned())
             } else {
@@ -190,8 +179,8 @@ pub fn build_bootstrap_payload(
     push_line(optional_kv_line(
         "approval mode",
         match kind {
-            SessionKind::Codex | SessionKind::Claude => Some(FORCED_APPROVAL_MODE),
-            SessionKind::Shell => harness.approval_mode.as_deref(),
+            SessionKind::CODEX | SessionKind::CLAUDE => Some(FORCED_APPROVAL_MODE),
+            _ => harness.approval_mode.as_deref(),
         },
     ));
     push_line(optional_kv_line(
@@ -373,11 +362,7 @@ fn sanitize_text(value: Option<&str>) -> Option<String> {
 }
 
 fn session_kind_label(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Shell => "shell",
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-    }
+    kind.as_str()
 }
 
 #[cfg(test)]
@@ -429,7 +414,7 @@ mod tests {
         };
 
         let launch =
-            build_session_harness_launch_plan(SessionKind::Codex, Path::new("/tmp/work"), &harness);
+            build_session_harness_launch_plan(SessionKind::CODEX, Path::new("/tmp/work"), &harness);
 
         assert_eq!(
             &launch.args,
@@ -484,7 +469,7 @@ mod tests {
         };
 
         let launch = build_session_harness_launch_plan(
-            SessionKind::Claude,
+            SessionKind::CLAUDE,
             Path::new("/tmp/work"),
             &harness,
         );
@@ -528,7 +513,7 @@ mod tests {
         };
 
         let launch = build_session_harness_launch_plan(
-            SessionKind::Claude,
+            SessionKind::CLAUDE,
             Path::new("/tmp/work"),
             &harness,
         );
@@ -555,7 +540,7 @@ mod tests {
             ..SessionHarnessOptions::default()
         };
         let codex_resume = build_session_resume_launch_plan(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             Path::new("/tmp/work"),
             &harness,
             Some("019ef6b1-8a1b-78f0-ae17-0db46572decf"),
@@ -586,7 +571,7 @@ mod tests {
         );
 
         let claude_resume = build_session_resume_launch_plan(
-            SessionKind::Claude,
+            SessionKind::CLAUDE,
             Path::new("/tmp/work"),
             &harness,
             Some("019ef6b1-8a1b-78f0-ae17-0db46572decf"),
@@ -624,7 +609,7 @@ mod tests {
         };
 
         let codex_resume = build_session_resume_launch_plan(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             Path::new("/tmp/work"),
             &harness,
             None,
@@ -661,7 +646,7 @@ mod tests {
     fn codex_launch_plan_adds_clean_startup_flags() {
         let harness = SessionHarnessOptions::default();
         let launch =
-            build_session_harness_launch_plan(SessionKind::Codex, Path::new("/tmp/work"), &harness);
+            build_session_harness_launch_plan(SessionKind::CODEX, Path::new("/tmp/work"), &harness);
 
         assert_eq!(
             launch.args,

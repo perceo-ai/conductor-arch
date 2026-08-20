@@ -442,13 +442,10 @@ impl WorkspaceSourcePreflight {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionKind {
-    Shell,
-    Codex,
-    Claude,
-}
+// Re-exported so the many `crate::workspace::SessionKind` imports keep
+// resolving; the type itself lives in its own module now that it carries
+// interning and serde behaviour.
+pub use crate::session_kind::SessionKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLaunch {
@@ -6174,7 +6171,7 @@ mutation($threadId: ID!) {{
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         Ok(SessionLaunch {
-            kind: SessionKind::Shell,
+            kind: SessionKind::SHELL,
             program: PathBuf::from(editor),
             args: vec![cwd.to_string_lossy().to_string()],
             cwd,
@@ -6222,8 +6219,8 @@ mutation($threadId: ID!) {{
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         let (program, mut args) = match kind {
-            SessionKind::Shell => (crate::platform::shell_program(), Vec::new()),
-            SessionKind::Codex => (
+            SessionKind::SHELL => (crate::platform::shell_program(), Vec::new()),
+            SessionKind::CODEX => (
                 settings
                     .providers
                     .codex_executable_path
@@ -6232,13 +6229,30 @@ mutation($threadId: ID!) {{
                     .unwrap_or_else(|| PathBuf::from("codex")),
                 Vec::new(),
             ),
-            SessionKind::Claude => (
+            SessionKind::CLAUDE => (
                 settings
                     .providers
                     .claude_code_executable_path
                     .as_deref()
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("claude")),
+                Vec::new(),
+            ),
+            // Any other registered agent runs its registry command. Codex and
+            // Claude keep their dedicated settings keys above because those
+            // already exist and are documented; everything else resolves from
+            // the registry until per-provider overrides are configurable.
+            other => (
+                PathBuf::from(
+                    crate::agent_tools::tool_by_provider(other.as_str())
+                        .map(|tool| tool.default_command)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{} is not a registered agent, so it has no launch command",
+                                other.as_str()
+                            )
+                        })?,
+                ),
                 Vec::new(),
             ),
         };
@@ -6712,7 +6726,7 @@ mutation($threadId: ID!) {{
         harness: SessionHarnessOptions,
     ) -> Result<ProcessRecord> {
         anyhow::ensure!(
-            !matches!(kind, SessionKind::Codex),
+            !matches!(kind, SessionKind::CODEX),
             "Codex sessions are owned by archcar; use ArchcarRequest::SpawnSession"
         );
         let launch = self.session_launch_with_options(name, kind, harness)?;
@@ -8219,7 +8233,7 @@ mutation($threadId: ID!) {{
         );
         let command = shell_words(&launch.program, &launch.args);
         let resume_id = match launch.kind {
-            SessionKind::Codex => thread.native_thread_id.as_deref(),
+            SessionKind::CODEX => thread.native_thread_id.as_deref(),
             _ => launch.session_resume_id.as_deref(),
         };
         self.record_process(RecordProcessInput {
@@ -9583,20 +9597,17 @@ fn archcar_input_kind_from_str(value: &str) -> Result<ArchcarInputKind, String> 
 }
 
 fn session_kind_as_str(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Shell => "shell",
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-    }
+    kind.as_str()
 }
 
+/// Accepts any key rather than a fixed set: rows written by a build that knew
+/// more agents than this one must still load, and an agent that is no longer
+/// registered still has a readable history.
 fn session_kind_from_str(value: &str) -> Result<SessionKind, String> {
-    match value {
-        "shell" => Ok(SessionKind::Shell),
-        "codex" => Ok(SessionKind::Codex),
-        "claude" => Ok(SessionKind::Claude),
-        other => Err(format!("unknown session kind {other}")),
+    if value.trim().is_empty() {
+        return Err("session kind is empty".to_owned());
     }
+    Ok(SessionKind::new(value))
 }
 
 fn row_to_workspace_timeline_event(
@@ -13116,7 +13127,7 @@ branch_prefix = "team"
                 "a",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let _b = store
@@ -13125,7 +13136,7 @@ branch_prefix = "team"
                 "b",
                 Some("b vis"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let c = store
@@ -13134,7 +13145,7 @@ branch_prefix = "team"
                 "c",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
 
@@ -13206,7 +13217,7 @@ branch_prefix = "team"
                 " first ",
                 Some("first visible"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let second = store
@@ -13215,7 +13226,7 @@ branch_prefix = "team"
                 "second",
                 None,
                 ArchcarInputKind::ReviewPrompt,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let other = store
@@ -13224,7 +13235,7 @@ branch_prefix = "team"
                 "other",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Claude,
+                SessionKind::CLAUDE,
             )
             .unwrap();
 
@@ -13294,7 +13305,7 @@ branch_prefix = "team"
                 "run tests",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
 
@@ -13326,7 +13337,7 @@ branch_prefix = "team"
                 "run tests",
                 Some("visible run tests"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
 
@@ -13354,7 +13365,7 @@ branch_prefix = "team"
                 "first",
                 Some("visible first"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let second = store
@@ -13363,7 +13374,7 @@ branch_prefix = "team"
                 "second",
                 None,
                 ArchcarInputKind::ReviewPrompt,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let claimed = store
@@ -13696,14 +13707,14 @@ claude_code_executable_path = "/opt/bin/claude-custom"
 
         assert_eq!(
             store
-                .session_launch("berlin", SessionKind::Codex)
+                .session_launch("berlin", SessionKind::CODEX)
                 .unwrap()
                 .program,
             PathBuf::from("/opt/bin/codex-custom")
         );
         assert_eq!(
             store
-                .session_launch("berlin", SessionKind::Claude)
+                .session_launch("berlin", SessionKind::CLAUDE)
                 .unwrap()
                 .program,
             PathBuf::from("/opt/bin/claude-custom")
@@ -14697,7 +14708,7 @@ CUSTOM_VALUE = "from-settings"
         store
             .append_chat_message(thread.id, "user", "hi", "user_send")
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -16771,7 +16782,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -16786,7 +16797,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "zurich",
                 &SessionLaunch {
-                    kind: SessionKind::Claude,
+                    kind: SessionKind::CLAUDE,
                     program: PathBuf::from("claude"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/zurich"),
@@ -16850,7 +16861,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -16923,7 +16934,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Shell,
+                    kind: SessionKind::SHELL,
                     program: PathBuf::from("/bin/sh"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -16984,7 +16995,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -17048,7 +17059,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -17169,7 +17180,7 @@ working_directory = "apps/web"
             .unwrap();
 
         let launch = store
-            .session_launch("frontend", SessionKind::Codex)
+            .session_launch("frontend", SessionKind::CODEX)
             .unwrap();
 
         assert_eq!(
@@ -18494,7 +18505,7 @@ spotlight_testing = true
             })
             .unwrap();
 
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
 
         assert_eq!(launch.cwd, workspace.path);
         assert!(!launch.program.as_os_str().is_empty());
@@ -18570,7 +18581,7 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
 
         assert_eq!(launch.cwd, workspace.path.join("apps/worker"));
         assert_eq!(
@@ -18613,7 +18624,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options(
                 "berlin",
-                SessionKind::Codex,
+                SessionKind::CODEX,
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
@@ -18695,7 +18706,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options(
                 "berlin",
-                SessionKind::Claude,
+                SessionKind::CLAUDE,
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
@@ -18770,7 +18781,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options_and_resume(
                 "berlin",
-                SessionKind::Claude,
+                SessionKind::CLAUDE,
                 SessionHarnessOptions::default(),
                 Some("019ef6b1-8a1b-78f0-ae17-0db46572decf"),
             )
@@ -18824,7 +18835,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options_and_resume(
                 "berlin",
-                SessionKind::Codex,
+                SessionKind::CODEX,
                 SessionHarnessOptions {
                     fast_mode: true,
                     approval_mode: Some("ask".to_owned()),
@@ -18898,7 +18909,7 @@ working_directory = "apps/worker"
         let err = store
             .start_session_with_options(
                 "berlin",
-                SessionKind::Codex,
+                SessionKind::CODEX,
                 SessionHarnessOptions {
                     plan_mode: true,
                     codex_goals: Some("ship the fix".to_owned()),
@@ -18952,7 +18963,7 @@ working_directory = "apps/worker"
                 .record_session_process(
                     "berlin",
                     &SessionLaunch {
-                        kind: SessionKind::Codex,
+                        kind: SessionKind::CODEX,
                         program: PathBuf::from("codex"),
                         args: vec!["resume".to_owned(), "--last".to_owned()],
                         cwd: workspace.path.clone(),
@@ -18995,7 +19006,7 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        let session = store.start_session("berlin", SessionKind::Shell).unwrap();
+        let session = store.start_session("berlin", SessionKind::SHELL).unwrap();
 
         assert_eq!(session.workspace_id, workspace.id);
         assert_eq!(session.kind, ProcessKind::Session);
@@ -19031,7 +19042,7 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .expect("seed dead session record");
@@ -19075,7 +19086,7 @@ working_directory = "apps/worker"
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -19172,7 +19183,7 @@ working_directory = "apps/worker"
         let thread = store
             .create_chat_thread("berlin", "codex", "Parser work", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -19233,7 +19244,7 @@ working_directory = "apps/worker"
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -19352,7 +19363,7 @@ general = "Keep changes focused."
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let first_session = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -23912,7 +23923,7 @@ spotlight_testing = true
                 "berlin",
                 thread.id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: PathBuf::from("/tmp/berlin"),
@@ -24097,7 +24108,7 @@ spotlight_testing = true
                 "berlin",
                 thread.id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: workspace.path.clone(),
@@ -24283,7 +24294,7 @@ spotlight_testing = true
                 "paris",
                 paris_thread.id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: temp.path().join("workspaces/demo/paris"),
@@ -25226,7 +25237,7 @@ spotlight_testing = true
     #[test]
     fn workspace_timeline_records_lifecycle_branch_session_and_pr_events() {
         let (_temp, store) = test_workspace_store();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -25270,7 +25281,7 @@ spotlight_testing = true
     fn stale_session_exit_after_workspace_delete_does_not_report_missing_workspace_name() {
         let (_temp, store) = test_workspace_store();
         let workspace = store.get_by_name("berlin").unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -25445,7 +25456,7 @@ spotlight_testing = true
                 "berlin",
                 thread_id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: PathBuf::from("/tmp/berlin"),

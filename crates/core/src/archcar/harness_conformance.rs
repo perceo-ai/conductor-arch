@@ -303,8 +303,8 @@ impl ManagedHarnessConformanceDriver for DeterministicHarnessDriver {
 
 fn managed_harness_conformance_drivers() -> Vec<Box<dyn ManagedHarnessConformanceDriver>> {
     vec![
-        Box::new(DeterministicHarnessDriver::new(SessionKind::Codex)),
-        Box::new(DeterministicHarnessDriver::new(SessionKind::Claude)),
+        Box::new(DeterministicHarnessDriver::new(SessionKind::CODEX)),
+        Box::new(DeterministicHarnessDriver::new(SessionKind::CLAUDE)),
     ]
 }
 
@@ -351,7 +351,7 @@ fn interaction(provider_key: &str, kind: ProviderInteractionKind) -> ProviderInt
 
 #[test]
 fn codex_and_claude_implement_contract_v1() {
-    for kind in [SessionKind::Codex, SessionKind::Claude] {
+    for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
         let harness = managed_harness_for_kind(kind).expect("managed harness");
         assert_eq!(harness.descriptor().contract_version, 1);
         assert_eq!(harness.descriptor().core_features, CORE_HARNESS_FEATURES);
@@ -363,7 +363,7 @@ fn codex_and_claude_implement_contract_v1() {
 /// else joins the registry at a lower tier, these two stay complete.
 #[test]
 fn codex_and_claude_stay_full_tier() {
-    for kind in [SessionKind::Codex, SessionKind::Claude] {
+    for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
         let harness = managed_harness_for_kind(kind).expect("managed harness");
         let descriptor = harness.descriptor();
         assert_eq!(
@@ -466,7 +466,7 @@ fn a_partial_descriptor_names_the_features_it_lacks() {
 fn descriptor_with(extended: Vec<(HarnessFeature, SupportMode)>) -> HarnessDescriptor {
     HarnessDescriptor {
         contract_version: 1,
-        kind: SessionKind::Codex,
+        kind: SessionKind::CODEX,
         provider_key: "fixture",
         display_name: "Fixture",
         default_executable: "fixture",
@@ -498,8 +498,8 @@ fn managed_harnesses_pass_complete_required_conformance_matrix() -> anyhow::Resu
 
 #[test]
 fn optional_goal_support_is_explicit() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     assert_eq!(
         codex.descriptor().optional(HarnessCapability::Goals),
         SupportMode::Native
@@ -521,7 +521,7 @@ fn managed_provider_adapters_stay_isolated() {
 
 #[test]
 fn capability_snapshots_include_required_baseline_for_managed_providers() {
-    for kind in [SessionKind::Codex, SessionKind::Claude] {
+    for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
         let harness = managed_harness_for_kind(kind).expect("managed harness");
         let capabilities = session_harness_capabilities_for_descriptor(
             harness.descriptor(),
@@ -546,7 +546,7 @@ fn capability_snapshots_include_required_baseline_for_managed_providers() {
 
 #[test]
 fn claude_reconfigure_controls_require_resume_with_desired_controls() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
@@ -562,7 +562,7 @@ fn claude_reconfigure_controls_require_resume_with_desired_controls() {
 
 #[test]
 fn claude_interaction_resolution_answers_in_band() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
@@ -586,7 +586,7 @@ fn claude_interaction_resolution_answers_in_band() {
 
 #[test]
 fn claude_interrupt_uses_process_group_and_resume_recovery() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
@@ -606,7 +606,7 @@ fn claude_interrupt_uses_process_group_and_resume_recovery() {
 
 #[test]
 fn codex_interrupt_uses_native_turn_interrupt_when_active() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
     let mut adapter = codex
         .create_adapter(adapter_context(Some("codex-thread-1")))
         .unwrap();
@@ -625,12 +625,12 @@ fn codex_interrupt_uses_native_turn_interrupt_when_active() {
 
 #[test]
 fn shell_stays_outside_the_managed_chat_contract() {
-    assert!(managed_harness_for_kind(SessionKind::Shell).is_none());
+    assert!(managed_harness_for_kind(SessionKind::SHELL).is_none());
 }
 
 #[test]
 fn managed_adapters_wrap_existing_native_input_formats() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
     let mut codex_adapter = codex
         .create_adapter(adapter_context(Some("codex-thread-1")))
         .unwrap();
@@ -644,7 +644,7 @@ fn managed_adapters_wrap_existing_native_input_formats() {
     assert_eq!(codex_payload["params"]["threadId"], "codex-thread-1");
     assert_eq!(codex_payload["params"]["input"][0]["text"], "run tests");
 
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut claude_adapter = claude.create_adapter(adapter_context(None)).unwrap();
     let claude_write = claude_adapter
         .encode_input(input("claude-input", "review changes"))
@@ -662,7 +662,7 @@ fn managed_adapters_wrap_existing_native_input_formats() {
 
 #[test]
 fn claude_does_not_fake_native_input_acknowledgement() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude.create_adapter(adapter_context(None)).unwrap();
     adapter
         .encode_input(input("claude-input", "review changes"))
@@ -688,7 +688,7 @@ fn claude_does_not_fake_native_input_acknowledgement() {
 
 #[test]
 fn codex_steer_preserves_turn_start_input_for_exactly_once_completion() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
     let mut adapter = codex
         .create_adapter(adapter_context(Some("codex-thread-1")))
         .unwrap();

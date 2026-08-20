@@ -2605,11 +2605,7 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
 }
 
 fn session_kind_label(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Shell => "Shell",
-        SessionKind::Codex => "Codex",
-        SessionKind::Claude => "Claude",
-    }
+    crate::archcar::harness::display_name_for_kind(kind)
 }
 
 fn input_kind_label(kind: &ArchcarInputKind) -> &'static str {
@@ -2741,7 +2737,7 @@ mod tests {
                 session_id: 4,
                 thread_id: 6,
                 workspace: "berlin".to_owned(),
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
                 pid: 123,
             },
         };
@@ -2797,7 +2793,7 @@ mod tests {
             input: "run tests".to_owned(),
             visible_input: Some("visible run tests".to_owned()),
             kind: ArchcarInputKind::User,
-            session_kind: SessionKind::Codex,
+            session_kind: SessionKind::CODEX,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"queue_chat_input\""));
@@ -2827,7 +2823,7 @@ mod tests {
                 input: "run tests".to_owned(),
                 visible_input: visible_input.clone(),
                 kind: ArchcarInputKind::User,
-                session_kind: SessionKind::Codex,
+                session_kind: SessionKind::CODEX,
                 created_at: "2026-07-23T12:00:00Z".to_owned(),
                 updated_at: "2026-07-23T12:00:01Z".to_owned(),
             };
@@ -4253,7 +4249,7 @@ mod tests {
             session_id: 7,
             thread_id: 3,
             workspace: "hoi-an".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 4242,
         };
 

@@ -29,6 +29,7 @@ pub mod repository;
 pub mod runtime_session_store;
 pub mod service;
 pub mod session_event;
+pub mod session_kind;
 pub mod session_pipeline;
 pub mod session_state;
 pub mod settings;

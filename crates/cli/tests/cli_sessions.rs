@@ -939,8 +939,8 @@ fn provider_interactions_help_lists_cli_actions() {
 
 #[test]
 fn harness_capabilities_gate_goals_to_codex_descriptor() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
 
     assert_eq!(
         codex.descriptor().optional(HarnessCapability::Goals),

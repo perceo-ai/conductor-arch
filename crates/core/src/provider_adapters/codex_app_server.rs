@@ -52,7 +52,7 @@ const CODEX_EXTENDED_FEATURES: &[(HarnessFeature, SupportMode)] = &[
 
 pub static CODEX_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     contract_version: MANAGED_HARNESS_CONTRACT_VERSION,
-    kind: SessionKind::Codex,
+    kind: SessionKind::CODEX,
     provider_key: CODEX_APP_SERVER_PROVIDER,
     display_name: "Codex",
     default_executable: CODEX_APP_SERVER_DEFAULT_EXECUTABLE,

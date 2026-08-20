@@ -19,17 +19,55 @@ pub trait HarnessController: Send + Sync {
 
 pub fn controller_for_kind(kind: SessionKind) -> Box<dyn HarnessController> {
     match kind {
-        SessionKind::Codex => Box::new(CodexHarnessController),
-        SessionKind::Claude => Box::new(ClaudeHarnessController),
-        SessionKind::Shell => Box::new(ShellHarnessController),
+        SessionKind::CODEX => Box::new(CodexHarnessController),
+        SessionKind::CLAUDE => Box::new(ClaudeHarnessController),
+        SessionKind::SHELL => Box::new(ShellHarnessController),
+        // Any other registered agent launches from its registry entry. It runs
+        // in a PTY with no structured transport until an adapter claims it, so
+        // it behaves like a terminal that happens to have an agent in it.
+        other => Box::new(RegistryHarnessController(other)),
     }
 }
 
+/// `None` means "drive this as a plain PTY". Shell is never managed, and a
+/// registered agent is only managed once an adapter exists for it — a
+/// descriptor is a promise about behaviour, so one is not invented here.
 pub fn managed_harness_for_kind(kind: SessionKind) -> Option<Box<dyn ManagedHarness>> {
     match kind {
-        SessionKind::Codex => Some(Box::new(CodexHarnessController)),
-        SessionKind::Claude => Some(Box::new(ClaudeHarnessController)),
-        SessionKind::Shell => None,
+        SessionKind::CODEX => Some(Box::new(CodexHarnessController)),
+        SessionKind::CLAUDE => Some(Box::new(ClaudeHarnessController)),
+        _ => None,
+    }
+}
+
+/// Display name from the registry, falling back to the raw key so an
+/// unregistered provider still renders as something a person can read.
+pub fn display_name_for_kind(kind: SessionKind) -> &'static str {
+    kind.display_name()
+}
+
+/// Launches a registry-listed agent with no managed transport. `build_launch`
+/// resolves the executable from the registry rather than a hardcoded match.
+pub struct RegistryHarnessController(SessionKind);
+
+impl HarnessController for RegistryHarnessController {
+    fn kind(&self) -> SessionKind {
+        self.0
+    }
+
+    fn supports_auto_spawn(&self) -> bool {
+        // Without a readiness signal there is nothing to wait for before
+        // delivering queued input, so these are started explicitly.
+        false
+    }
+
+    fn build_launch(
+        &self,
+        store: &WorkspaceStore,
+        workspace: &str,
+        harness: SessionHarnessOptions,
+    ) -> Result<crate::workspace::SessionLaunch> {
+        store.session_launch_with_options(workspace, self.0, harness)
     }
 }
 
@@ -76,7 +114,7 @@ pub struct CodexHarnessController;
 
 impl HarnessController for CodexHarnessController {
     fn kind(&self) -> SessionKind {
-        SessionKind::Codex
+        SessionKind::CODEX
     }
 
     fn supports_auto_spawn(&self) -> bool {
@@ -89,7 +127,7 @@ impl HarnessController for CodexHarnessController {
         workspace: &str,
         harness: SessionHarnessOptions,
     ) -> Result<crate::workspace::SessionLaunch> {
-        store.session_launch_with_options(workspace, SessionKind::Codex, harness)
+        store.session_launch_with_options(workspace, SessionKind::CODEX, harness)
     }
 }
 
@@ -97,7 +135,7 @@ pub struct ClaudeHarnessController;
 
 impl HarnessController for ClaudeHarnessController {
     fn kind(&self) -> SessionKind {
-        SessionKind::Claude
+        SessionKind::CLAUDE
     }
 
     fn supports_auto_spawn(&self) -> bool {
@@ -110,7 +148,7 @@ impl HarnessController for ClaudeHarnessController {
         workspace: &str,
         harness: SessionHarnessOptions,
     ) -> Result<crate::workspace::SessionLaunch> {
-        store.session_launch_with_options(workspace, SessionKind::Claude, harness)
+        store.session_launch_with_options(workspace, SessionKind::CLAUDE, harness)
     }
 }
 
@@ -118,7 +156,7 @@ pub struct ShellHarnessController;
 
 impl HarnessController for ShellHarnessController {
     fn kind(&self) -> SessionKind {
-        SessionKind::Shell
+        SessionKind::SHELL
     }
 
     fn supports_auto_spawn(&self) -> bool {
@@ -131,16 +169,12 @@ impl HarnessController for ShellHarnessController {
         workspace: &str,
         harness: SessionHarnessOptions,
     ) -> Result<crate::workspace::SessionLaunch> {
-        store.session_launch_with_options(workspace, SessionKind::Shell, harness)
+        store.session_launch_with_options(workspace, SessionKind::SHELL, harness)
     }
 }
 
 pub fn provider_name(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-        SessionKind::Shell => "shell",
-    }
+    kind.as_str()
 }
 
 pub fn ensure_thread_for_kind(
@@ -156,12 +190,10 @@ pub fn ensure_thread_for_kind(
     {
         return Ok(existing);
     }
-    let title = match kind {
-        SessionKind::Codex => "Codex Chat 1",
-        SessionKind::Claude => "Claude Chat 1",
-        SessionKind::Shell => "Shell Chat 1",
-    };
-    store.create_chat_thread(workspace, provider, title, None)
+    // Title from the registry so a newly registered agent reads as
+    // "Gemini CLI Chat 1" rather than falling back to its bare key.
+    let title = format!("{} Chat 1", display_name_for_kind(kind));
+    store.create_chat_thread(workspace, provider, &title, None)
 }
 
 #[cfg(test)]
@@ -176,17 +208,44 @@ mod tests {
     #[test]
     fn codex_harness_reports_runtime_capabilities_without_screen_hooks() {
         let controller = CodexHarnessController;
-        assert_eq!(controller.kind(), SessionKind::Codex);
+        assert_eq!(controller.kind(), SessionKind::CODEX);
         assert!(controller.supports_auto_spawn());
+    }
+
+    /// A registered agent with no adapter still resolves to a controller and
+    /// launches from its registry command, rather than failing to dispatch.
+    #[test]
+    fn registered_agents_without_an_adapter_fall_back_to_a_pty_controller() {
+        let gemini = SessionKind::new("gemini");
+        let controller = controller_for_kind(gemini);
+
+        assert_eq!(controller.kind(), gemini);
+        // No readiness signal means nothing to wait on before draining input.
+        assert!(!controller.supports_auto_spawn());
+        // And crucially, no descriptor is invented for it.
+        assert!(managed_harness_for_kind(gemini).is_none());
+        assert_eq!(gemini.display_name(), "Gemini CLI");
+    }
+
+    /// Provider identity is open, but launching still requires registration —
+    /// otherwise there is no command to run.
+    #[test]
+    fn an_unregistered_provider_has_an_identity_but_no_launch_command() {
+        let unknown = SessionKind::new("not-a-real-agent");
+
+        assert_eq!(unknown.as_str(), "not-a-real-agent");
+        assert!(managed_harness_for_kind(unknown).is_none());
+        // Falls back to the key so logs stay readable.
+        assert_eq!(unknown.display_name(), "not-a-real-agent");
     }
 
     #[test]
     fn managed_harness_registry_validates_codex_and_claude_baseline() {
-        for kind in [SessionKind::Codex, SessionKind::Claude] {
+        for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
             let harness = managed_harness_for_kind(kind).unwrap();
             validate_managed_harness(harness.as_ref()).unwrap();
         }
-        assert!(managed_harness_for_kind(SessionKind::Shell).is_none());
+        assert!(managed_harness_for_kind(SessionKind::SHELL).is_none());
     }
 
     #[test]
@@ -215,12 +274,12 @@ mod tests {
             .unwrap();
         let controller = ClaudeHarnessController;
 
-        assert_eq!(controller.kind(), SessionKind::Claude);
+        assert_eq!(controller.kind(), SessionKind::CLAUDE);
         assert!(controller.supports_auto_spawn());
         let launch = controller
             .build_launch(&store, "berlin", SessionHarnessOptions::default())
             .unwrap();
-        assert_eq!(launch.kind, SessionKind::Claude);
+        assert_eq!(launch.kind, SessionKind::CLAUDE);
         assert_eq!(launch.program, PathBuf::from("claude"));
         assert!(launch.session_resume_id.is_some());
         assert_eq!(

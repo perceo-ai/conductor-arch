@@ -57,7 +57,7 @@ const CLAUDE_EXTENDED_FEATURES: &[(HarnessFeature, SupportMode)] = &[
 
 pub static CLAUDE_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     contract_version: MANAGED_HARNESS_CONTRACT_VERSION,
-    kind: SessionKind::Claude,
+    kind: SessionKind::CLAUDE,
     provider_key: CLAUDE_PROVIDER_NAME,
     display_name: "Claude Code",
     default_executable: "claude",

@@ -2823,7 +2823,7 @@ fn run_cli() -> Result<()> {
                 } => {
                     let kind: SessionKind = kind.into();
                     anyhow::ensure!(
-                        matches!(kind, SessionKind::Codex | SessionKind::Claude),
+                        matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE),
                         "session send supports codex and claude"
                     );
                     let input = message_text_or_stdin(message)?;
@@ -3287,7 +3287,7 @@ fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
         ArchcarResponse::SessionSpawnQueued { workspace, kind } => {
-            println!("queued {:?} session for {}", kind, workspace);
+            println!("queued {} session for {}", kind.display_name(), workspace);
         }
         ArchcarResponse::SessionSpawned {
             session_id,
@@ -4222,7 +4222,7 @@ fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
 }
 
 fn cli_session_stop_uses_archcar(kind: SessionKind) -> bool {
-    matches!(kind, SessionKind::Codex | SessionKind::Claude)
+    matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE)
 }
 
 fn render_archcar_protocol_messages(messages: &[ArchcarMessage]) -> String {
@@ -4574,9 +4574,9 @@ fn print_status(lines: Vec<WorkspaceStatusLine>) {
 impl From<CliSessionKind> for SessionKind {
     fn from(value: CliSessionKind) -> Self {
         match value {
-            CliSessionKind::Shell => Self::Shell,
-            CliSessionKind::Codex => Self::Codex,
-            CliSessionKind::Claude => Self::Claude,
+            CliSessionKind::Shell => Self::SHELL,
+            CliSessionKind::Codex => Self::CODEX,
+            CliSessionKind::Claude => Self::CLAUDE,
         }
     }
 }
@@ -4815,11 +4815,7 @@ fn render_manual_session_command(launch: &SessionLaunch) -> String {
 }
 
 fn session_kind_label(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Shell => "shell",
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-    }
+    kind.as_str()
 }
 
 fn command_session_kind_label(command: &str) -> &'static str {
@@ -4925,16 +4921,16 @@ fn session_kind_from_process_record(
     if let Some(thread_id) = record.chat_thread_id {
         let thread = store.get_chat_thread_record(thread_id)?;
         return Ok(match thread.provider.as_str() {
-            "codex" => SessionKind::Codex,
-            "claude" => SessionKind::Claude,
-            _ => SessionKind::Shell,
+            "codex" => SessionKind::CODEX,
+            "claude" => SessionKind::CLAUDE,
+            _ => SessionKind::SHELL,
         });
     }
 
     Ok(match command_session_kind_label(&record.command) {
-        "codex" => SessionKind::Codex,
-        "claude" => SessionKind::Claude,
-        _ => SessionKind::Shell,
+        "codex" => SessionKind::CODEX,
+        "claude" => SessionKind::CLAUDE,
+        _ => SessionKind::SHELL,
     })
 }
 
@@ -4991,7 +4987,7 @@ fn ensure_session_send_target(
 }
 
 fn session_send_waits_for_ready(kind: SessionKind, thread_has_visible_history: bool) -> bool {
-    !matches!(kind, SessionKind::Claude) || thread_has_visible_history
+    !matches!(kind, SessionKind::CLAUDE) || thread_has_visible_history
 }
 
 fn wait_for_archcar_session_ready(
@@ -5406,7 +5402,7 @@ mod tests {
     #[test]
     fn windows_manual_session_command_sets_env_and_changes_drive() {
         let launch = SessionLaunch {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             program: PathBuf::from("codex.exe"),
             args: vec!["--model".to_owned(), "gpt-test".to_owned()],
             cwd: PathBuf::from(r"C:\work space"),
@@ -5429,7 +5425,7 @@ mod tests {
     #[cfg(not(windows))]
     fn manual_session_command_includes_workspace_env_and_program() {
         let launch = SessionLaunch {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             program: PathBuf::from("codex"),
             args: Vec::new(),
             cwd: PathBuf::from("/tmp/work space"),
@@ -5455,7 +5451,7 @@ mod tests {
     #[test]
     fn manual_codex_session_command_keeps_bootstrap_env_out_of_prompt() {
         let launch = SessionLaunch {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             program: PathBuf::from("codex"),
             args: vec!["--model".to_owned(), "gpt-5.6-sol".to_owned()],
             cwd: PathBuf::from("/tmp/work"),
@@ -5546,9 +5542,9 @@ mod tests {
 
     #[test]
     fn cli_session_stop_routes_provider_native_agents_through_archcar() {
-        assert!(cli_session_stop_uses_archcar(SessionKind::Codex));
-        assert!(cli_session_stop_uses_archcar(SessionKind::Claude));
-        assert!(!cli_session_stop_uses_archcar(SessionKind::Shell));
+        assert!(cli_session_stop_uses_archcar(SessionKind::CODEX));
+        assert!(cli_session_stop_uses_archcar(SessionKind::CLAUDE));
+        assert!(!cli_session_stop_uses_archcar(SessionKind::SHELL));
     }
 
     #[test]
@@ -5989,9 +5985,9 @@ mod tests {
 
     #[test]
     fn cli_claude_session_send_does_not_wait_for_ready_before_first_input() {
-        assert!(!session_send_waits_for_ready(SessionKind::Claude, false));
-        assert!(session_send_waits_for_ready(SessionKind::Claude, true));
-        assert!(session_send_waits_for_ready(SessionKind::Codex, false));
+        assert!(!session_send_waits_for_ready(SessionKind::CLAUDE, false));
+        assert!(session_send_waits_for_ready(SessionKind::CLAUDE, true));
+        assert!(session_send_waits_for_ready(SessionKind::CODEX, false));
     }
 
     fn session_send_thread_target(cli: Cli) -> Option<(i64, String)> {

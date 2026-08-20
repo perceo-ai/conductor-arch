@@ -112,7 +112,7 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
     let provider_events = ProviderEventStore::new(&paths.database_path);
     for workspace in store.list()? {
         let records = store.list_sessions(&workspace.name)?;
-        for kind in [SessionKind::Codex, SessionKind::Claude] {
+        for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
             for record in persisted_running_session_candidates(&records, kind) {
                 if !is_archcar_managed_persisted_session(&record, &paths.logs_dir) {
                     continue;
@@ -607,7 +607,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     if !interrupt_supported {
                         return ArchcarResponse::Error {
                             message: format!(
-                                "interrupt_turn is not supported for session kind {kind:?}"
+                                "interrupt_turn is not supported for {} sessions",
+                                kind.map(SessionKind::display_name).unwrap_or("unknown")
                             ),
                         };
                     }
@@ -2785,9 +2786,9 @@ fn start_background_task(
     for (agent_provider, prompt, title) in &agents {
         // Core rejects anything but a managed provider before we get here.
         let kind = if agent_provider == "claude" {
-            SessionKind::Claude
+            SessionKind::CLAUDE
         } else {
-            SessionKind::Codex
+            SessionKind::CODEX
         };
 
         // Reuse the normal chat path so a background workspace looks exactly
@@ -3104,14 +3105,14 @@ fn validate_send_input_delivery(
 ) -> Result<()> {
     let snapshot = handle.snapshot.lock().unwrap();
     if *kind == crate::archcar::protocol::ArchcarInputKind::RawTerminal
-        && snapshot.kind != SessionKind::Shell
+        && snapshot.kind != SessionKind::SHELL
     {
         anyhow::bail!("raw terminal input is only supported for shell sessions");
     }
     if delivery == crate::archcar::protocol::ArchcarInputDelivery::Immediate {
         return Ok(());
     }
-    if matches!(snapshot.kind, SessionKind::Codex | SessionKind::Claude) && !snapshot.ready {
+    if matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) && !snapshot.ready {
         anyhow::bail!(
             "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn",
             provider_name(snapshot.kind),
@@ -3438,22 +3439,22 @@ fn set_chat_plan_mode(
             message: err.to_string(),
         };
     }
-    for kind in [SessionKind::Claude, SessionKind::Codex] {
+    for kind in [SessionKind::CLAUDE, SessionKind::CODEX] {
         if let Some(handle) = live_session_handle_for_thread(state, thread_id, kind) {
             let mode = match kind {
-                SessionKind::Claude if plan_mode => {
+                SessionKind::CLAUDE if plan_mode => {
                     Some(crate::archcar::session::CLAUDE_PLAN_PERMISSION_MODE.to_owned())
                 }
-                SessionKind::Claude => {
+                SessionKind::CLAUDE => {
                     Some(crate::archcar::session::CLAUDE_DEFAULT_PERMISSION_MODE.to_owned())
                 }
                 // Codex carries plan mode as a read-only sandbox on the turns
                 // it starts; the adapter only needs to know which mode it is in.
-                SessionKind::Codex if plan_mode => Some(
+                SessionKind::CODEX if plan_mode => Some(
                     crate::provider_adapters::codex_app_server::CODEX_PLAN_PERMISSION_MODE
                         .to_owned(),
                 ),
-                SessionKind::Codex => Some("default".to_owned()),
+                SessionKind::CODEX => Some("default".to_owned()),
                 _ => None,
             };
             if let Some(mode) = mode {
@@ -3581,8 +3582,8 @@ fn start_building_approved_plan(
 
 fn session_kind_for_provider(provider_key: &str) -> SessionKind {
     match provider_key {
-        "claude" => SessionKind::Claude,
-        _ => SessionKind::Codex,
+        "claude" => SessionKind::CLAUDE,
+        _ => SessionKind::CODEX,
     }
 }
 
@@ -3646,7 +3647,7 @@ fn workspace_needing_session_for_queue(
     thread_id: i64,
     kind: SessionKind,
 ) -> Option<String> {
-    if !matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+    if !matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE) {
         return None;
     }
     if live_session_handle_for_thread(state, thread_id, kind).is_some() {
@@ -3700,7 +3701,7 @@ fn note_session_not_ready_for_queue(handle: &SessionHandle) {
     let Ok(mut snapshot) = handle.snapshot.lock() else {
         return;
     };
-    if matches!(snapshot.kind, SessionKind::Codex | SessionKind::Claude) {
+    if matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
         snapshot.ready = false;
         snapshot.runtime_state = crate::session_state::AgentSessionState::Running;
     }
@@ -4459,7 +4460,7 @@ fn ensure_default_session(
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
-    if !matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+    if !matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE) {
         return ArchcarResponse::Error {
             message: "only codex and claude auto-spawn are implemented".to_owned(),
         };
@@ -4582,12 +4583,7 @@ fn ensure_default_session(
 }
 
 fn default_queue_key(workspace: &str, kind: SessionKind) -> String {
-    let kind = match kind {
-        SessionKind::Shell => "shell",
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-    };
-    format!("{workspace}\0{kind}")
+    format!("{workspace}\0{}", kind.as_str())
 }
 
 fn ensure_chat_thread_session(
@@ -4597,7 +4593,7 @@ fn ensure_chat_thread_session(
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
-    if !matches!(kind, SessionKind::Codex | SessionKind::Claude) {
+    if !matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE) {
         return ArchcarResponse::Error {
             message: "only codex and claude chat-thread auto-spawn are implemented".to_owned(),
         };
@@ -4987,16 +4983,16 @@ fn is_archcar_managed_persisted_session(
 
 fn session_kind_matches_command(command: &str, kind: SessionKind) -> bool {
     let trimmed = command.trim();
-    match kind {
-        SessionKind::Codex => trimmed == "codex" || trimmed.starts_with("codex "),
-        SessionKind::Claude => trimmed == "claude" || trimmed.starts_with("claude "),
-        SessionKind::Shell => {
-            !(trimmed == "codex"
-                || trimmed.starts_with("codex ")
-                || trimmed == "claude"
-                || trimmed.starts_with("claude "))
-        }
+    let runs =
+        |executable: &str| trimmed == executable || trimmed.starts_with(&format!("{executable} "));
+    if kind.is_shell() {
+        // A shell row is a shell only while it is not running one of the
+        // registered agents — previously this only excluded codex and claude,
+        // so a row running any other agent was misread as a plain shell.
+        return !crate::agent_tools::agent_tools().any(|tool| runs(tool.default_command));
     }
+    crate::agent_tools::tool_by_provider(kind.as_str())
+        .is_some_and(|tool| runs(tool.default_command))
 }
 
 fn spawn_session(
@@ -5413,7 +5409,7 @@ mod tests {
                 input: "run tests".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
-                session_kind: SessionKind::Codex,
+                session_kind: SessionKind::CODEX,
             },
             &state,
         );
@@ -5450,7 +5446,7 @@ mod tests {
                 input: "and lint".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
-                session_kind: SessionKind::Codex,
+                session_kind: SessionKind::CODEX,
             },
             &state,
         );
@@ -5568,7 +5564,7 @@ mod tests {
             .record_session_process_for_thread(
                 "berlin",
                 thread.id,
-                &store.session_launch("berlin", SessionKind::Codex).unwrap(),
+                &store.session_launch("berlin", SessionKind::CODEX).unwrap(),
                 std::process::id(),
             )
             .unwrap();
@@ -5599,14 +5595,14 @@ mod tests {
                 "run tests",
                 Some("run visible tests"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let snapshot = crate::archcar::session::SessionSnapshot {
             session_id: process.id,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: process.pid,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -5690,14 +5686,14 @@ mod tests {
                 "pwd\n",
                 None,
                 ArchcarInputKind::RawTerminal,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -5772,7 +5768,7 @@ mod tests {
                 "run tests",
                 Some("visible tests"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let second = store
@@ -5781,14 +5777,14 @@ mod tests {
                 "second",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -5891,7 +5887,7 @@ mod tests {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Claude,
+            kind: SessionKind::CLAUDE,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -5970,7 +5966,7 @@ mod tests {
                     session_id: 9,
                     thread_id: thread.id,
                     workspace: "berlin".to_owned(),
-                    kind: SessionKind::Claude,
+                    kind: SessionKind::CLAUDE,
                     pid: 12345,
                     status: ProcessStatus::Running,
                     runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -6077,14 +6073,14 @@ mod tests {
                 "left over from before the restart",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -6136,7 +6132,7 @@ mod tests {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Claude,
+            kind: SessionKind::CLAUDE,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -6176,7 +6172,7 @@ mod tests {
                     input: input.to_owned(),
                     visible_input: None,
                     kind: ArchcarInputKind::User,
-                    session_kind: SessionKind::Claude,
+                    session_kind: SessionKind::CLAUDE,
                 },
                 &state,
             );
@@ -6211,7 +6207,7 @@ mod tests {
                 "first message",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let state = Arc::new(Mutex::new(ServerState {
@@ -6229,7 +6225,7 @@ mod tests {
         // A brand-new chat thread has no session, so nothing would ever deliver
         // the first message unless the queue starts one.
         assert_eq!(
-            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::Codex),
+            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::CODEX),
             Some("berlin".to_owned())
         );
     }
@@ -6247,7 +6243,7 @@ mod tests {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: ProcessStatus::Running,
             // Mid-turn: not ready, but TurnCompleted will drain the queue.
@@ -6278,7 +6274,7 @@ mod tests {
         }));
 
         assert_eq!(
-            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::Codex),
+            workspace_needing_session_for_queue(&state, &store, thread.id, SessionKind::CODEX),
             None
         );
     }
@@ -6354,14 +6350,14 @@ mod tests {
                 "run tests",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -6394,7 +6390,7 @@ mod tests {
             ArchcarRequest::EnsureChatThreadSession {
                 workspace: "berlin".to_owned(),
                 thread_id: thread.id,
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
                 harness: None,
             },
             &state,
@@ -6442,27 +6438,27 @@ mod tests {
         let first = ensure_default_session(
             &state,
             "berlin".to_owned(),
-            SessionKind::Codex,
+            SessionKind::CODEX,
             crate::workspace::SessionHarnessOptions::default(),
         );
         let second = ensure_default_session(
             &state,
             "berlin".to_owned(),
-            SessionKind::Codex,
+            SessionKind::CODEX,
             crate::workspace::SessionHarnessOptions::default(),
         );
         assert_eq!(
             first,
             ArchcarResponse::SessionSpawnQueued {
                 workspace: "berlin".to_owned(),
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
             }
         );
         assert_eq!(
             second,
             ArchcarResponse::SessionSpawnQueued {
                 workspace: "berlin".to_owned(),
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
             }
         );
     }
@@ -6474,7 +6470,7 @@ mod tests {
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
-            queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::Codex)]),
+            queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::CODEX)]),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
             drain_reruns: HashSet::new(),
@@ -6485,21 +6481,21 @@ mod tests {
         let claude = ensure_default_session(
             &state,
             "berlin".to_owned(),
-            SessionKind::Claude,
+            SessionKind::CLAUDE,
             crate::workspace::SessionHarnessOptions::default(),
         );
 
         assert!(matches!(
             claude,
             ArchcarResponse::SessionSpawnQueued {
-                kind: SessionKind::Claude,
+                kind: SessionKind::CLAUDE,
                 ..
             }
         ));
         assert!(matches!(
             event_rx.try_recv(),
             Ok(ArchcarEvent::SessionSpawnQueued {
-                kind: SessionKind::Claude,
+                kind: SessionKind::CLAUDE,
                 ..
             })
         ));
@@ -6525,7 +6521,7 @@ mod tests {
         let response = spawn_session(
             &state,
             "missing-workspace".to_owned(),
-            SessionKind::Shell,
+            SessionKind::SHELL,
             crate::workspace::SessionHarnessOptions::default(),
         );
 
@@ -6712,7 +6708,7 @@ mod tests {
             session_id: 9,
             thread_id: 4,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -6744,7 +6740,7 @@ mod tests {
         let response = ensure_default_session(
             &state,
             "berlin".to_owned(),
-            SessionKind::Codex,
+            SessionKind::CODEX,
             crate::workspace::SessionHarnessOptions::default(),
         );
 
@@ -6754,7 +6750,7 @@ mod tests {
                 session_id: 9,
                 thread_id: 4,
                 workspace: "berlin".to_owned(),
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
                 pid: 12345,
             }
         );
@@ -6767,7 +6763,7 @@ mod tests {
             session_id: 9,
             thread_id: 4,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -6779,7 +6775,7 @@ mod tests {
             session_id: 10,
             thread_id: 5,
             workspace: "paris".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12346,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Starting,
@@ -6824,7 +6820,7 @@ mod tests {
             session_id: 9,
             thread_id: 4,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
         }));
         assert!(events.contains(&ArchcarEvent::SessionReady {
@@ -6835,7 +6831,7 @@ mod tests {
             session_id: 10,
             thread_id: 5,
             workspace: "paris".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12346,
         }));
         assert!(!events.contains(&ArchcarEvent::SessionReady {
@@ -6880,7 +6876,7 @@ mod tests {
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -6901,7 +6897,7 @@ mod tests {
             session_id: process.id,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: process.pid,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Running,
@@ -6978,7 +6974,7 @@ mod tests {
             session_id: 9,
             thread_id: requested_thread.id + 1,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -7011,7 +7007,7 @@ mod tests {
             &state,
             "berlin".to_owned(),
             requested_thread.id,
-            SessionKind::Codex,
+            SessionKind::CODEX,
             crate::workspace::SessionHarnessOptions::default(),
         );
 
@@ -7019,7 +7015,7 @@ mod tests {
             response,
             ArchcarResponse::SessionSpawnQueued {
                 workspace: "berlin".to_owned(),
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
             }
         );
     }
@@ -7030,7 +7026,7 @@ mod tests {
             session_id: 9,
             thread_id: 4,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Running,
@@ -7084,7 +7080,7 @@ mod tests {
             session_id: 9,
             thread_id: 4,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 12345,
             status: crate::workspace::ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::Running,
@@ -7187,7 +7183,7 @@ mod tests {
             &state,
             "tokyo".to_owned(),
             requested_thread.id,
-            SessionKind::Codex,
+            SessionKind::CODEX,
             crate::workspace::SessionHarnessOptions::default(),
         );
 
@@ -7501,14 +7497,14 @@ mod tests {
         ];
 
         assert_eq!(
-            persisted_running_session_candidates(&records, SessionKind::Codex)
+            persisted_running_session_candidates(&records, SessionKind::CODEX)
                 .into_iter()
                 .map(|record| record.id)
                 .collect::<Vec<_>>(),
             vec![5, 3]
         );
         assert_eq!(
-            persisted_running_session_candidates(&records, SessionKind::Claude)
+            persisted_running_session_candidates(&records, SessionKind::CLAUDE)
                 .into_iter()
                 .map(|record| record.id)
                 .collect::<Vec<_>>(),
@@ -7813,7 +7809,7 @@ default = true
                 input: "do the work".to_owned(),
                 visible_input: None,
                 kind: ArchcarInputKind::User,
-                session_kind: SessionKind::Codex,
+                session_kind: SessionKind::CODEX,
             },
             &state,
         );
@@ -8323,7 +8319,7 @@ default = true
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let mut child = spawn_fake_managed_codex_process();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
@@ -8355,7 +8351,7 @@ default = true
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -8417,7 +8413,7 @@ default = true
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -8461,7 +8457,7 @@ default = true
         let thread = store
             .create_chat_thread("berlin", "claude", "Claude", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Claude).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CLAUDE).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -8483,7 +8479,7 @@ default = true
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, std::process::id())
             .unwrap();
@@ -8506,7 +8502,7 @@ default = true
             &paths.data_dir.join("logs"),
             temp.path(),
         );
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, std::process::id())
             .unwrap();

@@ -157,7 +157,7 @@ struct ProviderProcessConnection {
 static PROVIDER_NATIVE_SESSION_LAUNCH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn provider_native_session_launch_guard(kind: SessionKind) -> Option<MutexGuard<'static, ()>> {
-    matches!(kind, SessionKind::Codex | SessionKind::Claude).then(|| {
+    matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE).then(|| {
         PROVIDER_NATIVE_SESSION_LAUNCH_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -353,7 +353,7 @@ struct LiveSessionStart<'a> {
 }
 
 fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHandle> {
-    if matches!(start.kind, SessionKind::Codex | SessionKind::Claude) {
+    if matches!(start.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
         return spawn_provider_native_managed_session(start);
     }
 
@@ -450,9 +450,11 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         pending_recovery_context: start.startup_recovery_context.clone(),
     };
     let connection = match start.kind {
-        SessionKind::Codex => ManagedSessionConnection::CodexAppServer(connection),
-        SessionKind::Claude => ManagedSessionConnection::ClaudeStream(connection),
-        SessionKind::Shell => unreachable!("shell sessions use PTY"),
+        SessionKind::CODEX => ManagedSessionConnection::CodexAppServer(connection),
+        SessionKind::CLAUDE => ManagedSessionConnection::ClaudeStream(connection),
+        // Reaching here with an unmanaged kind is a routing bug, but a daemon
+        // serving other sessions should report it rather than abort.
+        other => anyhow::bail!("{other} has no managed transport; it runs as a PTY session"),
     };
 
     Ok(start_session_handle(
@@ -484,7 +486,7 @@ fn spawn_stdout_line_reader(stdout: std::process::ChildStdout) -> Receiver<Strin
 }
 
 fn process_lifecycle_ready(kind: SessionKind) -> bool {
-    matches!(kind, SessionKind::Codex | SessionKind::Shell)
+    matches!(kind, SessionKind::CODEX | SessionKind::SHELL)
 }
 
 struct RuntimeProviderEventInput<'a> {
@@ -916,10 +918,10 @@ fn build_thread_session_launch(
     harness: SessionHarnessOptions,
     controller: &dyn HarnessController,
 ) -> Result<ThreadSessionLaunch> {
-    if kind == SessionKind::Codex {
+    if kind == SessionKind::CODEX {
         return codex_app_server_session_launch(store, workspace, thread_record, harness);
     }
-    if kind == SessionKind::Claude {
+    if kind == SessionKind::CLAUDE {
         return claude_stream_session_launch(store, workspace, thread_record, harness);
     }
     Ok(ThreadSessionLaunch {
@@ -938,7 +940,7 @@ fn codex_app_server_session_launch(
     let harness = normalize_agent_harness_options(harness);
     let mut launch = store.session_launch_with_options(
         workspace,
-        SessionKind::Codex,
+        SessionKind::CODEX,
         SessionHarnessOptions::default(),
     )?;
     launch.args = CODEX_APP_SERVER_DEFAULT_ARGS
@@ -996,7 +998,7 @@ fn claude_stream_session_launch(
     let harness = normalize_agent_harness_options(harness);
     let mut launch = store.session_launch_with_options(
         workspace,
-        SessionKind::Claude,
+        SessionKind::CLAUDE,
         SessionHarnessOptions::default(),
     )?;
     let hook_settings = std::env::current_exe().ok().and_then(|executable| {
@@ -1356,7 +1358,7 @@ fn apply_provider_control_plan(
             let _ = crate::platform::interrupt_process_group(connection.child.id());
         }
         HarnessControlPlan::RestartRequired(controls) => {
-            if started.kind == SessionKind::Claude && connection.native_thread_id.is_none() {
+            if started.kind == SessionKind::CLAUDE && connection.native_thread_id.is_none() {
                 let _ = event_tx.send(ArchcarEvent::SessionError {
                     session_id: Some(started.session_id),
                     thread_id: Some(started.thread_id),
@@ -1454,7 +1456,7 @@ fn adopt_running_session(
             record.status == ProcessStatus::Running
                 && record.chat_thread_id.is_some()
                 && session_kind_from_command(&record.command) == Some(kind)
-                && kind == SessionKind::Codex
+                && kind == SessionKind::CODEX
                 && !provider_native_process(record.session_harness_metadata.as_deref())
                 && store.owns_process_log_path(&record.log_path)
         })
@@ -1494,11 +1496,11 @@ fn adopt_running_session(
 fn session_kind_from_command(command: &str) -> Option<SessionKind> {
     let trimmed = command.trim();
     if trimmed.starts_with("codex ") || trimmed == "codex" {
-        Some(SessionKind::Codex)
+        Some(SessionKind::CODEX)
     } else if trimmed.starts_with("claude ") || trimmed == "claude" {
-        Some(SessionKind::Claude)
+        Some(SessionKind::CLAUDE)
     } else if !trimmed.is_empty() {
-        Some(SessionKind::Shell)
+        Some(SessionKind::SHELL)
     } else {
         None
     }
@@ -1535,7 +1537,7 @@ pub fn restore_managed_session(
     let Some(kind) = session_kind_from_command(&process.command) else {
         return Ok(None);
     };
-    if kind == SessionKind::Shell {
+    if kind == SessionKind::SHELL {
         if terminate_process_and_wait(process.pid) {
             let _ = store.mark_session_process_exited(process.id, None);
         } else {
@@ -1559,7 +1561,7 @@ pub fn restore_managed_session(
         workspace,
         kind,
         process.pid,
-        kind == SessionKind::Codex,
+        kind == SessionKind::CODEX,
     );
     Ok(Some(start_session_handle(
         db_path, logs_dir, snapshot, controller, connection, event_tx,
@@ -1608,7 +1610,7 @@ fn should_persist_screen_output(
 }
 
 fn screen_persistence_fingerprint(kind: SessionKind, screen: &str) -> String {
-    if kind != SessionKind::Codex {
+    if kind != SessionKind::CODEX {
         return screen.to_owned();
     }
 
@@ -1653,7 +1655,7 @@ fn provider_input_local_id(session_id: i64, sequence: u64) -> String {
 
 fn session_ready_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
     match kind {
-        SessionKind::Codex => codex_screen_ready_for_input(screen),
+        SessionKind::CODEX => codex_screen_ready_for_input(screen),
         _ => false,
     }
 }
@@ -1664,14 +1666,14 @@ fn session_ready_for_visible_screen_after_busy(
     saw_busy_since_input: bool,
 ) -> bool {
     match kind {
-        SessionKind::Codex => saw_busy_since_input && codex_screen_ready_for_input(screen),
+        SessionKind::CODEX => saw_busy_since_input && codex_screen_ready_for_input(screen),
         _ => session_ready_for_visible_screen(kind, screen),
     }
 }
 
 fn session_busy_for_visible_screen(kind: SessionKind, screen: &str) -> bool {
     match kind {
-        SessionKind::Codex => screen.contains("Working ("),
+        SessionKind::CODEX => screen.contains("Working ("),
         _ => false,
     }
 }
@@ -1705,7 +1707,7 @@ fn pty_screen_snapshot_logging_enabled() -> bool {
 }
 
 fn should_attempt_native_thread_resolution(kind: SessionKind, already_resolved: bool) -> bool {
-    kind == SessionKind::Codex && !already_resolved
+    kind == SessionKind::CODEX && !already_resolved
 }
 
 fn run_session_loop(
@@ -1910,14 +1912,19 @@ fn run_session_loop(
                     match pty.send_line(&input) {
                         Ok(()) => {
                             match current.kind {
-                                SessionKind::Codex => {
+                                SessionKind::CODEX => {
                                     if let Ok(mut state) = snapshot.lock() {
                                         state.ready = false;
                                         state.runtime_state = AgentSessionState::Running;
                                     }
                                     codex_busy_since_input = false;
                                 }
-                                SessionKind::Shell => {
+                                SessionKind::CLAUDE => {}
+                                // Shell and any unmanaged agent share this
+                                // path: with no turn protocol there is nothing
+                                // to wait on, so the session is ready again as
+                                // soon as the line is written.
+                                _ => {
                                     if let Ok(mut state) = snapshot.lock() {
                                         state.ready = true;
                                         state.runtime_state = AgentSessionState::WaitingForInput;
@@ -1927,7 +1934,6 @@ fn run_session_loop(
                                         thread_id: current.thread_id,
                                     });
                                 }
-                                SessionKind::Claude => {}
                             }
                             info!(
                                 session_id = current.session_id,
@@ -3367,11 +3373,7 @@ fn enqueue_provider_input(
 }
 
 fn session_kind_provider_key(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-        SessionKind::Shell => "shell",
-    }
+    kind.as_str()
 }
 
 fn input_kind_storage_label(kind: &ArchcarInputKind) -> &'static str {
@@ -3602,7 +3604,7 @@ mod tests {
         let thread = store
             .create_chat_thread("berlin", "shell", "Shell", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let mut child = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
@@ -3621,7 +3623,7 @@ mod tests {
             process.id,
             thread.id,
             "berlin".to_owned(),
-            SessionKind::Shell,
+            SessionKind::SHELL,
             child.id(),
             true,
         )));
@@ -3635,7 +3637,7 @@ mod tests {
                 db_path,
                 logs_dir,
                 snapshot_for_loop,
-                controller_for_kind(SessionKind::Shell),
+                controller_for_kind(SessionKind::SHELL),
                 connection,
                 command_rx,
                 event_tx,
@@ -3702,22 +3704,22 @@ mod tests {
     #[test]
     fn codex_outputs_use_canonical_wrappers() {
         assert_eq!(
-            crate::runtime_session_store::format_session_raw_output(SessionKind::Codex, "hello"),
+            crate::runtime_session_store::format_session_raw_output(SessionKind::CODEX, "hello"),
             "[codex raw]\nhello\n[/codex raw]\n"
         );
         assert_eq!(
             crate::runtime_session_store::format_session_screen_output(
-                SessionKind::Codex,
+                SessionKind::CODEX,
                 "hello\n"
             ),
             "[codex screen]\nhello\n[/codex screen]\n"
         );
         assert_eq!(
-            crate::runtime_session_store::format_session_raw_output(SessionKind::Shell, "plain"),
+            crate::runtime_session_store::format_session_raw_output(SessionKind::SHELL, "plain"),
             "plain"
         );
         assert_eq!(
-            crate::runtime_session_store::format_session_screen_output(SessionKind::Shell, "plain"),
+            crate::runtime_session_store::format_session_screen_output(SessionKind::SHELL, "plain"),
             "plain"
         );
     }
@@ -3725,7 +3727,7 @@ mod tests {
     #[test]
     fn runtime_provider_input_events_use_discrete_identities() {
         let first = runtime_provider_event(RuntimeProviderEventInput {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             session_id: 7,
             thread_id: 11,
             identity_suffix: Some("input-1"),
@@ -3737,7 +3739,7 @@ mod tests {
             body: "first",
         });
         let second = runtime_provider_event(RuntimeProviderEventInput {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             session_id: 7,
             thread_id: 11,
             identity_suffix: Some("input-2"),
@@ -3760,7 +3762,7 @@ mod tests {
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -3769,7 +3771,7 @@ mod tests {
         append_runtime_provider_event(
             &first_runtime_store,
             runtime_provider_event(RuntimeProviderEventInput {
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
                 session_id: process.id,
                 thread_id: thread.id,
                 identity_suffix: Some("input-1"),
@@ -3785,7 +3787,7 @@ mod tests {
         append_runtime_provider_event(
             &first_runtime_store,
             runtime_provider_event(RuntimeProviderEventInput {
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
                 session_id: process.id,
                 thread_id: thread.id,
                 identity_suffix: Some("input-3"),
@@ -3807,7 +3809,7 @@ mod tests {
         append_runtime_provider_event(
             &restored_runtime_store,
             runtime_provider_event(RuntimeProviderEventInput {
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
                 session_id: process.id,
                 thread_id: thread.id,
                 identity_suffix: Some(&second_suffix),
@@ -3859,7 +3861,7 @@ mod tests {
             process.id,
             thread.id,
             "berlin".to_owned(),
-            SessionKind::Claude,
+            SessionKind::CLAUDE,
             process.pid,
             false,
         );
@@ -3985,7 +3987,7 @@ mod tests {
             process.id,
             thread.id,
             "berlin".to_owned(),
-            SessionKind::Claude,
+            SessionKind::CLAUDE,
             pid,
             false,
         )));
@@ -4121,7 +4123,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             process.id,
             thread.id,
             "berlin".to_owned(),
-            SessionKind::Claude,
+            SessionKind::CLAUDE,
             pid,
             false,
         )));
@@ -4194,9 +4196,9 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
 
     #[test]
     fn codex_process_lifecycle_is_ready_without_screen_semantic_detection() {
-        assert!(process_lifecycle_ready(SessionKind::Codex));
-        assert!(process_lifecycle_ready(SessionKind::Shell));
-        assert!(!process_lifecycle_ready(SessionKind::Claude));
+        assert!(process_lifecycle_ready(SessionKind::CODEX));
+        assert!(process_lifecycle_ready(SessionKind::SHELL));
+        assert!(!process_lifecycle_ready(SessionKind::CLAUDE));
     }
 
     #[test]
@@ -4267,7 +4269,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             pending_recovery_context: None,
         };
         let snapshot =
-            running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::Codex, 123, false);
+            running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::CODEX, 123, false);
 
         start_codex_app_server_lifecycle(&mut connection, &snapshot).unwrap();
 
@@ -4338,7 +4340,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             pending_recovery_context: None,
         };
         let snapshot =
-            running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::Codex, 123, false);
+            running_session_snapshot(7, 11, "berlin".to_owned(), SessionKind::CODEX, 123, false);
 
         start_codex_app_server_lifecycle(&mut connection, &snapshot).unwrap();
 
@@ -4394,7 +4396,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             first_process.id,
             thread.id,
             "berlin".to_owned(),
-            SessionKind::Codex,
+            SessionKind::CODEX,
             123,
             false,
         );
@@ -4402,7 +4404,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             second_process.id,
             thread.id,
             "berlin".to_owned(),
-            SessionKind::Codex,
+            SessionKind::CODEX,
             456,
             false,
         );
@@ -4934,27 +4936,27 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
 
         let mut last_persisted = None;
         assert!(should_persist_screen_output(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             &mut last_persisted,
             first_screen
         ));
         assert!(!should_persist_screen_output(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             &mut last_persisted,
             first_screen
         ));
         assert!(!should_persist_screen_output(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             &mut last_persisted,
             timer_repaint
         ));
         assert!(should_persist_screen_output(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             &mut last_persisted,
             background_terminal_update
         ));
         assert!(should_persist_screen_output(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             &mut last_persisted,
             real_update
         ));
@@ -4976,15 +4978,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
   gpt-5.6-sol medium · ~/archductor/workspaces/demo";
 
         assert!(session_ready_for_visible_screen(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             ready_screen
         ));
         assert!(!session_ready_for_visible_screen(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             working_screen
         ));
         assert!(!session_ready_for_visible_screen(
-            SessionKind::Shell,
+            SessionKind::SHELL,
             ready_screen
         ));
     }
@@ -5003,17 +5005,17 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
   gpt-5.6-sol medium · ~/archductor/workspaces/demo";
 
         assert!(!session_ready_for_visible_screen_after_busy(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             ready_screen,
             false
         ));
         assert!(!session_ready_for_visible_screen_after_busy(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             working_screen,
             true
         ));
         assert!(session_ready_for_visible_screen_after_busy(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             ready_screen,
             true
         ));
@@ -5022,15 +5024,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
     #[test]
     fn native_thread_resolution_stays_codex_only() {
         assert!(should_attempt_native_thread_resolution(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             false
         ));
         assert!(!should_attempt_native_thread_resolution(
-            SessionKind::Codex,
+            SessionKind::CODEX,
             true
         ));
         assert!(!should_attempt_native_thread_resolution(
-            SessionKind::Shell,
+            SessionKind::SHELL,
             false
         ));
     }
@@ -5039,7 +5041,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
     fn codex_thread_launch_without_native_id_starts_clean_session() {
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
-        let controller = controller_for_kind(SessionKind::Codex);
+        let controller = controller_for_kind(SessionKind::CODEX);
 
         let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
             &store,
@@ -5047,7 +5049,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             &store
                 .create_chat_thread("berlin", "codex", "Codex", None)
                 .unwrap(),
-            SessionKind::Codex,
+            SessionKind::CODEX,
             SessionHarnessOptions::default(),
             controller.as_ref(),
         )
@@ -5062,7 +5064,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
-        let controller = controller_for_kind(SessionKind::Codex);
+        let controller = controller_for_kind(SessionKind::CODEX);
         let fake_home = temp.path().join("home");
         let rollout_dir = fake_home.join(".codex/sessions/2026/07/18");
         fs::create_dir_all(&rollout_dir).unwrap();
@@ -5093,7 +5095,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
                     store.update_chat_thread_native_id(thread.id, "codex-native-thread")
                 })
                 .unwrap(),
-            SessionKind::Codex,
+            SessionKind::CODEX,
             SessionHarnessOptions::default(),
             controller.as_ref(),
         )
@@ -5117,7 +5119,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let _guard = env_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
-        let controller = controller_for_kind(SessionKind::Codex);
+        let controller = controller_for_kind(SessionKind::CODEX);
         let fake_home = temp.path().join("home");
         fs::create_dir_all(fake_home.join(".codex/sessions")).unwrap();
         let previous_home = std::env::var_os("HOME");
@@ -5138,7 +5140,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             &store,
             "berlin",
             &thread,
-            SessionKind::Codex,
+            SessionKind::CODEX,
             SessionHarnessOptions::default(),
             controller.as_ref(),
         )
@@ -5189,7 +5191,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         }
         assert_eq!(
             store
-                .session_launch("berlin", SessionKind::Codex)
+                .session_launch("berlin", SessionKind::CODEX)
                 .unwrap()
                 .program,
             PathBuf::from("/shared/bin/codex")
@@ -5200,16 +5202,16 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
     fn session_kind_detection_restores_runtime_supported_harnesses() {
         assert_eq!(
             session_kind_from_command("codex --no-alt-screen"),
-            Some(SessionKind::Codex)
+            Some(SessionKind::CODEX)
         );
-        assert_eq!(session_kind_from_command("codex"), Some(SessionKind::Codex));
+        assert_eq!(session_kind_from_command("codex"), Some(SessionKind::CODEX));
         assert_eq!(
             session_kind_from_command("claude --print"),
-            Some(SessionKind::Claude)
+            Some(SessionKind::CLAUDE)
         );
         assert_eq!(
             session_kind_from_command("bash -lc ls"),
-            Some(SessionKind::Shell)
+            Some(SessionKind::SHELL)
         );
         assert_eq!(session_kind_from_command(""), None);
     }
@@ -5221,12 +5223,12 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
 
-        let adopted = adopt_running_session(&store, "berlin", SessionKind::Codex).unwrap();
+        let adopted = adopt_running_session(&store, "berlin", SessionKind::CODEX).unwrap();
 
         assert!(adopted.is_none());
         let reconciled = store.get_process_record(process.id).unwrap();
@@ -5244,7 +5246,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
         let launch = data_store
-            .session_launch("berlin", SessionKind::Codex)
+            .session_launch("berlin", SessionKind::CODEX)
             .unwrap();
         let process = data_store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
@@ -5254,7 +5256,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let archcar_store =
             WorkspaceStore::open_with_logs(temp.path().join("state.db"), &archcar_logs_dir)
                 .unwrap();
-        let adopted = adopt_running_session(&archcar_store, "berlin", SessionKind::Codex).unwrap();
+        let adopted = adopt_running_session(&archcar_store, "berlin", SessionKind::CODEX).unwrap();
 
         assert!(adopted.is_none());
         let unchanged = data_store.get_process_record(process.id).unwrap();
@@ -5271,7 +5273,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, std::process::id())
             .unwrap();
@@ -5299,7 +5301,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .unwrap();
-        let mut launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let mut launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         launch.harness_metadata = Some("harness=codex-app-server;port=43000".to_owned());
         let mut child = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
         let process = store
@@ -5329,7 +5331,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         let thread = store
             .create_chat_thread("berlin", "shell", "Shell", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let mut child = ProcessCommand::new("/bin/sh")
             .args(["-c", "while :; do sleep 1; done"])
             .spawn()
@@ -5410,17 +5412,17 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         pid: u32,
     ) -> ProcessRecord {
         let kind = match thread.provider.as_str() {
-            "codex" => SessionKind::Codex,
-            "claude" => SessionKind::Claude,
+            "codex" => SessionKind::CODEX,
+            "claude" => SessionKind::CLAUDE,
             other => panic!("unexpected provider {other}"),
         };
         let mut launch = store.session_launch("berlin", kind).unwrap();
         launch.harness_metadata = Some(format!(
             "harness={};port={port}",
             match kind {
-                SessionKind::Codex => "codex-app-server",
-                SessionKind::Claude => "claude-stream-json",
-                SessionKind::Shell => "shell",
+                SessionKind::CODEX => "codex-app-server",
+                SessionKind::CLAUDE => "claude-stream-json",
+                _ => "shell",
             }
         ));
         store
