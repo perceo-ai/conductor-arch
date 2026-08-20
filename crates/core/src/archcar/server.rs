@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::archcar::harness::{managed_harness_for_kind, provider_name};
-use crate::archcar::harness_contract::{HarnessControl, RequiredHarnessFeature};
+use crate::archcar::harness_contract::{HarnessControl, HarnessFeature};
 use crate::archcar::harness_contract::{
     ProviderInteractionKind, ProviderInteractionResolution as InteractionResolution,
 };
@@ -602,10 +602,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     let interrupt_supported =
                         kind.and_then(managed_harness_for_kind)
                             .is_some_and(|harness| {
-                                harness
-                                    .descriptor()
-                                    .required_features
-                                    .contains(&RequiredHarnessFeature::Interrupt)
+                                harness.descriptor().supports(HarnessFeature::Interrupt)
                             });
                     if !interrupt_supported {
                         return ArchcarResponse::Error {

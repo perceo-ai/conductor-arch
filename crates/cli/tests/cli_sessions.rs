@@ -1,5 +1,5 @@
 use archductor_core::archcar::harness::managed_harness_for_kind;
-use archductor_core::archcar::harness_contract::{HarnessCapability, SupportMode};
+use archductor_core::archcar::harness_contract::{HarnessCapability, HarnessFeature, SupportMode};
 use archductor_core::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
 };
@@ -950,12 +950,13 @@ fn harness_capabilities_gate_goals_to_codex_descriptor() {
         claude.descriptor().optional(HarnessCapability::Goals),
         SupportMode::Unsupported { reason } if !reason.is_empty()
     ));
+    // Session controls are an extended feature now, so support is a per-provider
+    // declaration rather than a baseline guarantee — Claude reaches it by
+    // restarting, Codex natively, and both count as supported.
     for harness in [codex, claude] {
         assert!(harness
             .descriptor()
-            .required_features
-            .iter()
-            .any(|feature| feature.as_str() == "session_controls"));
+            .supports(HarnessFeature::SessionControls));
     }
 }
 

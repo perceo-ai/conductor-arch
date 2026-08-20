@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 pub const MANAGED_HARNESS_CONTRACT_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum RequiredHarnessFeature {
+pub enum HarnessFeature {
     Preflight,
     ThreadScopedSession,
     ProcessLifecycle,
@@ -25,45 +25,98 @@ pub enum RequiredHarnessFeature {
     CapabilityDiscovery,
 }
 
-impl RequiredHarnessFeature {
+impl HarnessFeature {
     pub fn as_str(self) -> &'static str {
         match self {
-            RequiredHarnessFeature::Preflight => "preflight",
-            RequiredHarnessFeature::ThreadScopedSession => "thread_scoped_session",
-            RequiredHarnessFeature::ProcessLifecycle => "process_lifecycle",
-            RequiredHarnessFeature::InputDelivery => "input_delivery",
-            RequiredHarnessFeature::InputAcknowledgement => "input_acknowledgement",
-            RequiredHarnessFeature::StreamingEvents => "streaming_events",
-            RequiredHarnessFeature::ExactlyOnceTurnCompletion => "exactly_once_turn_completion",
-            RequiredHarnessFeature::Queueing => "queueing",
-            RequiredHarnessFeature::Interrupt => "interrupt",
-            RequiredHarnessFeature::Resume => "resume",
-            RequiredHarnessFeature::CrashRecovery => "crash_recovery",
-            RequiredHarnessFeature::SessionControls => "session_controls",
-            RequiredHarnessFeature::ProviderInteractions => "provider_interactions",
-            RequiredHarnessFeature::StructuredErrors => "structured_errors",
-            RequiredHarnessFeature::CapabilityDiscovery => "capability_discovery",
+            HarnessFeature::Preflight => "preflight",
+            HarnessFeature::ThreadScopedSession => "thread_scoped_session",
+            HarnessFeature::ProcessLifecycle => "process_lifecycle",
+            HarnessFeature::InputDelivery => "input_delivery",
+            HarnessFeature::InputAcknowledgement => "input_acknowledgement",
+            HarnessFeature::StreamingEvents => "streaming_events",
+            HarnessFeature::ExactlyOnceTurnCompletion => "exactly_once_turn_completion",
+            HarnessFeature::Queueing => "queueing",
+            HarnessFeature::Interrupt => "interrupt",
+            HarnessFeature::Resume => "resume",
+            HarnessFeature::CrashRecovery => "crash_recovery",
+            HarnessFeature::SessionControls => "session_controls",
+            HarnessFeature::ProviderInteractions => "provider_interactions",
+            HarnessFeature::StructuredErrors => "structured_errors",
+            HarnessFeature::CapabilityDiscovery => "capability_discovery",
         }
     }
 }
 
-pub const REQUIRED_HARNESS_FEATURES: &[RequiredHarnessFeature] = &[
-    RequiredHarnessFeature::Preflight,
-    RequiredHarnessFeature::ThreadScopedSession,
-    RequiredHarnessFeature::ProcessLifecycle,
-    RequiredHarnessFeature::InputDelivery,
-    RequiredHarnessFeature::InputAcknowledgement,
-    RequiredHarnessFeature::StreamingEvents,
-    RequiredHarnessFeature::ExactlyOnceTurnCompletion,
-    RequiredHarnessFeature::Queueing,
-    RequiredHarnessFeature::Interrupt,
-    RequiredHarnessFeature::Resume,
-    RequiredHarnessFeature::CrashRecovery,
-    RequiredHarnessFeature::SessionControls,
-    RequiredHarnessFeature::ProviderInteractions,
-    RequiredHarnessFeature::StructuredErrors,
-    RequiredHarnessFeature::CapabilityDiscovery,
+/// The floor. Every managed harness — Codex, an ACP agent, a bare PTY
+/// passthrough — must implement all of these natively, because the daemon
+/// cannot fake any of them: it has to be able to check the tool is installed,
+/// own the process, hand it input, stream something back, know when a turn is
+/// over, report failure in a structured way, and say what it supports.
+pub const CORE_HARNESS_FEATURES: &[HarnessFeature] = &[
+    HarnessFeature::Preflight,
+    HarnessFeature::ProcessLifecycle,
+    HarnessFeature::InputDelivery,
+    HarnessFeature::StreamingEvents,
+    HarnessFeature::ExactlyOnceTurnCompletion,
+    HarnessFeature::StructuredErrors,
+    HarnessFeature::CapabilityDiscovery,
 ];
+
+/// Declared per provider with a [`SupportMode`]. A descriptor must carry an
+/// entry for every one of these — `Unsupported { reason }` is a valid answer,
+/// silence is not — so a capability gap is always a written statement rather
+/// than an omission nobody noticed.
+pub const EXTENDED_HARNESS_FEATURES: &[HarnessFeature] = &[
+    HarnessFeature::ThreadScopedSession,
+    HarnessFeature::InputAcknowledgement,
+    HarnessFeature::Queueing,
+    HarnessFeature::Interrupt,
+    HarnessFeature::Resume,
+    HarnessFeature::CrashRecovery,
+    HarnessFeature::SessionControls,
+    HarnessFeature::ProviderInteractions,
+];
+
+pub const ALL_HARNESS_FEATURES: &[HarnessFeature] = &[
+    HarnessFeature::Preflight,
+    HarnessFeature::ThreadScopedSession,
+    HarnessFeature::ProcessLifecycle,
+    HarnessFeature::InputDelivery,
+    HarnessFeature::InputAcknowledgement,
+    HarnessFeature::StreamingEvents,
+    HarnessFeature::ExactlyOnceTurnCompletion,
+    HarnessFeature::Queueing,
+    HarnessFeature::Interrupt,
+    HarnessFeature::Resume,
+    HarnessFeature::CrashRecovery,
+    HarnessFeature::SessionControls,
+    HarnessFeature::ProviderInteractions,
+    HarnessFeature::StructuredErrors,
+    HarnessFeature::CapabilityDiscovery,
+];
+
+/// How complete a provider's support is. Derived from the descriptor's
+/// extended-feature declarations rather than stored, so it cannot drift away
+/// from what the adapter actually does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HarnessTier {
+    /// Every extended feature works, natively or through an honest emulation.
+    Full,
+    /// Some extended features work; the rest are declared unsupported.
+    Partial,
+    /// Core only. Launches and streams, nothing more.
+    Basic,
+}
+
+impl HarnessTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HarnessTier::Full => "full",
+            HarnessTier::Partial => "partial",
+            HarnessTier::Basic => "basic",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HarnessCapability {
@@ -114,7 +167,8 @@ pub struct HarnessDescriptor {
     pub display_name: &'static str,
     pub default_executable: &'static str,
     pub preflight: HarnessPreflightSpec,
-    pub required_features: &'static [RequiredHarnessFeature],
+    pub core_features: &'static [HarnessFeature],
+    pub extended_features: &'static [(HarnessFeature, SupportMode)],
     pub optional_capabilities: &'static [(HarnessCapability, SupportMode)],
 }
 
@@ -126,6 +180,37 @@ impl HarnessDescriptor {
             .unwrap_or(SupportMode::Unsupported {
                 reason: "capability is not declared by this harness",
             })
+    }
+
+    /// An undeclared extended feature reads as unsupported rather than
+    /// panicking; `validate_managed_harness` is what refuses to register a
+    /// descriptor with gaps.
+    pub fn extended(&self, feature: HarnessFeature) -> SupportMode {
+        self.extended_features
+            .iter()
+            .find_map(|(candidate, support)| (*candidate == feature).then(|| support.clone()))
+            .unwrap_or(SupportMode::Unsupported {
+                reason: "feature is not declared by this harness",
+            })
+    }
+
+    pub fn supports(&self, feature: HarnessFeature) -> bool {
+        if self.core_features.contains(&feature) {
+            return true;
+        }
+        !matches!(self.extended(feature), SupportMode::Unsupported { .. })
+    }
+
+    pub fn tier(&self) -> HarnessTier {
+        let supported = EXTENDED_HARNESS_FEATURES
+            .iter()
+            .filter(|feature| !matches!(self.extended(**feature), SupportMode::Unsupported { .. }))
+            .count();
+        match supported {
+            0 => HarnessTier::Basic,
+            count if count == EXTENDED_HARNESS_FEATURES.len() => HarnessTier::Full,
+            _ => HarnessTier::Partial,
+        }
     }
 }
 

@@ -1156,7 +1156,14 @@ pub enum ArchcarResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionHarnessCapabilities {
     pub contract_version: u16,
+    /// Derived from `extended`; `full`, `partial`, or `basic`.
+    pub tier: String,
+    /// The core baseline this provider meets. Every managed provider reports
+    /// the same list — it is the floor, not a differentiator.
     pub required: Vec<String>,
+    /// Where providers actually differ. One entry per extended feature, each
+    /// with its support mode and, when unsupported, the reason.
+    pub extended: Vec<SessionCapabilitySupport>,
     pub optional: Vec<SessionCapabilitySupport>,
     pub observed_native: Vec<String>,
 }
@@ -1175,10 +1182,20 @@ pub fn session_harness_capabilities_for_descriptor(
 ) -> SessionHarnessCapabilities {
     SessionHarnessCapabilities {
         contract_version: descriptor.contract_version,
+        tier: descriptor.tier().as_str().to_owned(),
         required: descriptor
-            .required_features
+            .core_features
             .iter()
             .map(|feature| feature.as_str().to_owned())
+            .collect(),
+        extended: descriptor
+            .extended_features
+            .iter()
+            .map(|(feature, support)| SessionCapabilitySupport {
+                name: feature.as_str().to_owned(),
+                mode: support.as_str().to_owned(),
+                reason: support.reason().map(str::to_owned),
+            })
             .collect(),
         optional: descriptor
             .optional_capabilities
@@ -4369,7 +4386,13 @@ mod tests {
     fn session_capabilities_event_serializes_descriptor_payload() {
         let capabilities = SessionHarnessCapabilities {
             contract_version: 1,
+            tier: "partial".to_owned(),
             required: vec!["preflight".to_owned(), "streaming_events".to_owned()],
+            extended: vec![SessionCapabilitySupport {
+                name: "resume".to_owned(),
+                mode: "unsupported".to_owned(),
+                reason: Some("no session id to resume from".to_owned()),
+            }],
             optional: vec![SessionCapabilitySupport {
                 name: "goals".to_owned(),
                 mode: "native".to_owned(),
@@ -4402,7 +4425,9 @@ mod tests {
             runtime_state: crate::session_state::AgentSessionState::ToolRunning,
             capabilities: Some(SessionHarnessCapabilities {
                 contract_version: 1,
+                tier: "basic".to_owned(),
                 required: vec!["preflight".to_owned()],
+                extended: Vec::new(),
                 optional: Vec::new(),
                 observed_native: Vec::new(),
             }),

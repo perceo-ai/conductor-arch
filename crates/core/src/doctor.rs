@@ -1,5 +1,6 @@
 use crate::agent_tools::{
-    all_tools, launchable_agent_tools, launchable_provider_key, tool_by_provider, ToolSpec,
+    agent_tools, all_tools, canonical_provider_key, launchable_provider_key, tool_by_provider,
+    LaunchOwner, ToolSpec,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -25,12 +26,22 @@ pub struct DoctorReport {
     pub dependencies: Vec<DependencyCheck>,
 }
 
+/// One agent's readiness, carried alongside the registry facts the setup
+/// surfaces need. Keyed by provider rather than held in a named field, so
+/// adding an agent to `agent_tools` is the whole change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderReadiness {
+    pub provider_key: &'static str,
+    pub display_name: &'static str,
+    pub launchable: bool,
+    pub check: SetupCheck,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupReadiness {
     pub gh: SetupCheck,
-    pub codex: SetupCheck,
-    pub claude: SetupCheck,
-    pub opencode: SetupCheck,
+    /// One entry per chat agent in the registry, in registry order.
+    pub providers: Vec<ProviderReadiness>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,62 +106,85 @@ impl DoctorReport {
 impl SetupReadiness {
     pub fn from_host() -> Self {
         let gh = thread::spawn(gh_readiness);
-        let codex = thread::spawn(|| provider_readiness("codex"));
-        let claude = thread::spawn(|| provider_readiness("claude"));
-        let opencode = thread::spawn(|| provider_readiness("opencode"));
+        // Probe every agent concurrently. Each probe shells out with a 2s
+        // timeout, so serially this would scale badly as the registry grows.
+        let probes = agent_tools()
+            .map(|tool| {
+                (
+                    tool,
+                    thread::spawn(|| provider_readiness(tool.provider_key)),
+                )
+            })
+            .collect::<Vec<_>>();
 
         Self {
             gh: gh
                 .join()
                 .unwrap_or_else(|_| SetupCheck::blocked("GitHub CLI check failed.")),
-            codex: codex
-                .join()
-                .unwrap_or_else(|_| SetupCheck::blocked("Codex check failed.")),
-            claude: claude
-                .join()
-                .unwrap_or_else(|_| SetupCheck::blocked("Claude check failed.")),
-            opencode: opencode
-                .join()
-                .unwrap_or_else(|_| SetupCheck::blocked("OpenCode check failed.")),
+            providers: probes
+                .into_iter()
+                .map(|(tool, probe)| ProviderReadiness {
+                    provider_key: tool.provider_key,
+                    display_name: tool.display_name,
+                    launchable: tool.chat_launchable
+                        && tool.launch_owner != LaunchOwner::NotSupported,
+                    check: probe.join().unwrap_or_else(|_| {
+                        SetupCheck::blocked(format!("{} check failed.", tool.display_name))
+                    }),
+                })
+                .collect(),
         }
     }
 
     pub fn any_agent_ready(&self) -> bool {
-        launchable_agent_tools().any(|tool| {
-            self.provider_check(tool.provider_key)
-                .is_some_and(|check| check.ready)
-        })
+        self.first_ready_launchable_provider().is_some()
     }
 
     pub fn first_ready_launchable_provider(&self) -> Option<&'static str> {
-        launchable_agent_tools()
-            .find(|tool| {
-                self.provider_check(tool.provider_key)
-                    .is_some_and(|check| check.ready)
-            })
-            .map(|tool| tool.provider_key)
+        self.providers
+            .iter()
+            .find(|provider| provider.launchable && provider.check.ready)
+            .map(|provider| provider.provider_key)
     }
 
     pub fn provider_ready(&self, provider: &str) -> bool {
-        tool_by_provider(provider)
-            .and_then(|tool| self.provider_check(tool.provider_key))
-            .is_some_and(|check| check.ready)
+        self.provider(provider)
+            .is_some_and(|provider| provider.check.ready)
     }
 
     pub fn launchable_provider_ready(&self, provider: &str) -> bool {
         launchable_provider_key(provider)
-            .and_then(|provider| self.provider_check(provider))
-            .is_some_and(|check| check.ready)
+            .and_then(|provider| self.provider(provider))
+            .is_some_and(|provider| provider.check.ready)
     }
 
-    fn provider_check(&self, provider: &str) -> Option<SetupCheck> {
-        match provider {
-            "codex" => Some(self.codex.clone()),
-            "claude" => Some(self.claude.clone()),
-            "opencode" => Some(self.opencode.clone()),
-            _ if tool_by_provider(provider).is_some() => Some(provider_readiness(provider)),
-            _ => None,
-        }
+    /// Resolves through the registry so aliases (`claude-code`, `open-code`)
+    /// find the same entry the canonical key would.
+    pub fn provider(&self, provider: &str) -> Option<&ProviderReadiness> {
+        let canonical = canonical_provider_key(provider)?;
+        self.providers
+            .iter()
+            .find(|candidate| candidate.provider_key == canonical)
+    }
+
+    /// Agents that are installed but not usable yet — the ones worth naming in
+    /// a "sign in to X" prompt.
+    fn installed_but_not_ready(&self) -> Vec<&'static str> {
+        self.providers
+            .iter()
+            .filter(|provider| {
+                provider.launchable && provider.check.installed && !provider.check.ready
+            })
+            .map(|provider| provider.display_name)
+            .collect()
+    }
+
+    fn launchable_names(&self) -> Vec<&'static str> {
+        self.providers
+            .iter()
+            .filter(|provider| provider.launchable)
+            .map(|provider| provider.display_name)
+            .collect()
     }
 }
 
@@ -274,6 +308,20 @@ pub struct SetupRow {
     pub detail: String,
     pub state: SetupRowState,
     pub required: bool,
+    /// Set for agent rows, absent for GitHub CLI and the summary row. Lets a
+    /// client act on the row (install, sign in, select) without matching on
+    /// the display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
+    /// False for agents the registry knows about but this build cannot drive
+    /// as a chat session. They are shown because "detected but not usable" is
+    /// more useful than silence.
+    #[serde(default = "default_true")]
+    pub launchable: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// UI-ready setup readiness snapshot. Built server-side so the feedback and
@@ -290,17 +338,17 @@ pub struct SetupReport {
 
 impl SetupReport {
     pub fn from_readiness(readiness: &SetupReadiness, refresh_error: Option<String>) -> Self {
-        let rows = vec![
-            setup_row("GitHub CLI", &readiness.gh, true),
-            setup_row("Codex", &readiness.codex, false),
-            setup_row("Claude", &readiness.claude, false),
-            setup_row("OpenCode", &readiness.opencode, false),
-            setup_row(
-                "Selected provider",
-                &selected_provider_check(readiness),
-                true,
-            ),
-        ];
+        let mut rows = vec![setup_row("GitHub CLI", &readiness.gh, true)];
+        rows.extend(readiness.providers.iter().map(|provider| SetupRow {
+            provider_key: Some(provider.provider_key.to_owned()),
+            launchable: provider.launchable,
+            ..setup_row(provider.display_name, &provider.check, false)
+        }));
+        rows.push(setup_row(
+            "Selected provider",
+            &selected_provider_check(readiness),
+            true,
+        ));
         Self {
             complete: setup_blockers(readiness).is_empty(),
             feedback: setup_feedback(readiness),
@@ -335,10 +383,24 @@ fn setup_row(name: &str, check: &SetupCheck, required: bool) -> SetupRow {
         detail: check.detail.clone(),
         state,
         required,
+        provider_key: None,
+        launchable: true,
+    }
+}
+
+/// Joins names the way a sentence needs them: "Codex", "Codex or Claude",
+/// "Codex, Claude, or Gemini".
+fn or_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
     }
 }
 
 fn setup_feedback(readiness: &SetupReadiness) -> String {
+    let installed = readiness.installed_but_not_ready();
     match setup_blockers(readiness).as_slice() {
         [] => "Setup is complete.".to_owned(),
         [SetupBlocker::GithubUnavailable] if readiness.gh.installed => {
@@ -347,30 +409,47 @@ fn setup_feedback(readiness: &SetupReadiness) -> String {
         [SetupBlocker::GithubUnavailable] => {
             "Install and authenticate GitHub CLI, then press Recheck.".to_owned()
         }
-        [SetupBlocker::MissingAgent] if readiness.codex.installed || readiness.claude.installed => {
-            "Sign in to Codex or Claude, then press Recheck.".to_owned()
+        // Naming the agents that are already installed is more actionable than
+        // listing everything the registry knows about.
+        [SetupBlocker::MissingAgent] if !installed.is_empty() => {
+            format!("Sign in to {}, then press Recheck.", or_list(&installed))
         }
-        [SetupBlocker::MissingAgent] => {
-            "Install and sign in to Codex or Claude, then press Recheck.".to_owned()
-        }
+        [SetupBlocker::MissingAgent] => format!(
+            "Install and sign in to {}, then press Recheck.",
+            or_list(&readiness.launchable_names()),
+        ),
         [SetupBlocker::SelectedProviderUnavailable] => {
             "Choose a ready provider or sign in to the selected provider, then press Recheck."
                 .to_owned()
         }
-        _ => {
-            "Install or authenticate GitHub CLI and Codex or Claude, then press Recheck.".to_owned()
-        }
+        _ => format!(
+            "Install or authenticate GitHub CLI and {}, then press Recheck.",
+            or_list(&readiness.launchable_names()),
+        ),
     }
 }
 
 fn selected_provider_check(readiness: &SetupReadiness) -> SetupCheck {
-    match readiness.first_ready_launchable_provider() {
-        Some(provider) => SetupCheck::ready(format!("{provider} will be selected for new chats.")),
-        None if readiness.opencode.ready => SetupCheck::blocked(
-            "OpenCode is ready, but this build cannot launch OpenCode chat sessions yet.",
-        ),
-        None => SetupCheck::missing("No launchable chat provider is ready."),
+    if let Some(provider) = readiness.first_ready_launchable_provider() {
+        return SetupCheck::ready(format!("{provider} will be selected for new chats."));
     }
+    // An agent that is installed and authenticated but that this build cannot
+    // drive is the most confusing possible state, so say so by name rather
+    // than reporting a flat "nothing is ready".
+    let detected = readiness
+        .providers
+        .iter()
+        .filter(|provider| !provider.launchable && provider.check.ready)
+        .map(|provider| provider.display_name)
+        .collect::<Vec<_>>();
+    if !detected.is_empty() {
+        return SetupCheck::blocked(format!(
+            "{} ready, but this build cannot launch {} chat sessions yet.",
+            or_list(&detected),
+            if detected.len() == 1 { "its" } else { "their" },
+        ));
+    }
+    SetupCheck::missing("No launchable chat provider is ready.")
 }
 
 pub fn report_from_os_release(os_release: &str) -> DoctorReport {
@@ -772,6 +851,28 @@ fn is_executable(path: &Path) -> bool {
 mod tests {
     use super::*;
 
+    /// Builds readiness from the live registry so these tests keep covering
+    /// every agent as the registry grows. Anything not named is treated as not
+    /// installed.
+    fn readiness(gh: SetupCheck, checks: &[(&str, SetupCheck)]) -> SetupReadiness {
+        SetupReadiness {
+            gh,
+            providers: agent_tools()
+                .map(|tool| ProviderReadiness {
+                    provider_key: tool.provider_key,
+                    display_name: tool.display_name,
+                    launchable: tool.chat_launchable
+                        && tool.launch_owner != LaunchOwner::NotSupported,
+                    check: checks
+                        .iter()
+                        .find(|(key, _)| canonical_provider_key(key) == Some(tool.provider_key))
+                        .map(|(_, check)| check.clone())
+                        .unwrap_or_else(|| SetupCheck::missing("missing")),
+                })
+                .collect(),
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn refreshed_search_path_preserves_process_entries_and_adds_installed_tools() {
@@ -846,12 +947,10 @@ ID_LIKE=arch
 
     #[test]
     fn setup_blockers_require_github_cli() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::missing("missing"),
-            codex: SetupCheck::ready("ready"),
-            claude: SetupCheck::missing("missing"),
-            opencode: SetupCheck::missing("missing"),
-        };
+        let readiness = readiness(
+            SetupCheck::missing("missing"),
+            &[("codex", SetupCheck::ready("ready"))],
+        );
 
         assert_eq!(
             setup_blockers(&readiness),
@@ -861,36 +960,27 @@ ID_LIKE=arch
 
     #[test]
     fn setup_blockers_require_at_least_one_agent() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::ready("ready"),
-            codex: SetupCheck::missing("missing"),
-            claude: SetupCheck::missing("missing"),
-            opencode: SetupCheck::missing("missing"),
-        };
+        let readiness = readiness(SetupCheck::ready("ready"), &[]);
 
         assert_eq!(setup_blockers(&readiness), vec![SetupBlocker::MissingAgent]);
     }
 
     #[test]
     fn setup_blockers_require_launchable_agent_even_when_opencode_ready() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::ready("ready"),
-            codex: SetupCheck::missing("missing"),
-            claude: SetupCheck::missing("missing"),
-            opencode: SetupCheck::ready("ready"),
-        };
+        let readiness = readiness(
+            SetupCheck::ready("ready"),
+            &[("opencode", SetupCheck::ready("ready"))],
+        );
 
         assert_eq!(setup_blockers(&readiness), vec![SetupBlocker::MissingAgent]);
     }
 
     #[test]
     fn setup_blockers_include_selected_provider_readiness() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::ready("ready"),
-            codex: SetupCheck::missing("missing"),
-            claude: SetupCheck::ready("ready"),
-            opencode: SetupCheck::missing("missing"),
-        };
+        let readiness = readiness(
+            SetupCheck::ready("ready"),
+            &[("claude", SetupCheck::ready("ready"))],
+        );
 
         assert_eq!(
             setup_blockers_for_provider(&readiness, Some("codex")),
@@ -905,12 +995,13 @@ ID_LIKE=arch
 
     #[test]
     fn first_ready_launchable_provider_prefers_codex_then_claude() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::ready("ready"),
-            codex: SetupCheck::missing("missing"),
-            claude: SetupCheck::ready("ready"),
-            opencode: SetupCheck::ready("ready"),
-        };
+        let readiness = readiness(
+            SetupCheck::ready("ready"),
+            &[
+                ("claude", SetupCheck::ready("ready")),
+                ("opencode", SetupCheck::ready("ready")),
+            ],
+        );
 
         assert_eq!(readiness.first_ready_launchable_provider(), Some("claude"));
     }
@@ -1006,12 +1097,10 @@ ID_LIKE=arch
 
     #[test]
     fn setup_feedback_summarizes_missing_github_cli() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::missing("missing"),
-            codex: SetupCheck::ready("ready"),
-            claude: SetupCheck::missing("missing"),
-            opencode: SetupCheck::missing("missing"),
-        };
+        let readiness = readiness(
+            SetupCheck::missing("missing"),
+            &[("codex", SetupCheck::ready("ready"))],
+        );
 
         assert_eq!(
             setup_feedback(&readiness),
@@ -1021,49 +1110,45 @@ ID_LIKE=arch
 
     #[test]
     fn setup_feedback_summarizes_missing_agent() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::ready("ready"),
-            codex: SetupCheck::missing("missing"),
-            claude: SetupCheck::missing("missing"),
-            opencode: SetupCheck::missing("missing"),
-        };
+        let readiness = readiness(SetupCheck::ready("ready"), &[]);
 
         assert_eq!(
             setup_feedback(&readiness),
-            "Install and sign in to Codex or Claude, then press Recheck."
+            "Install and sign in to Codex or Claude Code, then press Recheck."
         );
     }
 
     #[test]
     fn setup_feedback_summarizes_installed_but_blocked_agent() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::ready("ready"),
-            codex: SetupCheck::blocked("blocked"),
-            claude: SetupCheck::missing("missing"),
-            opencode: SetupCheck::ready("ready"),
-        };
+        let readiness = readiness(
+            SetupCheck::ready("ready"),
+            &[
+                ("codex", SetupCheck::blocked("blocked")),
+                ("opencode", SetupCheck::ready("ready")),
+            ],
+        );
 
+        // Only Codex is installed, so only Codex is worth naming — the old
+        // wording listed every launchable agent regardless of what was there.
         assert_eq!(
             setup_feedback(&readiness),
-            "Sign in to Codex or Claude, then press Recheck."
+            "Sign in to Codex, then press Recheck."
         );
     }
 
     #[test]
     fn setup_report_marks_ready_host_complete() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::ready("Authenticated with GitHub."),
-            codex: SetupCheck::missing("missing"),
-            claude: SetupCheck::ready("ready"),
-            opencode: SetupCheck::missing("missing"),
-        };
+        let readiness = readiness(
+            SetupCheck::ready("Authenticated with GitHub."),
+            &[("claude", SetupCheck::ready("ready"))],
+        );
 
         let report = SetupReport::from_readiness(&readiness, None);
 
         assert!(report.complete);
         assert_eq!(report.feedback, "Setup is complete.");
-        // gh, codex, claude, opencode, selected provider.
-        assert_eq!(report.rows.len(), 5);
+        // GitHub CLI, one row per registry agent, then the summary row.
+        assert_eq!(report.rows.len(), agent_tools().count() + 2);
         assert_eq!(report.rows[0].name, "GitHub CLI");
         assert_eq!(report.rows[0].state, SetupRowState::Ready);
         let selected = report.rows.last().unwrap();
@@ -1072,14 +1157,75 @@ ID_LIKE=arch
         assert!(selected.detail.contains("claude"));
     }
 
+    /// The whole point of the rewrite: a new agent shows up in the report
+    /// without anyone editing this file.
+    #[test]
+    fn setup_report_covers_every_registry_agent() {
+        let report = SetupReport::from_readiness(&readiness(SetupCheck::ready("ready"), &[]), None);
+        let agent_rows = report
+            .rows
+            .iter()
+            .filter(|row| row.provider_key.is_some())
+            .collect::<Vec<_>>();
+
+        assert_eq!(agent_rows.len(), agent_tools().count());
+        for tool in agent_tools() {
+            assert!(
+                agent_rows
+                    .iter()
+                    .any(|row| row.provider_key.as_deref() == Some(tool.provider_key)),
+                "{} has no setup row",
+                tool.provider_key,
+            );
+        }
+        // GitHub CLI and the summary row bracket the agent rows.
+        assert_eq!(report.rows.first().unwrap().name, "GitHub CLI");
+        assert_eq!(report.rows.last().unwrap().name, "Selected provider");
+    }
+
+    /// A detected-but-undrivable agent is the most confusing state to land in,
+    /// so the summary row names it instead of reporting a flat "nothing ready".
+    #[test]
+    fn selected_provider_row_names_a_ready_but_unlaunchable_agent() {
+        let readiness = readiness(
+            SetupCheck::ready("ready"),
+            &[("opencode", SetupCheck::ready("ready"))],
+        );
+
+        let check = selected_provider_check(&readiness);
+
+        assert!(!check.ready);
+        assert!(check.detail.contains("OpenCode"));
+        assert!(check.detail.contains("cannot launch"));
+    }
+
+    #[test]
+    fn provider_lookup_resolves_registry_aliases() {
+        let readiness = readiness(
+            SetupCheck::ready("ready"),
+            &[("claude", SetupCheck::ready("ready"))],
+        );
+
+        assert!(readiness.provider_ready("claude-code"));
+        assert!(readiness.provider_ready("Claude Code"));
+        assert!(readiness.launchable_provider_ready("claudecode"));
+        assert!(readiness.provider("nonexistent-agent").is_none());
+    }
+
+    #[test]
+    fn or_list_reads_as_a_sentence() {
+        assert_eq!(or_list(&[]), "");
+        assert_eq!(or_list(&["Codex"]), "Codex");
+        assert_eq!(or_list(&["Codex", "Claude Code"]), "Codex or Claude Code");
+        assert_eq!(
+            or_list(&["Codex", "Claude Code", "Gemini"]),
+            "Codex, Claude Code, or Gemini"
+        );
+    }
+
     #[test]
     fn setup_report_flags_missing_required_rows() {
-        let readiness = SetupReadiness {
-            gh: SetupCheck::missing("Install GitHub CLI."),
-            codex: SetupCheck::missing("missing"),
-            claude: SetupCheck::missing("missing"),
-            opencode: SetupCheck::missing("missing"),
-        };
+        let readiness = readiness(SetupCheck::missing("Install GitHub CLI."), &[]);
 
         let report = SetupReport::from_readiness(&readiness, Some("refresh failed".to_owned()));
 

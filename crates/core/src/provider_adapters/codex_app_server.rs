@@ -1,11 +1,11 @@
 use crate::archcar::harness::CodexHarnessController;
 use crate::archcar::harness_contract::{
     HarnessAdapterContext, HarnessCapability, HarnessControl, HarnessControlPlan,
-    HarnessDescriptor, HarnessEffect, HarnessInput, HarnessPreflightSpec, HarnessRecoveryCause,
-    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, InteractionOption, InteractionQuestion,
-    ManagedHarness, ManagedHarnessAdapter, NativeRecord, NativeWrite, ProviderInteractionDraft,
-    ProviderInteractionKind, ProviderInteractionResolution, SupportMode,
-    MANAGED_HARNESS_CONTRACT_VERSION, REQUIRED_HARNESS_FEATURES,
+    HarnessDescriptor, HarnessEffect, HarnessFeature, HarnessInput, HarnessPreflightSpec,
+    HarnessRecoveryCause, HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, InteractionOption,
+    InteractionQuestion, ManagedHarness, ManagedHarnessAdapter, NativeRecord, NativeWrite,
+    ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution, SupportMode,
+    CORE_HARNESS_FEATURES, MANAGED_HARNESS_CONTRACT_VERSION,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -36,6 +36,20 @@ const CODEX_OPTIONAL_CAPABILITIES: &[(HarnessCapability, SupportMode)] = &[
     (HarnessCapability::NativeSlashCommands, SupportMode::Native),
 ];
 
+/// Codex's app-server speaks every extended feature natively: threads are
+/// first-class, `turn/start` is acknowledged, turns can be interrupted and
+/// resumed, and `item/tool/requestUserInput` carries interactions in band.
+const CODEX_EXTENDED_FEATURES: &[(HarnessFeature, SupportMode)] = &[
+    (HarnessFeature::ThreadScopedSession, SupportMode::Native),
+    (HarnessFeature::InputAcknowledgement, SupportMode::Native),
+    (HarnessFeature::Queueing, SupportMode::Native),
+    (HarnessFeature::Interrupt, SupportMode::Native),
+    (HarnessFeature::Resume, SupportMode::Native),
+    (HarnessFeature::CrashRecovery, SupportMode::Native),
+    (HarnessFeature::SessionControls, SupportMode::Native),
+    (HarnessFeature::ProviderInteractions, SupportMode::Native),
+];
+
 pub static CODEX_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     contract_version: MANAGED_HARNESS_CONTRACT_VERSION,
     kind: SessionKind::Codex,
@@ -46,7 +60,8 @@ pub static CODEX_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescript
         command: &["codex", "login", "status"],
         auth_guidance: "Run `codex login`.",
     },
-    required_features: REQUIRED_HARNESS_FEATURES,
+    core_features: CORE_HARNESS_FEATURES,
+    extended_features: CODEX_EXTENDED_FEATURES,
     optional_capabilities: CODEX_OPTIONAL_CAPABILITIES,
 };
 

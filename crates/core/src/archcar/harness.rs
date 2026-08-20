@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::archcar::harness_contract::{
-    ManagedHarness, MANAGED_HARNESS_CONTRACT_VERSION, REQUIRED_HARNESS_FEATURES,
+    ManagedHarness, CORE_HARNESS_FEATURES, EXTENDED_HARNESS_FEATURES,
+    MANAGED_HARNESS_CONTRACT_VERSION,
 };
 use crate::workspace::{SessionHarnessOptions, SessionKind, WorkspaceStore};
 
@@ -42,10 +43,32 @@ pub fn validate_managed_harness(harness: &dyn ManagedHarness) -> Result<()> {
         MANAGED_HARNESS_CONTRACT_VERSION,
     );
     anyhow::ensure!(
-        descriptor.required_features == REQUIRED_HARNESS_FEATURES,
-        "{} does not declare the complete required harness baseline",
+        descriptor.core_features == CORE_HARNESS_FEATURES,
+        "{} does not declare the complete core harness baseline",
         descriptor.provider_key,
     );
+    // Every extended feature needs a written verdict. An omission would read as
+    // unsupported at runtime, which is indistinguishable from a deliberate
+    // `Unsupported` — and one of those is a decision while the other is a bug.
+    for feature in EXTENDED_HARNESS_FEATURES {
+        anyhow::ensure!(
+            descriptor
+                .extended_features
+                .iter()
+                .any(|(candidate, _)| candidate == feature),
+            "{} does not declare support for {}",
+            descriptor.provider_key,
+            feature.as_str(),
+        );
+    }
+    for (feature, _) in descriptor.extended_features {
+        anyhow::ensure!(
+            EXTENDED_HARNESS_FEATURES.contains(feature),
+            "{} declares {} as extended, but it is not an extended feature",
+            descriptor.provider_key,
+            feature.as_str(),
+        );
+    }
     Ok(())
 }
 
