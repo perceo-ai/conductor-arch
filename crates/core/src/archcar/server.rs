@@ -1064,9 +1064,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             scope,
         } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|store| scoped_workspace_diff(&store, &workspace, path.as_deref(), &scope))
-            {
+            match WorkspaceStore::open_app(&db_path).and_then(|store| {
+                scoped_workspace_diff(&store, &workspace, path.as_deref(), &scope)
+            }) {
                 Ok(diff) => ArchcarResponse::WorkspaceDiff { workspace, diff },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -4307,13 +4307,14 @@ fn chat_threads_for_workspace(db_path: &Path, workspace: &str) -> Result<Vec<Arc
         })
 }
 
-fn inventory_snapshot(
-    db_path: &Path,
-) -> Result<(
+/// Repositories, workspaces, and each workspace's chat threads, as one bundle.
+type InventorySnapshot = (
     Vec<ArchcarRepositorySummary>,
     Vec<ArchcarWorkspaceSummary>,
     BTreeMap<String, Vec<ArchcarChatThread>>,
-)> {
+);
+
+fn inventory_snapshot(db_path: &Path) -> Result<InventorySnapshot> {
     let repositories = repository_summaries(db_path)?;
     let workspaces = workspace_summaries(db_path)?;
     let mut chat_threads = BTreeMap::new();

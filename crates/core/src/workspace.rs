@@ -24550,7 +24550,9 @@ spotlight_testing = true
                 message,
             ],
         );
-        git_output(workspace_path, ["rev-parse", "HEAD"]).trim().to_owned()
+        git_output(workspace_path, ["rev-parse", "HEAD"])
+            .trim()
+            .to_owned()
     }
 
     #[test]
@@ -24673,7 +24675,9 @@ spotlight_testing = true
     #[test]
     fn commit_lookups_reject_a_ref_that_is_not_a_commit() {
         let (_temp, store) = test_workspace_store();
-        assert!(store.commit_diff("berlin", "definitely-not-a-sha", None).is_err());
+        assert!(store
+            .commit_diff("berlin", "definitely-not-a-sha", None)
+            .is_err());
     }
 
     #[test]

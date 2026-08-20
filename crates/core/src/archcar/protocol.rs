@@ -60,21 +60,17 @@ impl ArchcarInputDelivery {
 /// returns. The same scope drives the file list and the diff for a file picked
 /// out of that list, so a file opened from a commit shows that commit's changes
 /// rather than everything since the review base.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceChangeScope {
     /// All changes against the review base ref (working tree vs base).
+    /// The default, so requests that omit `scope` keep their old behaviour.
+    #[default]
     All,
     /// Uncommitted staged + unstaged + untracked changes.
     Uncommitted,
     /// A single commit's changes.
     Commit { sha: String },
-}
-
-impl Default for WorkspaceChangeScope {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl WorkspaceChangeScope {
