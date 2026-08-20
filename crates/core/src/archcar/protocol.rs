@@ -391,6 +391,10 @@ pub enum ArchcarRequest {
     ListRepositoryBranches {
         repository: String,
     },
+    /// List every agent this build knows, with how completely it can drive
+    /// each one. Clients render provider pickers from this rather than
+    /// hardcoding a provider list that drifts from the registry.
+    ListAgentProviders,
     /// List the prompt-pack names available for a repository and which is active.
     ListPromptPacks {
         repository: String,
@@ -1010,6 +1014,9 @@ pub enum ArchcarResponse {
         repository: String,
         branches: Vec<String>,
     },
+    AgentProviders {
+        providers: Vec<AgentProviderSummary>,
+    },
     PromptPacks {
         repository: String,
         packs: Vec<String>,
@@ -1174,6 +1181,44 @@ pub struct SessionCapabilitySupport {
     pub mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// One agent as the registry sees it. `managed` distinguishes an agent the
+/// daemon drives with a structured transport from one that merely runs in a
+/// PTY; `tier` says how complete that driving is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProviderSummary {
+    pub provider_key: String,
+    pub display_name: String,
+    pub default_command: String,
+    /// Offered as a chat provider in pickers.
+    pub launchable: bool,
+    /// Driven through a managed harness rather than a bare PTY.
+    pub managed: bool,
+    /// `full`, `partial`, `basic`, or `none` when unmanaged.
+    pub tier: String,
+    pub auth_guidance: String,
+}
+
+pub fn agent_provider_summaries() -> Vec<AgentProviderSummary> {
+    crate::agent_tools::agent_tools()
+        .map(|tool| {
+            let kind = crate::session_kind::SessionKind::new(tool.provider_key);
+            let managed = crate::archcar::harness::managed_harness_for_kind(kind);
+            AgentProviderSummary {
+                provider_key: tool.provider_key.to_owned(),
+                display_name: tool.display_name.to_owned(),
+                default_command: tool.default_command.to_owned(),
+                launchable: tool.chat_launchable
+                    && tool.launch_owner != crate::agent_tools::LaunchOwner::NotSupported,
+                managed: managed.is_some(),
+                tier: managed
+                    .map(|harness| harness.descriptor().tier().as_str().to_owned())
+                    .unwrap_or_else(|| "none".to_owned()),
+                auth_guidance: tool.auth_guidance.to_owned(),
+            }
+        })
+        .collect()
 }
 
 pub fn session_harness_capabilities_for_descriptor(
@@ -1721,6 +1766,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListRepositoryBranches { repository } => {
             format!("list_repository_branches repository={repository}")
         }
+        ArchcarRequest::ListAgentProviders => "list_agent_providers".to_owned(),
         ArchcarRequest::ListPromptPacks { repository } => {
             format!("list_prompt_packs repository={repository}")
         }
@@ -2326,6 +2372,11 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::RepositoryBranches { repository, branches } => {
             format!("repository_branches repository={repository} count={}", branches.len())
         }
+        ArchcarResponse::AgentProviders { providers } => format!(
+            "agent_providers count={} managed={}",
+            providers.len(),
+            providers.iter().filter(|provider| provider.managed).count()
+        ),
         ArchcarResponse::PromptPacks { repository, packs, active } => format!(
             "prompt_packs repository={repository} count={} active={}",
             packs.len(),

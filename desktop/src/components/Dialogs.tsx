@@ -16,6 +16,7 @@ import {
   type GithubRepo,
   type GithubWorkItem,
 } from "@/bridge/client";
+import { providersStore } from "@/store/providers";
 
 // Global modal host. Renders the form for the active dialog spec. Every form
 // calls into `actions.*`, which logs the action, sends the archcar request, and
@@ -401,7 +402,12 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
     if (key === "github") {
       if (!rootPath()) return "No project path";
       if (work.loading) return "Loading";
-      if (work()?.ok === false) return "Needs gh";
+      // The probe only runs once this tab is selected, so before then we know
+      // nothing — `gh` may be signed in while this repo has no GitHub remote
+      // at all. Saying "Ready" on an unrun check is a promise we cannot keep.
+      const probe = work();
+      if (probe === undefined) return "Not checked";
+      if (probe.ok === false) return "Needs gh";
       return "Ready";
     }
     if (key === "linear") return "Needs key";
@@ -716,14 +722,24 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
           <span class="dialog-section-copy">Choose the provider used when this workspace opens a new chat.</span>
         </div>
         <div class="dialog-provider-grid">
-          <For each={["codex", "claude", "cursor"]}>
-            {(p) => (
+          <For each={providersStore.launchable()}>
+            {(entry) => (
               <button
                 class="dialog-provider-chip"
-                classList={{ "dialog-provider-chip-active": provider() === p }}
-                onClick={() => setProvider(p)}
+                classList={{
+                  "dialog-provider-chip-active": provider() === entry.provider_key,
+                }}
+                title={
+                  providersStore.tierBadge(entry.provider_key)
+                    ? `${entry.display_name} runs with reduced capabilities`
+                    : entry.display_name
+                }
+                onClick={() => setProvider(entry.provider_key)}
               >
-                {p}
+                {entry.display_name}
+                <Show when={providersStore.tierBadge(entry.provider_key)}>
+                  {(badge) => <span class="dialog-provider-chip-badge">{badge()}</span>}
+                </Show>
               </button>
             )}
           </For>

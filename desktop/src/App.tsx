@@ -11,6 +11,7 @@ import ShortcutsHelp from "./components/ShortcutsHelp";
 import Icon from "./components/Icon";
 import { PageStack } from "./pages";
 import { runShellAction } from "./lib/shellAction";
+import { providersStore } from "./store/providers";
 import {
   startStore,
   setupStore,
@@ -114,7 +115,12 @@ export default function App() {
   onMount(() => {
     // Connect the archcar event stream into the reactive store, then probe host
     // setup readiness. A blocking modal gates the app until setup is complete.
-    void startStore().then(() => setupStore.check().catch(() => undefined));
+    void startStore().then(() => {
+      setupStore.check().catch(() => undefined);
+      // The provider registry belongs to whichever daemon we are pointed at, so
+      // it is pulled per connection rather than baked into the renderer.
+      providersStore.load().catch(() => undefined);
+    });
   });
 
   // Links inside rendered markdown (chat, plans, briefings) are real anchors;

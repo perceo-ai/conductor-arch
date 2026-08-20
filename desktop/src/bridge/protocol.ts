@@ -2,7 +2,22 @@
 // Keep in sync when the Rust protocol changes. serde uses snake_case + an
 // internal `type` tag on the request/response/event enums.
 
-export type SessionKind = "shell" | "codex" | "claude";
+// Open on purpose: the daemon's provider set comes from its registry, so a
+// closed union here would drop any agent this build predates. The built-in
+// keys are kept for editor completion.
+export type SessionKind = "shell" | "codex" | "claude" | (string & {});
+
+/** One agent as the daemon's registry sees it (ListAgentProviders). */
+export type AgentProviderSummary = {
+  provider_key: string;
+  display_name: string;
+  default_command: string;
+  launchable: boolean;
+  managed: boolean;
+  /** "full" | "partial" | "basic" | "none" */
+  tier: string;
+  auth_guidance: string;
+};
 export type ArchcarInputKind = "user" | "review_prompt" | "control_command" | "raw_terminal";
 export type ArchcarInputDelivery = "auto" | "immediate";
 export type WorkspaceGitAction = "create_pr" | "push_branch" | "merge_pr" | "open_pr";
@@ -100,6 +115,7 @@ export type ArchcarRequest =
   | { type: "get_settings"; repository?: string }
   | { type: "get_settings_source"; repository?: string; layer?: string }
   | { type: "list_repository_branches"; repository: string }
+  | { type: "list_agent_providers" }
   | { type: "list_prompt_packs"; repository: string }
   | { type: "set_active_prompt_pack"; repository: string; pack: string }
   | { type: "save_settings"; repository?: string; layer?: string; toml: string }
@@ -291,6 +307,8 @@ export interface ArchcarWorkspaceSummary {
   open_tasks?: number;
   blocked_tasks?: number;
   active_sessions: number;
+  /** An agent here is parked on a question or permission prompt. */
+  awaiting_input?: boolean;
   run_running: boolean;
   changed_files: number;
   diff_additions: number;
@@ -561,6 +579,7 @@ export type ArchcarResponse =
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
   | { type: "repository_branches"; repository: string; branches: string[] }
+  | { type: "agent_providers"; providers: AgentProviderSummary[] }
   | { type: "prompt_packs"; repository: string; packs: string[]; active?: string }
   | { type: "settings_source"; scope: string; layer: string; toml: string }
   | { type: "settings_saved"; scope: string; layer: string }

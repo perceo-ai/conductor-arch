@@ -1647,6 +1647,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListAgentProviders => ArchcarResponse::AgentProviders {
+            providers: crate::archcar::protocol::agent_provider_summaries(),
+        },
         ArchcarRequest::ListPromptPacks { repository } => {
             let db_path = state.lock().unwrap().db_path.clone();
             let result: anyhow::Result<(Vec<String>, Option<String>)> =
@@ -3953,6 +3956,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
             | ArchcarRequest::ListRepositoryBranches { .. }
+            | ArchcarRequest::ListAgentProviders
             | ArchcarRequest::ListPromptPacks { .. }
             | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }

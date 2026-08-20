@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store";
 import { clients as bridge, type ClientSummary, type ClientsResult } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
 import { actions } from "./actions";
+import { providersStore } from "./providers";
 import { setupStore } from "./setup";
 import { toastsStore } from "./toasts";
 
@@ -49,6 +50,9 @@ function applyResult(res: ClientsResult): boolean {
 async function resync(): Promise<void> {
   await actions.refreshInventory().catch(() => undefined);
   await setupStore.check().catch(() => undefined);
+  // The new daemon may know a different set of agents than the old one, so a
+  // stale registry would offer providers this host cannot actually run.
+  await providersStore.load().catch(() => undefined);
 }
 
 async function run(

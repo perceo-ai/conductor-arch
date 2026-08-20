@@ -550,6 +550,8 @@ enum ArchcarCommand {
     Branches {
         repository: String,
     },
+    /// List every agent this build knows and how completely it drives each.
+    Providers,
     /// List a repository's available prompt packs and the active one.
     PromptPacks {
         repository: String,
@@ -2177,6 +2179,9 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::ListRepositoryBranches { repository })?,
                     );
                 }
+                ArchcarCommand::Providers => {
+                    print_archcar_response(client.send(ArchcarRequest::ListAgentProviders)?);
+                }
                 ArchcarCommand::PromptPacks { repository } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListPromptPacks { repository })?,
@@ -3655,6 +3660,19 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("repository_branches {repository} {}", branches.len());
             for b in branches {
                 println!("{b}");
+            }
+        }
+        ArchcarResponse::AgentProviders { providers } => {
+            println!("agent_providers {}", providers.len());
+            for provider in providers {
+                println!(
+                    "{:<14} {:<20} launchable={:<5} tier={:<7} {}",
+                    provider.provider_key,
+                    provider.display_name,
+                    provider.launchable,
+                    provider.tier,
+                    provider.default_command
+                );
             }
         }
         ArchcarResponse::PromptPacks {
