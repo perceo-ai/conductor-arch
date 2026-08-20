@@ -5309,9 +5309,10 @@ mod tests {
             "feature/ws",
         ]);
         let Command::Archcar {
-            command: ArchcarCommand::CreateWorkspace {
-                repository, branch, ..
-            },
+            command:
+                ArchcarCommand::CreateWorkspace {
+                    repository, branch, ..
+                },
         } = create
         else {
             panic!("expected archcar create-workspace");
