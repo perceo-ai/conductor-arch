@@ -1114,7 +1114,7 @@ ID_LIKE=arch
 
         assert_eq!(
             setup_feedback(&readiness),
-            "Install and sign in to Codex or Claude Code, then press Recheck."
+            "Install and sign in to Codex, Claude Code, or Gemini CLI, then press Recheck."
         );
     }
 

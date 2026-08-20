@@ -22,6 +22,7 @@ pub fn controller_for_kind(kind: SessionKind) -> Box<dyn HarnessController> {
         SessionKind::CODEX => Box::new(CodexHarnessController),
         SessionKind::CLAUDE => Box::new(ClaudeHarnessController),
         SessionKind::SHELL => Box::new(ShellHarnessController),
+        other if speaks_acp(other) => Box::new(AcpHarnessController(other)),
         // Any other registered agent launches from its registry entry. It runs
         // in a PTY with no structured transport until an adapter claims it, so
         // it behaves like a terminal that happens to have an agent in it.
@@ -36,7 +37,52 @@ pub fn managed_harness_for_kind(kind: SessionKind) -> Option<Box<dyn ManagedHarn
     match kind {
         SessionKind::CODEX => Some(Box::new(CodexHarnessController)),
         SessionKind::CLAUDE => Some(Box::new(ClaudeHarnessController)),
+        // Any ACP-speaking agent is managed through the one shared adapter, so
+        // provider breadth costs a registry entry rather than a new module.
+        other if speaks_acp(other) => Some(Box::new(AcpHarnessController(other))),
         _ => None,
+    }
+}
+
+fn speaks_acp(kind: SessionKind) -> bool {
+    crate::agent_tools::tool_by_provider(kind.as_str()).is_some_and(|tool| tool.speaks_acp())
+}
+
+/// Drives any registered ACP agent. The provider varies; the protocol does not,
+/// which is the whole point.
+pub struct AcpHarnessController(SessionKind);
+
+impl HarnessController for AcpHarnessController {
+    fn kind(&self) -> SessionKind {
+        self.0
+    }
+
+    fn supports_auto_spawn(&self) -> bool {
+        true
+    }
+
+    fn build_launch(
+        &self,
+        store: &WorkspaceStore,
+        workspace: &str,
+        harness: SessionHarnessOptions,
+    ) -> Result<crate::workspace::SessionLaunch> {
+        store.session_launch_with_options(workspace, self.0, harness)
+    }
+}
+
+impl ManagedHarness for AcpHarnessController {
+    fn descriptor(&self) -> &'static crate::archcar::harness_contract::HarnessDescriptor {
+        crate::provider_adapters::acp::descriptor_for(self.0)
+    }
+
+    fn create_adapter(
+        &self,
+        context: crate::archcar::harness_contract::HarnessAdapterContext,
+    ) -> Result<Box<dyn crate::archcar::harness_contract::ManagedHarnessAdapter>> {
+        Ok(Box::new(crate::provider_adapters::acp::AcpAdapter::new(
+            self.0, &context,
+        )))
     }
 }
 
@@ -216,15 +262,27 @@ mod tests {
     /// launches from its registry command, rather than failing to dispatch.
     #[test]
     fn registered_agents_without_an_adapter_fall_back_to_a_pty_controller() {
-        let gemini = SessionKind::new("gemini");
-        let controller = controller_for_kind(gemini);
+        let aider = SessionKind::new("aider");
+        let controller = controller_for_kind(aider);
 
-        assert_eq!(controller.kind(), gemini);
+        assert_eq!(controller.kind(), aider);
         // No readiness signal means nothing to wait on before draining input.
         assert!(!controller.supports_auto_spawn());
         // And crucially, no descriptor is invented for it.
-        assert!(managed_harness_for_kind(gemini).is_none());
-        assert_eq!(gemini.display_name(), "Gemini CLI");
+        assert!(managed_harness_for_kind(aider).is_none());
+        assert_eq!(aider.display_name(), "Aider");
+    }
+
+    /// The payoff of the shared adapter: an agent nobody wrote code for is
+    /// managed purely because the registry says it speaks ACP.
+    #[test]
+    fn acp_agents_are_managed_without_a_dedicated_adapter() {
+        let gemini = SessionKind::new("gemini");
+        let harness = managed_harness_for_kind(gemini).expect("gemini is managed over ACP");
+
+        assert_eq!(harness.descriptor().provider_key, "gemini");
+        validate_managed_harness(harness.as_ref()).expect("valid ACP descriptor");
+        assert!(controller_for_kind(gemini).supports_auto_spawn());
     }
 
     /// Provider identity is open, but launching still requires registration —

@@ -6242,19 +6242,21 @@ mutation($threadId: ID!) {{
             // Claude keep their dedicated settings keys above because those
             // already exist and are documented; everything else resolves from
             // the registry until per-provider overrides are configurable.
-            other => (
-                PathBuf::from(
-                    crate::agent_tools::tool_by_provider(other.as_str())
-                        .map(|tool| tool.default_command)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "{} is not a registered agent, so it has no launch command",
-                                other.as_str()
-                            )
-                        })?,
-                ),
-                Vec::new(),
-            ),
+            other => {
+                let tool =
+                    crate::agent_tools::tool_by_provider(other.as_str()).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{} is not a registered agent, so it has no launch command",
+                            other.as_str()
+                        )
+                    })?;
+                (
+                    PathBuf::from(tool.default_command),
+                    // ACP agents need their protocol flag or they come up as an
+                    // interactive TUI and the managed transport never speaks.
+                    tool.acp_args.iter().map(|arg| (*arg).to_owned()).collect(),
+                )
+            }
         };
         let harness::SessionHarnessLaunchPlan {
             args: harness_args,

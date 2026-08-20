@@ -38,6 +38,16 @@ pub struct ToolSpec {
     pub launch_owner: LaunchOwner,
     pub readiness_probe: &'static [&'static str],
     pub auth_guidance: &'static str,
+    /// Flags that put the agent into Agent Client Protocol mode. Non-empty
+    /// means this build can drive it as a managed session through the shared
+    /// ACP adapter instead of a bare PTY.
+    pub acp_args: &'static [&'static str],
+}
+
+impl ToolSpec {
+    pub fn speaks_acp(&self) -> bool {
+        !self.acp_args.is_empty()
+    }
 }
 
 const TOOL_SPECS: &[ToolSpec] = &[
@@ -52,6 +62,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::ArchcarManaged,
         readiness_probe: &["codex", "login", "status"],
         auth_guidance: "Run `codex login`.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::Claude,
@@ -64,6 +75,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::ArchcarManaged,
         readiness_probe: &["claude", "auth", "status"],
         auth_guidance: "Run `claude auth login`.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::Gemini,
@@ -72,10 +84,11 @@ const TOOL_SPECS: &[ToolSpec] = &[
         default_command: "gemini",
         aliases: &["gemini", "gemini-cli", "geminicli"],
         kind: ToolKind::ChatAgent,
-        chat_launchable: false,
-        launch_owner: LaunchOwner::NotSupported,
+        chat_launchable: true,
+        launch_owner: LaunchOwner::ArchcarManaged,
         readiness_probe: &["gemini", "--version"],
         auth_guidance: "Run `gemini` once to sign in.",
+        acp_args: &["--experimental-acp"],
     },
     ToolSpec {
         id: ToolId::OpenCode,
@@ -88,6 +101,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["opencode", "--version"],
         auth_guidance: "Install and configure OpenCode.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::Aider,
@@ -100,6 +114,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["aider", "--version"],
         auth_guidance: "Install Aider (`pipx install aider-chat`) and set a model API key.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::Amp,
@@ -112,6 +127,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["amp", "--version"],
         auth_guidance: "Run `amp login`.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::Copilot,
@@ -124,6 +140,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["copilot", "--version"],
         auth_guidance: "Authenticate GitHub CLI and enable Copilot for your account.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::CursorAgent,
@@ -136,6 +153,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["cursor-agent", "--version"],
         auth_guidance: "Run `cursor-agent login`.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::Grok,
@@ -148,6 +166,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["grok", "--version"],
         auth_guidance: "Set `XAI_API_KEY` or run `grok login`.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::Cursor,
@@ -160,6 +179,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["cursor", "--version"],
         auth_guidance: "Install Cursor.",
+        acp_args: &[],
     },
     ToolSpec {
         id: ToolId::VsCode,
@@ -172,6 +192,7 @@ const TOOL_SPECS: &[ToolSpec] = &[
         launch_owner: LaunchOwner::NotSupported,
         readiness_probe: &["code", "--version"],
         auth_guidance: "Install VS Code.",
+        acp_args: &[],
     },
 ];
 
@@ -235,7 +256,9 @@ mod tests {
             .map(|tool| tool.provider_key)
             .collect::<Vec<_>>();
 
-        assert_eq!(launchable, ["codex", "claude"]);
+        // Gemini joins them through the shared ACP adapter rather than a
+        // vendor-specific one.
+        assert_eq!(launchable, ["codex", "claude", "gemini"]);
         assert!(
             launchable_agent_tools().all(|tool| tool.launch_owner == LaunchOwner::ArchcarManaged)
         );
@@ -248,6 +271,19 @@ mod tests {
         assert_eq!(opencode.provider_key, "opencode");
         assert_eq!(supported_agent_provider_key("opencode"), Some("opencode"));
         assert_eq!(launchable_provider_key("opencode"), None);
+    }
+
+    /// ACP support is a registry fact, so adding an ACP-speaking agent needs no
+    /// adapter code at all.
+    #[test]
+    fn only_agents_with_acp_flags_are_driven_over_acp() {
+        assert!(tool_by_provider("gemini").unwrap().speaks_acp());
+        assert_eq!(
+            tool_by_provider("gemini").unwrap().acp_args,
+            ["--experimental-acp"]
+        );
+        assert!(!tool_by_provider("codex").unwrap().speaks_acp());
+        assert!(!tool_by_provider("aider").unwrap().speaks_acp());
     }
 
     #[test]
