@@ -213,6 +213,16 @@ impl RuntimeSessionStore {
         Ok(())
     }
 
+    pub fn update_chat_thread_harness_metadata(
+        &self,
+        thread_id: i64,
+        harness_metadata: Option<&str>,
+    ) -> Result<()> {
+        self.open()?
+            .update_chat_thread_harness_metadata(thread_id, harness_metadata)?;
+        Ok(())
+    }
+
     fn open(&self) -> Result<WorkspaceStore> {
         WorkspaceStore::open(&self.db_path)
     }

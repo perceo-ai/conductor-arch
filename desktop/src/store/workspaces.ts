@@ -78,6 +78,10 @@ export const workspacesStore = {
     logState("workspaces.setAll", { count: rows.length });
   },
 
+  setSummaries(summaries: ArchcarWorkspaceSummary[]) {
+    this.setAll(summaries.map(rowFromSummary));
+  },
+
   /** Patch a single field on one row — touches only that row. */
   patch(name: string, patch: Partial<WorkspaceRow>) {
     if (!state.byName[name]) return;
@@ -94,6 +98,6 @@ export const workspacesStore = {
   async refresh(): Promise<void> {
     const res = await send({ type: "list_workspaces" });
     if (res.type !== "workspaces") return;
-    this.setAll(res.workspaces.map(rowFromSummary));
+    this.setSummaries(res.workspaces);
   },
 };

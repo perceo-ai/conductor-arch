@@ -66,6 +66,27 @@ describe("startStore", () => {
     expect(api.ensureEvents).toHaveBeenCalledTimes(1);
   });
 
+  it("loads startup inventory through one archcar snapshot request", async () => {
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "get_inventory_snapshot") {
+        return {
+          type: "inventory_snapshot",
+          repositories: [],
+          workspaces: [],
+          chat_threads: {},
+        };
+      }
+      return { type: "ack" };
+    });
+    const { startStore } = await import("./index");
+
+    await startStore();
+
+    expect(api.request).toHaveBeenCalledWith({ type: "get_inventory_snapshot" });
+    expect(api.request).not.toHaveBeenCalledWith({ type: "list_workspaces" });
+    expect(api.request).not.toHaveBeenCalledWith({ type: "list_repositories" });
+  });
+
   it("resets after a failed init so a later call retries", async () => {
     api.ensureEvents.mockRejectedValueOnce(new Error("daemon down"));
     const { startStore } = await import("./index");

@@ -1,11 +1,12 @@
-import { For, Show, createEffect, createResource, createSignal } from "solid-js";
-import { repositoriesStore, prefsStore } from "@/store";
+import { For, Show, createEffect, createMemo, createResource, createSignal, type JSX } from "solid-js";
+import { repositoriesStore, prefsStore, nav } from "@/store";
 import { ACCENT_HEX } from "@/store/prefs";
 import { checkForUpdates, openExternal, remoteDaemon, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS, modelLabel, providerLabel } from "@/lib/models";
-import { DEFAULT_SHORTCUTS, parseKeybindingOverrides, resolveShortcut, shortcutHelp } from "@/lib/shortcuts";
+import { DEFAULT_SHORTCUTS, parseKeybindingOverrides } from "@/lib/shortcuts";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
 import { SetupReadinessCard } from "@/components/SetupReadiness";
+import Icon, { type IconName } from "@/components/Icon";
 import type { ServiceStatus } from "@/bridge/protocol";
 
 // Settings page — two panes per scope:
@@ -16,6 +17,188 @@ import type { ServiceStatus } from "@/bridge/protocol";
 // committed ("repository") or "local" override layer.
 
 type Layer = "repository" | "local";
+type SettingsSection = "general" | "clients" | "agents" | "repository" | "advanced";
+type TomlValueKind = "string" | "number" | "bool";
+
+function shortcutBindingKey(index: number): string {
+  const binding = DEFAULT_SHORTCUTS[index];
+  return binding.aliases?.[0] ?? binding.action;
+}
+
+function serializeShortcutBindings(bindings: typeof DEFAULT_SHORTCUTS): string {
+  return bindings
+    .map((binding, index) => ({ binding, index }))
+    .filter(({ binding }) => binding.keys.trim())
+    .map(({ binding, index }) => `${shortcutBindingKey(index)}=${binding.keys.trim()}`)
+    .join("; ");
+}
+
+function setShortcutBinding(index: number, keys: string) {
+  const current = parseKeybindingOverrides(prefsStore.state.keybindings, DEFAULT_SHORTCUTS);
+  current[index] = { ...current[index], keys };
+  prefsStore.setKeybindings(serializeShortcutBindings(current));
+}
+
+const SETTINGS_SECTIONS: Array<{
+  id: SettingsSection;
+  label: string;
+  group: string;
+  icon: IconName;
+}> = [
+  { id: "general", label: "General", group: "Personal", icon: "settings" },
+  { id: "clients", label: "Clients", group: "Archcars", icon: "panel-right" },
+  { id: "agents", label: "Agents", group: "Agents & environment", icon: "brain" },
+  { id: "repository", label: "Repository behavior", group: "Repositories", icon: "folder" },
+  { id: "advanced", label: "Advanced", group: "More", icon: "wrench" },
+];
+
+function SettingsNavButton(props: {
+  active: boolean;
+  icon: IconName;
+  label: string;
+  detail?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button class="settings-nav-button" classList={{ active: props.active }} onClick={props.onClick}>
+      <Icon name={props.icon} class="settings-nav-icon" />
+      <span class="settings-nav-text">
+        <span class="settings-nav-label">{props.label}</span>
+        <Show when={props.detail}>
+          <span class="settings-nav-detail">{props.detail}</span>
+        </Show>
+      </span>
+    </button>
+  );
+}
+
+function SettingsSectionBlock(props: { title: string; children: JSX.Element }) {
+  return (
+    <section class="settings-section-block">
+      <h2>{props.title}</h2>
+      <div class="settings-section-list">{props.children}</div>
+    </section>
+  );
+}
+
+function SettingsRow(props: {
+  title: string;
+  description?: JSX.Element;
+  meta?: JSX.Element;
+  control?: JSX.Element;
+  accent?: boolean;
+}) {
+  return (
+    <div class="settings-row" classList={{ "settings-row-accent": props.accent }}>
+      <div class="settings-row-copy">
+        <div class="settings-row-title">{props.title}</div>
+        <Show when={props.description}>
+          <div class="settings-row-description">{props.description}</div>
+        </Show>
+        <Show when={props.meta}>
+          <div class="settings-row-meta">{props.meta}</div>
+        </Show>
+      </div>
+      <Show when={props.control}>
+        <div class="settings-row-control">{props.control}</div>
+      </Show>
+    </div>
+  );
+}
+
+function tomlSectionBounds(lines: string[], section: string): [number, number] | null {
+  const header = `[${section}]`;
+  const start = lines.findIndex((line) => line.trim() === header);
+  if (start < 0) return null;
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^\s*\[[^\]]+\]\s*$/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  return [start, end];
+}
+
+function readTomlValue(toml: string, section: string, key: string): string {
+  const lines = toml.split("\n");
+  const bounds = tomlSectionBounds(lines, section);
+  if (!bounds) return "";
+  const [, end] = bounds;
+  for (let index = bounds[0] + 1; index < end; index += 1) {
+    const match = lines[index].match(new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`));
+    if (!match) continue;
+    const raw = match[1].trim();
+    if (raw.startsWith('"') && raw.endsWith('"')) {
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return raw.slice(1, -1);
+      }
+    }
+    return raw;
+  }
+  return "";
+}
+
+function formatTomlValue(value: string, kind: TomlValueKind): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (kind === "bool") return trimmed === "true" ? "true" : trimmed === "false" ? "false" : null;
+  if (kind === "number") return /^-?\d+$/.test(trimmed) ? trimmed : null;
+  return JSON.stringify(value);
+}
+
+function writeTomlValue(toml: string, section: string, key: string, value: string, kind: TomlValueKind): string {
+  const formatted = formatTomlValue(value, kind);
+  const lines = toml.trimEnd().split("\n");
+  if (lines.length === 1 && lines[0] === "") lines.length = 0;
+  let bounds = tomlSectionBounds(lines, section);
+  if (!bounds && formatted == null) return toml;
+  if (!bounds) {
+    if (lines.length > 0 && lines[lines.length - 1].trim() !== "") lines.push("");
+    lines.push(`[${section}]`);
+    bounds = [lines.length - 1, lines.length];
+  }
+  const [start, end] = bounds;
+  const existing = lines.findIndex((line, index) => index > start && index < end && new RegExp(`^\\s*${key}\\s*=`).test(line));
+  if (formatted == null) {
+    if (existing >= 0) lines.splice(existing, 1);
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
+  const next = `${key} = ${formatted}`;
+  if (existing >= 0) {
+    lines[existing] = next;
+  } else {
+    lines.splice(end, 0, next);
+  }
+  return `${lines.join("\n").trimEnd()}\n`;
+}
+
+function SettingsTextInput(props: {
+  value: string;
+  placeholder?: string;
+  onInput: (value: string) => void;
+}) {
+  return (
+    <input
+      class="settings-control"
+      value={props.value}
+      placeholder={props.placeholder}
+      onInput={(e) => props.onInput(e.currentTarget.value)}
+    />
+  );
+}
+
+function SettingsBoolSelect(props: { value: string; onInput: (value: string) => void }) {
+  return (
+    <select class="settings-control settings-boolean-control" value={props.value} onChange={(e) => props.onInput(e.currentTarget.value)}>
+      <option value="">Inherit</option>
+      <option value="true">On</option>
+      <option value="false">Off</option>
+    </select>
+  );
+}
 
 // Server-hosted execution: point this app (and the machine's CLI, which shares
 // the profile file) at an archcar daemon running elsewhere. The daemon owns
@@ -242,24 +425,35 @@ function BackgroundServiceCard() {
 }
 
 export function SettingsPage() {
+  const [activeSection, setActiveSection] = createSignal<SettingsSection>("general");
+  const [query, setQuery] = createSignal("");
   const [repo, setRepo] = createSignal<string | undefined>(undefined);
   const [layer, setLayer] = createSignal<Layer>("repository");
   const [updateStatus, setUpdateStatus] = createSignal<UpdateStatus | null>(null);
   const [checkingUpdates, setCheckingUpdates] = createSignal(false);
   const [recoveryStatus, setRecoveryStatus] = createSignal("Recovery has not run in this window.");
   const [recovering, setRecovering] = createSignal(false);
-
-  const [effective, { refetch: refetchEffective }] = createResource(
-    () => repo() ?? "\0global",
-    async (): Promise<string> => {
-      try {
-        const res = await send({ type: "get_settings", repository: repo() });
-        return res.type === "settings" ? res.toml : "";
-      } catch (err) {
-        return `# failed to load settings: ${(err as Error).message}`;
+  const filteredSections = createMemo(() => {
+    const needle = query().trim().toLowerCase();
+    if (!needle) return SETTINGS_SECTIONS;
+    return SETTINGS_SECTIONS.filter(
+      (section) =>
+        section.label.toLowerCase().includes(needle) ||
+        section.group.toLowerCase().includes(needle),
+    );
+  });
+  const groupedSections = createMemo(() => {
+    const groups: Array<{ group: string; sections: typeof SETTINGS_SECTIONS }> = [];
+    for (const section of filteredSections()) {
+      let group = groups.find((entry) => entry.group === section.group);
+      if (!group) {
+        group = { group: section.group, sections: [] };
+        groups.push(group);
       }
-    },
-  );
+      group.sections.push(section);
+    }
+    return groups;
+  });
 
   const [source, { refetch: refetchSource }] = createResource(
     () => [repo() ?? "\0global", repo() ? layer() : "global"] as const,
@@ -296,7 +490,6 @@ export function SettingsPage() {
       const res = await send({ type: "set_active_prompt_pack", repository, pack });
       if (res.type === "prompt_packs") {
         mutatePacks({ packs: res.packs, active: res.active });
-        await refetchEffective();
       } else {
         await refetchPacks();
       }
@@ -315,6 +508,11 @@ export function SettingsPage() {
     }
   });
   const dirty = () => draft() != null && draft() !== source();
+  const settingValue = (section: string, key: string) => readTomlValue(draft() ?? "", section, key);
+  const setSettingValue = (section: string, key: string, value: string, kind: TomlValueKind = "string") => {
+    setDraft((current) => writeTomlValue(current ?? "", section, key, value, kind));
+    setStatus("");
+  };
 
   async function save() {
     const toml = draft();
@@ -329,7 +527,7 @@ export function SettingsPage() {
       });
       if (res.type === "settings_saved") {
         setStatus("Saved");
-        await Promise.all([refetchSource(), refetchEffective()]);
+        await refetchSource();
       } else if (res.type === "error") {
         setStatus(`Save failed: ${res.message}`);
       } else {
@@ -383,239 +581,533 @@ export function SettingsPage() {
   }
 
   return (
-    <div class="page-shell">
-      <div class="page-header dashboard-header">
-        <div class="dashboard-title">Settings</div>
-        <div class="dashboard-subtitle">
-          Edit a layer's source below; the effective column shows the merged result.
-        </div>
-        <div class="settings-field">
-          <div class="settings-field-title">Default model for new chats</div>
-          <select
-            id="default-model"
-            class="chat-picker"
-            value={prefsStore.state.defaultModel}
-            onChange={(e) => prefsStore.setDefaultModel(e.currentTarget.value)}
-          >
-            <For each={CHAT_PROVIDERS}>
-              {(provider) => (
-                <optgroup label={providerLabel(provider)}>
-                  <For each={MODELS[provider] ?? []}>
-                    {(m) => <option value={m}>{modelLabel(m)}</option>}
-                  </For>
-                </optgroup>
-              )}
-            </For>
-          </select>
-        </div>
-        <div class="settings-appearance">
-          <div class="settings-appearance-group">
-            <span class="settings-field-title">Theme</span>
-            <div class="command-center-strip">
-              <For each={["dark", "light"] as const}>
-                {(t) => (
-                  <button
-                    class="nav-button"
-                    classList={{ "nav-button-active": prefsStore.state.theme === t }}
-                    onClick={() => prefsStore.setTheme(t)}
-                  >
-                    {t === "dark" ? "Dark" : "Light"}
-                  </button>
-                )}
-              </For>
-            </div>
-          </div>
-          <div class="settings-appearance-group">
-            <span class="settings-field-title">Accent</span>
-            <div class="command-center-strip">
-              <For each={["amber", "blue", "green", "rose"] as const}>
-                {(a) => (
-                  <button
-                    class="nav-button settings-accent-swatch"
-                    classList={{ "nav-button-active": prefsStore.state.accent === a }}
-                    style={{ "--swatch": ACCENT_HEX[a] }}
-                    onClick={() => prefsStore.setAccent(a)}
-                  >
-                    <span class="settings-accent-dot" />
-                    {a[0].toUpperCase() + a.slice(1)}
-                  </button>
-                )}
-              </For>
-            </div>
-          </div>
-          <div class="settings-appearance-group">
-            <span class="settings-field-title">Density</span>
-            <div class="command-center-strip">
-              <For each={["compact", "cozy", "comfortable"] as const}>
-                {(d) => (
-                  <button
-                    class="nav-button"
-                    classList={{ "nav-button-active": prefsStore.state.density === d }}
-                    onClick={() => prefsStore.setDensity(d)}
-                  >
-                    {d[0].toUpperCase() + d.slice(1)}
-                  </button>
-                )}
-              </For>
-            </div>
-          </div>
-        </div>
-        <div class="settings-field">
-          <div class="settings-field-title">Keyboard bindings</div>
-          <textarea
-            class="settings-machine-entry"
-            spellcheck={false}
-            rows={2}
-            placeholder="palette=ctrl+k; quick-open=ctrl+p; shortcuts=ctrl+/; terminal=ctrl+j"
-            value={prefsStore.state.keybindings}
-            onInput={(e) => prefsStore.setKeybindings(e.currentTarget.value)}
+    <div class="settings-page-shell">
+      <aside class="settings-sidebar">
+        <button class="settings-back-row" onClick={() => nav.back()} disabled={!nav.canBack()}>
+          <Icon name="arrow-left" class="settings-back-icon" />
+          <span>Settings</span>
+        </button>
+        <label class="settings-search">
+          <Icon name="file" class="settings-search-icon" />
+          <input
+            value={query()}
+            placeholder="Search settings"
+            onInput={(e) => setQuery(e.currentTarget.value)}
           />
-          <div class="settings-status settings-hint">
-            Format: action=keys separated by semicolons. Actions:{" "}
-            {Array.from(new Set(DEFAULT_SHORTCUTS.map((binding) => binding.aliases?.[0] ?? binding.action))).join(", ")}.
-          </div>
-          <div class="shortcuts-list settings-shortcuts-preview">
-            <For each={shortcutHelp(parseKeybindingOverrides(prefsStore.state.keybindings))}>
-              {(row) => (
-                <div class="shortcuts-row">
-                  <kbd class="shortcuts-keys">{row.keys}</kbd>
-                  <span class="shortcuts-label">{row.label}</span>
-                </div>
-              )}
-            </For>
-          </div>
-        </div>
-        <div class="settings-health-grid">
-          <SetupReadinessCard />
-          <div class="settings-field settings-health-card">
-            <div class="settings-field-title">Updates</div>
-            <div class="settings-status">
-              {updateStatus() ? updateStatusText(updateStatus()!) : "Check GitHub releases for a newer build."}
-            </div>
-            <div class="settings-action-row">
-              <button class="ui-button-secondary" disabled={checkingUpdates()} onClick={() => void runUpdateCheck()}>
-                {checkingUpdates() ? "Checking..." : "Check for updates"}
-              </button>
-              <Show when={updateStatus()?.releaseUrl}>
-                {(url) => (
-                  <button class="ui-button-secondary" onClick={() => void openExternal(url())}>
-                    Open release
-                  </button>
-                )}
-              </Show>
-            </div>
-          </div>
-          <BackgroundServiceCard />
-          <RemoteDaemonCard />
-          <div class="settings-field settings-health-card">
-            <div class="settings-field-title">Recovery</div>
-            <div class="settings-status">{recoveryStatus()}</div>
-            <div class="settings-action-row">
-              <button class="ui-button-secondary" disabled={recovering()} onClick={() => void runRecoveryCheck()}>
-                {recovering() ? "Checking..." : "Run recovery check"}
-              </button>
-            </div>
-          </div>
-        </div>
-        <div class="project-tabs">
-          <button
-            class="ws-tab-shell"
-            classList={{ "ws-tab-active": repo() === undefined }}
-            onClick={() => setRepo(undefined)}
-          >
-            <span class="ws-tab-label">Global</span>
-          </button>
-          <For each={repositoriesStore.state.order}>
-            {(name) => (
-              <button
-                class="ws-tab-shell"
-                classList={{ "ws-tab-active": repo() === name }}
-                onClick={() => setRepo(name)}
-              >
-                <span class="ws-tab-label">{name}</span>
-              </button>
+        </label>
+        <div class="settings-nav-groups">
+          <For each={groupedSections()}>
+            {(group) => (
+              <div class="settings-nav-group">
+                <div class="settings-nav-group-title">{group.group}</div>
+                <For each={group.sections}>
+                  {(section) => (
+                    <SettingsNavButton
+                      active={activeSection() === section.id}
+                      icon={section.icon}
+                      label={section.label}
+                      onClick={() => setActiveSection(section.id)}
+                    />
+                  )}
+                </For>
+              </div>
             )}
           </For>
-        </div>
-        <Show when={repo() !== undefined && (promptPacks()?.packs.length ?? 0) > 0}>
-          <div class="settings-prompt-packs">
-            <span class="settings-field-title">Prompt packs</span>
-            <div class="settings-pack-chips">
-              <For each={promptPacks()?.packs ?? []}>
-                {(pack) => (
-                  <button
-                    class="settings-pack-chip"
-                    classList={{ "settings-pack-chip-active": promptPacks()?.active === pack }}
-                    disabled={promptPacks()?.active === pack}
-                    title={promptPacks()?.active === pack ? "Active pack" : `Switch to ${pack}`}
-                    onClick={() => void switchPack(pack)}
-                  >
-                    {pack}
-                    <Show when={promptPacks()?.active === pack}> ✓</Show>
-                  </button>
+          <Show when={repositoriesStore.state.order.length > 0}>
+            <div class="settings-nav-group">
+              <div class="settings-nav-group-title">Repo Overrides</div>
+              <For each={repositoriesStore.state.order}>
+                {(name) => (
+                  <SettingsNavButton
+                    active={activeSection() === "repository" && repo() === name}
+                    icon="folder"
+                    label={name}
+                    detail="Prompts, runs, behavior"
+                    onClick={() => {
+                      setRepo(name);
+                      setActiveSection("repository");
+                    }}
+                  />
                 )}
               </For>
             </div>
-          </div>
-        </Show>
-        <Show when={repo() !== undefined}>
-          <div class="command-center-strip settings-layer-strip">
-            <button
-              class="nav-button"
-              classList={{ "nav-button-active": layer() === "repository" }}
-              onClick={() => setLayer("repository")}
-            >
-              Repository
-            </button>
-            <button
-              class="nav-button"
-              classList={{ "nav-button-active": layer() === "local" }}
-              onClick={() => setLayer("local")}
-            >
-              Local
-            </button>
-          </div>
-        </Show>
-      </div>
+          </Show>
+        </div>
+      </aside>
 
-      <div class="settings-split">
-        <div class="settings-pane">
-          <div class="settings-pane-head">
-            <span class="section-title">
-              Source — {repo() === undefined ? "app shared" : layer()}
-            </span>
-            <span class="card-meta">{status() || (dirty() ? "Unsaved changes" : "")}</span>
-            <button class="suggested-action" disabled={!dirty()} onClick={() => void save()}>
-              Save
-            </button>
+      <main class="settings-main">
+        <Show when={activeSection() === "general"}>
+          <div class="settings-content-narrow">
+            <h1>General</h1>
+            <SettingsSectionBlock title="Personal">
+              <SettingsRow
+                title="Default model for new chats"
+                description="Choose the model selected when a new chat thread starts."
+                control={
+                  <select
+                    id="default-model"
+                    class="settings-control"
+                    value={prefsStore.state.defaultModel}
+                    onChange={(e) => prefsStore.setDefaultModel(e.currentTarget.value)}
+                  >
+                    <For each={CHAT_PROVIDERS}>
+                      {(provider) => (
+                        <optgroup label={providerLabel(provider)}>
+                          <For each={MODELS[provider] ?? []}>
+                            {(m) => <option value={m}>{modelLabel(m)}</option>}
+                          </For>
+                        </optgroup>
+                      )}
+                    </For>
+                  </select>
+                }
+              />
+              <SettingsRow
+                title="Theme"
+                description="Choose the desktop appearance."
+                control={
+                  <div class="settings-segmented">
+                    <For each={["dark", "light"] as const}>
+                      {(t) => (
+                        <button
+                          classList={{ active: prefsStore.state.theme === t }}
+                          onClick={() => prefsStore.setTheme(t)}
+                        >
+                          {t === "dark" ? "Dark" : "Light"}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                }
+              />
+              <SettingsRow
+                title="Accent"
+                description="Used for selected tabs, rows, and primary affordances."
+                control={
+                  <div class="settings-swatch-row">
+                    <For each={["amber", "blue", "green", "rose"] as const}>
+                      {(a) => (
+                        <button
+                          class="settings-swatch"
+                          classList={{ active: prefsStore.state.accent === a }}
+                          style={{ "--swatch": ACCENT_HEX[a] }}
+                          title={a}
+                          onClick={() => prefsStore.setAccent(a)}
+                        />
+                      )}
+                    </For>
+                  </div>
+                }
+              />
+              <SettingsRow
+                title="Density"
+                description="Adjust spacing across workspace lists and controls."
+                control={
+                  <div class="settings-segmented">
+                    <For each={["compact", "cozy", "comfortable"] as const}>
+                      {(d) => (
+                        <button
+                          classList={{ active: prefsStore.state.density === d }}
+                          onClick={() => prefsStore.setDensity(d)}
+                        >
+                          {d[0].toUpperCase() + d.slice(1)}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                }
+              />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Keyboard">
+              <For each={parseKeybindingOverrides(prefsStore.state.keybindings, DEFAULT_SHORTCUTS)}>
+                {(binding, index) => (
+                  <SettingsRow
+                    title={binding.label}
+                    description={shortcutBindingKey(index())}
+                    control={
+                      <input
+                        class="settings-control settings-shortcut-input"
+                        value={binding.keys}
+                        placeholder="mod+k"
+                        spellcheck={false}
+                        onInput={(e) => setShortcutBinding(index(), e.currentTarget.value)}
+                      />
+                    }
+                  />
+                )}
+              </For>
+            </SettingsSectionBlock>
           </div>
-          <textarea
-            class="settings-source-area"
-            spellcheck={false}
-            value={draft() ?? ""}
-            onInput={(e) => {
-              setDraft(e.currentTarget.value);
-              setStatus("");
-            }}
-            onKeyDown={(e) => {
-              if (resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings)) === "save") {
-                e.preventDefault();
-                void save();
-              }
-            }}
-          />
-        </div>
-        <div class="settings-pane">
-          <div class="settings-pane-head">
-            <span class="section-title">Effective (read-only)</span>
+        </Show>
+
+        <Show when={activeSection() === "clients"}>
+          <div class="settings-content-narrow">
+            <h1>Clients</h1>
+            <SettingsSectionBlock title="This Device">
+              <RemoteDaemonCard />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Host Access">
+              <BackgroundServiceCard />
+              <SettingsRow
+                title="Multiple clients"
+                description="Hosted web, Perceo mobile, CLI, and MCP clients can all connect to the same listening archcar."
+                meta="Use one host:port plus the current token per client. Rotating the token revokes existing clients."
+                accent
+              />
+            </SettingsSectionBlock>
           </div>
-          <div class="ws-diff-view">
-            <Show when={!effective.loading} fallback={<div class="empty-state">Loading...</div>}>
-              <pre class="ws-diff-text">{effective()}</pre>
+        </Show>
+
+        <Show when={activeSection() === "agents"}>
+          <div class="settings-content-narrow">
+            <h1>Agents</h1>
+            <SettingsSectionBlock title="Environment">
+              <SetupReadinessCard />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Maintenance">
+              <SettingsRow
+                title="Recovery"
+                description={recoveryStatus()}
+                control={
+                  <button class="ui-button-secondary" disabled={recovering()} onClick={() => void runRecoveryCheck()}>
+                    {recovering() ? "Checking..." : "Run recovery check"}
+                  </button>
+                }
+              />
+            </SettingsSectionBlock>
+          </div>
+        </Show>
+
+        <Show when={activeSection() === "repository"}>
+          <div class="settings-content-wide">
+            <h1>{repo() === undefined ? "Repository Behavior" : repo()}</h1>
+            <SettingsSectionBlock title="Repositories">
+              <button
+                class="settings-repo-row"
+                classList={{ active: repo() === undefined }}
+                onClick={() => setRepo(undefined)}
+              >
+                <span>
+                  <strong>Global defaults</strong>
+                  <small>Fallback prompts, runs, workspace defaults, and behavior</small>
+                </span>
+                <Icon name="chevron-right" class="settings-nav-icon" />
+              </button>
+              <For each={repositoriesStore.state.order}>
+                {(name) => {
+                  const row = () => repositoriesStore.row(name);
+                  return (
+                    <button
+                      class="settings-repo-row"
+                      classList={{ active: repo() === name }}
+                      onClick={() => setRepo(name)}
+                    >
+                      <span>
+                        <strong>{name}</strong>
+                        <small>
+                          {row()?.activeWorkspaces ?? 0} active / {row()?.totalWorkspaces ?? 0} total workspaces
+                        </small>
+                      </span>
+                      <Icon name="chevron-right" class="settings-nav-icon" />
+                    </button>
+                  );
+                }}
+              </For>
+            </SettingsSectionBlock>
+            <Show when={repo() !== undefined}>
+              <div class="settings-top-controls">
+                <div class="settings-segmented">
+                  <button classList={{ active: layer() === "repository" }} onClick={() => setLayer("repository")}>
+                    Repository
+                  </button>
+                  <button classList={{ active: layer() === "local" }} onClick={() => setLayer("local")}>
+                    Local
+                  </button>
+                </div>
+              </div>
             </Show>
+            <Show when={repo() !== undefined && (promptPacks()?.packs.length ?? 0) > 0}>
+              <SettingsSectionBlock title="Prompt Packs">
+                <SettingsRow
+                  title="Active prompt pack"
+                  description="Switch the committed prompt set for this repository."
+                  control={
+                    <div class="settings-pack-chips">
+                      <For each={promptPacks()?.packs ?? []}>
+                        {(pack) => (
+                          <button
+                            class="settings-pack-chip"
+                            classList={{ "settings-pack-chip-active": promptPacks()?.active === pack }}
+                            disabled={promptPacks()?.active === pack}
+                            title={promptPacks()?.active === pack ? "Active pack" : `Switch to ${pack}`}
+                            onClick={() => void switchPack(pack)}
+                          >
+                            {pack}
+                            <Show when={promptPacks()?.active === pack}> ✓</Show>
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                  }
+                />
+              </SettingsSectionBlock>
+            </Show>
+            <SettingsSectionBlock title="Prompts">
+              <SettingsRow
+                title="General instructions"
+                description="Prepended to the first managed chat turn."
+                control={
+                  <SettingsTextInput
+                    value={settingValue("prompts", "general")}
+                    placeholder="Prefer small, reviewable changes..."
+                    onInput={(value) => setSettingValue("prompts", "general", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="New workspace"
+                description="Used when creating a workspace from free-form instructions."
+                control={
+                  <SettingsTextInput
+                    value={settingValue("prompts", "new_workspace")}
+                    placeholder="Create a small workspace plan..."
+                    onInput={(value) => setSettingValue("prompts", "new_workspace", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Continue work"
+                description="Used when asking an agent to pick up existing work."
+                control={
+                  <SettingsTextInput
+                    value={settingValue("prompts", "continue_work")}
+                    onInput={(value) => setSettingValue("prompts", "continue_work", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Code review"
+                description="Used for review staging and review-focused agent work."
+                control={
+                  <SettingsTextInput
+                    value={settingValue("prompts", "code_review")}
+                    onInput={(value) => setSettingValue("prompts", "code_review", value)}
+                  />
+                }
+              />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Runs And Checks">
+              <SettingsRow
+                title="Setup command"
+                description="Command run when preparing a workspace."
+                control={
+                  <SettingsTextInput
+                    value={settingValue("scripts", "setup")}
+                    placeholder="pnpm install"
+                    onInput={(value) => setSettingValue("scripts", "setup", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Run command"
+                description="Default local run command."
+                control={
+                  <SettingsTextInput
+                    value={settingValue("scripts", "run")}
+                    placeholder="pnpm dev"
+                    onInput={(value) => setSettingValue("scripts", "run", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Run mode"
+                description="Whether run commands can execute concurrently."
+                control={
+                  <select
+                    class="settings-control"
+                    value={settingValue("scripts", "run_mode")}
+                    onChange={(e) => setSettingValue("scripts", "run_mode", e.currentTarget.value)}
+                  >
+                    <option value="">Inherit</option>
+                    <option value="concurrent">Concurrent</option>
+                    <option value="nonconcurrent">Nonconcurrent</option>
+                  </select>
+                }
+              />
+              <SettingsRow
+                title="Test command"
+                control={
+                  <SettingsTextInput
+                    value={settingValue("scripts", "test")}
+                    placeholder="cargo test"
+                    onInput={(value) => setSettingValue("scripts", "test", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Lint command"
+                control={
+                  <SettingsTextInput
+                    value={settingValue("scripts", "lint")}
+                    onInput={(value) => setSettingValue("scripts", "lint", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Typecheck command"
+                control={
+                  <SettingsTextInput
+                    value={settingValue("scripts", "typecheck")}
+                    onInput={(value) => setSettingValue("scripts", "typecheck", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Build command"
+                control={
+                  <SettingsTextInput
+                    value={settingValue("scripts", "build")}
+                    onInput={(value) => setSettingValue("scripts", "build", value)}
+                  />
+                }
+              />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Workspace Defaults">
+              <SettingsRow
+                title="Base branch"
+                control={
+                  <SettingsTextInput
+                    value={settingValue("customization.workspace_defaults", "base_branch")}
+                    placeholder="main"
+                    onInput={(value) => setSettingValue("customization.workspace_defaults", "base_branch", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Branch prefix"
+                control={
+                  <SettingsTextInput
+                    value={settingValue("customization.workspace_defaults", "branch_prefix")}
+                    placeholder="lc"
+                    onInput={(value) => setSettingValue("customization.workspace_defaults", "branch_prefix", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Workspace parent"
+                description="Override where new worktrees are created."
+                control={
+                  <SettingsTextInput
+                    value={settingValue("customization.workspace_defaults", "workspace_parent")}
+                    placeholder="/path/to/workspaces"
+                    onInput={(value) => setSettingValue("customization.workspace_defaults", "workspace_parent", value)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Port block size"
+                control={
+                  <SettingsTextInput
+                    value={settingValue("customization.workspace_defaults", "port_block_size")}
+                    placeholder="10"
+                    onInput={(value) => setSettingValue("customization.workspace_defaults", "port_block_size", value, "number")}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Default visible tab"
+                control={
+                  <select
+                    class="settings-control"
+                    value={settingValue("customization.workspace_defaults", "default_visible_tab")}
+                    onChange={(e) =>
+                      setSettingValue("customization.workspace_defaults", "default_visible_tab", e.currentTarget.value)
+                    }
+                  >
+                    <option value="">Inherit</option>
+                    <option value="changes">Changes</option>
+                    <option value="files">Files</option>
+                    <option value="intel">Intel</option>
+                    <option value="terminal">Terminal</option>
+                  </select>
+                }
+              />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Git Behavior">
+              <SettingsRow
+                title="Delete branch on archive"
+                control={
+                  <SettingsBoolSelect
+                    value={settingValue("git", "delete_branch_on_archive")}
+                    onInput={(value) => setSettingValue("git", "delete_branch_on_archive", value, "bool")}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Archive after merge"
+                control={
+                  <SettingsBoolSelect
+                    value={settingValue("git", "archive_on_merge")}
+                    onInput={(value) => setSettingValue("git", "archive_on_merge", value, "bool")}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Auto setup push remote"
+                control={
+                  <SettingsBoolSelect
+                    value={settingValue("git", "worktree_push_auto_setup_remote")}
+                    onInput={(value) => setSettingValue("git", "worktree_push_auto_setup_remote", value, "bool")}
+                  />
+                }
+              />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Changes">
+              <SettingsRow
+                title={repo() === undefined ? "Global defaults" : `${layer()} overrides`}
+                description="Save the individual settings above."
+                meta={status() || (dirty() ? "Unsaved changes" : "Saved")}
+                control={
+                  <button class="suggested-action" disabled={!dirty()} onClick={() => void save()}>
+                    Save
+                  </button>
+                }
+                accent={dirty()}
+              />
+            </SettingsSectionBlock>
           </div>
-        </div>
-      </div>
+        </Show>
+
+        <Show when={activeSection() === "advanced"}>
+          <div class="settings-content-narrow">
+            <h1>Advanced</h1>
+            <SettingsSectionBlock title="Updates">
+              <SettingsRow
+                title="App updates"
+                description={updateStatus() ? updateStatusText(updateStatus()!) : "Check GitHub releases for a newer build."}
+                control={
+                  <div class="settings-action-row">
+                    <button
+                      class="ui-button-secondary"
+                      disabled={checkingUpdates()}
+                      onClick={() => void runUpdateCheck()}
+                    >
+                      {checkingUpdates() ? "Checking..." : "Check for updates"}
+                    </button>
+                    <Show when={updateStatus()?.releaseUrl}>
+                      {(url) => (
+                        <button class="ui-button-secondary" onClick={() => void openExternal(url())}>
+                          Open release
+                        </button>
+                      )}
+                    </Show>
+                  </div>
+                }
+              />
+            </SettingsSectionBlock>
+          </div>
+        </Show>
+      </main>
     </div>
   );
 }

@@ -239,6 +239,7 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
                     effort: self.context.controls.effort.clone(),
                     summary: None,
                     personality: None,
+                    fast_mode: self.context.controls.fast_mode.unwrap_or(false),
                 },
             )?;
         }
@@ -388,6 +389,10 @@ impl ManagedHarnessAdapter for CodexManagedAdapter {
             }
             HarnessControl::SetEffort(effort) => {
                 self.context.controls.effort = effort;
+                HarnessControlPlan::RestartRequired(self.context.controls.clone())
+            }
+            HarnessControl::SetFastMode(fast_mode) => {
+                self.context.controls.fast_mode = Some(fast_mode);
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
             }
             HarnessControl::SetPermissionMode(permission_mode) => {
@@ -909,6 +914,7 @@ pub struct CodexAppServerTurnStartParams {
     pub effort: Option<String>,
     pub summary: Option<String>,
     pub personality: Option<String>,
+    pub fast_mode: bool,
 }
 
 impl CodexAppServerTurnStartParams {
@@ -939,6 +945,12 @@ impl CodexAppServerTurnStartParams {
         insert_string(&mut params, "effort", self.effort.as_deref());
         insert_string(&mut params, "summary", self.summary.as_deref());
         insert_string(&mut params, "personality", self.personality.as_deref());
+        if self.fast_mode {
+            params.insert(
+                "config".to_owned(),
+                json!({ "model_reasoning_summary": CODEX_REASONING_SUMMARY, "service_tier": "fast" }),
+            );
+        }
         Value::Object(params)
     }
 }
@@ -3217,6 +3229,7 @@ mod tests {
                 effort: Some("medium".to_owned()),
                 summary: Some("concise".to_owned()),
                 personality: Some("friendly".to_owned()),
+                fast_mode: true,
             },
         )
         .unwrap();
@@ -3237,6 +3250,7 @@ mod tests {
         assert_eq!(line["params"]["effort"], "medium");
         assert_eq!(line["params"]["summary"], "concise");
         assert_eq!(line["params"]["personality"], "friendly");
+        assert_eq!(line["params"]["config"]["service_tier"], "fast");
     }
 
     #[test]

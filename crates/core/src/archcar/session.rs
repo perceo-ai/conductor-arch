@@ -142,12 +142,15 @@ struct ProviderProcessConnection {
     stdout_rx: Receiver<String>,
     next_read_line: usize,
     native_thread_id: Option<String>,
+    program: PathBuf,
+    env: Vec<(String, OsString)>,
     cwd: PathBuf,
     model: Option<String>,
     approval_policy: Option<String>,
     reasoning_mode: Option<String>,
     effort_mode: Option<String>,
     personality: Option<String>,
+    fast_mode: bool,
     pending_recovery_context: Option<String>,
 }
 
@@ -435,12 +438,15 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         stdout_rx,
         next_read_line: 0,
         native_thread_id: start.launch.session_resume_id.clone(),
+        program: start.launch.program.clone(),
+        env: start.launch.env.clone(),
         cwd: start.launch.cwd.clone(),
         model: model_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         approval_policy: approval_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         reasoning_mode: reasoning_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         effort_mode: effort_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         personality: personality_from_harness_metadata(start.launch.harness_metadata.as_deref()),
+        fast_mode: fast_from_harness_metadata(start.launch.harness_metadata.as_deref()),
         pending_recovery_context: start.startup_recovery_context.clone(),
     };
     let connection = match start.kind {
@@ -1184,6 +1190,73 @@ fn claude_stream_effort_mode(harness: &SessionHarnessOptions) -> Option<String> 
     })
 }
 
+fn claude_stream_connection_effort(connection: &ProviderProcessConnection) -> Option<String> {
+    connection.effort_mode.clone().or_else(|| {
+        if connection.fast_mode {
+            Some("low".to_owned())
+        } else {
+            connection.reasoning_mode.clone()
+        }
+    })
+}
+
+fn restart_claude_stream_connection(
+    connection: &mut ProviderProcessConnection,
+    thread_id: i64,
+) -> Result<u32> {
+    let native_thread_id = connection
+        .native_thread_id
+        .clone()
+        .context("Claude session has no native session id to resume")?;
+    let hook_settings = std::env::current_exe().ok().and_then(|executable| {
+        serde_json::to_string(&build_claude_hook_settings(&executable, thread_id)).ok()
+    });
+    let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
+        persistent_input: true,
+        replay_user_messages: true,
+        permission_prompt_tool: Some("stdio".to_owned()),
+        resume: Some(native_thread_id),
+        permission_mode: Some(CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+        model: connection.model.clone(),
+        effort: claude_stream_connection_effort(connection),
+        append_system_prompt: None,
+        settings_json: hook_settings,
+    });
+
+    let _ = crate::platform::terminate_process_group(connection.child.id(), false);
+    let _ = connection.child.kill();
+    let _ = connection.child.wait();
+
+    let mut command = ProcessCommand::new(&connection.program);
+    command
+        .args(args)
+        .current_dir(&connection.cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    for (key, value) in &connection.env {
+        command.env(key, value);
+    }
+    crate::platform::configure_new_process_group(&mut command);
+    let mut child = command
+        .spawn()
+        .context("restart Claude stream-json process")?;
+    let pid = child.id();
+    let stdin = child
+        .stdin
+        .take()
+        .context("restarted Claude stdin was not piped")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("restarted Claude stdout was not piped")?;
+    connection.child = child;
+    connection.stdin = stdin;
+    connection.stdout_rx = spawn_stdout_line_reader(stdout);
+    connection.next_read_line = 0;
+    Ok(pid)
+}
+
 fn sanitize_harness_text(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     (!value.is_empty()).then(|| value.to_owned())
@@ -1203,6 +1276,15 @@ fn set_provider_connection_effort(
     connection.effort_mode = sanitize_harness_text(effort.as_deref());
 }
 
+fn set_provider_connection_fast_mode(
+    connection: &mut ProviderProcessConnection,
+    fast_mode: Option<bool>,
+) {
+    if let Some(fast_mode) = fast_mode {
+        connection.fast_mode = fast_mode;
+    }
+}
+
 fn set_provider_connection_permission_mode(
     connection: &mut ProviderProcessConnection,
     _permission_mode: Option<String>,
@@ -1216,7 +1298,26 @@ fn apply_provider_connection_controls(
 ) {
     set_provider_connection_model(connection, controls.model);
     set_provider_connection_effort(connection, controls.effort);
+    set_provider_connection_fast_mode(connection, controls.fast_mode);
     set_provider_connection_permission_mode(connection, controls.permission_mode);
+}
+
+fn provider_connection_harness_metadata(
+    harness_name: &str,
+    connection: &ProviderProcessConnection,
+) -> Option<String> {
+    let options = SessionHarnessOptions {
+        plan_mode: false,
+        fast_mode: connection.fast_mode,
+        model: connection.model.clone(),
+        approval_mode: connection.approval_policy.clone(),
+        reasoning_mode: connection.reasoning_mode.clone(),
+        effort_mode: connection.effort_mode.clone(),
+        codex_personality: connection.personality.clone(),
+        codex_goals: None,
+        codex_skills: None,
+    };
+    non_interactive_harness_metadata(harness_name, &options)
 }
 
 fn apply_provider_control_plan(
@@ -1225,6 +1326,7 @@ fn apply_provider_control_plan(
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
     connection: &mut ProviderProcessConnection,
+    harness_name: &str,
     plan: HarnessControlPlan,
 ) {
     match plan {
@@ -1263,6 +1365,12 @@ fn apply_provider_control_plan(
                 return;
             }
             apply_provider_connection_controls(connection, controls);
+            let metadata = provider_connection_harness_metadata(harness_name, connection);
+            let _ = runtime_store
+                .update_chat_thread_harness_metadata(started.thread_id, metadata.as_deref());
+            let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
+                thread_id: started.thread_id,
+            });
         }
         HarnessControlPlan::Emulated(effect) => {
             let mut native_thread_id = connection.native_thread_id.clone();
@@ -1305,6 +1413,10 @@ fn reasoning_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
 
 fn effort_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
     metadata_value(metadata, "effort")
+}
+
+fn fast_from_harness_metadata(metadata: Option<&str>) -> bool {
+    metadata_value(metadata, "fast").is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 fn personality_from_harness_metadata(metadata: Option<&str>) -> Option<String> {
@@ -2082,6 +2194,7 @@ fn run_codex_app_server_session_loop(
             model: connection.model.clone(),
             effort: connection.effort_mode.clone(),
             permission_mode: connection.approval_policy.clone(),
+            fast_mode: Some(connection.fast_mode),
         },
     });
 
@@ -2461,6 +2574,7 @@ fn run_codex_app_server_session_loop(
                         &event_tx,
                         &started,
                         &mut connection,
+                        "codex-app-server",
                         plan,
                     );
                     if let Ok(mut state) = snapshot.lock() {
@@ -2476,6 +2590,7 @@ fn run_codex_app_server_session_loop(
                         &event_tx,
                         &started,
                         &mut connection,
+                        "codex-app-server",
                         plan,
                     );
                 }
@@ -2549,6 +2664,7 @@ fn run_claude_stream_session_loop(
             model: connection.model.clone(),
             effort: connection.effort_mode.clone(),
             permission_mode: connection.approval_policy.clone(),
+            fast_mode: Some(connection.fast_mode),
         },
     });
     // `claude --input-format stream-json` emits `system/init` only after it
@@ -2570,6 +2686,7 @@ fn run_claude_stream_session_loop(
         &mut connection.native_thread_id,
         HarnessEffect::Ready,
     );
+    let mut pending_restart = false;
 
     loop {
         drain_claude_stdout(
@@ -2699,21 +2816,77 @@ fn run_claude_stream_session_loop(
                         &event_tx,
                         &started,
                         &mut connection,
+                        "claude-stream-json",
                         plan,
                     );
                 }
                 SessionCommand::ApplyControl(control) => {
                     let plan = adapter.plan_control(control);
+                    let restart_required = matches!(plan, HarnessControlPlan::RestartRequired(_));
                     apply_provider_control_plan(
                         &runtime_store,
                         &snapshot,
                         &event_tx,
                         &started,
                         &mut connection,
+                        "claude-stream-json",
                         plan,
                     );
+                    if restart_required {
+                        pending_restart = true;
+                    }
                 }
                 SessionCommand::Resize { .. } => {}
+            }
+        }
+
+        if pending_restart && adapter.tracker.ready() {
+            match restart_claude_stream_connection(&mut connection, started.thread_id) {
+                Ok(pid) => {
+                    pending_restart = false;
+                    adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+                        session_id: started.session_id,
+                        thread_id: started.thread_id,
+                        workspace: started.workspace.clone(),
+                        native_session_id: connection.native_thread_id.clone(),
+                        controls: DesiredHarnessControls {
+                            model: connection.model.clone(),
+                            effort: connection.effort_mode.clone(),
+                            permission_mode: connection.approval_policy.clone(),
+                            fast_mode: Some(connection.fast_mode),
+                        },
+                    });
+                    adapter.note_transport_started();
+                    adapter.note_plan_mode(
+                        runtime_store
+                            .chat_thread_plan_mode(started.thread_id)
+                            .unwrap_or(false),
+                    );
+                    let _ = runtime_store.append_provider_native_output(
+                        started.session_id,
+                        "claude-stream-json",
+                        "transport restarted: claude -p stream-json",
+                    );
+                    if let Ok(mut state) = snapshot.lock() {
+                        state.pid = pid;
+                        state.ready = true;
+                        state.runtime_state = AgentSessionState::WaitingForInput;
+                    }
+                    let _ = event_tx.send(ArchcarEvent::SessionReady {
+                        session_id: started.session_id,
+                        thread_id: started.thread_id,
+                    });
+                }
+                Err(err) => {
+                    let _ = connection.child.kill();
+                    mark_provider_session_failed(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        format!("Claude stream restart failed: {err:#}"),
+                    );
+                }
             }
         }
 
@@ -2784,6 +2957,7 @@ fn drain_claude_stdout(
                                 event_tx,
                                 started,
                                 connection,
+                                "claude-stream-json",
                                 plan,
                             );
                             continue;
@@ -3073,6 +3247,7 @@ fn codex_turn_start_params(
         effort: codex_turn_effort(connection),
         summary: None,
         personality: connection.personality.clone(),
+        fast_mode: connection.fast_mode,
     }
 }
 
@@ -3795,12 +3970,15 @@ mod tests {
             stdout_rx: native_rx,
             next_read_line: 0,
             native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("claude-sonnet-fixture".to_owned()),
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot = Arc::new(Mutex::new(running_session_snapshot(
@@ -3928,12 +4106,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx: spawn_stdout_line_reader(stdout),
             next_read_line: 0,
             native_thread_id: None,
+            program: fake_claude.clone(),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("claude-sonnet-fixture".to_owned()),
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot = Arc::new(Mutex::new(running_session_snapshot(
@@ -4074,12 +4255,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx,
             next_read_line: 0,
             native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("gpt-5.4".to_owned()),
             approval_policy: Some("never".to_owned()),
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot =
@@ -4142,12 +4326,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx,
             next_read_line: 0,
             native_thread_id: Some("thr_existing".to_owned()),
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: None,
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
         let snapshot =
@@ -4275,12 +4462,15 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             stdout_rx,
             next_read_line: 0,
             native_thread_id: Some("thr_existing".to_owned()),
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
             cwd: PathBuf::from("/tmp/workspace"),
             model: Some("gpt-5.6-sol".to_owned()),
             approval_policy: None,
             reasoning_mode: None,
             effort_mode: None,
             personality: None,
+            fast_mode: false,
             pending_recovery_context: None,
         };
 
@@ -4303,6 +4493,136 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         );
 
         assert_eq!(connection.model, None);
+
+        let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn provider_connection_controls_update_fast_mode_and_metadata() {
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stdout_rx = spawn_stdout_line_reader(stdout);
+        let mut connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx,
+            next_read_line: 0,
+            native_thread_id: Some("thr_existing".to_owned()),
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: Some("gpt-5.6-sol".to_owned()),
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: Some("high".to_owned()),
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some("gpt-5.6-sol".to_owned()),
+                effort: Some("high".to_owned()),
+                fast_mode: Some(true),
+                ..DesiredHarnessControls::default()
+            },
+        );
+
+        assert!(connection.fast_mode);
+        assert_eq!(
+            provider_connection_harness_metadata("codex-app-server", &connection).as_deref(),
+            Some("harness=codex-app-server;fast=true;model=gpt-5.6-sol;approval=never;effort=high")
+        );
+
+        apply_provider_connection_controls(
+            &mut connection,
+            DesiredHarnessControls {
+                model: Some("gpt-5.6-sol".to_owned()),
+                effort: Some("high".to_owned()),
+                fast_mode: Some(false),
+                ..DesiredHarnessControls::default()
+            },
+        );
+
+        assert!(!connection.fast_mode);
+
+        let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn claude_restart_relaunches_with_resume_and_updated_controls() {
+        let temp = tempfile::tempdir().unwrap();
+        let fake_claude = temp.path().join("fake-claude.sh");
+        fs::write(
+            &fake_claude,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\"\ncat >/dev/null\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&fake_claude).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&fake_claude, perms).unwrap();
+        }
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stdout_rx = spawn_stdout_line_reader(stdout);
+        let mut connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx,
+            next_read_line: 0,
+            native_thread_id: Some("claude-session-1".to_owned()),
+            program: fake_claude,
+            env: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            model: Some("claude-opus-5".to_owned()),
+            approval_policy: Some(CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: true,
+            pending_recovery_context: None,
+        };
+
+        restart_claude_stream_connection(&mut connection, 99).unwrap();
+
+        let mut args = Vec::new();
+        for _ in 0..20 {
+            match connection.stdout_rx.recv_timeout(Duration::from_secs(2)) {
+                Ok(arg) => args.push(arg),
+                Err(_) => break,
+            }
+        }
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--resume", "claude-session-1"]),
+            "captured args: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--model", "claude-opus-5"]),
+            "captured args: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--effort", "low"]),
+            "captured args: {args:?}"
+        );
 
         let _ = connection.child.kill();
     }

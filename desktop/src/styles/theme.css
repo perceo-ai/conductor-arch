@@ -33,6 +33,41 @@
 
     --ui-font-sans: "Mona Sans", "Inter", "SF Pro Text", "Segoe UI", sans-serif;
     --ui-font-mono: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+    /* ── Code surface tokens ──
+       Every place the app shows code — the diff viewer, the file editor, and
+       markdown fences — reads these, so the three render identically.
+       --font-mono and --lc-mono are the names the older rules already ask for;
+       they were never defined, which silently dropped those surfaces to the
+       platform default monospace. Alias them here rather than chase every rule. */
+    --code-font: var(--ui-font-mono);
+    --font-mono: var(--ui-font-mono);
+    --lc-mono: var(--ui-font-mono);
+    --code-size: 12.5px;
+    --code-line: 1.5;
+    --code-tab: 2;
+    --code-surface: var(--ui-panel);
+    --code-fg: var(--lc-text);
+    --code-border: var(--lc-border);
+    --code-gutter-fg: #5f5f5f;
+    --code-line-active: rgba(255, 255, 255, 0.045);
+
+    /* Diff tints derived from the app's own change colors (--diff-add-accent /
+       --diff-del-accent, the same green and red the file-summary counts use)
+       laid over --ui-panel, so the diff reads as part of this app rather than a
+       transplanted GitHub surface. Row tint says "this line changed"; the
+       stronger word tint on top says "this is what changed in it". */
+    --diff-add-accent: #6cc58a;
+    --diff-del-accent: #e06f6f;
+    --diff-add-bg: #1c2a21;
+    --diff-add-fg: var(--lc-text);
+    --diff-add-word: rgba(108, 197, 138, 0.26);
+    --diff-del-bg: #2b1e1e;
+    --diff-del-fg: var(--lc-text);
+    --diff-del-word: rgba(224, 111, 111, 0.26);
+    --diff-hunk-bg: var(--ui-panel-3);
+    --diff-hunk-fg: var(--lc-text-muted);
+    --diff-header-bg: var(--ui-panel-2);
     --ui-text: 13px;
     --ui-text-sm: 12px;
     --ui-text-xs: 11px;
@@ -2067,38 +2102,31 @@ button.ui-button-destructive:hover {
 .lc-theme-light .chat-timeline-scroll {
     background-color: #ffffff;
 }
-/* Diff viewer: dark #151515 container + dark GitHub-style row tints. Map to the
-   GitHub light diff palette so diffs are readable in light mode. */
+/* Code surfaces in light mode: the GitHub light palette, set once on the shared
+   tokens so the diff viewer, file editor, and markdown fences all follow. */
+.lc-theme-light {
+    --code-surface: #ffffff;
+    --code-fg: #1f2328;
+    --code-border: #d9e0e8;
+    --code-gutter-fg: #9aa0a6;
+    --code-line-active: rgba(0, 0, 0, 0.04);
+
+    --diff-add-accent: #2e8b57;
+    --diff-del-accent: #c14545;
+    --diff-add-bg: #eaf7ee;
+    --diff-add-fg: #1f2328;
+    --diff-add-word: rgba(108, 197, 138, 0.45);
+    --diff-del-bg: #fdeded;
+    --diff-del-fg: #1f2328;
+    --diff-del-word: rgba(224, 111, 111, 0.35);
+    --diff-hunk-bg: #f1f3f5;
+    --diff-hunk-fg: #57606a;
+    --diff-header-bg: #f6f8fa;
+}
 .lc-theme-light .diff-view {
     background-color: #ffffff;
     color: #1f2328;
     border-color: #d9e0e8;
-}
-.lc-theme-light .chat-inline-event-code-row-context {
-    background-color: #ffffff;
-    color: #1f2328;
-}
-.lc-theme-light .chat-inline-event-code-row-added {
-    background-color: #e6ffec;
-    color: #1f2328;
-}
-.lc-theme-light .chat-inline-event-code-row-removed {
-    background-color: #ffebe9;
-    color: #1f2328;
-}
-.lc-theme-light .chat-inline-event-code-row-hunk {
-    background-color: #ddf4ff;
-    color: #0969da;
-}
-.lc-theme-light .chat-inline-event-code-row-meta {
-    background-color: #f6f8fa;
-    color: #57606a;
-}
-.lc-theme-light .diff-lineno {
-    color: #8c959f;
-}
-.lc-theme-light .diff-lineno-new {
-    border-right-color: #d9e0e8;
 }
 .lc-theme-light .ws-topbar {
     background-color: #ffffff;
@@ -3780,62 +3808,15 @@ button.chat-inline-event-expander label {
     line-height: 1.25;
     padding: 0 2px;
 }
-.chat-inline-event-code,
+/* Diff row/gutter styling lives in base.css and reads the shared code tokens;
+   only the terminal surface still needs its own container chrome here. */
 .chat-inline-event-terminal {
-    background-color: #0d1117;
-    border: 1px solid #30363d;
+    background-color: var(--code-surface);
+    border: 1px solid var(--code-border);
     border-radius: 5px;
 }
-.chat-inline-event-code .viewport,
 .chat-inline-event-terminal .viewport {
-    background-color: #0d1117;
-}
-.chat-inline-event-code-rows {
-    background-color: #0d1117;
-}
-.chat-inline-event-code-row {
-    min-height: 18px;
-}
-.chat-inline-event-code-row-context {
-    background-color: #0d1117;
-    color: #c9d1d9;
-}
-.chat-inline-event-code-row-added {
-    background-color: #10281a;
-    color: #d6f5df;
-}
-.chat-inline-event-code-row-removed {
-    background-color: #2a1111;
-    color: #f5d6d6;
-}
-.chat-inline-event-code-row-hunk {
-    background-color: #111d2f;
-    color: #8db7e8;
-}
-.chat-inline-event-code-row-meta {
-    background-color: #161b22;
-    color: #8b949e;
-}
-.chat-inline-event-code-gutter {
-    border-right: 1px solid #30363d;
-    color: #6e7681;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
-    font-size: 10px;
-    min-width: 42px;
-    padding: 0 8px;
-}
-.chat-inline-event-code-sign {
-    color: #8b949e;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
-    font-size: 10px;
-    min-width: 18px;
-    padding: 0 4px;
-}
-.chat-inline-event-code-text {
-    color: inherit;
-    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
-    font-size: 10px;
-    padding: 0 8px;
+    background-color: var(--code-surface);
 }
 .chat-inline-event-loading {
     color: #b6c7e8;
@@ -4753,4 +4734,403 @@ textarea:focus {
     height: 14px;
     min-width: 14px;
     min-height: 14px;
+}
+
+/* Conductor-style settings layout */
+.settings-page-shell {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 300px minmax(0, 1fr);
+    background: var(--lc-bg);
+    color: var(--lc-text);
+}
+
+.settings-sidebar {
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--lc-border);
+    background: #171717;
+    padding: 14px 10px;
+    overflow: hidden;
+}
+
+.settings-back-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    border: 0;
+    background: transparent;
+    color: var(--lc-text);
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 8px;
+    text-align: left;
+}
+
+.settings-back-row:disabled {
+    color: var(--lc-text-muted);
+}
+
+.settings-back-icon,
+.settings-search-icon,
+.settings-nav-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+}
+
+.settings-search {
+    height: 38px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 8px;
+    background: #101010;
+    padding: 0 10px;
+    margin: 12px 0 16px;
+}
+
+.settings-search input {
+    min-height: 0;
+    height: 34px;
+    flex: 1 1 auto;
+    border: 0;
+    background: transparent;
+    outline: none;
+    padding: 0;
+    color: var(--lc-text-strong);
+}
+
+.settings-search-icon {
+    color: var(--lc-text-muted);
+}
+
+.settings-nav-groups {
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding-right: 2px;
+}
+
+.settings-nav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.settings-nav-group-title {
+    color: var(--lc-text-muted);
+    font-size: 11px;
+    font-weight: 650;
+    padding: 0 8px 4px;
+}
+
+.settings-nav-button {
+    width: 100%;
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: #a8a8a8;
+    text-align: left;
+    padding: 7px 9px;
+}
+
+.settings-nav-button:hover {
+    background: var(--lc-hover-soft);
+    color: var(--lc-text-strong);
+}
+
+.settings-nav-button.active {
+    background: #242121;
+    color: var(--lc-text-strong);
+    box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+.settings-nav-button.active .settings-nav-icon {
+    color: var(--lc-accent);
+}
+
+.settings-nav-text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.settings-nav-label,
+.settings-nav-detail {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-nav-label {
+    font-size: 13px;
+    font-weight: 550;
+}
+
+.settings-nav-detail {
+    color: var(--lc-text-muted);
+    font-size: 11px;
+}
+
+.settings-main {
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 42px 56px;
+}
+
+.settings-main h1 {
+    margin: 0 0 28px;
+    color: var(--lc-text-strong);
+    font-size: 26px;
+    font-weight: 650;
+    letter-spacing: 0;
+}
+
+.settings-content-narrow,
+.settings-content-wide {
+    width: min(100%, 1120px);
+}
+
+.settings-content-narrow {
+    max-width: 920px;
+}
+
+.settings-section-block {
+    margin-bottom: 34px;
+}
+
+.settings-section-block h2 {
+    margin: 0 0 10px;
+    color: var(--lc-text-muted);
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0;
+}
+
+.settings-section-list {
+    border-top: 1px solid var(--lc-border);
+}
+
+.settings-row,
+.settings-section-list > .settings-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    min-height: 82px;
+    border-bottom: 1px solid var(--lc-border);
+    padding: 16px 0;
+    background: transparent;
+}
+
+.settings-section-list > .settings-field {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 10px;
+}
+
+.settings-row-accent {
+    box-shadow: inset 3px 0 0 var(--lc-accent);
+    padding-left: 12px;
+}
+
+.settings-row-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.settings-row-title {
+    color: var(--lc-text-strong);
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.settings-row-description,
+.settings-row-meta {
+    color: var(--lc-text-muted);
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+.settings-row-meta {
+    font-size: 11px;
+}
+
+.settings-row-control {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    max-width: min(520px, 48vw);
+}
+
+.settings-control {
+    width: 270px;
+    min-height: 36px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 7px;
+    background: #101010;
+    color: var(--lc-text-strong);
+    padding: 0 10px;
+    font: inherit;
+}
+
+.settings-segmented {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 8px;
+    background: #101010;
+    padding: 3px;
+}
+
+.settings-segmented button {
+    min-height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--lc-text-muted);
+    padding: 0 10px;
+    font-size: 12px;
+}
+
+.settings-segmented button:hover {
+    color: var(--lc-text-strong);
+    background: var(--lc-hover-soft);
+}
+
+.settings-segmented button.active {
+    color: var(--lc-text-strong);
+    background: #2b2b2b;
+}
+
+.settings-swatch-row {
+    display: inline-flex;
+    gap: 8px;
+}
+
+.settings-swatch {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    border: 1px solid var(--lc-border-strong);
+    background: var(--swatch);
+    box-shadow: inset 0 0 0 2px rgba(0, 0, 0, 0.35);
+}
+
+.settings-swatch.active {
+    outline: 2px solid var(--lc-text-strong);
+    outline-offset: 2px;
+}
+
+.settings-keybinding-entry {
+    width: 100%;
+    resize: vertical;
+}
+
+.settings-repo-row {
+    width: 100%;
+    min-height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border: 0;
+    border-bottom: 1px solid var(--lc-border);
+    background: transparent;
+    color: var(--lc-text);
+    padding: 12px 0;
+    text-align: left;
+}
+
+.settings-repo-row:hover {
+    background: var(--lc-hover-soft);
+}
+
+.settings-repo-row.active {
+    color: var(--lc-text-strong);
+    box-shadow: inset 3px 0 0 var(--lc-accent);
+    padding-left: 12px;
+}
+
+.settings-repo-row span {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.settings-repo-row strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.settings-repo-row small {
+    color: var(--lc-text-muted);
+    font-size: 12px;
+}
+
+.settings-top-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 22px;
+}
+
+.settings-content-wide .settings-split {
+    height: min(620px, 58vh);
+    padding: 0;
+    margin-top: 10px;
+}
+
+@media (max-width: 920px) {
+    .settings-page-shell {
+        grid-template-columns: 240px minmax(0, 1fr);
+    }
+
+    .settings-main {
+        padding: 28px 24px;
+    }
+
+    .settings-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 12px;
+    }
+
+    .settings-row-control {
+        width: 100%;
+        max-width: none;
+        justify-content: flex-start;
+    }
+
+    .settings-control {
+        width: 100%;
+    }
+
+    .settings-top-controls {
+        align-items: stretch;
+        flex-direction: column;
+    }
 }

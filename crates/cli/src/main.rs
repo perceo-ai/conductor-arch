@@ -92,6 +92,13 @@ enum Command {
         name_only: bool,
         #[arg(long)]
         file: Option<PathBuf>,
+        /// Include staged changes too, diffing everything against HEAD
+        /// (default: unstaged only).
+        #[arg(long)]
+        uncommitted: bool,
+        /// Diff one commit's changes. Takes precedence over --uncommitted.
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
     },
     Pr {
         #[command(subcommand)]
@@ -260,6 +267,11 @@ enum ArchcarCommand {
         session_id: i64,
         level: String,
     },
+    Fast {
+        session_id: i64,
+        #[arg(long)]
+        off: bool,
+    },
     PermissionMode {
         session_id: i64,
         mode: String,
@@ -290,6 +302,8 @@ enum ArchcarCommand {
     },
     /// List all workspaces with status counts.
     Workspaces,
+    /// List repositories, workspaces, and active chat strips in one request.
+    InventorySnapshot,
     /// List repositories with workspace counts.
     Repositories,
     /// List chat threads for a workspace.
@@ -356,6 +370,9 @@ enum ArchcarCommand {
     CommitDiff {
         workspace: String,
         commit: String,
+        /// Limit the patch to one file.
+        #[arg(long)]
+        path: Option<String>,
     },
     /// List a workspace's configured check commands.
     CheckList {
@@ -422,11 +439,20 @@ enum ArchcarCommand {
         /// Show all changes vs the review base (default: uncommitted only).
         #[arg(long)]
         all: bool,
+        /// Show one commit's changes instead. Takes precedence over --all.
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
     },
-    /// Print the three-section unified diff for a workspace.
+    /// Print the unified diff for a workspace, or for one file in it.
     WorkspaceDiff {
         workspace: String,
         path: Option<String>,
+        /// Diff uncommitted changes only (default: everything vs the review base).
+        #[arg(long)]
+        uncommitted: bool,
+        /// Diff one commit's changes. Takes precedence over --uncommitted.
+        #[arg(long, value_name = "SHA")]
+        commit: Option<String>,
     },
     /// List todos for a workspace.
     Todos {
@@ -1443,6 +1469,15 @@ fn run_cli() -> Result<()> {
                         response => print_archcar_response(response),
                     }
                 }
+                ArchcarCommand::Fast { session_id, off } => {
+                    match client.send(ArchcarRequest::SetSessionFastMode {
+                        session_id,
+                        fast_mode: !off,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
                 ArchcarCommand::PermissionMode { session_id, mode } => {
                     match client
                         .send(ArchcarRequest::SetSessionPermissionMode { session_id, mode })?
@@ -1475,6 +1510,12 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Workspaces => {
                     print_archcar_response(client.send(ArchcarRequest::ListWorkspaces)?);
+                }
+                ArchcarCommand::InventorySnapshot => {
+                    match client.send(ArchcarRequest::GetInventorySnapshot)? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
                 }
                 ArchcarCommand::Repositories => {
                     print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
@@ -1547,10 +1588,16 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::GetCommitMessageDraft { workspace })?,
                     );
                 }
-                ArchcarCommand::CommitDiff { workspace, commit } => {
-                    print_archcar_response(
-                        client.send(ArchcarRequest::GetCommitDiff { workspace, commit })?,
-                    );
+                ArchcarCommand::CommitDiff {
+                    workspace,
+                    commit,
+                    path,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::GetCommitDiff {
+                        workspace,
+                        commit,
+                        path,
+                    })?);
                 }
                 ArchcarCommand::CheckList { workspace } => {
                     print_archcar_response(
@@ -1641,20 +1688,42 @@ fn run_cli() -> Result<()> {
                         content,
                     })?);
                 }
-                ArchcarCommand::WorkspaceChanges { workspace, all } => {
-                    let scope = if all {
-                        WorkspaceChangeScope::All
-                    } else {
-                        WorkspaceChangeScope::Uncommitted
-                    };
+                ArchcarCommand::WorkspaceChanges {
+                    workspace,
+                    all,
+                    commit,
+                } => {
+                    let scope = change_scope(
+                        commit,
+                        if all {
+                            WorkspaceChangeScope::All
+                        } else {
+                            WorkspaceChangeScope::Uncommitted
+                        },
+                    );
                     print_archcar_response(
                         client.send(ArchcarRequest::GetWorkspaceChanges { workspace, scope })?,
                     );
                 }
-                ArchcarCommand::WorkspaceDiff { workspace, path } => {
-                    print_archcar_response(
-                        client.send(ArchcarRequest::GetWorkspaceDiff { workspace, path })?,
+                ArchcarCommand::WorkspaceDiff {
+                    workspace,
+                    path,
+                    uncommitted,
+                    commit,
+                } => {
+                    let scope = change_scope(
+                        commit,
+                        if uncommitted {
+                            WorkspaceChangeScope::Uncommitted
+                        } else {
+                            WorkspaceChangeScope::All
+                        },
                     );
+                    print_archcar_response(client.send(ArchcarRequest::GetWorkspaceDiff {
+                        workspace,
+                        path,
+                        scope,
+                    })?);
                 }
                 ArchcarCommand::Todos { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::ListTodos { workspace })?);
@@ -2443,12 +2512,21 @@ fn run_cli() -> Result<()> {
             workspace,
             name_only,
             file,
+            uncommitted,
+            commit,
         } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             if name_only {
                 for path in store.changed_files(&workspace)? {
                     println!("{path}");
                 }
+            } else if let Some(commit) = commit {
+                print!(
+                    "{}",
+                    store.commit_diff(&workspace, &commit, file.as_deref())?
+                );
+            } else if uncommitted {
+                print!("{}", store.uncommitted_diff(&workspace, file.as_deref())?);
             } else {
                 print!("{}", store.unified_diff(&workspace, file.as_deref())?);
             }
@@ -3013,6 +3091,15 @@ fn refresh_all_repository_prompt_snapshots(paths: &AppPaths) -> Result<usize> {
     })
 }
 
+/// Resolve a change scope from CLI flags. Naming a commit is unambiguous about
+/// which changes are wanted, so it wins over the working-tree flags.
+fn change_scope(commit: Option<String>, default: WorkspaceChangeScope) -> WorkspaceChangeScope {
+    match commit {
+        Some(sha) => WorkspaceChangeScope::Commit { sha },
+        None => default,
+    }
+}
+
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
@@ -3098,6 +3185,31 @@ fn print_archcar_response(response: ArchcarResponse) {
                     ws.pull_request_number
                         .map(|n| format!(" pr=#{n}"))
                         .unwrap_or_default()
+                );
+            }
+        }
+        ArchcarResponse::InventorySnapshot {
+            repositories,
+            workspaces,
+            chat_threads,
+        } => {
+            println!(
+                "inventory_snapshot repositories={} workspaces={} chat_workspaces={}",
+                repositories.len(),
+                workspaces.len(),
+                chat_threads.len()
+            );
+            for repo in repositories {
+                println!(
+                    "repo {} active_workspaces={} total_workspaces={}",
+                    repo.name, repo.active_workspaces, repo.total_workspaces
+                );
+            }
+            for ws in workspaces {
+                let chat_count = chat_threads.get(&ws.name).map(Vec::len).unwrap_or(0);
+                println!(
+                    "workspace {} repo={} branch={} status={} chats={}",
+                    ws.name, ws.repository_name, ws.branch, ws.status, chat_count
                 );
             }
         }
@@ -5309,6 +5421,26 @@ mod tests {
         };
         assert_eq!(session_id, 7);
         assert_eq!(level, "high");
+
+        let fast = Cli::try_parse_from(["archductor", "archcar", "fast", "7"]).unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::Fast { session_id, off },
+        } = fast.command
+        else {
+            panic!("expected archcar fast");
+        };
+        assert_eq!(session_id, 7);
+        assert!(!off);
+
+        let slow = Cli::try_parse_from(["archductor", "archcar", "fast", "7", "--off"]).unwrap();
+        let Command::Archcar {
+            command: ArchcarCommand::Fast { session_id, off },
+        } = slow.command
+        else {
+            panic!("expected archcar fast --off");
+        };
+        assert_eq!(session_id, 7);
+        assert!(off);
 
         let permission =
             Cli::try_parse_from(["archductor", "archcar", "permission-mode", "7", "default"])

@@ -1,14 +1,34 @@
-import { For, Show, createResource } from "solid-js";
+import { For, Show, createMemo, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
-import type { DiffFileSummary, WorkspaceChangeScope } from "@/bridge/protocol";
+import { commitScopeSha, type DiffFileSummary, type WorkspaceChangeScope } from "@/bridge/protocol";
+import CompactSelect, { type CompactSelectOption } from "@/components/CompactSelect";
 import Diff from "@/components/Diff";
 import Icon from "@/components/Icon";
+import { parseCommitLog, shortSha } from "@/lib/commitLog";
 import { langFromPath } from "@/lib/highlight";
 import { openCommitInCenter } from "./openFileBridge";
 
-// Changes views — port of workspace_changes_panel + workspace_diff_sections.
-// The right panel shows the summary rows; the main Changes tab shows rows plus
-// the three-section unified diff. Both fetch on demand via createResource.
+// Changes views. The scope selector picks which set of changes the panel lists
+// — everything since the review base, uncommitted work, or one commit — and the
+// same scope travels with a file when it is opened, so the file's diff shows
+// that scope's changes rather than everything since the base.
+
+const ALL_SCOPE = "all";
+const UNCOMMITTED_SCOPE = "uncommitted";
+const COMMIT_PREFIX = "commit:";
+
+/** Encode a scope as a CompactSelect option value. */
+function scopeToValue(scope: WorkspaceChangeScope): string {
+  const sha = commitScopeSha(scope);
+  return sha ? `${COMMIT_PREFIX}${sha}` : scope === "all" ? ALL_SCOPE : UNCOMMITTED_SCOPE;
+}
+
+function valueToScope(value: string): WorkspaceChangeScope {
+  if (value.startsWith(COMMIT_PREFIX)) {
+    return { commit: { sha: value.slice(COMMIT_PREFIX.length) } };
+  }
+  return value === ALL_SCOPE ? "all" : "uncommitted";
+}
 
 function Counts(props: { file: DiffFileSummary }) {
   if (props.file.additions == null || props.file.deletions == null) {
@@ -30,9 +50,18 @@ function stateLabel(f: DiffFileSummary): string {
   return "[clean]";
 }
 
-function ChangeRow(props: { file: DiffFileSummary; showState: boolean; onOpen?: (path: string) => void }) {
+function ChangeRow(props: {
+  file: DiffFileSummary;
+  showState: boolean;
+  selected?: boolean;
+  onOpen?: (path: string) => void;
+}) {
   return (
-    <button class="ws-file-summary-row-content" onClick={() => props.onOpen?.(props.file.path)}>
+    <button
+      class="ws-file-summary-row-content"
+      classList={{ "ws-file-summary-row-selected": props.selected }}
+      onClick={() => props.onOpen?.(props.file.path)}
+    >
       <Icon name="file-code" class="ws-file-icon" />
       <span class="ws-file-name">{props.file.path}</span>
       <Show when={props.showState}>
@@ -46,37 +75,77 @@ function ChangeRow(props: { file: DiffFileSummary; showState: boolean; onOpen?: 
 export function ChangesRows(props: {
   workspace: string;
   defaultScope?: WorkspaceChangeScope;
-  openFile?: (path: string) => void;
-  showCommits?: boolean;
+  openFile?: (path: string, scope: WorkspaceChangeScope) => void;
+  /** Fires when the scope picker changes, so an attached diff can follow it. */
+  onScopeChange?: (scope: WorkspaceChangeScope) => void;
+  /** Path to mark as selected, for callers that render a diff alongside. */
+  selectedPath?: string;
 }) {
-  const scope = props.defaultScope ?? "uncommitted";
+  const [scope, setScope] = createSignal<WorkspaceChangeScope>(props.defaultScope ?? "uncommitted");
+
   const [changes] = createResource(
-    () => [props.workspace, scope] as const,
-    async ([ws, sc]) => {
+    () => [props.workspace, scopeToValue(scope())] as const,
+    async ([ws]) => {
       try {
-        const res = await send({ type: "get_workspace_changes", workspace: ws, scope: sc });
+        const res = await send({ type: "get_workspace_changes", workspace: ws, scope: scope() });
         return res.type === "workspace_changes" ? res.files : [];
       } catch {
         return [];
       }
     },
   );
+
   const [commits] = createResource(
     () => props.workspace,
-    async (ws): Promise<string> => {
+    async (ws) => {
       try {
         const res = await send({ type: "get_recent_commits", workspace: ws, limit: 15 });
-        return res.type === "recent_commits" ? res.log : "";
+        return res.type === "recent_commits" ? parseCommitLog(res.log) : [];
       } catch {
-        return "";
+        return [];
       }
     },
   );
+
+  const options = createMemo<CompactSelectOption[]>(() => [
+    { value: ALL_SCOPE, label: "All changes" },
+    { value: UNCOMMITTED_SCOPE, label: "Uncommitted" },
+    ...(commits() ?? []).map((commit) => ({
+      value: `${COMMIT_PREFIX}${commit.sha}`,
+      label: `${shortSha(commit.sha)} ${commit.subject}`.trim(),
+      group: "Recent commits",
+    })),
+  ]);
+
   return (
     <div class="ws-file-summary-panel">
       <div class="ws-changes-header">
         <span class="ws-changes-title">Changes</span>
-        <span class="ws-panel-kicker">{scope === "all" ? "All" : "Uncommitted"}</span>
+        <CompactSelect
+          class="ws-changes-scope"
+          placement="down"
+          title="Which changes to list"
+          value={scopeToValue(scope())}
+          options={options()}
+          onChange={(value) => {
+            const next = valueToScope(value);
+            setScope(next);
+            props.onScopeChange?.(next);
+          }}
+        />
+        {/* The scope list replaced the old recent-commits rows, which were the
+            only way to open a whole commit's diff. Keep that reachable. */}
+        <Show when={commitScopeSha(scope())}>
+          {(sha) => (
+            <button
+              class="ws-changes-commit-open"
+              title="Open the full commit diff"
+              onClick={() => openCommitInCenter(props.workspace, sha())}
+            >
+              <Icon name="git-compare" />
+            </button>
+          )}
+        </Show>
       </div>
       <Show
         when={(changes() ?? []).length > 0}
@@ -84,42 +153,36 @@ export function ChangesRows(props: {
       >
         <For each={changes()}>
           {(file) => (
-            <ChangeRow file={file} showState={scope === "uncommitted"} onOpen={props.openFile} />
+            <ChangeRow
+              file={file}
+              // staged/unstaged/untracked describe the working tree, so the
+              // label is meaningless for a commit's files.
+              showState={scope() === "uncommitted"}
+              selected={props.selectedPath === file.path}
+              onOpen={(path) => props.openFile?.(path, scope())}
+            />
           )}
         </For>
-      </Show>
-      <Show when={props.showCommits && (commits() ?? "").trim()}>
-        <div class="ws-commits-section">
-          <div class="ws-commits-head">
-            <span class="section-title">Recent commits</span>
-          </div>
-          <For each={(commits() ?? "").split("\n").filter((l) => l.trim())}>
-            {(line) => {
-              // First whitespace-delimited token is the short SHA.
-              const sha = line.trim().split(/\s+/)[0];
-              return (
-                <button
-                  class="ws-commit-row"
-                  title="View this commit's diff"
-                  onClick={() => sha && openCommitInCenter(props.workspace, sha)}
-                >
-                  {line}
-                </button>
-              );
-            }}
-          </For>
-        </div>
       </Show>
     </div>
   );
 }
 
-export function DiffView(props: { workspace: string; path?: string }) {
+export function DiffView(props: {
+  workspace: string;
+  path?: string;
+  scope?: WorkspaceChangeScope;
+}) {
   const [diff] = createResource(
-    () => [props.workspace, props.path] as const,
+    () => [props.workspace, props.path, scopeToValue(props.scope ?? "all")] as const,
     async ([ws, path]) => {
       try {
-        const res = await send({ type: "get_workspace_diff", workspace: ws, path });
+        const res = await send({
+          type: "get_workspace_diff",
+          workspace: ws,
+          path,
+          scope: props.scope ?? "all",
+        });
         return res.type === "workspace_diff" ? res.diff : "";
       } catch {
         return "";
@@ -138,13 +201,27 @@ export function DiffView(props: { workspace: string; path?: string }) {
 }
 
 export default function ChangesTab(props: { workspace: string }) {
-  // The diff below renders all three scopes (working tree / unstaged / staged),
-  // so the summary rows default to "all" for a consistent picture. The
-  // right-panel ChangesRows keeps its own default independently.
+  const [scope, setScope] = createSignal<WorkspaceChangeScope>("all");
+  // Undefined means "the whole scope"; picking a row narrows the diff to it.
+  const [path, setPath] = createSignal<string | undefined>(undefined);
   return (
     <div class="ws-changes-tab">
-      <ChangesRows workspace={props.workspace} defaultScope="all" showCommits />
-      <DiffView workspace={props.workspace} />
+      <ChangesRows
+        workspace={props.workspace}
+        defaultScope="all"
+        selectedPath={path()}
+        openFile={(nextPath, nextScope) => {
+          setScope(nextScope);
+          setPath(nextPath);
+        }}
+        // A path selected under one scope need not exist in the next, so
+        // switching scope drops back to that scope's whole diff.
+        onScopeChange={(next) => {
+          setScope(next);
+          setPath(undefined);
+        }}
+      />
+      <DiffView workspace={props.workspace} path={path()} scope={scope()} />
     </div>
   );
 }

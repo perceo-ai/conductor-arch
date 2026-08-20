@@ -3705,17 +3705,75 @@ impl WorkspaceStore {
         Ok(())
     }
 
+    /// Everything since the review base. Untracked files are appended for the
+    /// same reason as in `uncommitted_diff`: they appear in this scope's
+    /// summaries, so they have to appear in its patch.
     pub fn unified_diff_against_base(&self, name: &str, path: Option<&Path>) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
-        if let Some(path) = path {
+        let mut diff = if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            return git_output_dynamic(
+            git_output_dynamic(
                 &workspace.path,
                 &["diff", base_ref, "--", path_value.as_str()],
-            );
+            )?
+        } else {
+            git_output_dynamic(&workspace.path, &["diff", base_ref, "--"])?
+        };
+        diff.push_str(&untracked_patch(&workspace.path, path)?);
+        Ok(diff)
+    }
+
+    /// Every uncommitted change in one patch: `git diff HEAD` covers staged and
+    /// unstaged together. Taking the staged and unstaged diffs separately and
+    /// concatenating them would list a file that is both twice, with
+    /// overlapping hunks, which is exactly what the changes panel must not show.
+    /// Untracked files are appended, since they appear in the matching summaries.
+    pub fn uncommitted_diff(&self, name: &str, path: Option<&Path>) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let mut diff = if let Some(path) = path {
+            let path_value = path.to_string_lossy().to_string();
+            git_output_dynamic(
+                &workspace.path,
+                &["diff", "HEAD", "--", path_value.as_str()],
+            )?
+        } else {
+            git_output_dynamic(&workspace.path, &["diff", "HEAD", "--"])?
+        };
+        diff.push_str(&untracked_patch(&workspace.path, path)?);
+        Ok(diff)
+    }
+
+    /// One commit's patch, optionally narrowed to a single path.
+    pub fn commit_diff(&self, name: &str, commit: &str, path: Option<&Path>) -> Result<String> {
+        let workspace = self.get_by_name(name)?;
+        let commit = validate_commit_ref(&workspace.path, commit)?;
+        let mut args = vec!["show", "--format=", commit.as_str(), "--"];
+        let path_value;
+        if let Some(path) = path {
+            path_value = path.to_string_lossy().to_string();
+            args.push(path_value.as_str());
         }
-        git_output_dynamic(&workspace.path, &["diff", base_ref, "--"])
+        git_output_dynamic(&workspace.path, &args)
+    }
+
+    /// File summaries for a single commit. Unlike the working-tree scopes this
+    /// does not consult `git status`: staged/unstaged/untracked describe the
+    /// working tree, and a commit has none of them.
+    pub fn file_summaries_for_commit(
+        &self,
+        name: &str,
+        commit: &str,
+    ) -> Result<Vec<DiffFileSummary>> {
+        let workspace = self.get_by_name(name)?;
+        let commit = validate_commit_ref(&workspace.path, commit)?;
+        let output = git_output_dynamic(
+            &workspace.path,
+            &["show", "--numstat", "--format=", commit.as_str()],
+        )?;
+        let mut summaries = merge_diff_summaries(parse_diff_numstat(&output));
+        summaries.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(summaries)
     }
 
     pub fn set_workspace_base_ref(&self, name: &str, base_ref: &str) -> Result<Workspace> {
@@ -4124,9 +4182,16 @@ impl WorkspaceStore {
 
     pub fn git_show_commit(&self, name: &str, commit: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
+        let commit = validate_commit_ref(&workspace.path, commit)?;
         git_output_dynamic(
             &workspace.path,
-            &["show", "--stat", "--patch", "--format=medium", commit],
+            &[
+                "show",
+                "--stat",
+                "--patch",
+                "--format=medium",
+                commit.as_str(),
+            ],
         )
     }
 
@@ -10259,6 +10324,25 @@ fn validate_workspace_relative_path(relative_path: &str) -> Result<&Path> {
     Ok(path)
 }
 
+/// Resolve a caller-supplied commit-ish to a full sha, rejecting anything that
+/// is not a commit in this workspace. The leading-dash check matters because
+/// git reads a `-`-prefixed revision argument as a flag, so an unchecked value
+/// could turn `git show <commit>` into `git show --some-option`.
+fn validate_commit_ref(cwd: &Path, commit: &str) -> Result<String> {
+    let commit = commit.trim();
+    anyhow::ensure!(!commit.is_empty(), "commit is required");
+    anyhow::ensure!(
+        !commit.starts_with('-'),
+        "invalid commit reference: {commit}",
+    );
+    let spec = format!("{commit}^{{commit}}");
+    let resolved = git_output_dynamic(cwd, &["rev-parse", "--verify", spec.as_str()])
+        .with_context(|| format!("resolve commit {commit}"))?;
+    let resolved = resolved.trim().to_owned();
+    anyhow::ensure!(!resolved.is_empty(), "unknown commit: {commit}");
+    Ok(resolved)
+}
+
 fn ensure_tracked_in_head(cwd: &Path, relative_path: &str) -> Result<()> {
     let output = Command::new("git")
         .arg("-C")
@@ -10884,6 +10968,50 @@ fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
 
 fn git_output_dynamic(cwd: &Path, args: &[&str]) -> Result<String> {
     command_output(cwd, "git", args)
+}
+
+/// Render one untracked file as a new-file patch. `git diff` never reports
+/// untracked content, so `--no-index` against /dev/null is what turns it into a
+/// normal patch; git special-cases that path on every platform, including
+/// Windows. It exits 1 when the two sides differ, which is the expected result
+/// here rather than a failure, so this cannot go through `command_output`.
+fn git_diff_untracked_file(cwd: &Path, relative_path: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["diff", "--no-index", "--", "/dev/null", relative_path])
+        .current_dir(cwd)
+        .output()
+        .with_context(|| format!("run git diff --no-index in {}", cwd.display()))?;
+    match output.status.code() {
+        Some(0) | Some(1) => Ok(String::from_utf8_lossy(&output.stdout).to_string()),
+        _ => anyhow::bail!(
+            "git diff --no-index failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    }
+}
+
+/// Patches for the workspace's untracked files, optionally narrowed to one
+/// path. The summaries built by `file_change_summaries_from_numstat` list
+/// untracked files, so the scope's diff has to carry them or the viewer offers
+/// a row that opens to nothing. Filtering matches those summaries exactly.
+fn untracked_patch(workspace_path: &Path, only: Option<&Path>) -> Result<String> {
+    let only = only.map(|path| path.to_string_lossy().to_string());
+    let status = git_output(
+        workspace_path,
+        ["status", "--porcelain", "--untracked-files=all"],
+    )?;
+    let mut patch = String::new();
+    for path in parse_untracked_status_paths(&status) {
+        if is_conductor_context_path(&path) {
+            continue;
+        }
+        if only.as_ref().is_some_and(|wanted| wanted != &path) {
+            continue;
+        }
+        patch.push_str(&git_diff_untracked_file(workspace_path, &path)?);
+    }
+    Ok(patch)
 }
 
 fn ensure_clean_git_tree(cwd: &Path, label: &str) -> Result<()> {
@@ -24458,6 +24586,202 @@ spotlight_testing = true
         assert!(summaries.iter().any(|summary| {
             summary.path == "draft.md" && summary.additions == Some(1) && summary.untracked
         }));
+    }
+
+    /// Commit `message` with every file currently staged, returning its sha.
+    fn commit_staged(workspace_path: &Path, message: &str) -> String {
+        git_output(
+            workspace_path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+        git_output(workspace_path, ["rev-parse", "HEAD"])
+            .trim()
+            .to_owned()
+    }
+
+    #[test]
+    fn uncommitted_diff_covers_staged_and_unstaged_in_one_patch() {
+        // The panel's "uncommitted" scope has to be a single patch against HEAD:
+        // stitching the staged and unstaged diffs together would list a file
+        // that is both twice, with overlapping hunks.
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+
+        fs::write(workspace.path.join("staged.txt"), "base\n").unwrap();
+        fs::write(workspace.path.join("both.txt"), "base\n").unwrap();
+        git_output(&workspace.path, ["add", "staged.txt", "both.txt"]);
+        commit_staged(&workspace.path, "seed");
+
+        fs::write(workspace.path.join("staged.txt"), "staged edit\n").unwrap();
+        git_output(&workspace.path, ["add", "staged.txt"]);
+        fs::write(workspace.path.join("both.txt"), "staged edit\n").unwrap();
+        git_output(&workspace.path, ["add", "both.txt"]);
+        fs::write(workspace.path.join("both.txt"), "staged then unstaged\n").unwrap();
+
+        let diff = store.uncommitted_diff("berlin", None).unwrap();
+
+        assert_eq!(diff.matches("diff --git a/both.txt").count(), 1);
+        assert!(diff.contains("staged edit"));
+        assert!(diff.contains("staged then unstaged"));
+    }
+
+    #[test]
+    fn uncommitted_diff_narrows_to_one_path() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("a.txt"), "a\n").unwrap();
+        fs::write(workspace.path.join("b.txt"), "b\n").unwrap();
+        git_output(&workspace.path, ["add", "a.txt", "b.txt"]);
+        commit_staged(&workspace.path, "seed");
+        fs::write(workspace.path.join("a.txt"), "a changed\n").unwrap();
+        fs::write(workspace.path.join("b.txt"), "b changed\n").unwrap();
+
+        let diff = store
+            .uncommitted_diff("berlin", Some(Path::new("a.txt")))
+            .unwrap();
+
+        assert!(diff.contains("a.txt"));
+        assert!(!diff.contains("b.txt"));
+    }
+
+    #[test]
+    fn uncommitted_diff_includes_untracked_files() {
+        // The uncommitted summaries list untracked files, so the patch has to
+        // carry them too; `git diff HEAD` alone leaves them out and the viewer
+        // then shows "No diff" for a row it just listed.
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("tracked.txt"), "base\n").unwrap();
+        git_output(&workspace.path, ["add", "tracked.txt"]);
+        commit_staged(&workspace.path, "seed");
+        fs::write(workspace.path.join("tracked.txt"), "edited\n").unwrap();
+        fs::write(workspace.path.join("brand-new.txt"), "hello\n").unwrap();
+
+        let diff = store.uncommitted_diff("berlin", None).unwrap();
+
+        assert!(diff.contains("diff --git a/tracked.txt"));
+        assert!(diff.contains("diff --git a/brand-new.txt"));
+        assert!(diff.contains("new file mode"));
+        assert!(diff.contains("+hello"));
+    }
+
+    #[test]
+    fn uncommitted_diff_narrowed_to_an_untracked_path_returns_its_patch() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("brand-new.txt"), "hello\n").unwrap();
+        fs::write(workspace.path.join("other-new.txt"), "nope\n").unwrap();
+
+        let diff = store
+            .uncommitted_diff("berlin", Some(Path::new("brand-new.txt")))
+            .unwrap();
+
+        assert!(diff.contains("brand-new.txt"));
+        assert!(diff.contains("+hello"));
+        assert!(!diff.contains("other-new.txt"));
+    }
+
+    #[test]
+    fn diff_against_base_includes_untracked_files() {
+        // Same contract for the "all" scope, whose summaries list untracked too.
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("brand-new.txt"), "hello\n").unwrap();
+
+        let diff = store.unified_diff_against_base("berlin", None).unwrap();
+
+        assert!(diff.contains("brand-new.txt"));
+        assert!(diff.contains("+hello"));
+    }
+
+    #[test]
+    fn commit_diff_returns_only_that_commit_changes() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+
+        fs::write(workspace.path.join("first.txt"), "first\n").unwrap();
+        git_output(&workspace.path, ["add", "first.txt"]);
+        let first = commit_staged(&workspace.path, "first commit");
+        fs::write(workspace.path.join("second.txt"), "second\n").unwrap();
+        git_output(&workspace.path, ["add", "second.txt"]);
+        commit_staged(&workspace.path, "second commit");
+
+        let diff = store.commit_diff("berlin", &first, None).unwrap();
+
+        assert!(diff.contains("first.txt"));
+        assert!(!diff.contains("second.txt"));
+    }
+
+    #[test]
+    fn commit_diff_narrows_to_one_path() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("kept.txt"), "kept\n").unwrap();
+        fs::write(workspace.path.join("other.txt"), "other\n").unwrap();
+        git_output(&workspace.path, ["add", "kept.txt", "other.txt"]);
+        let sha = commit_staged(&workspace.path, "both files");
+
+        let diff = store
+            .commit_diff("berlin", &sha, Some(Path::new("kept.txt")))
+            .unwrap();
+
+        assert!(diff.contains("kept.txt"));
+        assert!(!diff.contains("other.txt"));
+    }
+
+    #[test]
+    fn file_summaries_for_commit_count_that_commit_only() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+
+        fs::write(workspace.path.join("counted.txt"), "one\ntwo\n").unwrap();
+        git_output(&workspace.path, ["add", "counted.txt"]);
+        let sha = commit_staged(&workspace.path, "add counted");
+        // Later work must not leak into the commit's summary.
+        fs::write(workspace.path.join("later.txt"), "later\n").unwrap();
+        git_output(&workspace.path, ["add", "later.txt"]);
+
+        let summaries = store.file_summaries_for_commit("berlin", &sha).unwrap();
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].path, "counted.txt");
+        assert_eq!(summaries[0].additions, Some(2));
+        assert_eq!(summaries[0].deletions, Some(0));
+    }
+
+    #[test]
+    fn file_summaries_for_commit_do_not_claim_worktree_state() {
+        // staged/unstaged/untracked describe the working tree; a commit has
+        // none of those, and marking its files staged would mislead the panel.
+        let (_temp, store) = test_workspace_store();
+        let workspace = store.get_by_name("berlin").unwrap();
+        fs::write(workspace.path.join("committed.txt"), "x\n").unwrap();
+        git_output(&workspace.path, ["add", "committed.txt"]);
+        let sha = commit_staged(&workspace.path, "commit it");
+
+        let summaries = store.file_summaries_for_commit("berlin", &sha).unwrap();
+
+        assert!(summaries
+            .iter()
+            .all(|s| !s.staged && !s.unstaged && !s.untracked));
+    }
+
+    #[test]
+    fn commit_lookups_reject_a_ref_that_is_not_a_commit() {
+        let (_temp, store) = test_workspace_store();
+        assert!(store
+            .commit_diff("berlin", "definitely-not-a-sha", None)
+            .is_err());
     }
 
     #[test]

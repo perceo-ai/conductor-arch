@@ -67,7 +67,8 @@ schema is `crates/core/src/archcar/protocol.rs` (`ArchcarRequest`,
 `ArchcarResponse`, `ArchcarEvent`), mirrored for TypeScript clients in
 `desktop/src/bridge/protocol.ts`. A `subscribe` request upgrades the
 connection to a stream of `ArchcarEvent` envelopes (session lifecycle, queue
-updates, provider interactions, background-task updates).
+updates, provider interactions, background-task updates, inventory
+invalidation).
 
 Errors are always `{"type": "error", "message": "..."}` — never a dropped
 connection for a well-formed request.
@@ -76,6 +77,9 @@ connection for a well-formed request.
 
 Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
 
+- Startup sync: `get_inventory_snapshot` returns repositories, workspaces, and
+  chat-thread strips for active workspaces in one response; follow with
+  `subscribe` and refresh narrowly on `inventory_changed` events.
 - Repositories and workspaces: add/clone, create (branch, prompt, GitHub
   issue/PR, Linear), lifecycle (archive/restore/rename/duplicate/delete),
   branches, linked directories.
@@ -103,6 +107,16 @@ Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
 - Diffs and provenance: branch diff, per-session contributions,
   `snapshot_diff_contribution` / `list_diff_contributions` (durable patch +
   risks/blockers), checkpoints incl. `compare_checkpoint`.
+- Change scopes: `get_workspace_changes` and `get_workspace_diff` both take a
+  `scope` — `"all"` (vs the review base), `"uncommitted"` (staged + unstaged
+  against HEAD, as one patch), or `{"commit": {"sha": "..."}}`. The file list
+  and the diff for a file picked out of it share the scope, so a file opened
+  from a commit shows that commit's changes rather than everything since the
+  base. `get_workspace_diff` returns the single diff for the requested scope;
+  it previously returned a three-section document (working tree / unstaged /
+  staged concatenated under headings), whose sections overlapped. `scope`
+  defaults to `"all"`, so clients that omit it keep the old default view.
+  `get_commit_diff` takes an optional `path` to narrow a commit to one file.
 - Checks and review: configured check list/run/logs, review comments, PR
   draft/create/refresh/merge, readiness detail.
 - Background tasks: `start_background_task` (one or more managed agents via

@@ -38,6 +38,14 @@ async function refreshThreadWorkspace(threadId: number) {
   }
 }
 
+async function refreshThreadWorkspaceByName(workspace: string) {
+  try {
+    await Promise.all([workspacesStore.refresh(), threadsStore.refresh(workspace)]);
+  } catch {
+    // transient; the next event or focus refresh retries
+  }
+}
+
 async function refreshTerminalScreen(sessionId: number) {
   try {
     const res = await send({ type: "get_session_screen", session_id: sessionId });
@@ -253,6 +261,18 @@ export function applyEvent(event: ArchcarEvent) {
     case "chat_thread_renamed": {
       // Retitled from agent metadata; the tab strip reads the thread list.
       void refreshThreadWorkspace((event as { thread_id: number }).thread_id);
+      break;
+    }
+
+    case "inventory_changed": {
+      const e = event as { scope: string; workspace?: string };
+      if (e.scope === "repositories") {
+        void refreshWorkspaceInventoryAndChats();
+      } else if (e.workspace) {
+        void refreshThreadWorkspaceByName(e.workspace);
+      } else {
+        void refreshWorkspaceInventoryAndChats();
+      }
       break;
     }
 
