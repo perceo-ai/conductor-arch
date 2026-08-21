@@ -988,6 +988,21 @@ body.resizing-col {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;
 }
+
+/* Skill descriptions are prose, not paths, and some run to several hundred
+   characters — wrap to two lines instead of one long ellipsised run. */
+.chat-skill-item {
+  align-items: flex-start;
+}
+.chat-skill-description {
+  font-family: inherit;
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.35;
+}
 .chat-toolbar {
   display: flex;
   flex-direction: row;

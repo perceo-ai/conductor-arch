@@ -7,6 +7,16 @@
 // keys are kept for editor completion.
 export type SessionKind = "shell" | "codex" | "claude" | (string & {});
 
+/** A skill installed on the daemon's machine (ListSkills). */
+export type AgentSkill = {
+  name: string;
+  description: string;
+  /** Provider keys that have it installed. */
+  providers: string[];
+  /** Managed by a plugin, so sync leaves it alone. */
+  plugin: boolean;
+};
+
 /** One agent as the daemon's registry sees it (ListAgentProviders). */
 export type AgentProviderSummary = {
   provider_key: string;
@@ -64,6 +74,7 @@ export type ArchcarRequest =
   | { type: "get_inventory_snapshot" }
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
+  | { type: "list_skills" }
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
   | { type: "list_chat_transcripts"; workspace: string; limit?: number }
@@ -509,6 +520,7 @@ export type ArchcarResponse =
     }
   | { type: "workspaces"; workspaces: ArchcarWorkspaceSummary[] }
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
+  | { type: "skills"; skills: AgentSkill[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
   | { type: "chat_transcripts"; workspace: string; transcripts: ArchcarChatTranscriptSummary[] }

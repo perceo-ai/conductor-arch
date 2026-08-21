@@ -12,6 +12,13 @@ import {
 } from "@/store";
 import { timelineItemsForSlice } from "@/store/chat";
 import { EFFORTS, agentModelOptions, agentModelValue, firstModel, providerForModel } from "@/lib/models";
+import {
+  insertSkillMention,
+  rankSkills,
+  skillMentionAt,
+  skillsForProvider,
+  type SkillOption,
+} from "@/lib/skillMention";
 import { send } from "@/bridge/client";
 import type {
   ArchcarChatThread,
@@ -630,6 +637,8 @@ function Composer(props: {
   let inputRef: HTMLTextAreaElement | undefined;
   const [fileMention, setFileMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
   const [fileMentionCursor, setFileMentionCursor] = createSignal(0);
+  const [skillMention, setSkillMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
+  const [skillMentionCursor, setSkillMentionCursor] = createSignal(0);
   const slice = () => chatStore.slice(props.threadId);
   const sessionKind = () => providerToKind(props.provider);
   const busy = () => slice().session?.ready === false && slice().session != null;
@@ -663,6 +672,26 @@ function Composer(props: {
     scored.sort((a, b) => a.score - b.score);
     return scored.slice(0, 8).map((item) => item.path);
   });
+  // Skills live on the daemon's machine, so they come over the wire like the
+  // workspace file list rather than being read locally.
+  const [skills] = createResource(
+    () => props.threadId,
+    async (): Promise<SkillOption[]> => {
+      try {
+        const res = await send({ type: "list_skills" });
+        return res.type === "skills" ? res.skills : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const skillMentionOptions = createMemo(() => {
+    const mention = skillMention();
+    if (!mention) return [];
+    const provider = props.provider || null;
+    return rankSkills(skillsForProvider(skills() ?? [], provider), mention.query);
+  });
+
   const composerPreviewHtml = createMemo(() =>
     text().trim().length > 0 ? renderMarkdownWithInlineFileChips(text()) : "",
   );
@@ -760,6 +789,8 @@ function Composer(props: {
     const cursor = inputRef?.selectionStart ?? value.length;
     setFileMention(inlineFileMentionAt(value, cursor));
     setFileMentionCursor(0);
+    setSkillMention(skillMentionAt(value, cursor));
+    setSkillMentionCursor(0);
   }
 
   function setEditorText(value: string, cursor?: number) {
@@ -783,6 +814,15 @@ function Composer(props: {
     });
     setFileMention(null);
     setEditorText(inserted.value, inserted.cursor);
+  }
+
+  /** Insert `/name ` — the agent CLI is what actually runs the command. */
+  function insertSkill(name: string) {
+    const mention = skillMention();
+    if (!mention) return;
+    const next = insertSkillMention(text(), mention, name);
+    setSkillMention(null);
+    setEditorText(next.value, next.cursor);
   }
 
   function fileNameFromMention(path: string): string {
@@ -812,6 +852,7 @@ function Composer(props: {
     setText("");
     setAttachments([]);
     setFileMention(null);
+    setSkillMention(null);
     // Picked context rides on one message only; a follow-up shouldn't resend it.
     newChatContextStore.clear(props.threadId);
   }
@@ -978,6 +1019,29 @@ function Composer(props: {
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    if (skillMention() && skillMentionOptions().length > 0) {
+      const n = skillMentionOptions().length;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSkillMentionCursor((c) => (c + 1) % n);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSkillMentionCursor((c) => (c - 1 + n) % n);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        insertSkill(skillMentionOptions()[skillMentionCursor()].name);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSkillMention(null);
+        return;
+      }
+    }
     if (fileMention()) {
       const n = fileMentionOptions().length;
       if (e.key === "ArrowDown") {
@@ -1184,6 +1248,30 @@ function Composer(props: {
             onPaste={(e) => void onPaste(e)}
             rows={1}
           />
+          <Show when={skillMention() && skillMentionOptions().length > 0}>
+            <div class="chat-file-mention-menu chat-skill-menu" role="listbox">
+              <For each={skillMentionOptions()}>
+                {(skill, i) => (
+                  <button
+                    class="chat-file-mention-item chat-skill-item"
+                    classList={{ "chat-file-mention-item-active": i() === skillMentionCursor() }}
+                    role="option"
+                    aria-selected={i() === skillMentionCursor()}
+                    onMouseEnter={() => setSkillMentionCursor(i())}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      insertSkill(skill.name);
+                    }}
+                  >
+                    <span class="chat-file-mention-name">/{skill.name}</span>
+                    <span class="chat-file-mention-path chat-skill-description">
+                      {skill.description}
+                    </span>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
           <Show when={fileMention() && fileMentionOptions().length > 0}>
             <div class="chat-file-mention-menu" role="listbox">
               <For each={fileMentionOptions()}>
