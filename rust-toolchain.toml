@@ -1,0 +1,15 @@
+# Pin the Rust toolchain for CI and for every working copy.
+#
+# CI previously installed unpinned `stable`, so its lint set moved whenever
+# Rust released: a `cargo clippy --workspace --all-targets -- -D warnings` that
+# passed locally on 1.96 failed in CI on 1.98 over `clippy::for_kv_map`, a lint
+# the older compiler does not have. Pinning here rather than in the workflows
+# means the two cannot drift — rustup honours this file for every cargo
+# invocation in the repo, so a local check is the same check CI runs.
+#
+# Bumping is a deliberate, reviewable commit: change the channel, run
+# `cargo clippy --workspace --all-targets -- -D warnings`, fix what the newer
+# lints find, and land it together.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
