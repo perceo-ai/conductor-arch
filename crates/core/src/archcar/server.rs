@@ -898,6 +898,27 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListSkillCatalog => {
+            let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            match crate::skill_catalog::catalog(&home) {
+                Ok(catalog) => ArchcarResponse::SkillCatalog { catalog },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::InstallCatalogSkill { name, providers } => {
+            let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            match crate::skill_catalog::install_skill(&home, &name, &providers) {
+                Ok(targets) => ArchcarResponse::SkillInstalled {
+                    name,
+                    targets: targets.iter().map(|p| p.display().to_string()).collect(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetSyncPlan { selection } => {
             let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
             match crate::skill_sync::plan_sync(&home, &selection) {
@@ -4014,6 +4035,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListRepositories
             | ArchcarRequest::ListSkills
             | ArchcarRequest::GetSyncPlan { .. }
+            | ArchcarRequest::ListSkillCatalog
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
             | ArchcarRequest::ListChatTranscripts { .. }

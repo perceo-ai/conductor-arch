@@ -203,6 +203,14 @@ pub enum ArchcarRequest {
     ListRepositories,
     /// Agent skills installed on the daemon's machine, merged across providers.
     ListSkills,
+    /// Installable skills, annotated with what this machine already has.
+    ListSkillCatalog,
+    /// Clone a catalog skill into the given providers (all when empty).
+    InstallCatalogSkill {
+        name: String,
+        #[serde(default)]
+        providers: Vec<String>,
+    },
     /// What syncing skills and MCP servers across providers would write.
     GetSyncPlan {
         #[serde(default)]
@@ -853,6 +861,13 @@ pub enum ArchcarResponse {
     },
     Skills {
         skills: Vec<crate::skills::Skill>,
+    },
+    SkillCatalog {
+        catalog: crate::skill_catalog::Catalog,
+    },
+    SkillInstalled {
+        name: String,
+        targets: Vec<String>,
     },
     SyncPlan {
         plan: crate::skill_sync::SyncPlan,
@@ -1649,6 +1664,10 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListWorkspaces => "list_workspaces".to_owned(),
         ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
         ArchcarRequest::ListSkills => "list_skills".to_owned(),
+        ArchcarRequest::ListSkillCatalog => "list_skill_catalog".to_owned(),
+        ArchcarRequest::InstallCatalogSkill { name, .. } => {
+            format!("install_catalog_skill name={name}")
+        }
         ArchcarRequest::GetSyncPlan { .. } => "get_sync_plan".to_owned(),
         ArchcarRequest::ApplySync { .. } => "apply_sync".to_owned(),
         ArchcarRequest::ListChatThreads { workspace } => {
@@ -2269,6 +2288,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             format!("repositories count={}", repositories.len())
         }
         ArchcarResponse::Skills { skills } => format!("skills count={}", skills.len()),
+        ArchcarResponse::SkillCatalog { catalog } => {
+            format!("skill_catalog count={}", catalog.skills.len())
+        }
+        ArchcarResponse::SkillInstalled { name, targets } => {
+            format!("skill_installed name={name} targets={}", targets.len())
+        }
         ArchcarResponse::SyncPlan { plan } => {
             format!("sync_plan actions={}", plan.actions.len())
         }

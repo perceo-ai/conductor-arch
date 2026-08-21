@@ -326,6 +326,14 @@ enum ArchcarCommand {
     Repositories,
     /// List agent skills installed on the daemon's machine.
     Skills,
+    /// List installable skills from the catalog.
+    SkillCatalog,
+    /// Install a catalog skill into every provider (or the ones named).
+    InstallSkill {
+        name: String,
+        #[arg(long)]
+        provider: Vec<String>,
+    },
     /// Show what syncing skills and MCP servers across providers would write.
     SyncPlan,
     /// Sync skills and MCP servers across providers (adds only, never deletes).
@@ -1576,6 +1584,15 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Skills => {
                     print_archcar_response(client.send(ArchcarRequest::ListSkills)?);
+                }
+                ArchcarCommand::SkillCatalog => {
+                    print_archcar_response(client.send(ArchcarRequest::ListSkillCatalog)?);
+                }
+                ArchcarCommand::InstallSkill { name, provider } => {
+                    print_archcar_response(client.send(ArchcarRequest::InstallCatalogSkill {
+                        name,
+                        providers: provider,
+                    })?);
                 }
                 ArchcarCommand::SyncPlan => {
                     print_archcar_response(client.send(ArchcarRequest::GetSyncPlan {
@@ -3774,6 +3791,28 @@ fn print_archcar_response(response: ArchcarResponse) {
                 summary.source_branch_ahead,
                 summary.conflicting_workspaces,
             );
+        }
+        ArchcarResponse::SkillCatalog { catalog } => {
+            println!("skill_catalog {}", catalog.skills.len());
+            for skill in catalog.skills {
+                println!(
+                    "{:<22} {:<12} {:<16} {}",
+                    skill.name,
+                    skill.category,
+                    if skill.installed_for.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        skill.installed_for.join(",")
+                    },
+                    skill.description
+                );
+            }
+        }
+        ArchcarResponse::SkillInstalled { name, targets } => {
+            println!("skill_installed {name}");
+            for target in targets {
+                println!("  {target}");
+            }
         }
         ArchcarResponse::SyncPlan { plan } => {
             println!(

@@ -1,0 +1,146 @@
+{
+  "version": 1,
+  "note": "Installable skills. Each entry is cloned from `git`; `subdir` picks one skill out of a repository that ships several. Paths and descriptions here were taken from the repositories themselves, not guessed — an entry whose subdir has no SKILL.md fails the install rather than copying something arbitrary. Kept in-repo so installs work offline and changes show up in a diff; the loader is written so this can come from a URL later.",
+  "skills": [
+    {
+      "name": "brainstorming",
+      "description": "Explore intent, requirements, and design before implementation. Use before any creative work.",
+      "category": "Process",
+      "git": "https://github.com/obra/superpowers",
+      "subdir": "skills/brainstorming"
+    },
+    {
+      "name": "systematic-debugging",
+      "description": "Work a bug from evidence to root cause instead of guessing at fixes.",
+      "category": "Process",
+      "git": "https://github.com/obra/superpowers",
+      "subdir": "skills/systematic-debugging"
+    },
+    {
+      "name": "test-driven-development",
+      "description": "Write the failing test first, then the implementation that satisfies it.",
+      "category": "Process",
+      "git": "https://github.com/obra/superpowers",
+      "subdir": "skills/test-driven-development"
+    },
+    {
+      "name": "requesting-code-review",
+      "description": "Get a rigorous review of completed work before merging.",
+      "category": "Process",
+      "git": "https://github.com/obra/superpowers",
+      "subdir": "skills/requesting-code-review"
+    },
+    {
+      "name": "using-git-worktrees",
+      "description": "Isolate feature work in its own worktree before starting a plan.",
+      "category": "Process",
+      "git": "https://github.com/obra/superpowers",
+      "subdir": "skills/using-git-worktrees"
+    },
+    {
+      "name": "mcp-builder",
+      "description": "Create high-quality MCP servers that let models interact with external systems.",
+      "category": "Engineering",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/mcp-builder"
+    },
+    {
+      "name": "webapp-testing",
+      "description": "Drive and test local web applications with Playwright.",
+      "category": "Engineering",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/webapp-testing"
+    },
+    {
+      "name": "skill-creator",
+      "description": "Create, modify, and measure skills.",
+      "category": "Engineering",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/skill-creator"
+    },
+    {
+      "name": "frontend-design",
+      "description": "Distinctive, intentional visual design when building or reshaping UI.",
+      "category": "Design",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/frontend-design"
+    },
+    {
+      "name": "canvas-design",
+      "description": "Create visual art as .png and .pdf documents using a design philosophy.",
+      "category": "Design",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/canvas-design"
+    },
+    {
+      "name": "theme-factory",
+      "description": "Style artifacts — slides, docs, landing pages — with a coherent theme.",
+      "category": "Design",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/theme-factory"
+    },
+    {
+      "name": "web-artifacts-builder",
+      "description": "Build elaborate multi-component HTML artifacts with modern frontend tooling.",
+      "category": "Design",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/web-artifacts-builder"
+    },
+    {
+      "name": "algorithmic-art",
+      "description": "Algorithmic art in p5.js with seeded randomness and parameter exploration.",
+      "category": "Design",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/algorithmic-art"
+    },
+    {
+      "name": "docx",
+      "description": "Read, write, and edit Word documents without losing formatting.",
+      "category": "Documents",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/docx"
+    },
+    {
+      "name": "pdf",
+      "description": "Extract text and tables from PDFs, fill forms, split and merge.",
+      "category": "Documents",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/pdf"
+    },
+    {
+      "name": "pptx",
+      "description": "Create and edit PowerPoint decks programmatically.",
+      "category": "Documents",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/pptx"
+    },
+    {
+      "name": "xlsx",
+      "description": "Read and write spreadsheets, including formulas and formatting.",
+      "category": "Documents",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/xlsx"
+    },
+    {
+      "name": "doc-coauthoring",
+      "description": "A structured workflow for co-authoring documentation with a human.",
+      "category": "Documents",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/doc-coauthoring"
+    },
+    {
+      "name": "claude-api",
+      "description": "Reference for the Claude API — model ids, pricing, streaming, tool use, caching.",
+      "category": "Reference",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/claude-api"
+    },
+    {
+      "name": "slack-gif-creator",
+      "description": "Create animated GIFs sized and validated for Slack.",
+      "category": "Communication",
+      "git": "https://github.com/anthropics/skills",
+      "subdir": "skills/slack-gif-creator"
+    }
+  ]
+}
