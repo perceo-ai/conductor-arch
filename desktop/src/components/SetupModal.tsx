@@ -69,7 +69,7 @@ export default function SetupModal() {
           <p class="setup-copy">
             <Show
               when={remote()?.address}
-              fallback="Archductor needs the GitHub CLI plus a signed-in Codex or Claude CLI before chat features can run."
+              fallback="Archductor needs the GitHub CLI and at least one signed-in coding agent before chat features can run."
             >
               {`These tools are checked on the remote daemon at ${remote()?.address}, not on this machine. Install or authenticate them there, or disconnect to use this machine instead.`}
             </Show>

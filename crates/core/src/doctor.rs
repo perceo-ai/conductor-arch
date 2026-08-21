@@ -338,17 +338,21 @@ pub struct SetupReport {
 
 impl SetupReport {
     pub fn from_readiness(readiness: &SetupReadiness, refresh_error: Option<String>) -> Self {
-        let mut rows = vec![setup_row("GitHub CLI", &readiness.gh, true)];
-        rows.extend(readiness.providers.iter().map(|provider| SetupRow {
-            provider_key: Some(provider.provider_key.to_owned()),
-            launchable: provider.launchable,
-            ..setup_row(provider.display_name, &provider.check, false)
-        }));
-        rows.push(setup_row(
-            "Selected provider",
-            &selected_provider_check(readiness),
-            true,
-        ));
+        // One row for every agent rather than one row per agent. The registry
+        // keeps growing, and a gate that lists a dozen "Missing" providers
+        // reads as a dozen chores when the requirement is simply "have one".
+        let ready_provider = readiness
+            .providers
+            .iter()
+            .find(|provider| provider.launchable && provider.check.ready);
+        let rows = vec![
+            setup_row("GitHub CLI", &readiness.gh, true),
+            SetupRow {
+                provider_key: ready_provider.map(|p| p.provider_key.to_owned()),
+                launchable: ready_provider.is_some(),
+                ..setup_row("Coding agent", &agent_check(readiness), true)
+            },
+        ];
         Self {
             complete: setup_blockers(readiness).is_empty(),
             feedback: setup_feedback(readiness),
@@ -429,7 +433,9 @@ fn setup_feedback(readiness: &SetupReadiness) -> String {
     }
 }
 
-fn selected_provider_check(readiness: &SetupReadiness) -> SetupCheck {
+/// Whether *any* supported agent is usable, plus the most useful thing to say
+/// when none is.
+fn agent_check(readiness: &SetupReadiness) -> SetupCheck {
     if let Some(provider) = readiness.first_ready_launchable_provider() {
         return SetupCheck::ready(format!("{provider} will be selected for new chats."));
     }
@@ -449,7 +455,21 @@ fn selected_provider_check(readiness: &SetupReadiness) -> SetupCheck {
             if detected.len() == 1 { "its" } else { "their" },
         ));
     }
-    SetupCheck::missing("No launchable chat provider is ready.")
+    // Naming the candidates is the difference between "something is missing"
+    // and "here is what to install".
+    let candidates = readiness
+        .providers
+        .iter()
+        .filter(|provider| provider.launchable)
+        .map(|provider| provider.display_name)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return SetupCheck::missing("Install and sign in to a supported coding agent.");
+    }
+    SetupCheck::missing(format!(
+        "Set up at least one supported agent: {}.",
+        or_list(&candidates)
+    ))
 }
 
 pub fn report_from_os_release(os_release: &str) -> DoctorReport {
@@ -1147,52 +1167,61 @@ ID_LIKE=arch
 
         assert!(report.complete);
         assert_eq!(report.feedback, "Setup is complete.");
-        // GitHub CLI, one row per registry agent, then the summary row.
-        assert_eq!(report.rows.len(), agent_tools().count() + 2);
+        // Two rows, whatever the registry grows to: have GitHub, have an agent.
+        assert_eq!(report.rows.len(), 2, "{:?}", report.rows);
         assert_eq!(report.rows[0].name, "GitHub CLI");
         assert_eq!(report.rows[0].state, SetupRowState::Ready);
-        let selected = report.rows.last().unwrap();
-        assert_eq!(selected.name, "Selected provider");
-        assert_eq!(selected.state, SetupRowState::Ready);
-        assert!(selected.detail.contains("claude"));
+        let agent = &report.rows[1];
+        assert_eq!(agent.name, "Coding agent");
+        assert_eq!(agent.state, SetupRowState::Ready);
+        assert!(agent.detail.contains("claude"));
     }
 
-    /// The whole point of the rewrite: a new agent shows up in the report
-    /// without anyone editing this file.
+    /// The gate asks for one agent, not for every agent. A growing registry
+    /// must not turn into a growing checklist of chores.
     #[test]
-    fn setup_report_covers_every_registry_agent() {
+    fn setup_report_stays_two_rows_however_many_agents_exist() {
         let report = SetupReport::from_readiness(&readiness(SetupCheck::ready("ready"), &[]), None);
-        let agent_rows = report
-            .rows
-            .iter()
-            .filter(|row| row.provider_key.is_some())
-            .collect::<Vec<_>>();
 
-        assert_eq!(agent_rows.len(), agent_tools().count());
-        for tool in agent_tools() {
-            assert!(
-                agent_rows
-                    .iter()
-                    .any(|row| row.provider_key.as_deref() == Some(tool.provider_key)),
-                "{} has no setup row",
-                tool.provider_key,
-            );
-        }
-        // GitHub CLI and the summary row bracket the agent rows.
-        assert_eq!(report.rows.first().unwrap().name, "GitHub CLI");
-        assert_eq!(report.rows.last().unwrap().name, "Selected provider");
+        assert_eq!(report.rows.len(), 2, "{:?}", report.rows);
+        assert_eq!(report.rows[0].name, "GitHub CLI");
+        assert_eq!(report.rows[1].name, "Coding agent");
+        assert!(
+            agent_tools().count() > 2,
+            "this test is only meaningful with a registry bigger than the row count"
+        );
+    }
+
+    /// With nothing installed, the one agent row has to say what would satisfy
+    /// it — otherwise it is a blocker with no instruction.
+    #[test]
+    fn the_agent_row_names_what_would_satisfy_it() {
+        let report = SetupReport::from_readiness(&readiness(SetupCheck::ready("ready"), &[]), None);
+
+        let agent = &report.rows[1];
+        assert_eq!(agent.state, SetupRowState::Missing);
+        assert!(
+            agent.detail.contains("at least one"),
+            "expected a one-of instruction, got {:?}",
+            agent.detail
+        );
+        assert!(
+            agent.detail.contains("Codex") || agent.detail.contains("Claude"),
+            "expected named candidates, got {:?}",
+            agent.detail
+        );
     }
 
     /// A detected-but-undrivable agent is the most confusing state to land in,
     /// so the summary row names it instead of reporting a flat "nothing ready".
     #[test]
-    fn selected_provider_row_names_a_ready_but_unlaunchable_agent() {
+    fn the_agent_row_names_a_ready_but_unlaunchable_agent() {
         let readiness = readiness(
             SetupCheck::ready("ready"),
             &[("opencode", SetupCheck::ready("ready"))],
         );
 
-        let check = selected_provider_check(&readiness);
+        let check = agent_check(&readiness);
 
         assert!(!check.ready);
         assert!(check.detail.contains("OpenCode"));
