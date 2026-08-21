@@ -898,6 +898,26 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetSyncPlan { selection } => {
+            let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            match crate::skill_sync::plan_sync(&home, &selection) {
+                Ok(plan) => ArchcarResponse::SyncPlan { plan },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::ApplySync { selection } => {
+            let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            match crate::skill_sync::plan_sync(&home, &selection)
+                .and_then(|plan| crate::skill_sync::apply_sync(&home, &plan))
+            {
+                Ok(applied) => ArchcarResponse::SyncApplied { applied },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListRepositories => {
             let db_path = state.lock().unwrap().db_path.clone();
             match repository_summaries(&db_path) {
@@ -3993,6 +4013,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListWorkspaces
             | ArchcarRequest::ListRepositories
             | ArchcarRequest::ListSkills
+            | ArchcarRequest::GetSyncPlan { .. }
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
             | ArchcarRequest::ListChatTranscripts { .. }

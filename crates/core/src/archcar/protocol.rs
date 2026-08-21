@@ -203,6 +203,16 @@ pub enum ArchcarRequest {
     ListRepositories,
     /// Agent skills installed on the daemon's machine, merged across providers.
     ListSkills,
+    /// What syncing skills and MCP servers across providers would write.
+    GetSyncPlan {
+        #[serde(default)]
+        selection: crate::skill_sync::SyncSelection,
+    },
+    /// Perform the sync. Adds and overwrites only; never deletes.
+    ApplySync {
+        #[serde(default)]
+        selection: crate::skill_sync::SyncSelection,
+    },
     ListChatThreads {
         workspace: String,
     },
@@ -843,6 +853,12 @@ pub enum ArchcarResponse {
     },
     Skills {
         skills: Vec<crate::skills::Skill>,
+    },
+    SyncPlan {
+        plan: crate::skill_sync::SyncPlan,
+    },
+    SyncApplied {
+        applied: Vec<crate::skill_sync::SyncAction>,
     },
     ChatThreads {
         workspace: String,
@@ -1633,6 +1649,8 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListWorkspaces => "list_workspaces".to_owned(),
         ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
         ArchcarRequest::ListSkills => "list_skills".to_owned(),
+        ArchcarRequest::GetSyncPlan { .. } => "get_sync_plan".to_owned(),
+        ArchcarRequest::ApplySync { .. } => "apply_sync".to_owned(),
         ArchcarRequest::ListChatThreads { workspace } => {
             format!("list_chat_threads workspace={workspace}")
         }
@@ -2251,6 +2269,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             format!("repositories count={}", repositories.len())
         }
         ArchcarResponse::Skills { skills } => format!("skills count={}", skills.len()),
+        ArchcarResponse::SyncPlan { plan } => {
+            format!("sync_plan actions={}", plan.actions.len())
+        }
+        ArchcarResponse::SyncApplied { applied } => {
+            format!("sync_applied count={}", applied.len())
+        }
         ArchcarResponse::ChatThreads { workspace, threads } => {
             format!("chat_threads workspace={workspace} count={}", threads.len())
         }

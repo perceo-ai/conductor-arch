@@ -326,6 +326,10 @@ enum ArchcarCommand {
     Repositories,
     /// List agent skills installed on the daemon's machine.
     Skills,
+    /// Show what syncing skills and MCP servers across providers would write.
+    SyncPlan,
+    /// Sync skills and MCP servers across providers (adds only, never deletes).
+    Sync,
     /// Register a git repository with the daemon (paths resolve on the daemon's
     /// machine, so this works against a remote where `repo add` cannot).
     AddRepository {
@@ -1572,6 +1576,16 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Skills => {
                     print_archcar_response(client.send(ArchcarRequest::ListSkills)?);
+                }
+                ArchcarCommand::SyncPlan => {
+                    print_archcar_response(client.send(ArchcarRequest::GetSyncPlan {
+                        selection: Default::default(),
+                    })?);
+                }
+                ArchcarCommand::Sync => {
+                    print_archcar_response(client.send(ArchcarRequest::ApplySync {
+                        selection: Default::default(),
+                    })?);
                 }
                 ArchcarCommand::AddRepository {
                     path,
@@ -3760,6 +3774,34 @@ fn print_archcar_response(response: ArchcarResponse) {
                 summary.source_branch_ahead,
                 summary.conflicting_workspaces,
             );
+        }
+        ArchcarResponse::SyncPlan { plan } => {
+            println!(
+                "sync_plan providers={} skills={} mcp_servers={} actions={}",
+                plan.providers.join(","),
+                plan.skills.len(),
+                plan.mcp_servers.len(),
+                plan.actions.len()
+            );
+            for action in plan.actions {
+                println!(
+                    "{:<6} {:<28} -> {:<8} {}{}",
+                    action.kind,
+                    action.item,
+                    action.provider,
+                    action.target,
+                    if action.overwrite { " (overwrite)" } else { "" }
+                );
+            }
+        }
+        ArchcarResponse::SyncApplied { applied } => {
+            println!("sync_applied {}", applied.len());
+            for action in applied {
+                println!(
+                    "{:<6} {:<28} -> {}",
+                    action.kind, action.item, action.provider
+                );
+            }
         }
         ArchcarResponse::Skills { skills } => {
             println!("skills {}", skills.len());
