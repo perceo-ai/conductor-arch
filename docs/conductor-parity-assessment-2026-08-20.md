@@ -72,8 +72,8 @@ Each verified absent by grep:
 - **Pinned workspaces** (0.25.3), **unread marking** (0.25.11), **workspace
   grouping** (0.35.2). Sidebar has none of these.
 - **Notes tab** (0.27.0).
-- **GitHub Actions integration** (0.33.2) and **Vercel deployments** (0.29.2).
-  Checks exist, but not these CI surfaces.
+- **GitHub Actions integration** (0.33.2). Checks exist, but not workflow runs.
+  (**Vercel deployments** (0.29.2) is a deliberate non-goal.)
 - **Mobile app** — Conductor's is upcoming; Archductor has no client story
   beyond desktop + CLI.
 
@@ -99,14 +99,16 @@ Each verified absent by grep:
   external contract, which is why a headless Linux daemon driven from macOS
   works today.
 
-## Recommended order
+## Agreed order (2026-08-20)
 
-1. **Skill/MCP library + sync** — an opened bullet, cheap relative to the
-   others, and it compounds with the multi-client switcher just shipped.
-2. **Multi-repo projects** — the other opened bullet; structural, so the longer
-   it waits the more it costs.
-3. **Search + deep links + pinning** — a week of small wins that close the
-   "feels less finished" gap.
-4. **Stacks** — only if the team uses stacked PRs.
-5. **Multiplayer / hosted sandboxes** — do not start without an explicit
-   product decision; these are company-shaped bets, not features.
+1. **GitHub Actions** — workflow runs beside the existing checks surface.
+2. **Skill/MCP library** — `/skill` discovery in the composer, one-click sync
+   across on-device providers, and a catalog of installable skills.
+3. **Multi-repo projects** — structural, so the longer it waits the more it
+   costs.
+4. **Small polish batch** — search, deep links, pinning, unread, grouping,
+   notes.
+
+Not scheduled: **Vercel** (dropped), **Stacks** (only if the team adopts
+stacked PRs), **multiplayer / hosted sandboxes** (company-shaped bets that need
+an explicit product decision, not a ticket).
