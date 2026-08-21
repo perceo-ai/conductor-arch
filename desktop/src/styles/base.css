@@ -5655,3 +5655,11 @@ button.ws-tab-shell.ws-chat-new:hover {
 .sync-preview-overwrite {
   color: #e0b341;
 }
+
+/* GitHub Actions rows sit in the Checks panel beside the local checks. */
+.ws-actions-logo {
+  width: 12px;
+  height: 12px;
+  margin-right: 5px;
+  vertical-align: -1px;
+}

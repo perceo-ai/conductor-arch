@@ -3,8 +3,10 @@ import githubActionsLogo from "material-icon-theme/icons/github-actions-workflow
 import { openExternal, send } from "@/bridge/client";
 import { actions, nav, threadsStore, toastsStore, workspacesStore } from "@/store";
 import Icon from "@/components/Icon";
-import { parsePrReadiness, type PrCheckRow } from "@/lib/prReadiness";
+import { parsePrReadiness, type PrCheckRow, type PrGateTone } from "@/lib/prReadiness";
 import type {
+  WorkflowRun,
+  WorkflowRunSummary,
   ArchcarChatThread,
   ArchcarChecksSummary,
   ArchcarConfiguredCheck,
@@ -513,6 +515,31 @@ export function ChecksPanel(props: { workspace: string }) {
   const readinessView = createMemo(() => (readiness() ? parsePrReadiness(readiness()!) : null));
   const prUrl = () => workspacesStore.row(props.workspace)?.prUrl;
 
+  // CI is the other half of "is this branch good": the local checks above say
+  // what this machine thinks, these say what GitHub did after the push.
+  const [workflowRuns] = createResource(
+    () => props.workspace,
+    async (ws): Promise<WorkflowRunSummary | null> => {
+      try {
+        const res = await send({ type: "list_workflow_runs", workspace: ws });
+        return res.type === "workflow_runs" ? res.summary : null;
+      } catch {
+        return null;
+      }
+    },
+  );
+
+  const workflowTone = (run: WorkflowRun): PrGateTone => {
+    if (run.conclusion === "success") return "passed";
+    if (["failure", "timed_out", "startup_failure", "action_required"].includes(run.conclusion)) {
+      return "failed";
+    }
+    // Queued counts as running: the branch is not settled yet.
+    if (run.status !== "completed") return "running";
+    // Cancelled and skipped need no action, so they are neither pass nor fail.
+    return "unknown";
+  };
+
   return (
     <div class="ws-tab-panel command-panel ws-checks-panel-flat">
       <div class="ws-flat-section-label">Git status</div>
@@ -533,7 +560,50 @@ export function ChecksPanel(props: { workspace: string }) {
           )}
         </Show>
       </div>
-      <div class="ws-flat-section-label">Checks</div>
+            <div class="ws-flat-section-label">
+        <img src={githubActionsLogo} alt="" class="ws-actions-logo" />
+        GitHub Actions
+      </div>
+      <Show
+        when={workflowRuns()}
+        fallback={<div class="ws-flat-empty">Loading workflow runs…</div>}
+      >
+        {(summary) => (
+          <Show
+            when={!summary().unavailable}
+            fallback={
+              <div class="ws-flat-empty" title={summary().unavailable ?? ""}>
+                No GitHub Actions for this branch.
+              </div>
+            }
+          >
+            <Show
+              when={summary().runs.length > 0}
+              fallback={<div class="ws-flat-empty">No runs for this branch yet.</div>}
+            >
+              <For each={summary().runs.slice(0, 8)}>
+                {(run: WorkflowRun) => (
+                  <div class="ws-git-status-line">
+                    <CheckGlyph tone={workflowTone(run)} />
+                    <span class="ws-check-name">{run.name}</span>
+                    <span class="ws-check-detail">
+                      #{run.number} {run.conclusion || run.status}
+                    </span>
+                    <button
+                      class="ws-check-open"
+                      title="Open run on GitHub"
+                      onClick={() => void openExternal(run.url)}
+                    >
+                      <Icon name="external" />
+                    </button>
+                  </div>
+                )}
+              </For>
+            </Show>
+          </Show>
+        )}
+      </Show>
+<div class="ws-flat-section-label">Checks</div>
       <Show
         when={(readinessView()?.checks.length ?? 0) > 0}
         fallback={

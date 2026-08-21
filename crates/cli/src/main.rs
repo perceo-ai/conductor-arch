@@ -326,6 +326,10 @@ enum ArchcarCommand {
     Repositories,
     /// List agent skills installed on the daemon's machine.
     Skills,
+    /// List GitHub Actions runs for a workspace's branch.
+    WorkflowRuns {
+        workspace: String,
+    },
     /// List installable skills from the catalog.
     SkillCatalog,
     /// Install a catalog skill into every provider (or the ones named).
@@ -1584,6 +1588,11 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Skills => {
                     print_archcar_response(client.send(ArchcarRequest::ListSkills)?);
+                }
+                ArchcarCommand::WorkflowRuns { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkflowRuns { workspace })?,
+                    );
                 }
                 ArchcarCommand::SkillCatalog => {
                     print_archcar_response(client.send(ArchcarRequest::ListSkillCatalog)?);
@@ -3791,6 +3800,32 @@ fn print_archcar_response(response: ArchcarResponse) {
                 summary.source_branch_ahead,
                 summary.conflicting_workspaces,
             );
+        }
+        ArchcarResponse::WorkflowRuns { workspace, summary } => {
+            match &summary.unavailable {
+                Some(reason) => println!("workflow_runs {workspace} unavailable: {reason}"),
+                None => println!(
+                    "workflow_runs {workspace} {} (failing={} running={} succeeded={})",
+                    summary.runs.len(),
+                    summary.failing,
+                    summary.running,
+                    summary.succeeded
+                ),
+            }
+            for run in summary.runs {
+                println!(
+                    "{:<28} {:<12} {:<10} #{} {}",
+                    run.name,
+                    run.status,
+                    if run.conclusion.is_empty() {
+                        "-"
+                    } else {
+                        &run.conclusion
+                    },
+                    run.number,
+                    run.url
+                );
+            }
         }
         ArchcarResponse::SkillCatalog { catalog } => {
             println!("skill_catalog {}", catalog.skills.len());

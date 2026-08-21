@@ -399,6 +399,10 @@ pub enum ArchcarRequest {
     ListReviewComments {
         workspace: String,
     },
+    /// GitHub Actions runs for the workspace's branch.
+    ListWorkflowRuns {
+        workspace: String,
+    },
     GetChecksSummary {
         workspace: String,
     },
@@ -1041,6 +1045,10 @@ pub enum ArchcarResponse {
         workspace: String,
         comments: Vec<ReviewComment>,
     },
+    WorkflowRuns {
+        workspace: String,
+        summary: crate::github_actions::WorkflowRunSummary,
+    },
     ChecksSummary {
         workspace: String,
         summary: ArchcarChecksSummary,
@@ -1665,6 +1673,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
         ArchcarRequest::ListSkills => "list_skills".to_owned(),
         ArchcarRequest::ListSkillCatalog => "list_skill_catalog".to_owned(),
+        ArchcarRequest::ListWorkflowRuns { workspace } => {
+            format!("list_workflow_runs workspace={workspace}")
+        }
         ArchcarRequest::InstallCatalogSkill { name, .. } => {
             format!("install_catalog_skill name={name}")
         }
@@ -2288,6 +2299,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             format!("repositories count={}", repositories.len())
         }
         ArchcarResponse::Skills { skills } => format!("skills count={}", skills.len()),
+        ArchcarResponse::WorkflowRuns { workspace, summary } => format!(
+            "workflow_runs workspace={workspace} runs={} failing={} running={}",
+            summary.runs.len(),
+            summary.failing,
+            summary.running
+        ),
         ArchcarResponse::SkillCatalog { catalog } => {
             format!("skill_catalog count={}", catalog.skills.len())
         }

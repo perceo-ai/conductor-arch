@@ -4768,6 +4768,25 @@ impl WorkspaceStore {
         Ok(Some(body))
     }
 
+    /// GitHub Actions runs for this workspace's branch.
+    ///
+    /// `gh` failing is a normal state here — no GitHub remote, not signed in,
+    /// not installed — so the reason is reported in the summary rather than
+    /// raised as an error that would blank the panel.
+    pub fn workflow_runs(&self, name: &str) -> Result<crate::github_actions::WorkflowRunSummary> {
+        let workspace = self.get_by_name(name)?;
+        let args = crate::github_actions::run_list_args(&workspace.branch, 20);
+        match command_output_owned(&workspace.path, "gh", &args) {
+            Ok(output) => Ok(crate::github_actions::summarize(
+                crate::github_actions::parse_workflow_runs(&output),
+            )),
+            Err(err) => Ok(crate::github_actions::WorkflowRunSummary {
+                unavailable: Some(err.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn pull_request_checks(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let args = self.gh_pr_args_for_workspace(&workspace, "checks", &[])?;

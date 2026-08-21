@@ -898,6 +898,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListWorkflowRuns { workspace } => with_store(state, |store| {
+            let summary = store.workflow_runs(&workspace)?;
+            Ok(ArchcarResponse::WorkflowRuns { workspace, summary })
+        }),
         ArchcarRequest::ListSkillCatalog => {
             let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
             match crate::skill_catalog::catalog(&home) {
@@ -4036,6 +4040,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListSkills
             | ArchcarRequest::GetSyncPlan { .. }
             | ArchcarRequest::ListSkillCatalog
+            | ArchcarRequest::ListWorkflowRuns { .. }
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
             | ArchcarRequest::ListChatTranscripts { .. }

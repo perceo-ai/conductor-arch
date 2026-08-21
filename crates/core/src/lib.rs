@@ -7,6 +7,7 @@ pub mod codex_tui;
 pub mod doctor;
 pub mod env_flags;
 pub mod git_review_service;
+pub mod github_actions;
 pub mod github_pr;
 pub mod harness;
 pub mod import;

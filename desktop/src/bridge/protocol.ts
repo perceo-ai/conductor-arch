@@ -7,6 +7,26 @@
 // keys are kept for editor completion.
 export type SessionKind = "shell" | "codex" | "claude" | (string & {});
 
+/** A GitHub Actions run for a workspace's branch. */
+export type WorkflowRun = {
+  name: string;
+  status: string;
+  conclusion: string;
+  branch: string;
+  url: string;
+  started_at: string;
+  number: number;
+};
+
+export type WorkflowRunSummary = {
+  runs: WorkflowRun[];
+  failing: number;
+  running: number;
+  succeeded: number;
+  /** Set when gh could not answer (no remote, no auth, not installed). */
+  unavailable?: string | null;
+};
+
 /** One write a sync would perform. */
 export type SyncAction = {
   /** "skill" or "mcp" */
@@ -103,6 +123,7 @@ export type ArchcarRequest =
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
   | { type: "list_skills" }
+  | { type: "list_workflow_runs"; workspace: string }
   | { type: "get_sync_plan"; selection?: SyncSelection }
   | { type: "apply_sync"; selection?: SyncSelection }
   | { type: "list_chat_threads"; workspace: string }
@@ -551,6 +572,7 @@ export type ArchcarResponse =
   | { type: "workspaces"; workspaces: ArchcarWorkspaceSummary[] }
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
   | { type: "skills"; skills: AgentSkill[] }
+  | { type: "workflow_runs"; workspace: string; summary: WorkflowRunSummary }
   | { type: "sync_plan"; plan: SyncPlan }
   | { type: "sync_applied"; applied: SyncAction[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
