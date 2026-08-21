@@ -7,6 +7,34 @@
 // keys are kept for editor completion.
 export type SessionKind = "shell" | "codex" | "claude" | (string & {});
 
+/** One write a sync would perform. */
+export type SyncAction = {
+  /** "skill" or "mcp" */
+  kind: string;
+  item: string;
+  provider: string;
+  target: string;
+  overwrite: boolean;
+};
+
+export type SyncPlan = {
+  providers: string[];
+  /** Providers with a skills directory (Cursor has MCP config but no skills). */
+  skill_providers?: string[];
+  mcp_providers?: string[];
+  /** item name -> providers that already have it */
+  skills: Record<string, string[]>;
+  mcp_servers: Record<string, string[]>;
+  actions: SyncAction[];
+};
+
+/** Empty arrays mean "everything", which is what the one-click path sends. */
+export type SyncSelection = {
+  skills?: string[];
+  mcp_servers?: string[];
+  providers?: string[];
+};
+
 /** A skill installed on the daemon's machine (ListSkills). */
 export type AgentSkill = {
   name: string;
@@ -75,6 +103,8 @@ export type ArchcarRequest =
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
   | { type: "list_skills" }
+  | { type: "get_sync_plan"; selection?: SyncSelection }
+  | { type: "apply_sync"; selection?: SyncSelection }
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
   | { type: "list_chat_transcripts"; workspace: string; limit?: number }
@@ -521,6 +551,8 @@ export type ArchcarResponse =
   | { type: "workspaces"; workspaces: ArchcarWorkspaceSummary[] }
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
   | { type: "skills"; skills: AgentSkill[] }
+  | { type: "sync_plan"; plan: SyncPlan }
+  | { type: "sync_applied"; applied: SyncAction[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
   | { type: "chat_transcripts"; workspace: string; transcripts: ArchcarChatTranscriptSummary[] }

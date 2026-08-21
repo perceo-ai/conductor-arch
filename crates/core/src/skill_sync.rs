@@ -44,6 +44,13 @@ pub struct SyncAction {
 pub struct SyncPlan {
     /// Provider keys that can receive writes, sorted.
     pub providers: Vec<String>,
+    /// Providers with a skills directory. Cursor has MCP config but no skill
+    /// root, so a UI that assumes one list would promise writes we never make.
+    #[serde(default)]
+    pub skill_providers: Vec<String>,
+    /// Providers with an MCP config.
+    #[serde(default)]
+    pub mcp_providers: Vec<String>,
     /// Skill name -> providers that already have it.
     pub skills: BTreeMap<String, Vec<String>>,
     /// MCP server name -> providers that already have it.
@@ -169,6 +176,13 @@ pub fn plan_sync(home: &Path, selection: &SyncSelection) -> Result<SyncPlan> {
         }
     }
     plan.providers.sort();
+    plan.skill_providers = roots.iter().map(|r| r.provider_key.clone()).collect();
+    plan.skill_providers.sort();
+    plan.mcp_providers = mcp_targets(home)
+        .into_iter()
+        .map(|t| t.provider_key)
+        .collect();
+    plan.mcp_providers.sort();
 
     // --- skills -----------------------------------------------------------
     // Plugin skills are owned by their plugin; copying them into another
@@ -435,6 +449,16 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("extra.md"), "supporting file\n").unwrap();
+    }
+
+    #[test]
+    fn the_plan_says_which_providers_accept_each_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let plan = plan_sync(temp.path(), &SyncSelection::default()).unwrap();
+        // Cursor takes MCP servers but has no skills directory; conflating the
+        // two lists makes the UI promise writes that never happen.
+        assert_eq!(plan.skill_providers, vec!["claude", "codex"]);
+        assert_eq!(plan.mcp_providers, vec!["claude", "codex", "cursor"]);
     }
 
     #[test]

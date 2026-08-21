@@ -17,6 +17,7 @@ import {
   type GithubWorkItem,
 } from "@/bridge/client";
 import { providersStore } from "@/store/providers";
+import SyncSkillsDialog from "./SyncSkillsDialog";
 
 // Global modal host. Renders the form for the active dialog spec. Every form
 // calls into `actions.*`, which logs the action, sends the archcar request, and
@@ -1008,6 +1009,11 @@ export default function Dialogs() {
           <Match when={s().kind === "add-project"}>
             <Modal title="Add project" onClose={close}>
               <AddProjectForm onDone={close} />
+            </Modal>
+          </Match>
+          <Match when={s().kind === "sync-skills"}>
+            <Modal title="Sync skills and MCP servers" onClose={close}>
+              <SyncSkillsDialog onDone={close} />
             </Modal>
           </Match>
           <Match when={s().kind === "add-client"}>
