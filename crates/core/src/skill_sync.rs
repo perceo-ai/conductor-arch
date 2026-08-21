@@ -237,7 +237,7 @@ pub fn plan_sync(home: &Path, selection: &SyncSelection) -> Result<SyncPlan> {
             .insert(name.clone(), providers.iter().cloned().collect());
     }
 
-    for (name, _) in union_json.iter() {
+    for name in union_json.keys() {
         if !selection.wants_mcp(name) {
             continue;
         }
