@@ -792,6 +792,11 @@ pub enum ArchcarResponse {
         status: String,
         runtime_state: AgentSessionState,
         ready: bool,
+        /// Pending questions or permission prompts on this session's thread.
+        /// `ready = false` on its own reads as "busy"; when the reason is a
+        /// human, that is a different instruction to whoever is watching.
+        #[serde(default)]
+        pending_interactions: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<SessionHarnessCapabilities>,
     },
@@ -2177,10 +2182,18 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             status,
             runtime_state,
             ready,
+            pending_interactions,
             capabilities: _,
         } => format!(
-            "session_status session_id={session_id} status={status} state={} ready={ready}",
-            runtime_state.as_str()
+            "session_status session_id={session_id} status={status} state={} ready={ready}{}",
+            runtime_state.as_str(),
+            // Only when there is something to answer — an always-on `=0` would
+            // add noise to every session log line.
+            if *pending_interactions > 0 {
+                format!(" pending_interactions={pending_interactions}")
+            } else {
+                String::new()
+            }
         ),
         ArchcarResponse::SessionScreen { session_id, screen } => format!(
             "session_screen session_id={session_id} chars={}",
@@ -4470,11 +4483,41 @@ mod tests {
     }
 
     #[test]
+    fn session_status_summary_names_the_human_a_session_is_waiting_on() {
+        // `ready=false` alone reads as "busy"; a parked session needs to be
+        // distinguishable from a working one in the one-line summary.
+        let blocked = ArchcarResponse::SessionStatus {
+            session_id: 4,
+            status: "running".to_owned(),
+            ready: false,
+            pending_interactions: 1,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            capabilities: None,
+        };
+        let summary = archcar_response_summary(&blocked);
+        assert!(summary.contains("pending_interactions=1"), "{summary}");
+
+        let working = ArchcarResponse::SessionStatus {
+            session_id: 4,
+            status: "running".to_owned(),
+            ready: false,
+            pending_interactions: 0,
+            runtime_state: crate::session_state::AgentSessionState::ToolRunning,
+            capabilities: None,
+        };
+        assert!(
+            !archcar_response_summary(&working).contains("pending_interactions"),
+            "a working session must not look blocked"
+        );
+    }
+
+    #[test]
     fn session_status_response_carries_typed_runtime_state() {
         let response = ArchcarResponse::SessionStatus {
             session_id: 11,
             status: "running".to_owned(),
             ready: false,
+            pending_interactions: 0,
             runtime_state: crate::session_state::AgentSessionState::ToolRunning,
             capabilities: Some(SessionHarnessCapabilities {
                 contract_version: 1,

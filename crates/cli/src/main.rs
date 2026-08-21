@@ -3309,14 +3309,23 @@ fn print_archcar_response(response: ArchcarResponse) {
             status,
             runtime_state,
             ready,
+            pending_interactions,
             capabilities,
         } => {
             println!(
-                "session {} status={} state={} ready={}",
+                "session {} status={} state={} ready={}{}",
                 session_id,
                 status,
                 runtime_state.as_str(),
-                ready
+                ready,
+                // Without this, a session parked on a question is reported as
+                // `waiting_for_input ready=false` — which reads as "still
+                // working" rather than "waiting on you".
+                if pending_interactions > 0 {
+                    format!(" awaiting-input={pending_interactions}")
+                } else {
+                    String::new()
+                }
             );
             if let Some(capabilities) = capabilities {
                 println!(

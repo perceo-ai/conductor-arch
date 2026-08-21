@@ -672,11 +672,19 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             match load_or_restore_session_handle(state, session_id) {
                 Ok(Some(handle)) => {
                     let snapshot = handle.snapshot.lock().unwrap().clone();
+                    let pending_interactions = {
+                        let db_path = state.lock().unwrap().db_path.clone();
+                        ProviderInteractionStore::new(db_path)
+                            .list(Some(snapshot.thread_id), true)
+                            .map(|pending| pending.len())
+                            .unwrap_or(0)
+                    };
                     ArchcarResponse::SessionStatus {
                         session_id,
                         status: snapshot.status.as_str().to_owned(),
                         runtime_state: snapshot.runtime_state,
                         ready: snapshot.ready,
+                        pending_interactions,
                         capabilities: snapshot.capabilities,
                     }
                 }
