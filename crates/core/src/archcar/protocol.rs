@@ -201,6 +201,8 @@ pub enum ArchcarRequest {
     GetInventorySnapshot,
     ListWorkspaces,
     ListRepositories,
+    /// Agent skills installed on the daemon's machine, merged across providers.
+    ListSkills,
     ListChatThreads {
         workspace: String,
     },
@@ -838,6 +840,9 @@ pub enum ArchcarResponse {
     },
     Repositories {
         repositories: Vec<ArchcarRepositorySummary>,
+    },
+    Skills {
+        skills: Vec<crate::skills::Skill>,
     },
     ChatThreads {
         workspace: String,
@@ -1627,6 +1632,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetInventorySnapshot => "get_inventory_snapshot".to_owned(),
         ArchcarRequest::ListWorkspaces => "list_workspaces".to_owned(),
         ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
+        ArchcarRequest::ListSkills => "list_skills".to_owned(),
         ArchcarRequest::ListChatThreads { workspace } => {
             format!("list_chat_threads workspace={workspace}")
         }
@@ -2244,6 +2250,7 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::Repositories { repositories } => {
             format!("repositories count={}", repositories.len())
         }
+        ArchcarResponse::Skills { skills } => format!("skills count={}", skills.len()),
         ArchcarResponse::ChatThreads { workspace, threads } => {
             format!("chat_threads workspace={workspace} count={}", threads.len())
         }

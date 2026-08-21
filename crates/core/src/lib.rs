@@ -33,6 +33,7 @@ pub mod session_kind;
 pub mod session_pipeline;
 pub mod session_state;
 pub mod settings;
+pub mod skills;
 pub mod storage;
 pub mod terminal_logs;
 pub mod todos;

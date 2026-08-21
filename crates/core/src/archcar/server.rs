@@ -886,6 +886,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListSkills => {
+            // Read from the daemon's home: these are the skills the agent
+            // process will actually load, which on a remote is not the
+            // client's machine.
+            let home = crate::platform::home_dir().unwrap_or_else(|| PathBuf::from("."));
+            match crate::skills::list_skills(&home) {
+                Ok(skills) => ArchcarResponse::Skills { skills },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListRepositories => {
             let db_path = state.lock().unwrap().db_path.clone();
             match repository_summaries(&db_path) {
@@ -3980,6 +3992,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetInventorySnapshot
             | ArchcarRequest::ListWorkspaces
             | ArchcarRequest::ListRepositories
+            | ArchcarRequest::ListSkills
             | ArchcarRequest::ListChatThreads { .. }
             | ArchcarRequest::GetChatProjection { .. }
             | ArchcarRequest::ListChatTranscripts { .. }

@@ -324,6 +324,8 @@ enum ArchcarCommand {
     InventorySnapshot,
     /// List repositories with workspace counts.
     Repositories,
+    /// List agent skills installed on the daemon's machine.
+    Skills,
     /// Register a git repository with the daemon (paths resolve on the daemon's
     /// machine, so this works against a remote where `repo add` cannot).
     AddRepository {
@@ -1567,6 +1569,9 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Repositories => {
                     print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
+                }
+                ArchcarCommand::Skills => {
+                    print_archcar_response(client.send(ArchcarRequest::ListSkills)?);
                 }
                 ArchcarCommand::AddRepository {
                     path,
@@ -3755,6 +3760,17 @@ fn print_archcar_response(response: ArchcarResponse) {
                 summary.source_branch_ahead,
                 summary.conflicting_workspaces,
             );
+        }
+        ArchcarResponse::Skills { skills } => {
+            println!("skills {}", skills.len());
+            for skill in skills {
+                println!(
+                    "{:<28} {:<16} {}",
+                    skill.name,
+                    skill.providers.join(","),
+                    skill.description
+                );
+            }
         }
         ArchcarResponse::Repositories { repositories } => {
             println!("repositories {}", repositories.len());
