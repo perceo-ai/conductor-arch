@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod claude_hooks;
 pub mod claude_stream;
 pub mod codex_app_server;
@@ -9,6 +10,7 @@ mod tests {
         let sources = [
             ("codex_app_server.rs", include_str!("codex_app_server.rs")),
             ("claude_stream.rs", include_str!("claude_stream.rs")),
+            ("acp.rs", include_str!("acp.rs")),
         ];
         let forbidden = [
             concat!("visible", "_screen_text"),

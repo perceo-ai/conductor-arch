@@ -19,16 +19,21 @@ import {
 // same card DOM when only a sibling changes — a status flip on one workspace
 // re-renders that card alone (mirrors refresh.rs WorkspaceStatusChanged scoping).
 
-type Bucket = "ready" | "running" | "review" | "archived";
+type Bucket = "blocked" | "ready" | "running" | "review" | "archived";
 
 function bucketOf(r: WorkspaceRow): Bucket {
   if (r.status === "archived") return "archived";
+  // Before "review" and "running": an agent waiting on an answer is the only
+  // state here that stops making progress until a human acts, so it should not
+  // sit in a column you scan past.
+  if (r.awaitingInput) return "blocked";
   if (r.prNumber != null && (r.prState ?? "").toLowerCase() === "open") return "review";
   if (r.runRunning || r.activeSessions > 0) return "running";
   return "ready";
 }
 
 const COLUMNS: { bucket: Bucket; title: string; empty: string }[] = [
+  { bucket: "blocked", title: "Needs you", empty: "No agent is waiting" },
   { bucket: "ready", title: "Ready", empty: "No ready workspaces" },
   { bucket: "running", title: "Running", empty: "Nothing running" },
   { bucket: "review", title: "Review", empty: "Nothing in review" },
@@ -201,6 +206,7 @@ export function DashboardPage() {
 
   const byBucket = createMemo(() => {
     const groups: Record<Bucket, WorkspaceRow[]> = {
+      blocked: [],
       ready: [],
       running: [],
       review: [],

@@ -17,6 +17,8 @@ use crate::local_chat::{
     local_chat_agent_type, parse_local_chat_transcript, session_events_to_local_chat_messages,
     truncate_chars,
 };
+use crate::provider_events::ProviderEventStore;
+use crate::provider_projection::{provider_projection_from_records, ProjectionRenderClass};
 use crate::redaction::redact_sensitive_text;
 use crate::session_event::{
     codex_parsed_item_to_session_event, SessionEvent, SessionEventPayload, SessionEventSource,
@@ -442,13 +444,10 @@ impl WorkspaceSourcePreflight {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionKind {
-    Shell,
-    Codex,
-    Claude,
-}
+// Re-exported so the many `crate::workspace::SessionKind` imports keep
+// resolving; the type itself lives in its own module now that it carries
+// interning and serde behaviour.
+pub use crate::session_kind::SessionKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLaunch {
@@ -3594,6 +3593,32 @@ impl WorkspaceStore {
             .collect())
     }
 
+    /// Every file this branch touches relative to where it forked, plus
+    /// anything still uncommitted. This is the set a reviewer sees, so it is
+    /// what the pull-request draft and summaries describe.
+    pub fn branch_changed_files(&self, name: &str) -> Result<Vec<String>> {
+        let workspace = self.get_by_name(name)?;
+        let base_ref = workspace_base_ref(&workspace);
+        let base_commit =
+            workspace_merge_base_ref(&workspace, base_ref).unwrap_or_else(|| base_ref.to_owned());
+        let mut files = BTreeSet::new();
+        // A brand-new branch with no base yet still has its working tree.
+        if let Ok(committed) = git_output_dynamic(
+            &workspace.path,
+            &["diff", "--name-only", &base_commit, "HEAD"],
+        ) {
+            files.extend(
+                committed
+                    .lines()
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        files.extend(self.changed_files(name)?);
+        Ok(files.into_iter().collect())
+    }
+
     pub fn git_status_short(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         git_output_dynamic(&workspace.path, &["status", "--short"])
@@ -4310,8 +4335,11 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
+        // A pull request describes the branch, not the working tree. Using
+        // `changed_files` (git status) meant the draft went empty the moment
+        // the work was committed — which is exactly when a PR gets opened.
         let changed_files = self
-            .changed_files(name)?
+            .branch_changed_files(name)?
             .into_iter()
             .filter(|path| !is_conductor_context_path(path))
             .collect::<Vec<_>>();
@@ -4740,6 +4768,25 @@ impl WorkspaceStore {
         Ok(Some(body))
     }
 
+    /// GitHub Actions runs for this workspace's branch.
+    ///
+    /// `gh` failing is a normal state here — no GitHub remote, not signed in,
+    /// not installed — so the reason is reported in the summary rather than
+    /// raised as an error that would blank the panel.
+    pub fn workflow_runs(&self, name: &str) -> Result<crate::github_actions::WorkflowRunSummary> {
+        let workspace = self.get_by_name(name)?;
+        let args = crate::github_actions::run_list_args(&workspace.branch, 20);
+        match command_output_owned(&workspace.path, "gh", &args) {
+            Ok(output) => Ok(crate::github_actions::summarize(
+                crate::github_actions::parse_workflow_runs(&output),
+            )),
+            Err(err) => Ok(crate::github_actions::WorkflowRunSummary {
+                unavailable: Some(err.to_string()),
+                ..Default::default()
+            }),
+        }
+    }
+
     pub fn pull_request_checks(&self, name: &str) -> Result<String> {
         let workspace = self.get_by_name(name)?;
         let args = self.gh_pr_args_for_workspace(&workspace, "checks", &[])?;
@@ -5137,17 +5184,31 @@ mutation($threadId: ID!) {{
         }
     }
 
+    /// What the agent last said, for the pull-request body.
+    ///
+    /// This used to be the last non-empty line of the raw session log, which
+    /// for a stream-json provider is the protocol framing itself — PR bodies
+    /// were coming out with `[/claude-stream-json]` under "Session summary".
+    /// The agent's own closing message is the thing worth quoting, so read it
+    /// from the projection and fall back to nothing rather than to noise.
     fn latest_session_summary(&self, workspace: &Workspace) -> Result<Option<String>> {
-        let Some(process) = self
-            .list_processes(&workspace.name, ProcessKind::Session)?
+        let Some(thread) = self
+            .list_chat_threads(&workspace.name)?
             .into_iter()
-            .next()
+            .max_by_key(|thread| thread.id)
         else {
             return Ok(None);
         };
-        let transcript = fs::read_to_string(&process.log_path).unwrap_or_default();
-        let summary = terminal_log_preview(&transcript);
-        Ok((!summary.trim().is_empty()).then_some(summary))
+        let records = ProviderEventStore::new(self.db_path()).list_for_chat_thread(thread.id)?;
+        let summary = provider_projection_from_records(&records)
+            .items
+            .into_iter()
+            .map(|item| (item.render_class, item.body.trim().to_owned()))
+            .rfind(|(render_class, body)| {
+                *render_class == ProjectionRenderClass::AssistantChat && !body.is_empty()
+            })
+            .map(|(_, body)| body);
+        Ok(summary)
     }
 
     fn record_pull_request(&self, workspace_id: i64, url: &str) -> Result<PullRequest> {
@@ -6174,7 +6235,7 @@ mutation($threadId: ID!) {{
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         Ok(SessionLaunch {
-            kind: SessionKind::Shell,
+            kind: SessionKind::SHELL,
             program: PathBuf::from(editor),
             args: vec![cwd.to_string_lossy().to_string()],
             cwd,
@@ -6222,8 +6283,8 @@ mutation($threadId: ID!) {{
         let mut env = conductor_environment(&settings, &repository, &workspace)?;
         env.extend(self.linked_directory_env(&workspace)?);
         let (program, mut args) = match kind {
-            SessionKind::Shell => (crate::platform::shell_program(), Vec::new()),
-            SessionKind::Codex => (
+            SessionKind::SHELL => (crate::platform::shell_program(), Vec::new()),
+            SessionKind::CODEX => (
                 settings
                     .providers
                     .codex_executable_path
@@ -6232,7 +6293,7 @@ mutation($threadId: ID!) {{
                     .unwrap_or_else(|| PathBuf::from("codex")),
                 Vec::new(),
             ),
-            SessionKind::Claude => (
+            SessionKind::CLAUDE => (
                 settings
                     .providers
                     .claude_code_executable_path
@@ -6241,6 +6302,25 @@ mutation($threadId: ID!) {{
                     .unwrap_or_else(|| PathBuf::from("claude")),
                 Vec::new(),
             ),
+            // Any other registered agent runs its registry command. Codex and
+            // Claude keep their dedicated settings keys above because those
+            // already exist and are documented; everything else resolves from
+            // the registry until per-provider overrides are configurable.
+            other => {
+                let tool =
+                    crate::agent_tools::tool_by_provider(other.as_str()).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{} is not a registered agent, so it has no launch command",
+                            other.as_str()
+                        )
+                    })?;
+                (
+                    PathBuf::from(tool.default_command),
+                    // ACP agents need their protocol flag or they come up as an
+                    // interactive TUI and the managed transport never speaks.
+                    tool.acp_args.iter().map(|arg| (*arg).to_owned()).collect(),
+                )
+            }
         };
         let harness::SessionHarnessLaunchPlan {
             args: harness_args,
@@ -6712,7 +6792,7 @@ mutation($threadId: ID!) {{
         harness: SessionHarnessOptions,
     ) -> Result<ProcessRecord> {
         anyhow::ensure!(
-            !matches!(kind, SessionKind::Codex),
+            !matches!(kind, SessionKind::CODEX),
             "Codex sessions are owned by archcar; use ArchcarRequest::SpawnSession"
         );
         let launch = self.session_launch_with_options(name, kind, harness)?;
@@ -8219,7 +8299,7 @@ mutation($threadId: ID!) {{
         );
         let command = shell_words(&launch.program, &launch.args);
         let resume_id = match launch.kind {
-            SessionKind::Codex => thread.native_thread_id.as_deref(),
+            SessionKind::CODEX => thread.native_thread_id.as_deref(),
             _ => launch.session_resume_id.as_deref(),
         };
         self.record_process(RecordProcessInput {
@@ -9583,20 +9663,17 @@ fn archcar_input_kind_from_str(value: &str) -> Result<ArchcarInputKind, String> 
 }
 
 fn session_kind_as_str(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Shell => "shell",
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-    }
+    kind.as_str()
 }
 
+/// Accepts any key rather than a fixed set: rows written by a build that knew
+/// more agents than this one must still load, and an agent that is no longer
+/// registered still has a readable history.
 fn session_kind_from_str(value: &str) -> Result<SessionKind, String> {
-    match value {
-        "shell" => Ok(SessionKind::Shell),
-        "codex" => Ok(SessionKind::Codex),
-        "claude" => Ok(SessionKind::Claude),
-        other => Err(format!("unknown session kind {other}")),
+    if value.trim().is_empty() {
+        return Err("session kind is empty".to_owned());
     }
+    Ok(SessionKind::new(value))
 }
 
 fn row_to_workspace_timeline_event(
@@ -13116,7 +13193,7 @@ branch_prefix = "team"
                 "a",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let _b = store
@@ -13125,7 +13202,7 @@ branch_prefix = "team"
                 "b",
                 Some("b vis"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let c = store
@@ -13134,7 +13211,7 @@ branch_prefix = "team"
                 "c",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
 
@@ -13206,7 +13283,7 @@ branch_prefix = "team"
                 " first ",
                 Some("first visible"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let second = store
@@ -13215,7 +13292,7 @@ branch_prefix = "team"
                 "second",
                 None,
                 ArchcarInputKind::ReviewPrompt,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let other = store
@@ -13224,7 +13301,7 @@ branch_prefix = "team"
                 "other",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Claude,
+                SessionKind::CLAUDE,
             )
             .unwrap();
 
@@ -13294,7 +13371,7 @@ branch_prefix = "team"
                 "run tests",
                 None,
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
 
@@ -13326,7 +13403,7 @@ branch_prefix = "team"
                 "run tests",
                 Some("visible run tests"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
 
@@ -13354,7 +13431,7 @@ branch_prefix = "team"
                 "first",
                 Some("visible first"),
                 ArchcarInputKind::User,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let second = store
@@ -13363,7 +13440,7 @@ branch_prefix = "team"
                 "second",
                 None,
                 ArchcarInputKind::ReviewPrompt,
-                SessionKind::Codex,
+                SessionKind::CODEX,
             )
             .unwrap();
         let claimed = store
@@ -13696,14 +13773,14 @@ claude_code_executable_path = "/opt/bin/claude-custom"
 
         assert_eq!(
             store
-                .session_launch("berlin", SessionKind::Codex)
+                .session_launch("berlin", SessionKind::CODEX)
                 .unwrap()
                 .program,
             PathBuf::from("/opt/bin/codex-custom")
         );
         assert_eq!(
             store
-                .session_launch("berlin", SessionKind::Claude)
+                .session_launch("berlin", SessionKind::CLAUDE)
                 .unwrap()
                 .program,
             PathBuf::from("/opt/bin/claude-custom")
@@ -14697,7 +14774,7 @@ CUSTOM_VALUE = "from-settings"
         store
             .append_chat_message(thread.id, "user", "hi", "user_send")
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -16771,7 +16848,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -16786,7 +16863,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "zurich",
                 &SessionLaunch {
-                    kind: SessionKind::Claude,
+                    kind: SessionKind::CLAUDE,
                     program: PathBuf::from("claude"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/zurich"),
@@ -16850,7 +16927,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -16923,7 +17000,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Shell,
+                    kind: SessionKind::SHELL,
                     program: PathBuf::from("/bin/sh"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -16984,7 +17061,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -17048,7 +17125,7 @@ working_directory = "apps/web"
             .record_session_process(
                 "berlin",
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: Vec::new(),
                     cwd: temp.path().join("workspaces/demo/berlin"),
@@ -17169,7 +17246,7 @@ working_directory = "apps/web"
             .unwrap();
 
         let launch = store
-            .session_launch("frontend", SessionKind::Codex)
+            .session_launch("frontend", SessionKind::CODEX)
             .unwrap();
 
         assert_eq!(
@@ -18494,7 +18571,7 @@ spotlight_testing = true
             })
             .unwrap();
 
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
 
         assert_eq!(launch.cwd, workspace.path);
         assert!(!launch.program.as_os_str().is_empty());
@@ -18570,7 +18647,7 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
 
         assert_eq!(launch.cwd, workspace.path.join("apps/worker"));
         assert_eq!(
@@ -18613,7 +18690,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options(
                 "berlin",
-                SessionKind::Codex,
+                SessionKind::CODEX,
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
@@ -18695,7 +18772,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options(
                 "berlin",
-                SessionKind::Claude,
+                SessionKind::CLAUDE,
                 SessionHarnessOptions {
                     plan_mode: true,
                     fast_mode: true,
@@ -18770,7 +18847,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options_and_resume(
                 "berlin",
-                SessionKind::Claude,
+                SessionKind::CLAUDE,
                 SessionHarnessOptions::default(),
                 Some("019ef6b1-8a1b-78f0-ae17-0db46572decf"),
             )
@@ -18824,7 +18901,7 @@ working_directory = "apps/worker"
         let launch = store
             .session_launch_with_options_and_resume(
                 "berlin",
-                SessionKind::Codex,
+                SessionKind::CODEX,
                 SessionHarnessOptions {
                     fast_mode: true,
                     approval_mode: Some("ask".to_owned()),
@@ -18898,7 +18975,7 @@ working_directory = "apps/worker"
         let err = store
             .start_session_with_options(
                 "berlin",
-                SessionKind::Codex,
+                SessionKind::CODEX,
                 SessionHarnessOptions {
                     plan_mode: true,
                     codex_goals: Some("ship the fix".to_owned()),
@@ -18952,7 +19029,7 @@ working_directory = "apps/worker"
                 .record_session_process(
                     "berlin",
                     &SessionLaunch {
-                        kind: SessionKind::Codex,
+                        kind: SessionKind::CODEX,
                         program: PathBuf::from("codex"),
                         args: vec!["resume".to_owned(), "--last".to_owned()],
                         cwd: workspace.path.clone(),
@@ -18995,7 +19072,7 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        let session = store.start_session("berlin", SessionKind::Shell).unwrap();
+        let session = store.start_session("berlin", SessionKind::SHELL).unwrap();
 
         assert_eq!(session.workspace_id, workspace.id);
         assert_eq!(session.kind, ProcessKind::Session);
@@ -19031,7 +19108,7 @@ working_directory = "apps/worker"
             })
             .unwrap();
 
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .expect("seed dead session record");
@@ -19075,7 +19152,7 @@ working_directory = "apps/worker"
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -19172,7 +19249,7 @@ working_directory = "apps/worker"
         let thread = store
             .create_chat_thread("berlin", "codex", "Parser work", None)
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
             .unwrap();
@@ -19233,7 +19310,7 @@ working_directory = "apps/worker"
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Codex).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -19352,7 +19429,7 @@ general = "Keep changes focused."
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let first_session = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -21895,6 +21972,118 @@ pr_title_template = "{workspace}: {branch} ({changed_files_count})"
             .contains("No saved agent session summary yet."));
     }
 
+    /// Stage and commit everything in a worktree with an explicit identity, so
+    /// the test does not depend on the machine's git config.
+    fn commit_all_in(path: &Path, message: &str) {
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["add", "-A"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                message,
+            ])
+            .status()
+            .unwrap();
+    }
+
+    #[test]
+    fn pull_request_draft_still_describes_the_branch_after_the_work_is_committed() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        fs::write(workspace.path.join("README.md"), "demo\nchanged\n").unwrap();
+
+        // Uncommitted: the draft has always handled this case.
+        assert!(store
+            .render_pull_request_template("berlin")
+            .unwrap()
+            .body
+            .contains("- README.md"));
+
+        commit_all_in(&workspace.path, "Update the readme");
+
+        // Committing is the normal precondition for opening a PR, so the draft
+        // has to keep describing the work rather than going blank.
+        let template = store.render_pull_request_template("berlin").unwrap();
+        assert!(
+            template.body.contains("- README.md"),
+            "committed work vanished from the draft: {}",
+            template.body
+        );
+        assert!(
+            !template.body.contains("No changed files detected."),
+            "draft claimed an empty branch: {}",
+            template.body
+        );
+    }
+
+    #[test]
+    fn branch_changed_files_unions_committed_and_uncommitted_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("committed.txt"), "one\n").unwrap();
+        commit_all_in(&workspace.path, "Add committed file");
+        fs::write(workspace.path.join("pending.txt"), "two\n").unwrap();
+
+        let files = store.branch_changed_files("berlin").unwrap();
+
+        assert!(files.contains(&"committed.txt".to_owned()), "{files:?}");
+        assert!(files.contains(&"pending.txt".to_owned()), "{files:?}");
+    }
+
     #[test]
     fn create_pull_request_returns_existing_remote_pr_instead_of_duplicate() {
         let _guard = env_lock().lock().unwrap();
@@ -23912,7 +24101,7 @@ spotlight_testing = true
                 "berlin",
                 thread.id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: PathBuf::from("/tmp/berlin"),
@@ -24097,7 +24286,7 @@ spotlight_testing = true
                 "berlin",
                 thread.id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: workspace.path.clone(),
@@ -24283,7 +24472,7 @@ spotlight_testing = true
                 "paris",
                 paris_thread.id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: temp.path().join("workspaces/demo/paris"),
@@ -25226,7 +25415,7 @@ spotlight_testing = true
     #[test]
     fn workspace_timeline_records_lifecycle_branch_session_and_pr_events() {
         let (_temp, store) = test_workspace_store();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -25270,7 +25459,7 @@ spotlight_testing = true
     fn stale_session_exit_after_workspace_delete_does_not_report_missing_workspace_name() {
         let (_temp, store) = test_workspace_store();
         let workspace = store.get_by_name("berlin").unwrap();
-        let launch = store.session_launch("berlin", SessionKind::Shell).unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
         let process = store
             .record_session_process("berlin", &launch, exited_child_pid())
             .unwrap();
@@ -25445,7 +25634,7 @@ spotlight_testing = true
                 "berlin",
                 thread_id,
                 &SessionLaunch {
-                    kind: SessionKind::Codex,
+                    kind: SessionKind::CODEX,
                     program: PathBuf::from("codex"),
                     args: vec!["--no-alt-screen".to_owned()],
                     cwd: PathBuf::from("/tmp/berlin"),

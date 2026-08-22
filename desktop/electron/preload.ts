@@ -2,6 +2,26 @@ import { contextBridge, ipcRenderer } from "electron";
 
 // Typed, isolated bridge exposed to the renderer as window.archductor.
 // The renderer never touches the socket or Node APIs directly.
+
+/** One saved daemon, as the renderer sees it — no token. */
+export interface ClientSummary {
+  id: string;
+  label: string;
+  address: string;
+}
+
+/** Every clients:* handler answers with the whole list so the UI stays in sync. */
+export type ClientsResult =
+  | {
+      ok: true;
+      activeId: string | null;
+      clients: ClientSummary[];
+      /** Set when ARCHDUCTOR_ARCHCAR_REMOTE overrides the saved selection. */
+      envAddress?: string | null;
+      id?: string;
+    }
+  | { ok: false; error: string };
+
 const api = {
   /** Send a request to archcar; resolves with the ArchcarResponse payload. */
   request: async <Res = unknown>(payload: unknown): Promise<Res> => {
@@ -80,6 +100,24 @@ const api = {
   /** Clear the remote profile and go back to the local daemon. */
   remoteClear: (): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("archcar:remote-clear"),
+
+  /** Saved daemons this machine can switch between (never includes tokens). */
+  clientsList: (): Promise<ClientsResult> => ipcRenderer.invoke("clients:list"),
+
+  /** Save a daemon and switch to it; verifies before committing the switch. */
+  clientsAdd: (opts: { label?: string; address: string; token: string }): Promise<ClientsResult> =>
+    ipcRenderer.invoke("clients:add", opts),
+
+  /** Switch to a saved client, or to this machine with null. */
+  clientsActivate: (id: string | null): Promise<ClientsResult> =>
+    ipcRenderer.invoke("clients:activate", id),
+
+  /** Forget a saved client. */
+  clientsRemove: (id: string): Promise<ClientsResult> => ipcRenderer.invoke("clients:remove", id),
+
+  /** Rename a saved client. */
+  clientsRename: (opts: { id: string; label: string }): Promise<ClientsResult> =>
+    ipcRenderer.invoke("clients:rename", opts),
 
   /** Check the latest published GitHub release; install remains manual. */
   checkForUpdates: (): Promise<

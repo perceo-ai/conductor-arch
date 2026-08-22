@@ -201,6 +201,26 @@ pub enum ArchcarRequest {
     GetInventorySnapshot,
     ListWorkspaces,
     ListRepositories,
+    /// Agent skills installed on the daemon's machine, merged across providers.
+    ListSkills,
+    /// Installable skills, annotated with what this machine already has.
+    ListSkillCatalog,
+    /// Clone a catalog skill into the given providers (all when empty).
+    InstallCatalogSkill {
+        name: String,
+        #[serde(default)]
+        providers: Vec<String>,
+    },
+    /// What syncing skills and MCP servers across providers would write.
+    GetSyncPlan {
+        #[serde(default)]
+        selection: crate::skill_sync::SyncSelection,
+    },
+    /// Perform the sync. Adds and overwrites only; never deletes.
+    ApplySync {
+        #[serde(default)]
+        selection: crate::skill_sync::SyncSelection,
+    },
     ListChatThreads {
         workspace: String,
     },
@@ -379,6 +399,10 @@ pub enum ArchcarRequest {
     ListReviewComments {
         workspace: String,
     },
+    /// GitHub Actions runs for the workspace's branch.
+    ListWorkflowRuns {
+        workspace: String,
+    },
     GetChecksSummary {
         workspace: String,
     },
@@ -391,6 +415,10 @@ pub enum ArchcarRequest {
     ListRepositoryBranches {
         repository: String,
     },
+    /// List every agent this build knows, with how completely it can drive
+    /// each one. Clients render provider pickers from this rather than
+    /// hardcoding a provider list that drifts from the registry.
+    ListAgentProviders,
     /// List the prompt-pack names available for a repository and which is active.
     ListPromptPacks {
         repository: String,
@@ -788,6 +816,11 @@ pub enum ArchcarResponse {
         status: String,
         runtime_state: AgentSessionState,
         ready: bool,
+        /// Pending questions or permission prompts on this session's thread.
+        /// `ready = false` on its own reads as "busy"; when the reason is a
+        /// human, that is a different instruction to whoever is watching.
+        #[serde(default)]
+        pending_interactions: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<SessionHarnessCapabilities>,
     },
@@ -829,6 +862,22 @@ pub enum ArchcarResponse {
     },
     Repositories {
         repositories: Vec<ArchcarRepositorySummary>,
+    },
+    Skills {
+        skills: Vec<crate::skills::Skill>,
+    },
+    SkillCatalog {
+        catalog: crate::skill_catalog::Catalog,
+    },
+    SkillInstalled {
+        name: String,
+        targets: Vec<String>,
+    },
+    SyncPlan {
+        plan: crate::skill_sync::SyncPlan,
+    },
+    SyncApplied {
+        applied: Vec<crate::skill_sync::SyncAction>,
     },
     ChatThreads {
         workspace: String,
@@ -996,6 +1045,10 @@ pub enum ArchcarResponse {
         workspace: String,
         comments: Vec<ReviewComment>,
     },
+    WorkflowRuns {
+        workspace: String,
+        summary: crate::github_actions::WorkflowRunSummary,
+    },
     ChecksSummary {
         workspace: String,
         summary: ArchcarChecksSummary,
@@ -1009,6 +1062,9 @@ pub enum ArchcarResponse {
     RepositoryBranches {
         repository: String,
         branches: Vec<String>,
+    },
+    AgentProviders {
+        providers: Vec<AgentProviderSummary>,
     },
     PromptPacks {
         repository: String,
@@ -1156,7 +1212,14 @@ pub enum ArchcarResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionHarnessCapabilities {
     pub contract_version: u16,
+    /// Derived from `extended`; `full`, `partial`, or `basic`.
+    pub tier: String,
+    /// The core baseline this provider meets. Every managed provider reports
+    /// the same list — it is the floor, not a differentiator.
     pub required: Vec<String>,
+    /// Where providers actually differ. One entry per extended feature, each
+    /// with its support mode and, when unsupported, the reason.
+    pub extended: Vec<SessionCapabilitySupport>,
     pub optional: Vec<SessionCapabilitySupport>,
     pub observed_native: Vec<String>,
 }
@@ -1169,16 +1232,64 @@ pub struct SessionCapabilitySupport {
     pub reason: Option<String>,
 }
 
+/// One agent as the registry sees it. `managed` distinguishes an agent the
+/// daemon drives with a structured transport from one that merely runs in a
+/// PTY; `tier` says how complete that driving is.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentProviderSummary {
+    pub provider_key: String,
+    pub display_name: String,
+    pub default_command: String,
+    /// Offered as a chat provider in pickers.
+    pub launchable: bool,
+    /// Driven through a managed harness rather than a bare PTY.
+    pub managed: bool,
+    /// `full`, `partial`, `basic`, or `none` when unmanaged.
+    pub tier: String,
+    pub auth_guidance: String,
+}
+
+pub fn agent_provider_summaries() -> Vec<AgentProviderSummary> {
+    crate::agent_tools::agent_tools()
+        .map(|tool| {
+            let kind = crate::session_kind::SessionKind::new(tool.provider_key);
+            let managed = crate::archcar::harness::managed_harness_for_kind(kind);
+            AgentProviderSummary {
+                provider_key: tool.provider_key.to_owned(),
+                display_name: tool.display_name.to_owned(),
+                default_command: tool.default_command.to_owned(),
+                launchable: tool.chat_launchable
+                    && tool.launch_owner != crate::agent_tools::LaunchOwner::NotSupported,
+                managed: managed.is_some(),
+                tier: managed
+                    .map(|harness| harness.descriptor().tier().as_str().to_owned())
+                    .unwrap_or_else(|| "none".to_owned()),
+                auth_guidance: tool.auth_guidance.to_owned(),
+            }
+        })
+        .collect()
+}
+
 pub fn session_harness_capabilities_for_descriptor(
     descriptor: &HarnessDescriptor,
     observed_native: Vec<String>,
 ) -> SessionHarnessCapabilities {
     SessionHarnessCapabilities {
         contract_version: descriptor.contract_version,
+        tier: descriptor.tier().as_str().to_owned(),
         required: descriptor
-            .required_features
+            .core_features
             .iter()
             .map(|feature| feature.as_str().to_owned())
+            .collect(),
+        extended: descriptor
+            .extended_features
+            .iter()
+            .map(|(feature, support)| SessionCapabilitySupport {
+                name: feature.as_str().to_owned(),
+                mode: support.as_str().to_owned(),
+                reason: support.reason().map(str::to_owned),
+            })
             .collect(),
         optional: descriptor
             .optional_capabilities
@@ -1257,6 +1368,12 @@ pub struct ArchcarWorkspaceSummary {
     #[serde(default)]
     pub blocked_tasks: usize,
     pub active_sessions: usize,
+    /// An agent here is blocked on a question or permission prompt. Distinct
+    /// from `active_sessions`: a blocked agent is still "active" but is burning
+    /// wall-clock waiting for a human, and looks identical to a working one
+    /// unless it is called out.
+    #[serde(default)]
+    pub awaiting_input: bool,
     pub run_running: bool,
     pub changed_files: usize,
     pub diff_additions: usize,
@@ -1554,6 +1671,16 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetInventorySnapshot => "get_inventory_snapshot".to_owned(),
         ArchcarRequest::ListWorkspaces => "list_workspaces".to_owned(),
         ArchcarRequest::ListRepositories => "list_repositories".to_owned(),
+        ArchcarRequest::ListSkills => "list_skills".to_owned(),
+        ArchcarRequest::ListSkillCatalog => "list_skill_catalog".to_owned(),
+        ArchcarRequest::ListWorkflowRuns { workspace } => {
+            format!("list_workflow_runs workspace={workspace}")
+        }
+        ArchcarRequest::InstallCatalogSkill { name, .. } => {
+            format!("install_catalog_skill name={name}")
+        }
+        ArchcarRequest::GetSyncPlan { .. } => "get_sync_plan".to_owned(),
+        ArchcarRequest::ApplySync { .. } => "apply_sync".to_owned(),
         ArchcarRequest::ListChatThreads { workspace } => {
             format!("list_chat_threads workspace={workspace}")
         }
@@ -1704,6 +1831,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ListRepositoryBranches { repository } => {
             format!("list_repository_branches repository={repository}")
         }
+        ArchcarRequest::ListAgentProviders => "list_agent_providers".to_owned(),
         ArchcarRequest::ListPromptPacks { repository } => {
             format!("list_prompt_packs repository={repository}")
         }
@@ -2108,10 +2236,18 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             status,
             runtime_state,
             ready,
+            pending_interactions,
             capabilities: _,
         } => format!(
-            "session_status session_id={session_id} status={status} state={} ready={ready}",
-            runtime_state.as_str()
+            "session_status session_id={session_id} status={status} state={} ready={ready}{}",
+            runtime_state.as_str(),
+            // Only when there is something to answer — an always-on `=0` would
+            // add noise to every session log line.
+            if *pending_interactions > 0 {
+                format!(" pending_interactions={pending_interactions}")
+            } else {
+                String::new()
+            }
         ),
         ArchcarResponse::SessionScreen { session_id, screen } => format!(
             "session_screen session_id={session_id} chars={}",
@@ -2161,6 +2297,25 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::Repositories { repositories } => {
             format!("repositories count={}", repositories.len())
+        }
+        ArchcarResponse::Skills { skills } => format!("skills count={}", skills.len()),
+        ArchcarResponse::WorkflowRuns { workspace, summary } => format!(
+            "workflow_runs workspace={workspace} runs={} failing={} running={}",
+            summary.runs.len(),
+            summary.failing,
+            summary.running
+        ),
+        ArchcarResponse::SkillCatalog { catalog } => {
+            format!("skill_catalog count={}", catalog.skills.len())
+        }
+        ArchcarResponse::SkillInstalled { name, targets } => {
+            format!("skill_installed name={name} targets={}", targets.len())
+        }
+        ArchcarResponse::SyncPlan { plan } => {
+            format!("sync_plan actions={}", plan.actions.len())
+        }
+        ArchcarResponse::SyncApplied { applied } => {
+            format!("sync_applied count={}", applied.len())
         }
         ArchcarResponse::ChatThreads { workspace, threads } => {
             format!("chat_threads workspace={workspace} count={}", threads.len())
@@ -2309,6 +2464,11 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::RepositoryBranches { repository, branches } => {
             format!("repository_branches repository={repository} count={}", branches.len())
         }
+        ArchcarResponse::AgentProviders { providers } => format!(
+            "agent_providers count={} managed={}",
+            providers.len(),
+            providers.iter().filter(|provider| provider.managed).count()
+        ),
         ArchcarResponse::PromptPacks { repository, packs, active } => format!(
             "prompt_packs repository={repository} count={} active={}",
             packs.len(),
@@ -2588,11 +2748,7 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
 }
 
 fn session_kind_label(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Shell => "Shell",
-        SessionKind::Codex => "Codex",
-        SessionKind::Claude => "Claude",
-    }
+    crate::archcar::harness::display_name_for_kind(kind)
 }
 
 fn input_kind_label(kind: &ArchcarInputKind) -> &'static str {
@@ -2724,7 +2880,7 @@ mod tests {
                 session_id: 4,
                 thread_id: 6,
                 workspace: "berlin".to_owned(),
-                kind: SessionKind::Codex,
+                kind: SessionKind::CODEX,
                 pid: 123,
             },
         };
@@ -2780,7 +2936,7 @@ mod tests {
             input: "run tests".to_owned(),
             visible_input: Some("visible run tests".to_owned()),
             kind: ArchcarInputKind::User,
-            session_kind: SessionKind::Codex,
+            session_kind: SessionKind::CODEX,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"queue_chat_input\""));
@@ -2810,7 +2966,7 @@ mod tests {
                 input: "run tests".to_owned(),
                 visible_input: visible_input.clone(),
                 kind: ArchcarInputKind::User,
-                session_kind: SessionKind::Codex,
+                session_kind: SessionKind::CODEX,
                 created_at: "2026-07-23T12:00:00Z".to_owned(),
                 updated_at: "2026-07-23T12:00:01Z".to_owned(),
             };
@@ -4236,7 +4392,7 @@ mod tests {
             session_id: 7,
             thread_id: 3,
             workspace: "hoi-an".to_owned(),
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             pid: 4242,
         };
 
@@ -4369,7 +4525,13 @@ mod tests {
     fn session_capabilities_event_serializes_descriptor_payload() {
         let capabilities = SessionHarnessCapabilities {
             contract_version: 1,
+            tier: "partial".to_owned(),
             required: vec!["preflight".to_owned(), "streaming_events".to_owned()],
+            extended: vec![SessionCapabilitySupport {
+                name: "resume".to_owned(),
+                mode: "unsupported".to_owned(),
+                reason: Some("no session id to resume from".to_owned()),
+            }],
             optional: vec![SessionCapabilitySupport {
                 name: "goals".to_owned(),
                 mode: "native".to_owned(),
@@ -4394,15 +4556,47 @@ mod tests {
     }
 
     #[test]
+    fn session_status_summary_names_the_human_a_session_is_waiting_on() {
+        // `ready=false` alone reads as "busy"; a parked session needs to be
+        // distinguishable from a working one in the one-line summary.
+        let blocked = ArchcarResponse::SessionStatus {
+            session_id: 4,
+            status: "running".to_owned(),
+            ready: false,
+            pending_interactions: 1,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            capabilities: None,
+        };
+        let summary = archcar_response_summary(&blocked);
+        assert!(summary.contains("pending_interactions=1"), "{summary}");
+
+        let working = ArchcarResponse::SessionStatus {
+            session_id: 4,
+            status: "running".to_owned(),
+            ready: false,
+            pending_interactions: 0,
+            runtime_state: crate::session_state::AgentSessionState::ToolRunning,
+            capabilities: None,
+        };
+        assert!(
+            !archcar_response_summary(&working).contains("pending_interactions"),
+            "a working session must not look blocked"
+        );
+    }
+
+    #[test]
     fn session_status_response_carries_typed_runtime_state() {
         let response = ArchcarResponse::SessionStatus {
             session_id: 11,
             status: "running".to_owned(),
             ready: false,
+            pending_interactions: 0,
             runtime_state: crate::session_state::AgentSessionState::ToolRunning,
             capabilities: Some(SessionHarnessCapabilities {
                 contract_version: 1,
+                tier: "basic".to_owned(),
                 required: vec!["preflight".to_owned()],
+                extended: Vec::new(),
                 optional: Vec::new(),
                 observed_native: Vec::new(),
             }),

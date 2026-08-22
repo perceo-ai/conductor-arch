@@ -102,6 +102,177 @@ pub fn clear_profile(paths: &AppPaths) -> Result<bool> {
     }
 }
 
+// --- Saved clients -------------------------------------------------------
+//
+// A machine can hold any number of daemons it knows how to reach, with one of
+// them active. The active one is mirrored into `remote.json` on every change,
+// so `configured_remote_endpoint` — and therefore every CLI command, the
+// desktop bridge, and MCP — keeps reading a single file and needs no knowledge
+// of the list. `clients.json` is the list; `remote.json` is the selection.
+
+/// One saved daemon this machine can point at.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientProfile {
+    /// Stable key used by `remote use` and the desktop switcher.
+    pub id: String,
+    /// Human name shown in the UI; defaults to the address.
+    pub label: String,
+    pub address: String,
+    pub token: String,
+}
+
+/// The saved-client list plus which one is selected. No active id means this
+/// machine's local daemon.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientsFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_id: Option<String>,
+    #[serde(default)]
+    pub clients: Vec<ClientProfile>,
+}
+
+impl ClientsFile {
+    pub fn active(&self) -> Option<&ClientProfile> {
+        let id = self.active_id.as_deref()?;
+        self.clients.iter().find(|client| client.id == id)
+    }
+
+    /// Find by id first, then by exact label, then case-insensitively — so
+    /// `remote use devbox` works for a client labelled "Devbox".
+    pub fn find(&self, key: &str) -> Option<&ClientProfile> {
+        let key = key.trim();
+        self.clients
+            .iter()
+            .find(|c| c.id == key)
+            .or_else(|| self.clients.iter().find(|c| c.label == key))
+            .or_else(|| {
+                self.clients
+                    .iter()
+                    .find(|c| c.label.eq_ignore_ascii_case(key) || c.id.eq_ignore_ascii_case(key))
+            })
+    }
+
+    /// Add or update by address — reconnecting to a known daemon should refresh
+    /// its token rather than accumulate duplicates. Returns the client's id.
+    pub fn upsert(&mut self, label: Option<&str>, address: &str, token: &str) -> String {
+        let address = address.trim().to_owned();
+        let token = token.trim().to_owned();
+        if let Some(existing) = self.clients.iter_mut().find(|c| c.address == address) {
+            existing.token = token;
+            if let Some(label) = label.map(str::trim).filter(|l| !l.is_empty()) {
+                existing.label = label.to_owned();
+            }
+            return existing.id.clone();
+        }
+        let label = label
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .unwrap_or(&address)
+            .to_owned();
+        let id = self.unique_id(&client_id_from(&label));
+        self.clients.push(ClientProfile {
+            id: id.clone(),
+            label,
+            address,
+            token,
+        });
+        id
+    }
+
+    /// Remove by id or label. Clears the selection when the active one goes.
+    pub fn remove(&mut self, key: &str) -> bool {
+        let Some(id) = self.find(key).map(|c| c.id.clone()) else {
+            return false;
+        };
+        self.clients.retain(|c| c.id != id);
+        if self.active_id.as_deref() == Some(id.as_str()) {
+            self.active_id = None;
+        }
+        true
+    }
+
+    fn unique_id(&self, base: &str) -> String {
+        if !self.clients.iter().any(|c| c.id == base) {
+            return base.to_owned();
+        }
+        (2..)
+            .map(|n| format!("{base}-{n}"))
+            .find(|candidate| !self.clients.iter().any(|c| &c.id == candidate))
+            .expect("an unused suffix always exists")
+    }
+}
+
+/// Slug for a label: lowercase, non-alphanumerics collapsed to single dashes.
+fn client_id_from(label: &str) -> String {
+    let mut id = String::new();
+    for ch in label.chars() {
+        if ch.is_ascii_alphanumeric() {
+            id.push(ch.to_ascii_lowercase());
+        } else if !id.ends_with('-') {
+            id.push('-');
+        }
+    }
+    let id = id.trim_matches('-').to_owned();
+    if id.is_empty() {
+        "client".to_owned()
+    } else {
+        id
+    }
+}
+
+pub fn clients_path(paths: &AppPaths) -> PathBuf {
+    paths.state_dir.join("clients.json")
+}
+
+/// Load the saved clients. A machine that only ever used `remote connect`
+/// before this file existed still has a `remote.json`; adopt it as the first
+/// client so upgrading does not silently drop the connection.
+pub fn load_clients(paths: &AppPaths) -> Result<ClientsFile> {
+    let path = clients_path(paths);
+    let mut file = match std::fs::read_to_string(&path) {
+        Ok(contents) => serde_json::from_str::<ClientsFile>(&contents)
+            .with_context(|| format!("parse saved clients {}", path.display()))?,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => ClientsFile::default(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("read saved clients {}", path.display()))
+        }
+    };
+    file.clients
+        .retain(|c| !c.address.trim().is_empty() && !c.token.trim().is_empty());
+    if file.active().is_none() {
+        file.active_id = None;
+    }
+    if file.clients.is_empty() {
+        if let Some(profile) = load_profile(paths)? {
+            let id = file.upsert(None, &profile.address, &profile.token);
+            file.active_id = Some(id);
+        }
+    }
+    Ok(file)
+}
+
+/// Persist the list (owner-only: it holds every token) and mirror the active
+/// client into `remote.json` so every existing reader follows the selection.
+pub fn save_clients(paths: &AppPaths, file: &ClientsFile) -> Result<()> {
+    std::fs::create_dir_all(&paths.state_dir)
+        .with_context(|| format!("create archcar state dir {}", paths.state_dir.display()))?;
+    let path = clients_path(paths);
+    let body = serde_json::to_string_pretty(file)?;
+    std::fs::write(&path, format!("{body}\n"))
+        .with_context(|| format!("write saved clients {}", path.display()))?;
+    restrict_to_owner(&path)?;
+    match file.active() {
+        Some(client) => save_profile(
+            paths,
+            &RemoteProfile {
+                address: client.address.clone(),
+                token: client.token.clone(),
+            },
+        ),
+        None => clear_profile(paths).map(|_| ()),
+    }
+}
+
 /// Read the access token, creating one on first use. The file is owner-only:
 /// anyone who can read it can drive every workspace on this machine.
 pub fn ensure_token(paths: &AppPaths) -> Result<String> {
@@ -275,6 +446,173 @@ mod tests {
             database_path: dir.join("data/archductor.db"),
             logs_dir: dir.join("state/logs"),
         }
+    }
+
+    #[test]
+    fn saving_clients_mirrors_the_active_one_into_the_remote_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+
+        let mut file = ClientsFile::default();
+        let devbox = file.upsert(Some("Devbox"), "devbox:7420", "tok-a");
+        let builder = file.upsert(Some("Builder"), "builder:7420", "tok-b");
+        file.active_id = Some(builder.clone());
+        save_clients(&paths, &file).unwrap();
+
+        // Every existing reader goes through the profile, so it must follow.
+        let profile = load_profile(&paths).unwrap().unwrap();
+        assert_eq!(profile.address, "builder:7420");
+        assert_eq!(profile.token, "tok-b");
+
+        // Switching rewrites the mirror rather than accumulating state.
+        let mut file = load_clients(&paths).unwrap();
+        assert_eq!(file.clients.len(), 2);
+        file.active_id = Some(devbox);
+        save_clients(&paths, &file).unwrap();
+        assert_eq!(
+            load_profile(&paths).unwrap().unwrap().address,
+            "devbox:7420"
+        );
+
+        // Selecting this machine clears the mirror entirely.
+        file.active_id = None;
+        save_clients(&paths, &file).unwrap();
+        assert!(load_profile(&paths).unwrap().is_none());
+        assert_eq!(load_clients(&paths).unwrap().clients.len(), 2);
+    }
+
+    #[test]
+    fn reconnecting_to_a_known_address_refreshes_it_instead_of_duplicating() {
+        let mut file = ClientsFile::default();
+        let first = file.upsert(Some("Devbox"), "devbox:7420", "old");
+        let again = file.upsert(None, "devbox:7420", "new");
+
+        assert_eq!(first, again);
+        assert_eq!(file.clients.len(), 1);
+        assert_eq!(file.clients[0].token, "new");
+        assert_eq!(
+            file.clients[0].label, "Devbox",
+            "an unnamed reconnect keeps the label"
+        );
+    }
+
+    #[test]
+    fn client_ids_are_slugs_and_stay_unique() {
+        let mut file = ClientsFile::default();
+        file.upsert(Some("My Devbox!"), "a:1", "t");
+        file.upsert(Some("My Devbox!"), "b:2", "t");
+        file.upsert(Some("   "), "c:3", "t");
+
+        let ids: Vec<_> = file.clients.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["my-devbox", "my-devbox-2", "c-3"]);
+        assert_eq!(
+            file.clients[2].label, "c:3",
+            "a blank label falls back to the address"
+        );
+    }
+
+    #[test]
+    fn clients_are_found_by_id_or_label_and_removal_clears_the_selection() {
+        let mut file = ClientsFile::default();
+        let id = file.upsert(Some("Devbox"), "devbox:7420", "tok");
+        file.active_id = Some(id.clone());
+
+        assert_eq!(
+            file.find("devbox").map(|c| c.id.as_str()),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            file.find("Devbox").map(|c| c.id.as_str()),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            file.find("DEVBOX").map(|c| c.id.as_str()),
+            Some(id.as_str())
+        );
+        assert!(file.find("nope").is_none());
+
+        assert!(file.remove("Devbox"));
+        assert!(file.clients.is_empty());
+        assert_eq!(
+            file.active_id, None,
+            "removing the active client selects this machine"
+        );
+        assert!(!file.remove("Devbox"));
+    }
+
+    #[test]
+    fn an_existing_single_profile_is_adopted_as_the_first_client() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        save_profile(
+            &paths,
+            &RemoteProfile {
+                address: "devbox:7420".to_owned(),
+                token: "tok".to_owned(),
+            },
+        )
+        .unwrap();
+
+        let file = load_clients(&paths).unwrap();
+
+        assert_eq!(
+            file.clients.len(),
+            1,
+            "upgrading must not drop the connection"
+        );
+        assert_eq!(
+            file.active().map(|c| c.address.as_str()),
+            Some("devbox:7420")
+        );
+        assert_eq!(file.clients[0].label, "devbox:7420");
+    }
+
+    #[test]
+    fn an_active_id_with_no_matching_client_falls_back_to_this_machine() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        std::fs::write(
+            clients_path(&paths),
+            r#"{"active_id":"ghost","clients":[{"id":"devbox","label":"Devbox","address":"devbox:7420","token":"tok"}]}"#,
+        )
+        .unwrap();
+
+        let file = load_clients(&paths).unwrap();
+
+        assert_eq!(file.active_id, None);
+        assert_eq!(file.clients.len(), 1);
+    }
+
+    #[test]
+    fn clients_with_a_blank_address_or_token_are_dropped_on_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        std::fs::write(
+            clients_path(&paths),
+            r#"{"clients":[{"id":"a","label":"A","address":"","token":"t"},{"id":"b","label":"B","address":"b:1","token":"  "}]}"#,
+        )
+        .unwrap();
+
+        assert!(load_clients(&paths).unwrap().clients.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clients_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        let mut file = ClientsFile::default();
+        file.upsert(Some("Devbox"), "devbox:7420", "tok");
+        save_clients(&paths, &file).unwrap();
+
+        let mode = std::fs::metadata(clients_path(&paths))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the file holds every client's token");
     }
 
     #[test]

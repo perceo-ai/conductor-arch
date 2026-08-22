@@ -170,20 +170,38 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RemoteCommand {
-    /// Save a remote daemon profile (and verify the daemon responds).
+    /// Save a remote daemon as a client and switch to it (verifies it responds).
     Connect {
         /// `host:port` of the remote archcar TCP listener.
         address: String,
         /// Access token (print it on the server with `archductor service token`).
         #[arg(long)]
         token: String,
-        /// Save the profile without contacting the daemon.
+        /// Name for this client in the switcher; defaults to the address.
+        #[arg(long)]
+        label: Option<String>,
+        /// Save the client without contacting the daemon.
         #[arg(long)]
         no_verify: bool,
     },
+    /// List the saved clients, marking the active one.
+    List,
+    /// Switch to a saved client by name or id.
+    Use {
+        /// Client name or id; `local` or `this-machine` selects the local daemon.
+        client: String,
+        /// Switch without contacting the daemon first.
+        #[arg(long)]
+        no_verify: bool,
+    },
+    /// Forget a saved client.
+    Remove {
+        /// Client name or id.
+        client: String,
+    },
     /// Show where archcar requests from this machine currently go.
     Status,
-    /// Remove the saved remote profile and use the local daemon again.
+    /// Switch back to this machine's local daemon (saved clients are kept).
     Disconnect,
 }
 
@@ -221,13 +239,13 @@ enum HistoryCommand {
 enum ArchcarCommand {
     Ensure {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
+        kind: SessionKind,
     },
     Spawn {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "shell")]
+        kind: SessionKind,
     },
     Status {
         session_id: i64,
@@ -306,6 +324,46 @@ enum ArchcarCommand {
     InventorySnapshot,
     /// List repositories with workspace counts.
     Repositories,
+    /// List agent skills installed on the daemon's machine.
+    Skills,
+    /// List GitHub Actions runs for a workspace's branch.
+    WorkflowRuns {
+        workspace: String,
+    },
+    /// List installable skills from the catalog.
+    SkillCatalog,
+    /// Install a catalog skill into every provider (or the ones named).
+    InstallSkill {
+        name: String,
+        #[arg(long)]
+        provider: Vec<String>,
+    },
+    /// Show what syncing skills and MCP servers across providers would write.
+    SyncPlan,
+    /// Sync skills and MCP servers across providers (adds only, never deletes).
+    Sync,
+    /// Register a git repository with the daemon (paths resolve on the daemon's
+    /// machine, so this works against a remote where `repo add` cannot).
+    AddRepository {
+        /// Path to an existing git repository, on the daemon's filesystem.
+        path: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        remote_name: Option<String>,
+        #[arg(long)]
+        default_branch: Option<String>,
+        #[arg(long)]
+        workspace_parent: Option<String>,
+    },
+    /// Create a workspace (worktree + branch) on the daemon.
+    CreateWorkspace {
+        repository: String,
+        name: String,
+        branch: String,
+        #[arg(long)]
+        base_ref: Option<String>,
+    },
     /// List chat threads for a workspace.
     ChatThreads {
         workspace: String,
@@ -510,6 +568,8 @@ enum ArchcarCommand {
     Branches {
         repository: String,
     },
+    /// List every agent this build knows and how completely it drives each.
+    Providers,
     /// List a repository's available prompt packs and the active one.
     PromptPacks {
         repository: String,
@@ -771,8 +831,8 @@ enum ArchcarQueueCommand {
         thread_id: i64,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
         kind: CliArchcarInputKind,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
-        session_kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
+        session_kind: SessionKind,
         #[arg(long)]
         visible_input: Option<String>,
         input: Vec<String>,
@@ -1012,8 +1072,8 @@ enum WorkspaceBranchCommand {
 enum SessionCommand {
     Start {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "shell")]
+        kind: SessionKind,
         #[arg(long)]
         plan_mode: bool,
         #[arg(long)]
@@ -1035,8 +1095,8 @@ enum SessionCommand {
     },
     Open {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Shell)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "shell")]
+        kind: SessionKind,
         #[arg(long)]
         terminal: Option<String>,
         #[arg(long)]
@@ -1072,8 +1132,8 @@ enum SessionCommand {
     },
     Send {
         workspace: String,
-        #[arg(long, value_enum, default_value_t = CliSessionKind::Codex)]
-        kind: CliSessionKind,
+        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
+        kind: SessionKind,
         #[arg(long)]
         thread_id: Option<i64>,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
@@ -1173,13 +1233,6 @@ enum CheckpointCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum CliSessionKind {
-    Shell,
-    Codex,
-    Claude,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum CliArchcarInputKind {
     User,
     ReviewPrompt,
@@ -1229,6 +1282,19 @@ fn run_cli() -> Result<()> {
     }
     let cli = Cli::parse();
     let paths = AppPaths::from_env();
+
+    // These commands read this machine's SQLite database directly. Pointed at a
+    // remote daemon they would quietly maintain a second, divergent inventory
+    // while `remote status` and every `archcar` verb talk to the server.
+    if let Some(name) = local_store_command_name(&cli.command) {
+        if let Some(ArchcarEndpoint::Remote { address, .. }) = configured_remote_endpoint(&paths)? {
+            anyhow::bail!(
+                "`archductor {name}` reads this machine's database, but Archductor is connected to \
+                 the remote daemon at {address}.\nUse `archductor archcar <command>` for \
+                 remote-backed work, or run `archductor remote disconnect` first."
+            );
+        }
+    }
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
@@ -1299,7 +1365,7 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(client.send(
                         ArchcarRequest::EnsureWorkspaceDefaultSession {
                             workspace,
-                            kind: kind.into(),
+                            kind,
                             harness: None,
                         },
                     )?);
@@ -1307,7 +1373,7 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::Spawn { workspace, kind } => {
                     print_archcar_response(client.send(ArchcarRequest::SpawnSession {
                         workspace,
-                        kind: kind.into(),
+                        kind,
                         harness: None,
                     })?);
                 }
@@ -1355,7 +1421,7 @@ fn run_cli() -> Result<()> {
                         input: input.join(" "),
                         visible_input,
                         kind: kind.into(),
-                        session_kind: session_kind.into(),
+                        session_kind,
                     })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
@@ -1519,6 +1585,61 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Repositories => {
                     print_archcar_response(client.send(ArchcarRequest::ListRepositories)?);
+                }
+                ArchcarCommand::Skills => {
+                    print_archcar_response(client.send(ArchcarRequest::ListSkills)?);
+                }
+                ArchcarCommand::WorkflowRuns { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListWorkflowRuns { workspace })?,
+                    );
+                }
+                ArchcarCommand::SkillCatalog => {
+                    print_archcar_response(client.send(ArchcarRequest::ListSkillCatalog)?);
+                }
+                ArchcarCommand::InstallSkill { name, provider } => {
+                    print_archcar_response(client.send(ArchcarRequest::InstallCatalogSkill {
+                        name,
+                        providers: provider,
+                    })?);
+                }
+                ArchcarCommand::SyncPlan => {
+                    print_archcar_response(client.send(ArchcarRequest::GetSyncPlan {
+                        selection: Default::default(),
+                    })?);
+                }
+                ArchcarCommand::Sync => {
+                    print_archcar_response(client.send(ArchcarRequest::ApplySync {
+                        selection: Default::default(),
+                    })?);
+                }
+                ArchcarCommand::AddRepository {
+                    path,
+                    name,
+                    remote_name,
+                    default_branch,
+                    workspace_parent,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::AddRepository {
+                        path,
+                        name,
+                        remote_name,
+                        default_branch,
+                        workspace_parent,
+                    })?);
+                }
+                ArchcarCommand::CreateWorkspace {
+                    repository,
+                    name,
+                    branch,
+                    base_ref,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::CreateWorkspace {
+                        repository,
+                        name,
+                        branch,
+                        base_ref,
+                    })?);
                 }
                 ArchcarCommand::ChatThreads { workspace } => {
                     print_archcar_response(
@@ -2103,6 +2224,9 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::ListRepositoryBranches { repository })?,
                     );
                 }
+                ArchcarCommand::Providers => {
+                    print_archcar_response(client.send(ArchcarRequest::ListAgentProviders)?);
+                }
                 ArchcarCommand::PromptPacks { repository } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListPromptPacks { repository })?,
@@ -2642,7 +2766,7 @@ fn run_cli() -> Result<()> {
                     let process = if cli_session_start_uses_archcar(kind) {
                         let existing_ids = running_session_ids(&store, &workspace)?;
                         let client = ArchcarClient::from_paths(&paths);
-                        let kind: SessionKind = kind.into();
+                        let kind: SessionKind = kind;
                         print_archcar_response(client.send(ArchcarRequest::SpawnSession {
                             workspace: workspace.clone(),
                             kind,
@@ -2656,7 +2780,7 @@ fn run_cli() -> Result<()> {
                             Duration::from_secs(5),
                         )?
                     } else {
-                        store.start_session_with_options(&workspace, kind.into(), harness)?
+                        store.start_session_with_options(&workspace, kind, harness)?
                     };
                     println!(
                         "Started session for {} as pid {} (log: {})",
@@ -2682,7 +2806,7 @@ fn run_cli() -> Result<()> {
                 } => {
                     let launch = store.session_launch_with_options(
                         &workspace,
-                        kind.into(),
+                        kind,
                         SessionHarnessOptions {
                             plan_mode,
                             fast_mode,
@@ -2740,9 +2864,9 @@ fn run_cli() -> Result<()> {
                     immediate,
                     message,
                 } => {
-                    let kind: SessionKind = kind.into();
+                    let kind: SessionKind = kind;
                     anyhow::ensure!(
-                        matches!(kind, SessionKind::Codex | SessionKind::Claude),
+                        matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE),
                         "session send supports codex and claude"
                     );
                     let input = message_text_or_stdin(message)?;
@@ -2872,29 +2996,79 @@ fn run_cli() -> Result<()> {
             RemoteCommand::Connect {
                 address,
                 token,
+                label,
                 no_verify,
             } => {
                 let address = address.trim().to_owned();
                 let token = token.trim().to_owned();
                 if !no_verify {
-                    let client = ArchcarClient::remote(address.clone(), token.clone());
-                    match client.send(ArchcarRequest::GetRemoteAccess)? {
-                        ArchcarResponse::Error { message } => {
-                            anyhow::bail!("remote daemon at {address} refused: {message}")
-                        }
-                        _ => println!("Verified archcar at {address}."),
-                    }
+                    verify_client(&address, &token)?;
                 }
-                remote::save_profile(
-                    &paths,
-                    &remote::RemoteProfile {
-                        address: address.clone(),
-                        token,
-                    },
-                )?;
+                let mut clients = remote::load_clients(&paths)?;
+                let id = clients.upsert(label.as_deref(), &address, &token);
+                clients.active_id = Some(id);
+                remote::save_clients(&paths, &clients)?;
                 println!("Connected: this machine's Archductor clients now use {address}.");
-                println!("Profile: {}", remote::profile_path(&paths).display());
-                println!("Disconnect with `archductor remote disconnect`.");
+                println!("Saved clients: {}", remote::clients_path(&paths).display());
+                println!("Switch with `archductor remote use <client>` or `remote disconnect`.");
+            }
+            RemoteCommand::List => {
+                let clients = remote::load_clients(&paths)?;
+                let env_remote = std::env::var(remote::REMOTE_ENV)
+                    .ok()
+                    .filter(|value| !value.trim().is_empty());
+                if let Some(address) = &env_remote {
+                    println!("  (environment)      {address}  <- overrides the selection below");
+                }
+                let marker = |active: bool| if active { "*" } else { " " };
+                println!(
+                    "{} this-machine       {}",
+                    marker(clients.active_id.is_none()),
+                    paths.archcar_endpoint_path().display()
+                );
+                for client in &clients.clients {
+                    println!(
+                        "{} {:<18} {}",
+                        marker(clients.active_id.as_deref() == Some(client.id.as_str())),
+                        client.id,
+                        client.address
+                    );
+                }
+            }
+            RemoteCommand::Use { client, no_verify } => {
+                let key = client.trim();
+                let mut clients = remote::load_clients(&paths)?;
+                if matches!(key, "local" | "this-machine" | "this machine") {
+                    clients.active_id = None;
+                    remote::save_clients(&paths, &clients)?;
+                    println!("Using this machine's local daemon.");
+                } else {
+                    let Some(target) = clients.find(key).cloned() else {
+                        anyhow::bail!(
+                            "no saved client named {key}; run `archductor remote list` to see them"
+                        );
+                    };
+                    if !no_verify {
+                        verify_client(&target.address, &target.token)?;
+                    }
+                    clients.active_id = Some(target.id.clone());
+                    remote::save_clients(&paths, &clients)?;
+                    println!("Switched to {} ({}).", target.label, target.address);
+                }
+            }
+            RemoteCommand::Remove { client } => {
+                let mut clients = remote::load_clients(&paths)?;
+                let was_active = clients
+                    .find(client.trim())
+                    .is_some_and(|c| clients.active_id.as_deref() == Some(c.id.as_str()));
+                if !clients.remove(client.trim()) {
+                    anyhow::bail!("no saved client named {client}");
+                }
+                remote::save_clients(&paths, &clients)?;
+                println!("Removed {client}.");
+                if was_active {
+                    println!("Now using this machine's local daemon.");
+                }
             }
             RemoteCommand::Status => {
                 let env_remote = std::env::var(remote::REMOTE_ENV)
@@ -2916,10 +3090,15 @@ fn run_cli() -> Result<()> {
                 }
             }
             RemoteCommand::Disconnect => {
-                if remote::clear_profile(&paths)? {
-                    println!("Removed the remote profile; using the local daemon.");
-                } else {
-                    println!("No remote profile was set.");
+                let mut clients = remote::load_clients(&paths)?;
+                match clients.active().map(|c| c.label.clone()) {
+                    Some(label) => {
+                        clients.active_id = None;
+                        remote::save_clients(&paths, &clients)?;
+                        println!("Left {label}; using this machine's local daemon.");
+                        println!("It stays saved — switch back with `archductor remote use`.");
+                    }
+                    None => println!("Already using this machine's local daemon."),
                 }
                 if std::env::var(remote::REMOTE_ENV).is_ok() {
                     println!(
@@ -3100,11 +3279,63 @@ fn change_scope(commit: Option<String>, default: WorkspaceChangeScope) -> Worksp
     }
 }
 
+/// Contact a daemon before pointing this machine at it, so a typo or a dead
+/// host fails here instead of leaving every surface talking to nothing.
+fn verify_client(address: &str, token: &str) -> Result<()> {
+    let client = ArchcarClient::remote(address.to_owned(), token.to_owned());
+    match client.send(ArchcarRequest::GetRemoteAccess)? {
+        ArchcarResponse::Error { message } => {
+            anyhow::bail!("remote daemon at {address} refused: {message}")
+        }
+        _ => {
+            println!("Verified archcar at {address}.");
+            Ok(())
+        }
+    }
+}
+
+/// The commands that open `WorkspaceStore`/`RepositoryStore` against the local
+/// database instead of going through `ArchcarClient`. Returns the name to print
+/// in the refusal, or `None` for commands that are safe under a remote profile.
+///
+/// `archcar`, `remote`, `service`, and `mcp` are absent on purpose: they either
+/// speak to the configured daemon already or configure the connection itself.
+/// `doctor`/`setup`/`settings` only touch host state and config files.
+fn local_store_command_name(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::History { .. } => Some("history"),
+        Command::Repo { .. } => Some("repo"),
+        Command::Workspace { .. } => Some("workspace"),
+        Command::Run { .. } => Some("run"),
+        Command::Stop { .. } => Some("stop"),
+        Command::Logs { .. } => Some("logs"),
+        Command::Runs { .. } => Some("runs"),
+        Command::Diff { .. } => Some("diff"),
+        Command::Pr { .. } => Some("pr"),
+        Command::Session { .. } => Some("session"),
+        Command::Todo { .. } => Some("todo"),
+        Command::Checks { .. } => Some("checks"),
+        Command::Open { .. } => Some("open"),
+        Command::Review { .. } => Some("review"),
+        Command::Archive { .. } => Some("archive"),
+        Command::Status => Some("status"),
+        Command::Checkpoint { .. } => Some("checkpoint"),
+        Command::Conflicts { .. } => Some("conflicts"),
+        Command::Discard { .. } => Some("discard"),
+        _ => None,
+    }
+}
+
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
         ArchcarResponse::SessionSpawnQueued { workspace, kind } => {
-            println!("queued {:?} session for {}", kind, workspace);
+            println!("queued {} session for {}", kind.display_name(), workspace);
+            // The id does not exist until the spawn lands, and `send` needs
+            // one — say where to get it rather than leaving a dead end.
+            println!(
+                "session id appears in `archductor archcar processes {workspace}` once it starts"
+            );
         }
         ArchcarResponse::SessionSpawned {
             session_id,
@@ -3123,14 +3354,23 @@ fn print_archcar_response(response: ArchcarResponse) {
             status,
             runtime_state,
             ready,
+            pending_interactions,
             capabilities,
         } => {
             println!(
-                "session {} status={} state={} ready={}",
+                "session {} status={} state={} ready={}{}",
                 session_id,
                 status,
                 runtime_state.as_str(),
-                ready
+                ready,
+                // Without this, a session parked on a question is reported as
+                // `waiting_for_input ready=false` — which reads as "still
+                // working" rather than "waiting on you".
+                if pending_interactions > 0 {
+                    format!(" awaiting-input={pending_interactions}")
+                } else {
+                    String::new()
+                }
             );
             if let Some(capabilities) = capabilities {
                 println!(
@@ -3173,7 +3413,7 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspaces {}", workspaces.len());
             for ws in workspaces {
                 println!(
-                    "{} repo={} branch={} status={} +{} -{} todos={} sessions={}{}",
+                    "{} repo={} branch={} status={} +{} -{} todos={} sessions={}{}{}",
                     ws.name,
                     ws.repository_name,
                     ws.branch,
@@ -3182,6 +3422,13 @@ fn print_archcar_response(response: ArchcarResponse) {
                     ws.diff_deletions,
                     ws.open_todos,
                     ws.active_sessions,
+                    // A blocked agent reads as busy without this; it is the
+                    // difference between "wait" and "go answer it".
+                    if ws.awaiting_input {
+                        " awaiting-input"
+                    } else {
+                        ""
+                    },
                     ws.pull_request_number
                         .map(|n| format!(" pr=#{n}"))
                         .unwrap_or_default()
@@ -3353,7 +3600,9 @@ fn print_archcar_response(response: ArchcarResponse) {
         }
         ArchcarResponse::CommitMessageDraft { workspace, message } => {
             println!("commit_message_draft {workspace}");
-            print!("{message}");
+            // Drafts have no trailing newline of their own, so printing them
+            // raw ran the message into the next shell prompt.
+            println!("{}", message.trim_end());
         }
         ArchcarResponse::CommitDiff {
             workspace,
@@ -3481,6 +3730,19 @@ fn print_archcar_response(response: ArchcarResponse) {
                 println!("{b}");
             }
         }
+        ArchcarResponse::AgentProviders { providers } => {
+            println!("agent_providers {}", providers.len());
+            for provider in providers {
+                println!(
+                    "{:<14} {:<20} launchable={:<5} tier={:<7} {}",
+                    provider.provider_key,
+                    provider.display_name,
+                    provider.launchable,
+                    provider.tier,
+                    provider.default_command
+                );
+            }
+        }
         ArchcarResponse::PromptPacks {
             repository,
             packs,
@@ -3538,6 +3800,93 @@ fn print_archcar_response(response: ArchcarResponse) {
                 summary.source_branch_ahead,
                 summary.conflicting_workspaces,
             );
+        }
+        ArchcarResponse::WorkflowRuns { workspace, summary } => {
+            match &summary.unavailable {
+                Some(reason) => println!("workflow_runs {workspace} unavailable: {reason}"),
+                None => println!(
+                    "workflow_runs {workspace} {} (failing={} running={} succeeded={})",
+                    summary.runs.len(),
+                    summary.failing,
+                    summary.running,
+                    summary.succeeded
+                ),
+            }
+            for run in summary.runs {
+                println!(
+                    "{:<28} {:<12} {:<10} #{} {}",
+                    run.name,
+                    run.status,
+                    if run.conclusion.is_empty() {
+                        "-"
+                    } else {
+                        &run.conclusion
+                    },
+                    run.number,
+                    run.url
+                );
+            }
+        }
+        ArchcarResponse::SkillCatalog { catalog } => {
+            println!("skill_catalog {}", catalog.skills.len());
+            for skill in catalog.skills {
+                println!(
+                    "{:<22} {:<12} {:<16} {}",
+                    skill.name,
+                    skill.category,
+                    if skill.installed_for.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        skill.installed_for.join(",")
+                    },
+                    skill.description
+                );
+            }
+        }
+        ArchcarResponse::SkillInstalled { name, targets } => {
+            println!("skill_installed {name}");
+            for target in targets {
+                println!("  {target}");
+            }
+        }
+        ArchcarResponse::SyncPlan { plan } => {
+            println!(
+                "sync_plan providers={} skills={} mcp_servers={} actions={}",
+                plan.providers.join(","),
+                plan.skills.len(),
+                plan.mcp_servers.len(),
+                plan.actions.len()
+            );
+            for action in plan.actions {
+                println!(
+                    "{:<6} {:<28} -> {:<8} {}{}",
+                    action.kind,
+                    action.item,
+                    action.provider,
+                    action.target,
+                    if action.overwrite { " (overwrite)" } else { "" }
+                );
+            }
+        }
+        ArchcarResponse::SyncApplied { applied } => {
+            println!("sync_applied {}", applied.len());
+            for action in applied {
+                println!(
+                    "{:<6} {:<28} -> {}",
+                    action.kind, action.item, action.provider
+                );
+            }
+        }
+        ArchcarResponse::Skills { skills } => {
+            println!("skills {}", skills.len());
+            for skill in skills {
+                println!(
+                    "{:<28} {:<16} {}",
+                    skill.name,
+                    skill.providers.join(","),
+                    skill.description
+                );
+            }
         }
         ArchcarResponse::Repositories { repositories } => {
             println!("repositories {}", repositories.len());
@@ -4034,12 +4383,24 @@ fn archcar_allow_resolution(always: bool) -> Result<ProviderInteractionResolutio
     Ok(ProviderInteractionResolution::Approve)
 }
 
-fn cli_session_start_uses_archcar(kind: CliSessionKind) -> bool {
-    matches!(kind, CliSessionKind::Codex | CliSessionKind::Claude)
+/// Only managed providers route through archcar; everything else, including
+/// registered agents with no adapter, runs as a local PTY session.
+fn cli_session_start_uses_archcar(kind: SessionKind) -> bool {
+    archductor_core::archcar::harness::managed_harness_for_kind(kind).is_some()
+}
+
+/// Builds the `--kind` parser from the registry, so `--help` lists every
+/// agent this build knows and an unknown value is rejected with that list
+/// rather than failing later as a missing executable.
+fn session_kind_parser() -> impl clap::builder::TypedValueParser<Value = SessionKind> {
+    use clap::builder::TypedValueParser as _;
+    let mut names = vec!["shell"];
+    names.extend(archductor_core::agent_tools::agent_tools().map(|tool| tool.provider_key));
+    clap::builder::PossibleValuesParser::new(names).map(|value| SessionKind::new(&value))
 }
 
 fn cli_session_stop_uses_archcar(kind: SessionKind) -> bool {
-    matches!(kind, SessionKind::Codex | SessionKind::Claude)
+    matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE)
 }
 
 fn render_archcar_protocol_messages(messages: &[ArchcarMessage]) -> String {
@@ -4388,16 +4749,6 @@ fn print_status(lines: Vec<WorkspaceStatusLine>) {
     }
 }
 
-impl From<CliSessionKind> for SessionKind {
-    fn from(value: CliSessionKind) -> Self {
-        match value {
-            CliSessionKind::Shell => Self::Shell,
-            CliSessionKind::Codex => Self::Codex,
-            CliSessionKind::Claude => Self::Claude,
-        }
-    }
-}
-
 impl From<CliArchcarInputKind> for ArchcarInputKind {
     fn from(value: CliArchcarInputKind) -> Self {
         match value {
@@ -4632,11 +4983,7 @@ fn render_manual_session_command(launch: &SessionLaunch) -> String {
 }
 
 fn session_kind_label(kind: SessionKind) -> &'static str {
-    match kind {
-        SessionKind::Shell => "shell",
-        SessionKind::Codex => "codex",
-        SessionKind::Claude => "claude",
-    }
+    kind.as_str()
 }
 
 fn command_session_kind_label(command: &str) -> &'static str {
@@ -4742,16 +5089,16 @@ fn session_kind_from_process_record(
     if let Some(thread_id) = record.chat_thread_id {
         let thread = store.get_chat_thread_record(thread_id)?;
         return Ok(match thread.provider.as_str() {
-            "codex" => SessionKind::Codex,
-            "claude" => SessionKind::Claude,
-            _ => SessionKind::Shell,
+            "codex" => SessionKind::CODEX,
+            "claude" => SessionKind::CLAUDE,
+            _ => SessionKind::SHELL,
         });
     }
 
     Ok(match command_session_kind_label(&record.command) {
-        "codex" => SessionKind::Codex,
-        "claude" => SessionKind::Claude,
-        _ => SessionKind::Shell,
+        "codex" => SessionKind::CODEX,
+        "claude" => SessionKind::CLAUDE,
+        _ => SessionKind::SHELL,
     })
 }
 
@@ -4808,7 +5155,7 @@ fn ensure_session_send_target(
 }
 
 fn session_send_waits_for_ready(kind: SessionKind, thread_has_visible_history: bool) -> bool {
-    !matches!(kind, SessionKind::Claude) || thread_has_visible_history
+    !matches!(kind, SessionKind::CLAUDE) || thread_has_visible_history
 }
 
 fn wait_for_archcar_session_ready(
@@ -5070,6 +5417,74 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    fn command_of(args: &[&str]) -> Command {
+        Cli::try_parse_from(args).unwrap().command
+    }
+
+    #[test]
+    fn direct_store_commands_are_named_so_a_remote_profile_can_refuse_them() {
+        for (args, expected) in [
+            (vec!["archductor", "status"], "status"),
+            (vec!["archductor", "repo", "list"], "repo"),
+            (vec!["archductor", "workspace", "list"], "workspace"),
+            (vec!["archductor", "conflicts", "ws"], "conflicts"),
+        ] {
+            assert_eq!(
+                local_store_command_name(&command_of(&args)),
+                Some(expected),
+                "{args:?} opens the local store and must be refused under a remote profile"
+            );
+        }
+    }
+
+    #[test]
+    fn connection_and_daemon_backed_commands_stay_usable_under_a_remote_profile() {
+        for args in [
+            vec!["archductor", "archcar", "workspaces"],
+            vec!["archductor", "remote", "status"],
+            vec!["archductor", "doctor"],
+            vec!["archductor", "mcp", "serve"],
+        ] {
+            assert_eq!(
+                local_store_command_name(&command_of(&args)),
+                None,
+                "{args:?} must keep working while a remote daemon is configured"
+            );
+        }
+    }
+
+    #[test]
+    fn archcar_gained_the_verbs_a_remote_only_client_needs_to_bootstrap() {
+        let add = command_of(&["archductor", "archcar", "add-repository", "/srv/repo"]);
+        let Command::Archcar {
+            command: ArchcarCommand::AddRepository { path, .. },
+        } = add
+        else {
+            panic!("expected archcar add-repository");
+        };
+        assert_eq!(path, "/srv/repo");
+
+        let create = command_of(&[
+            "archductor",
+            "archcar",
+            "create-workspace",
+            "demo",
+            "ws",
+            "feature/ws",
+        ]);
+        let Command::Archcar {
+            command:
+                ArchcarCommand::CreateWorkspace {
+                    repository, branch, ..
+                },
+        } = create
+        else {
+            panic!("expected archcar create-workspace");
+        };
+        assert_eq!(repository, "demo");
+        assert_eq!(branch, "feature/ws");
+    }
+
     #[test]
     fn parses_app_shared_settings_export() {
         let cli = Cli::try_parse_from([
@@ -5155,7 +5570,7 @@ mod tests {
     #[test]
     fn windows_manual_session_command_sets_env_and_changes_drive() {
         let launch = SessionLaunch {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             program: PathBuf::from("codex.exe"),
             args: vec!["--model".to_owned(), "gpt-test".to_owned()],
             cwd: PathBuf::from(r"C:\work space"),
@@ -5178,7 +5593,7 @@ mod tests {
     #[cfg(not(windows))]
     fn manual_session_command_includes_workspace_env_and_program() {
         let launch = SessionLaunch {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             program: PathBuf::from("codex"),
             args: Vec::new(),
             cwd: PathBuf::from("/tmp/work space"),
@@ -5204,7 +5619,7 @@ mod tests {
     #[test]
     fn manual_codex_session_command_keeps_bootstrap_env_out_of_prompt() {
         let launch = SessionLaunch {
-            kind: SessionKind::Codex,
+            kind: SessionKind::CODEX,
             program: PathBuf::from("codex"),
             args: vec!["--model".to_owned(), "gpt-5.6-sol".to_owned()],
             cwd: PathBuf::from("/tmp/work"),
@@ -5288,16 +5703,16 @@ mod tests {
 
     #[test]
     fn cli_session_start_routes_provider_native_agents_through_archcar() {
-        assert!(cli_session_start_uses_archcar(CliSessionKind::Codex));
-        assert!(cli_session_start_uses_archcar(CliSessionKind::Claude));
-        assert!(!cli_session_start_uses_archcar(CliSessionKind::Shell));
+        assert!(cli_session_start_uses_archcar(SessionKind::CODEX));
+        assert!(cli_session_start_uses_archcar(SessionKind::CLAUDE));
+        assert!(!cli_session_start_uses_archcar(SessionKind::SHELL));
     }
 
     #[test]
     fn cli_session_stop_routes_provider_native_agents_through_archcar() {
-        assert!(cli_session_stop_uses_archcar(SessionKind::Codex));
-        assert!(cli_session_stop_uses_archcar(SessionKind::Claude));
-        assert!(!cli_session_stop_uses_archcar(SessionKind::Shell));
+        assert!(cli_session_stop_uses_archcar(SessionKind::CODEX));
+        assert!(cli_session_stop_uses_archcar(SessionKind::CLAUDE));
+        assert!(!cli_session_stop_uses_archcar(SessionKind::SHELL));
     }
 
     #[test]
@@ -5519,7 +5934,7 @@ mod tests {
         };
         assert_eq!(thread_id, 42);
         assert_eq!(kind, CliArchcarInputKind::ReviewPrompt);
-        assert_eq!(session_kind, CliSessionKind::Claude);
+        assert_eq!(session_kind, SessionKind::CLAUDE);
         assert_eq!(visible_input.as_deref(), Some("Review staged comments"));
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
 
@@ -5687,7 +6102,7 @@ mod tests {
         };
 
         assert_eq!(workspace, "berlin");
-        assert_eq!(kind, CliSessionKind::Claude);
+        assert_eq!(kind, SessionKind::CLAUDE);
         assert_eq!(thread_id, Some(42));
         assert_eq!(input_kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
@@ -5738,9 +6153,9 @@ mod tests {
 
     #[test]
     fn cli_claude_session_send_does_not_wait_for_ready_before_first_input() {
-        assert!(!session_send_waits_for_ready(SessionKind::Claude, false));
-        assert!(session_send_waits_for_ready(SessionKind::Claude, true));
-        assert!(session_send_waits_for_ready(SessionKind::Codex, false));
+        assert!(!session_send_waits_for_ready(SessionKind::CLAUDE, false));
+        assert!(session_send_waits_for_ready(SessionKind::CLAUDE, true));
+        assert!(session_send_waits_for_ready(SessionKind::CODEX, false));
     }
 
     fn session_send_thread_target(cli: Cli) -> Option<(i64, String)> {
@@ -5756,7 +6171,7 @@ mod tests {
         else {
             return None;
         };
-        if kind == CliSessionKind::Claude {
+        if kind == SessionKind::CLAUDE {
             thread_id.map(|thread_id| (thread_id, message.join(" ")))
         } else {
             None

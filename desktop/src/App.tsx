@@ -10,6 +10,8 @@ import CommandPalette from "./components/CommandPalette";
 import ShortcutsHelp from "./components/ShortcutsHelp";
 import Icon from "./components/Icon";
 import { PageStack } from "./pages";
+import { runShellAction } from "./lib/shellAction";
+import { providersStore } from "./store/providers";
 import {
   startStore,
   setupStore,
@@ -113,7 +115,12 @@ export default function App() {
   onMount(() => {
     // Connect the archcar event stream into the reactive store, then probe host
     // setup readiness. A blocking modal gates the app until setup is complete.
-    void startStore().then(() => setupStore.check().catch(() => undefined));
+    void startStore().then(() => {
+      setupStore.check().catch(() => undefined);
+      // The provider registry belongs to whichever daemon we are pointed at, so
+      // it is pulled per connection rather than baked into the renderer.
+      providersStore.load().catch(() => undefined);
+    });
   });
 
   // Links inside rendered markdown (chat, plans, briefings) are real anchors;
@@ -325,7 +332,7 @@ export default function App() {
         }
         case "open-in-app": {
           const path = activeWorkspace()?.path;
-          if (path) void openExternal(path);
+          if (path) runShellAction("Open workspace", openExternal(path));
           break;
         }
         case "open-menu":
@@ -349,14 +356,18 @@ export default function App() {
         <WindowControls />
       </Show>
       <div class="window-content">
-        <Sidebar
-          collapsed={sidebarCollapsed()}
-          onToggle={() => setSidebarCollapsed((c) => !c)}
-        />
-        <Show when={sidebarCollapsed()}>
-          <button class="ui-button-icon reopen-sidebar" onClick={() => setSidebarCollapsed(false)}>
-            <Icon name="panel-right" />
-          </button>
+        {/* Settings brings its own left column and takes over the window;
+            showing both would put two navigation rails side by side. */}
+        <Show when={nav.activePage() !== "settings"}>
+          <Sidebar
+            collapsed={sidebarCollapsed()}
+            onToggle={() => setSidebarCollapsed((c) => !c)}
+          />
+          <Show when={sidebarCollapsed()}>
+            <button class="ui-button-icon reopen-sidebar" onClick={() => setSidebarCollapsed(false)}>
+              <Icon name="panel-right" />
+            </button>
+          </Show>
         </Show>
         <PageStack />
       </div>

@@ -157,6 +157,146 @@ export function resolveRemoteConfig(
   return null;
 }
 
+// --- Saved clients -----------------------------------------------------------
+// Mirrors crates/core/src/archcar/remote.rs: `clients.json` is the list of
+// daemons this machine knows, `remote.json` is the selection. Writing the
+// mirror on every change is what lets the CLI, MCP, and this bridge keep
+// reading one file while the switcher manages many.
+
+export interface ClientProfile {
+  id: string;
+  label: string;
+  address: string;
+  token: string;
+}
+
+/** On-disk shape — snake_case `active_id` matches the Rust serde field. */
+export interface ClientsFile {
+  active_id?: string;
+  clients: ClientProfile[];
+}
+
+export function clientsPath(): string {
+  return path.join(stateDir(), "clients.json");
+}
+
+/** Slug for a label: lowercase, non-alphanumerics collapsed to single dashes. */
+export function clientIdFrom(label: string): string {
+  const id = label
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .toLowerCase()
+    .replace(/^-+|-+$/g, "");
+  return id || "client";
+}
+
+/**
+ * Pure parse (exported for tests). Drops incomplete entries, forgets an active
+ * id with no matching client, and adopts a pre-existing single profile so a
+ * machine that only ever ran `remote connect` keeps its connection.
+ */
+export function parseClients(raw: string | null, profileRaw: string | null): ClientsFile {
+  let file: ClientsFile = { clients: [] };
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Partial<ClientsFile>;
+      file = {
+        active_id: parsed.active_id,
+        clients: Array.isArray(parsed.clients) ? parsed.clients : [],
+      };
+    } catch {
+      // A malformed list falls back to the local daemon rather than wedging
+      // the app; the next save rewrites it.
+      file = { clients: [] };
+    }
+  }
+  file.clients = file.clients.filter(
+    (c) => c && c.id && c.address?.trim() && c.token?.trim(),
+  );
+  if (!file.clients.some((c) => c.id === file.active_id)) delete file.active_id;
+  if (file.clients.length === 0 && profileRaw) {
+    try {
+      const profile = JSON.parse(profileRaw) as { address?: string; token?: string };
+      const address = profile.address?.trim();
+      const token = profile.token?.trim();
+      if (address && token) {
+        const id = clientIdFrom(address);
+        file = { active_id: id, clients: [{ id, label: address, address, token }] };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return file;
+}
+
+/** Add or update by address, returning the client's id. */
+export function upsertClient(
+  file: ClientsFile,
+  label: string | undefined,
+  address: string,
+  token: string,
+): string {
+  const trimmedAddress = address.trim();
+  const trimmedToken = token.trim();
+  const trimmedLabel = label?.trim();
+  const existing = file.clients.find((c) => c.address === trimmedAddress);
+  if (existing) {
+    existing.token = trimmedToken;
+    if (trimmedLabel) existing.label = trimmedLabel;
+    return existing.id;
+  }
+  const base = clientIdFrom(trimmedLabel || trimmedAddress);
+  let id = base;
+  for (let n = 2; file.clients.some((c) => c.id === id); n += 1) id = `${base}-${n}`;
+  file.clients.push({ id, label: trimmedLabel || trimmedAddress, address: trimmedAddress, token: trimmedToken });
+  return id;
+}
+
+export function loadClients(): ClientsFile {
+  const read = (p: string): string | null => {
+    try {
+      return fs.readFileSync(p, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  return parseClients(read(clientsPath()), read(remoteProfilePath()));
+}
+
+/** Persist the list owner-only and mirror the active client into remote.json. */
+export function saveClients(file: ClientsFile): void {
+  fs.mkdirSync(path.dirname(clientsPath()), { recursive: true });
+  fs.writeFileSync(clientsPath(), JSON.stringify(file, null, 2) + "\n", { mode: 0o600 });
+  const active = file.clients.find((c) => c.id === file.active_id);
+  if (active) {
+    fs.writeFileSync(
+      remoteProfilePath(),
+      JSON.stringify({ address: active.address, token: active.token }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
+  } else {
+    fs.rmSync(remoteProfilePath(), { force: true });
+  }
+}
+
+/**
+ * Guard for IPC handlers that read the client's filesystem or shell out to
+ * local tools. When a remote daemon owns the workspaces, every `rootPath` in
+ * the UI names a directory on *that* machine, so `existsSync`/`git -C`/`gh`
+ * run here answer about the wrong disk. Returning a reason beats failing
+ * silently or — worse — reporting a daemon-side path as deleted.
+ */
+export function remoteHandlerBlock(
+  config: RemoteConfig | null,
+  action: string,
+): { ok: false; error: string } | null {
+  if (!config) return null;
+  return {
+    ok: false,
+    error: `${action} needs the files on this machine, but Archductor is connected to the daemon at ${config.address}. Disconnect under Settings → Clients to work with local paths.`,
+  };
+}
+
 export function loadRemoteConfig(): RemoteConfig | null {
   const readFile = (p: string): string | null => {
     try {

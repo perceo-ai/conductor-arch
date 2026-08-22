@@ -4,11 +4,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::archcar::harness::ClaudeHarnessController;
 use crate::archcar::harness_contract::{
     HarnessAdapterContext, HarnessCapability, HarnessControl, HarnessControlPlan,
-    HarnessDescriptor, HarnessEffect, HarnessInput, HarnessPreflightSpec, HarnessRecoveryCause,
-    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, InteractionAnswer, InteractionOption,
-    InteractionQuestion, ManagedHarness, ManagedHarnessAdapter, NativeRecord, NativeWrite,
-    ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution, SupportMode,
-    MANAGED_HARNESS_CONTRACT_VERSION, REQUIRED_HARNESS_FEATURES,
+    HarnessDescriptor, HarnessEffect, HarnessFeature, HarnessInput, HarnessPreflightSpec,
+    HarnessRecoveryCause, HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, InteractionAnswer,
+    InteractionOption, InteractionQuestion, ManagedHarness, ManagedHarnessAdapter, NativeRecord,
+    NativeWrite, ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
+    SupportMode, CORE_HARNESS_FEATURES, MANAGED_HARNESS_CONTRACT_VERSION,
 };
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
@@ -36,9 +36,28 @@ const CLAUDE_OPTIONAL_CAPABILITIES: &[(HarnessCapability, SupportMode)] = &[
     ),
 ];
 
+/// Claude's stream-json transport covers most of the extended set natively,
+/// with two honest exceptions. It sends no per-input acknowledgement frame —
+/// the daemon infers receipt from `message_start`, so acknowledgement is an
+/// emulation rather than a provider guarantee. And model/effort changes cannot
+/// be applied to a live process, so session controls restart and resume.
+const CLAUDE_EXTENDED_FEATURES: &[(HarnessFeature, SupportMode)] = &[
+    (HarnessFeature::ThreadScopedSession, SupportMode::Native),
+    (HarnessFeature::InputAcknowledgement, SupportMode::Emulated),
+    (HarnessFeature::Queueing, SupportMode::Native),
+    (HarnessFeature::Interrupt, SupportMode::Native),
+    (HarnessFeature::Resume, SupportMode::Native),
+    (HarnessFeature::CrashRecovery, SupportMode::Native),
+    (
+        HarnessFeature::SessionControls,
+        SupportMode::RestartRequired,
+    ),
+    (HarnessFeature::ProviderInteractions, SupportMode::Native),
+];
+
 pub static CLAUDE_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     contract_version: MANAGED_HARNESS_CONTRACT_VERSION,
-    kind: SessionKind::Claude,
+    kind: SessionKind::CLAUDE,
     provider_key: CLAUDE_PROVIDER_NAME,
     display_name: "Claude Code",
     default_executable: "claude",
@@ -46,7 +65,8 @@ pub static CLAUDE_MANAGED_HARNESS_DESCRIPTOR: HarnessDescriptor = HarnessDescrip
         command: &["claude", "auth", "status"],
         auth_guidance: "Run `claude auth login`.",
     },
-    required_features: REQUIRED_HARNESS_FEATURES,
+    core_features: CORE_HARNESS_FEATURES,
+    extended_features: CLAUDE_EXTENDED_FEATURES,
     optional_capabilities: CLAUDE_OPTIONAL_CAPABILITIES,
 };
 
@@ -3631,8 +3651,8 @@ mod tests {
     #[test]
     fn capability_discovery_uses_contract_baseline_and_observed_init_values() {
         assert_eq!(
-            CLAUDE_MANAGED_HARNESS_DESCRIPTOR.required_features,
-            REQUIRED_HARNESS_FEATURES
+            CLAUDE_MANAGED_HARNESS_DESCRIPTOR.core_features,
+            CORE_HARNESS_FEATURES
         );
         let init = parse_claude_stream_json_lines(
             r#"{"type":"system","subtype":"init","session_id":"s1","capabilities":["streaming","future-capability"]}"#,

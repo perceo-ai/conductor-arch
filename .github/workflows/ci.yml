@@ -661,8 +661,12 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          targets: x86_64-pc-windows-gnu
+
+      # The target must land on the toolchain rust-toolchain.toml pins, not on
+      # whatever `stable` resolves to today, so add it after the override is in
+      # effect rather than through the action's `targets:` input.
+      - name: Add x86_64-pc-windows-gnu target
+        run: rustup target add x86_64-pc-windows-gnu
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -749,8 +753,12 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-        with:
-          targets: x86_64-unknown-linux-musl
+
+      # The target must land on the toolchain rust-toolchain.toml pins, not on
+      # whatever `stable` resolves to today, so add it after the override is in
+      # effect rather than through the action's `targets:` input.
+      - name: Add x86_64-unknown-linux-musl target
+        run: rustup target add x86_64-unknown-linux-musl
 
       - name: Build portable musl binaries
         run: cargo build -p archductor-core -p archductor -p archcar --target x86_64-unknown-linux-musl --locked

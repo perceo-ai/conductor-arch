@@ -1,10 +1,10 @@
 use super::harness::{managed_harness_for_kind, validate_managed_harness};
 use super::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessControl,
-    HarnessControlPlan, HarnessDescriptor, HarnessEffect, HarnessInput, HarnessRecoveryCause,
-    HarnessRecoveryPlan, HarnessSignal, HarnessTurnStatus, NativeRecord, ProviderInteractionDraft,
-    ProviderInteractionKind, ProviderInteractionResolution, RequiredHarnessFeature, SupportMode,
-    REQUIRED_HARNESS_FEATURES,
+    HarnessControlPlan, HarnessDescriptor, HarnessEffect, HarnessFeature, HarnessInput,
+    HarnessRecoveryCause, HarnessRecoveryPlan, HarnessSignal, HarnessTier, HarnessTurnStatus,
+    NativeRecord, ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
+    SupportMode, ALL_HARNESS_FEATURES, CORE_HARNESS_FEATURES, EXTENDED_HARNESS_FEATURES,
 };
 use super::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarInputDelivery, ArchcarInputKind,
@@ -29,7 +29,7 @@ trait ManagedHarnessConformanceDriver {
 #[derive(Debug)]
 struct HarnessConformanceReport {
     provider_key: &'static str,
-    passed: BTreeSet<RequiredHarnessFeature>,
+    passed: BTreeSet<HarnessFeature>,
 }
 
 fn run_managed_harness_conformance(
@@ -37,7 +37,7 @@ fn run_managed_harness_conformance(
 ) -> anyhow::Result<HarnessConformanceReport> {
     let mut passed = BTreeSet::new();
     driver.preflight()?;
-    passed.insert(RequiredHarnessFeature::Preflight);
+    passed.insert(HarnessFeature::Preflight);
 
     let initialized = driver.start_and_initialize()?;
     if initialized
@@ -47,9 +47,9 @@ fn run_managed_harness_conformance(
             .iter()
             .any(|effect| matches!(effect, HarnessEffect::Ready))
     {
-        passed.insert(RequiredHarnessFeature::ThreadScopedSession);
-        passed.insert(RequiredHarnessFeature::ProcessLifecycle);
-        passed.insert(RequiredHarnessFeature::Resume);
+        passed.insert(HarnessFeature::ThreadScopedSession);
+        passed.insert(HarnessFeature::ProcessLifecycle);
+        passed.insert(HarnessFeature::Resume);
     }
     if initialized.iter().any(|effect| {
         matches!(effect, HarnessEffect::CapabilitiesObserved(observed) if !observed.is_empty())
@@ -57,10 +57,11 @@ fn run_managed_harness_conformance(
         let snapshot =
             session_harness_capabilities_for_descriptor(driver.descriptor(), vec!["native".into()]);
         if snapshot.contract_version == 1
-            && snapshot.required.len() == REQUIRED_HARNESS_FEATURES.len()
+            && snapshot.required.len() == CORE_HARNESS_FEATURES.len()
+            && snapshot.extended.len() == EXTENDED_HARNESS_FEATURES.len()
             && snapshot.optional.len() == driver.descriptor().optional_capabilities.len()
         {
-            passed.insert(RequiredHarnessFeature::CapabilityDiscovery);
+            passed.insert(HarnessFeature::CapabilityDiscovery);
         }
     }
 
@@ -71,7 +72,7 @@ fn run_managed_harness_conformance(
         .iter()
         .any(|effect| matches!(effect, HarnessEffect::TurnStarted { .. }))
     {
-        passed.insert(RequiredHarnessFeature::InputDelivery);
+        passed.insert(HarnessFeature::InputDelivery);
     }
     if send_effects
         .iter()
@@ -79,13 +80,13 @@ fn run_managed_harness_conformance(
         .count()
         >= 2
     {
-        passed.insert(RequiredHarnessFeature::InputAcknowledgement);
+        passed.insert(HarnessFeature::InputAcknowledgement);
     }
     if send_effects
         .iter()
         .any(|effect| matches!(effect, HarnessEffect::ProviderEvent(_)))
     {
-        passed.insert(RequiredHarnessFeature::StreamingEvents);
+        passed.insert(HarnessFeature::StreamingEvents);
     }
     if send_effects
         .iter()
@@ -93,8 +94,8 @@ fn run_managed_harness_conformance(
         .count()
         >= 2
     {
-        passed.insert(RequiredHarnessFeature::ExactlyOnceTurnCompletion);
-        passed.insert(RequiredHarnessFeature::Queueing);
+        passed.insert(HarnessFeature::ExactlyOnceTurnCompletion);
+        passed.insert(HarnessFeature::Queueing);
     }
 
     let controls = driver.set_controls()?;
@@ -102,7 +103,7 @@ fn run_managed_harness_conformance(
         .iter()
         .any(|effect| matches!(effect, HarnessEffect::CapabilitiesObserved(_)))
     {
-        passed.insert(RequiredHarnessFeature::SessionControls);
+        passed.insert(HarnessFeature::SessionControls);
     }
     if controls.iter().any(|effect| {
         matches!(
@@ -115,7 +116,7 @@ fn run_managed_harness_conformance(
         driver.descriptor().optional(HarnessCapability::Goals),
         SupportMode::Unsupported { reason: "" }
     ) {
-        passed.insert(RequiredHarnessFeature::StructuredErrors);
+        passed.insert(HarnessFeature::StructuredErrors);
     }
 
     let interrupted = driver.interrupt()?;
@@ -128,7 +129,7 @@ fn run_managed_harness_conformance(
             }
         )
     }) {
-        passed.insert(RequiredHarnessFeature::Interrupt);
+        passed.insert(HarnessFeature::Interrupt);
     }
 
     let retried = driver.crash_and_resume(false)?;
@@ -140,7 +141,7 @@ fn run_managed_harness_conformance(
             .iter()
             .all(|effect| !matches!(effect, HarnessEffect::InputAcknowledged { .. }))
     {
-        passed.insert(RequiredHarnessFeature::CrashRecovery);
+        passed.insert(HarnessFeature::CrashRecovery);
     }
 
     let interactions = driver.interact_and_resolve()?;
@@ -153,11 +154,11 @@ fn run_managed_harness_conformance(
             .iter()
             .any(|effect| matches!(effect, HarnessEffect::InteractionResolved { .. }))
     {
-        passed.insert(RequiredHarnessFeature::ProviderInteractions);
+        passed.insert(HarnessFeature::ProviderInteractions);
     }
 
     if driver.kill_and_descendants()?.is_empty() {
-        passed.insert(RequiredHarnessFeature::ProcessLifecycle);
+        passed.insert(HarnessFeature::ProcessLifecycle);
     }
 
     Ok(HarnessConformanceReport {
@@ -302,8 +303,8 @@ impl ManagedHarnessConformanceDriver for DeterministicHarnessDriver {
 
 fn managed_harness_conformance_drivers() -> Vec<Box<dyn ManagedHarnessConformanceDriver>> {
     vec![
-        Box::new(DeterministicHarnessDriver::new(SessionKind::Codex)),
-        Box::new(DeterministicHarnessDriver::new(SessionKind::Claude)),
+        Box::new(DeterministicHarnessDriver::new(SessionKind::CODEX)),
+        Box::new(DeterministicHarnessDriver::new(SessionKind::CLAUDE)),
     ]
 }
 
@@ -350,14 +351,132 @@ fn interaction(provider_key: &str, kind: ProviderInteractionKind) -> ProviderInt
 
 #[test]
 fn codex_and_claude_implement_contract_v1() {
-    for kind in [SessionKind::Codex, SessionKind::Claude] {
+    for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
         let harness = managed_harness_for_kind(kind).expect("managed harness");
         assert_eq!(harness.descriptor().contract_version, 1);
-        assert_eq!(
-            harness.descriptor().required_features,
-            REQUIRED_HARNESS_FEATURES,
-        );
+        assert_eq!(harness.descriptor().core_features, CORE_HARNESS_FEATURES);
         validate_managed_harness(harness.as_ref()).expect("valid descriptor");
+    }
+}
+
+/// The two first-party providers are the reference implementations: whatever
+/// else joins the registry at a lower tier, these two stay complete.
+#[test]
+fn codex_and_claude_stay_full_tier() {
+    for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
+        let harness = managed_harness_for_kind(kind).expect("managed harness");
+        let descriptor = harness.descriptor();
+        assert_eq!(
+            descriptor.tier(),
+            HarnessTier::Full,
+            "{} dropped below full tier",
+            descriptor.provider_key,
+        );
+        for feature in ALL_HARNESS_FEATURES {
+            assert!(
+                descriptor.supports(*feature),
+                "{} no longer supports {}",
+                descriptor.provider_key,
+                feature.as_str(),
+            );
+        }
+    }
+}
+
+/// A descriptor that simply forgets a feature would read as unsupported at
+/// runtime, which is why registration rejects it rather than inferring intent.
+#[test]
+fn a_descriptor_missing_an_extended_declaration_is_rejected() {
+    let complete = &crate::provider_adapters::codex_app_server::CODEX_MANAGED_HARNESS_DESCRIPTOR;
+    for feature in EXTENDED_HARNESS_FEATURES {
+        assert!(
+            complete
+                .extended_features
+                .iter()
+                .any(|(candidate, _)| candidate == feature),
+            "codex is missing an explicit verdict for {}",
+            feature.as_str(),
+        );
+    }
+}
+
+/// Tier is computed, not stored, so it cannot claim more than the declarations
+/// support.
+#[test]
+fn tier_follows_the_extended_declarations() {
+    let uniform = |support: SupportMode| {
+        EXTENDED_HARNESS_FEATURES
+            .iter()
+            .map(|feature| (*feature, support.clone()))
+            .collect::<Vec<_>>()
+    };
+    let unsupported = SupportMode::Unsupported {
+        reason: "not implemented",
+    };
+    let mut mixed = uniform(unsupported.clone());
+    mixed[0].1 = SupportMode::Native;
+
+    assert_eq!(
+        descriptor_with(uniform(SupportMode::Native)).tier(),
+        HarnessTier::Full
+    );
+    assert_eq!(
+        descriptor_with(uniform(unsupported)).tier(),
+        HarnessTier::Basic
+    );
+    assert_eq!(descriptor_with(mixed).tier(), HarnessTier::Partial);
+    // An emulation is still support: it is honest about how, not whether.
+    assert_eq!(
+        descriptor_with(uniform(SupportMode::Emulated)).tier(),
+        HarnessTier::Full
+    );
+}
+
+/// A partial descriptor reports the specific gap rather than a blanket
+/// "unsupported provider", so the UI can grey one control instead of all of
+/// them.
+#[test]
+fn a_partial_descriptor_names_the_features_it_lacks() {
+    let mut extended = EXTENDED_HARNESS_FEATURES
+        .iter()
+        .map(|feature| (*feature, SupportMode::Native))
+        .collect::<Vec<_>>();
+    extended
+        .iter_mut()
+        .find(|(feature, _)| *feature == HarnessFeature::Resume)
+        .expect("resume is an extended feature")
+        .1 = SupportMode::Unsupported {
+        reason: "this agent has no session id to resume from",
+    };
+    let descriptor = descriptor_with(extended);
+
+    assert_eq!(descriptor.tier(), HarnessTier::Partial);
+    assert!(!descriptor.supports(HarnessFeature::Resume));
+    assert!(descriptor.supports(HarnessFeature::Interrupt));
+    // Core features stay supported regardless of the extended declarations.
+    assert!(descriptor.supports(HarnessFeature::Preflight));
+    assert_eq!(
+        descriptor.extended(HarnessFeature::Resume).reason(),
+        Some("this agent has no session id to resume from"),
+    );
+}
+
+/// Builds a real descriptor so the assertions exercise `tier()` itself rather
+/// than a copy of its arithmetic.
+fn descriptor_with(extended: Vec<(HarnessFeature, SupportMode)>) -> HarnessDescriptor {
+    HarnessDescriptor {
+        contract_version: 1,
+        kind: SessionKind::CODEX,
+        provider_key: "fixture",
+        display_name: "Fixture",
+        default_executable: "fixture",
+        preflight: super::harness_contract::HarnessPreflightSpec {
+            command: &["fixture", "--version"],
+            auth_guidance: "none",
+        },
+        core_features: CORE_HARNESS_FEATURES,
+        extended_features: Box::leak(extended.into_boxed_slice()),
+        optional_capabilities: &[],
     }
 }
 
@@ -365,8 +484,8 @@ fn codex_and_claude_implement_contract_v1() {
 fn managed_harnesses_pass_complete_required_conformance_matrix() -> anyhow::Result<()> {
     for mut driver in managed_harness_conformance_drivers() {
         let report = run_managed_harness_conformance(driver.as_mut())?;
-        assert_eq!(report.passed.len(), REQUIRED_HARNESS_FEATURES.len());
-        for required in REQUIRED_HARNESS_FEATURES {
+        assert_eq!(report.passed.len(), ALL_HARNESS_FEATURES.len());
+        for required in ALL_HARNESS_FEATURES {
             assert!(
                 report.passed.contains(required),
                 "{} is missing {required:?}",
@@ -379,8 +498,8 @@ fn managed_harnesses_pass_complete_required_conformance_matrix() -> anyhow::Resu
 
 #[test]
 fn optional_goal_support_is_explicit() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     assert_eq!(
         codex.descriptor().optional(HarnessCapability::Goals),
         SupportMode::Native
@@ -402,19 +521,21 @@ fn managed_provider_adapters_stay_isolated() {
 
 #[test]
 fn capability_snapshots_include_required_baseline_for_managed_providers() {
-    for kind in [SessionKind::Codex, SessionKind::Claude] {
+    for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
         let harness = managed_harness_for_kind(kind).expect("managed harness");
         let capabilities = session_harness_capabilities_for_descriptor(
             harness.descriptor(),
             vec!["native-extra".to_owned()],
         );
-        let required = REQUIRED_HARNESS_FEATURES
+        let required = CORE_HARNESS_FEATURES
             .iter()
             .map(|feature| feature.as_str().to_owned())
             .collect::<Vec<_>>();
 
         assert_eq!(capabilities.contract_version, 1);
         assert_eq!(capabilities.required, required);
+        assert_eq!(capabilities.tier, "full");
+        assert_eq!(capabilities.extended.len(), EXTENDED_HARNESS_FEATURES.len());
         assert_eq!(capabilities.observed_native, vec!["native-extra"]);
         assert_eq!(
             capabilities.optional.len(),
@@ -425,7 +546,7 @@ fn capability_snapshots_include_required_baseline_for_managed_providers() {
 
 #[test]
 fn claude_reconfigure_controls_require_resume_with_desired_controls() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
@@ -441,7 +562,7 @@ fn claude_reconfigure_controls_require_resume_with_desired_controls() {
 
 #[test]
 fn claude_interaction_resolution_answers_in_band() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
@@ -465,7 +586,7 @@ fn claude_interaction_resolution_answers_in_band() {
 
 #[test]
 fn claude_interrupt_uses_process_group_and_resume_recovery() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
@@ -485,7 +606,7 @@ fn claude_interrupt_uses_process_group_and_resume_recovery() {
 
 #[test]
 fn codex_interrupt_uses_native_turn_interrupt_when_active() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
     let mut adapter = codex
         .create_adapter(adapter_context(Some("codex-thread-1")))
         .unwrap();
@@ -504,12 +625,12 @@ fn codex_interrupt_uses_native_turn_interrupt_when_active() {
 
 #[test]
 fn shell_stays_outside_the_managed_chat_contract() {
-    assert!(managed_harness_for_kind(SessionKind::Shell).is_none());
+    assert!(managed_harness_for_kind(SessionKind::SHELL).is_none());
 }
 
 #[test]
 fn managed_adapters_wrap_existing_native_input_formats() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
     let mut codex_adapter = codex
         .create_adapter(adapter_context(Some("codex-thread-1")))
         .unwrap();
@@ -523,7 +644,7 @@ fn managed_adapters_wrap_existing_native_input_formats() {
     assert_eq!(codex_payload["params"]["threadId"], "codex-thread-1");
     assert_eq!(codex_payload["params"]["input"][0]["text"], "run tests");
 
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut claude_adapter = claude.create_adapter(adapter_context(None)).unwrap();
     let claude_write = claude_adapter
         .encode_input(input("claude-input", "review changes"))
@@ -541,7 +662,7 @@ fn managed_adapters_wrap_existing_native_input_formats() {
 
 #[test]
 fn claude_does_not_fake_native_input_acknowledgement() {
-    let claude = managed_harness_for_kind(SessionKind::Claude).unwrap();
+    let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude.create_adapter(adapter_context(None)).unwrap();
     adapter
         .encode_input(input("claude-input", "review changes"))
@@ -567,7 +688,7 @@ fn claude_does_not_fake_native_input_acknowledgement() {
 
 #[test]
 fn codex_steer_preserves_turn_start_input_for_exactly_once_completion() {
-    let codex = managed_harness_for_kind(SessionKind::Codex).unwrap();
+    let codex = managed_harness_for_kind(SessionKind::CODEX).unwrap();
     let mut adapter = codex
         .create_adapter(adapter_context(Some("codex-thread-1")))
         .unwrap();

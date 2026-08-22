@@ -1,5 +1,5 @@
 import { createResource, createSignal, For, Show } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore, prefsStore } from "@/store";
 import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
@@ -12,6 +12,9 @@ import {
 } from "@/lib/workspaceStatus";
 import { deriveWorkspacePrAction, workspacePrActionInput, type WorkspacePrActionKind } from "@/lib/workspacePrAction";
 import { titleCaseWorkspace } from "@/lib/text";
+import { fuzzyScore } from "@/lib/fuzzy";
+import { runShellAction } from "@/lib/shellAction";
+import ClientSwitcher from "./ClientSwitcher";
 
 // Run a lifecycle action and surface any failure as a toast rather than
 // swallowing it — a silently-failing remove/delete is how a dead workspace ends
@@ -29,6 +32,10 @@ function workspaceMenuItems(name: string): ContextMenuItem[] {
   const archived = () => workspacesStore.row(name)?.status === "archived";
   return [
     { label: "Open", run: () => nav.selectWorkspace(name) },
+    {
+      label: prefsStore.isPinned(name) ? "Unpin" : "Pin to top",
+      run: () => prefsStore.togglePinned(name),
+    },
     {
       label: "Rename…",
       run: () =>
@@ -98,7 +105,7 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
       label: "Open in editor",
       run: () => {
         const root = repositoriesStore.row(repo)?.rootPath;
-        if (root) runAction("Open", openExternal(root));
+        if (root) runShellAction("Open in editor", openExternal(root));
       },
     },
     {
@@ -168,6 +175,21 @@ function WorkspaceRow(props: { name: string }) {
           <Icon name={WORKSPACE_GIT_STATE_ICON[gitState().action]} />
         </span>
         <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
+        {/* A blocked agent is otherwise indistinguishable from a working one
+            in this list, which is how a session sits parked for minutes. */}
+        <Show when={prefsStore.isPinned(props.name)}>
+          <span class="workspace-row-indicator workspace-row-pinned" title="Pinned">
+            <Icon name="arrow-up" />
+          </span>
+        </Show>
+        <Show when={row()?.awaitingInput}>
+          <span
+            class="workspace-row-indicator workspace-row-awaiting"
+            title="An agent is waiting for your answer"
+          >
+            <Icon name="alert" />
+          </span>
+        </Show>
         <Show when={compactBadges().length > 0}>
           <span class="workspace-row-indicators">
             <For each={compactBadges()}>
@@ -215,11 +237,34 @@ function ProjectAvatar(props: { repo: string }) {
   );
 }
 
+// Sidebar filter. Module-level so the project groups and the input share it
+// without threading a prop through every row.
+const [workspaceFilter, setWorkspaceFilter] = createSignal("");
+
+/** Match on the workspace name and its branch — people search for either. */
+function matchesFilter(name: string, query: string): boolean {
+  const trimmed = query.trim();
+  if (!trimmed) return true;
+  const row = workspacesStore.row(name);
+  return (
+    fuzzyScore(trimmed, name) !== null ||
+    (row?.branch ? fuzzyScore(trimmed, row.branch) !== null : false)
+  );
+}
+
 function ProjectGroup(props: { repo: string }) {
-  const names = () =>
-    workspacesStore.state.order.filter(
-      (name) => workspacesStore.row(name)?.repository === props.repo,
+  const names = () => {
+    const all = workspacesStore.state.order.filter(
+      (name) =>
+        workspacesStore.row(name)?.repository === props.repo &&
+        matchesFilter(name, workspaceFilter()),
     );
+    // Pinned first, otherwise the daemon's order. Stable so the list does not
+    // reshuffle while an agent updates a row.
+    const pinned = all.filter((name) => prefsStore.isPinned(name));
+    const rest = all.filter((name) => !prefsStore.isPinned(name));
+    return [...pinned, ...rest];
+  };
   return (
     <div class="project-group">
       <div
@@ -285,6 +330,8 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         </button>
       </div>
 
+      <ClientSwitcher />
+
       <div class="sidebar-nav-group">
         <button
           class="sidebar-nav-button"
@@ -314,6 +361,24 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
             <Icon name="plus" />
           </button>
       </div>
+
+      <label class="workspace-search">
+        <Icon name="file" class="workspace-search-icon" />
+        <input
+          value={workspaceFilter()}
+          placeholder="Filter workspaces"
+          onInput={(e) => setWorkspaceFilter(e.currentTarget.value)}
+        />
+        <Show when={workspaceFilter()}>
+          <button
+            class="ui-button-icon"
+            title="Clear filter"
+            onClick={() => setWorkspaceFilter("")}
+          >
+            <Icon name="x" />
+          </button>
+        </Show>
+      </label>
 
       <div class="workspace-list">
         <Show

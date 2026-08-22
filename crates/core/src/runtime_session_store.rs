@@ -230,14 +230,14 @@ impl RuntimeSessionStore {
 
 pub(crate) fn format_session_raw_output(kind: SessionKind, raw: &str) -> String {
     match kind {
-        SessionKind::Codex => crate::workspace::format_codex_raw_output(raw),
+        SessionKind::CODEX => crate::workspace::format_codex_raw_output(raw),
         _ => raw.to_owned(),
     }
 }
 
 pub(crate) fn format_session_screen_output(kind: SessionKind, screen: &str) -> String {
     match kind {
-        SessionKind::Codex => crate::workspace::format_codex_screen_snapshot(screen),
+        SessionKind::CODEX => crate::workspace::format_codex_screen_snapshot(screen),
         _ => screen.to_owned(),
     }
 }

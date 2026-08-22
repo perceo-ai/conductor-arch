@@ -768,7 +768,7 @@ mod tests {
         assert!(!request_retry_safe_after_response_loss(
             &ArchcarRequest::SpawnSession {
                 workspace: "berlin".to_owned(),
-                kind: crate::workspace::SessionKind::Codex,
+                kind: crate::workspace::SessionKind::CODEX,
                 harness: None,
             }
         ));

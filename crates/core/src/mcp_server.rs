@@ -337,9 +337,9 @@ pub fn tools() -> Vec<ToolSpec> {
                     visible_input: Some(prompt),
                     kind: crate::archcar::protocol::ArchcarInputKind::User,
                     session_kind: match optional_string(args, "session_kind").as_deref() {
-                        Some("claude") => crate::workspace::SessionKind::Claude,
-                        Some("shell") => crate::workspace::SessionKind::Shell,
-                        _ => crate::workspace::SessionKind::Codex,
+                        Some("claude") => crate::workspace::SessionKind::CLAUDE,
+                        Some("shell") => crate::workspace::SessionKind::SHELL,
+                        _ => crate::workspace::SessionKind::CODEX,
                     },
                 })
             },

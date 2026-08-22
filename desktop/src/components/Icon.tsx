@@ -12,6 +12,7 @@ export type IconName =
   | "chevron-left"
   | "chevron-right"
   | "chevron-up"
+  | "cloud"
   | "external"
   | "file"
   | "file-code"
@@ -22,6 +23,7 @@ export type IconName =
   | "git-pull-request"
   | "history"
   | "layout-dashboard"
+  | "monitor"
   | "panel-left"
   | "panel-right"
   | "paperclip"
@@ -53,6 +55,7 @@ const PATHS: Record<IconName, () => JSX.Element> = {
   "chevron-left": () => <path d="m15 18-6-6 6-6" />,
   "chevron-right": () => <path d="m9 18 6-6-6-6" />,
   "chevron-up": () => <path d="m18 15-6-6-6 6" />,
+  cloud: () => <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />,
   external: () => <><path d="M15 3h6v6" /><path d="M10 14 21 3" /><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" /></>,
   file: () => <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /></>,
   "file-code": () => <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" /><path d="m10 13-2 2 2 2" /><path d="m14 17 2-2-2-2" /></>,
@@ -63,6 +66,7 @@ const PATHS: Record<IconName, () => JSX.Element> = {
   "git-pull-request": () => <><circle cx="6" cy="18" r="3" /><circle cx="6" cy="6" r="3" /><circle cx="18" cy="18" r="3" /><path d="M6 9v6" /><path d="M18 15v-2a4 4 0 0 0-4-4h-3" /><path d="m14 6-3 3 3 3" /></>,
   history: () => <><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5" /><path d="M12 7v5l3 2" /></>,
   "layout-dashboard": () => <><rect x="3" y="3" width="7" height="9" rx="1" /><rect x="14" y="3" width="7" height="5" rx="1" /><rect x="14" y="12" width="7" height="9" rx="1" /><rect x="3" y="16" width="7" height="5" rx="1" /></>,
+  monitor: () => <><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8" /><path d="M12 17v4" /></>,
   "panel-left": () => <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>,
   "panel-right": () => <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
   paperclip: () => <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 1 1 5.66 5.66l-9.2 9.19a2 2 0 1 1-2.83-2.83l8.49-8.48" />,

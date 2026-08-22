@@ -33,6 +33,12 @@ export interface Prefs {
   sidebarCollapsed: boolean;
   // Machine-local keyboard overrides, e.g. "palette=ctrl+p; focus=ctrl+j".
   keybindings: string;
+  /**
+   * Workspaces pinned to the top of the sidebar. A view preference, not
+   * workspace state, so it lives here rather than in the daemon's database —
+   * two people pointed at the same daemon should be able to pin differently.
+   */
+  pinnedWorkspaces: string[];
 }
 
 const DEFAULTS: Prefs = {
@@ -43,6 +49,7 @@ const DEFAULTS: Prefs = {
   density: "cozy",
   sidebarCollapsed: false,
   keybindings: "",
+  pinnedWorkspaces: [],
 };
 
 function load(): Prefs {
@@ -78,6 +85,7 @@ function persist() {
         density: state.density,
         sidebarCollapsed: state.sidebarCollapsed,
         keybindings: state.keybindings,
+        pinnedWorkspaces: state.pinnedWorkspaces,
       }),
     );
   } catch {
@@ -87,6 +95,18 @@ function persist() {
 
 export const prefsStore = {
   state,
+
+  isPinned(workspace: string): boolean {
+    return state.pinnedWorkspaces.includes(workspace);
+  },
+
+  togglePinned(workspace: string) {
+    const pinned = state.pinnedWorkspaces.includes(workspace)
+      ? state.pinnedWorkspaces.filter((name) => name !== workspace)
+      : [...state.pinnedWorkspaces, workspace];
+    setState("pinnedWorkspaces", pinned);
+    persist();
+  },
 
   /** Set the default model for new chats. Provider is derived from the model. */
   setDefaultModel(model: string) {

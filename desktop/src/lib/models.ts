@@ -21,13 +21,28 @@ export const MODELS: Record<string, string[]> = {
 
 export const EFFORTS = ["low", "medium", "high"];
 
-/** Providers that expose switchable agent models (excludes shell/terminal). */
+/**
+ * Fallback chat providers, used only before the daemon's registry arrives.
+ * Live values come from ListAgentProviders — see providersStore.
+ */
 export const CHAT_PROVIDERS = ["codex", "claude"];
 
-export function providerLabel(provider: string): string {
-  if (provider === "codex") return "Codex";
-  if (provider === "claude") return "Claude Code";
-  return provider;
+const PROVIDER_LABELS: Record<string, string> = {
+  codex: "Codex",
+  claude: "Claude Code",
+};
+
+/**
+ * Prefers the daemon's display name; `known` is the registry snapshot when one
+ * has loaded. Falls back to the raw key so an unknown provider still renders.
+ */
+export function providerLabel(
+  provider: string,
+  known?: { provider_key: string; display_name: string }[],
+): string {
+  const match = known?.find((entry) => entry.provider_key === provider);
+  if (match) return match.display_name;
+  return PROVIDER_LABELS[provider] ?? provider;
 }
 
 export function modelLabel(model: string): string {

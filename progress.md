@@ -468,7 +468,14 @@ Historical GTK surface (superseded, kept for reference):
   and no revocation beyond rotating the single token. Expose a non-loopback
   listener only behind a firewall, VPN, SSH tunnel, or a reverse proxy you
   trust. Server-hosted use assumes agent CLIs and `gh` auth exist on the
-  server.
+  server; when they do not, the setup gate says so and offers Disconnect
+  instead of wedging the app.
+- Under a remote profile the direct-store CLI commands (`repo`, `workspace`,
+  `status`, and 16 others) refuse rather than work: they read the local
+  database, so `archductor archcar <command>` is the remote-backed path. The
+  New workspace ▸ GitHub tab is also unavailable remotely — `gh` resolves the
+  repo from a working directory that lives on the daemon's machine and there is
+  no daemon-side RPC for that listing yet.
 - The service installer covers launchd (macOS) and systemd user units (Linux).
   Windows reports "unsupported"; run `archcar` yourself there.
 - The launchd/systemd unit does not carry `XDG_*` overrides, so an installed
@@ -537,6 +544,79 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Client switcher on 2026-08-20:
+
+- A machine can now save any number of daemons and move between them from a
+  picker above the sidebar nav. `state/clients.json` holds the list;
+  `state/remote.json` stays the *selection* and is rewritten on every switch, so
+  `configured_remote_endpoint`, the CLI, MCP, and the desktop bridge all keep
+  reading one file and follow the picker with no changes of their own. A machine
+  that only ever ran `remote connect` has its existing profile adopted as the
+  first saved client, so upgrading does not drop the connection.
+- Switching re-pulls the workspace inventory and re-probes setup readiness,
+  because both belong to the daemon being left.
+- CLI gained `remote list`, `remote use <client>`, and `remote remove <client>`;
+  `remote connect --label` saves-and-activates and `remote disconnect` returns to
+  this machine while keeping the client saved. Selection stays machine-wide, so
+  a terminal and the window never target different servers.
+- Settings ▸ Archcars ▸ Clients is now the manager (add / use / rename /
+  forget). `ARCHDUCTOR_ARCHCAR_REMOTE` still wins and puts both surfaces into a
+  read-only "pinned by environment" state.
+- Written tests: core `archcar::remote` (15, 8 new covering the mirror, slug
+  ids, upsert-by-address, profile adoption, dangling active id, owner-only
+  perms), `archductor` bin (39), desktop `pnpm test` (278, 8 new asserting the
+  TS mirror matches the Rust rules).
+- Live smoke: two containerized daemons on 7451/7452 with different repos.
+  CLI `remote list`/`use` switched between them and `archcar workspaces`
+  returned each machine's own workspace; Playwright drove the sidebar picker
+  through Alpha → Beta → This machine → Alpha and asserted the sidebar showed
+  only that daemon's inventory each time.
+- Settings now replaces the workspace sidebar instead of rendering beside it —
+  two navigation rails were on screen at once. Its back row falls back to the
+  dashboard when there is no history to pop (it is the only way out now), and
+  on macOS the rail reserves the traffic-light strip the workspace sidebar's
+  chrome row used to hold.
+- Known nit found while testing: piping CLI output into `head` panics on
+  `Broken pipe` instead of exiting quietly. Cosmetic, not fixed here.
+
+Remote-client hardening on 2026-08-20 (first real two-host run):
+
+- Probed with a Linux `archcar` in Docker and the macOS client against it, so
+  client and daemon had genuinely separate filesystems for the first time —
+  everything before this was loopback with a shared disk. `archcar` links no
+  GTK/GLib/X11/Wayland and the container had no `DISPLAY`, so the daemon half is
+  confirmed headless; repo add, worktree create, file list, write-file, changes,
+  and diff all served correctly over TCP at 12–90ms.
+- Fixed: the blocking setup modal probes whichever daemon is configured, so a
+  server without `gh`/Codex/Claude made the app unrecoverable — Settings, and
+  its Disconnect button, sat behind the scrim. The gate now names the host the
+  rows describe and carries its own Disconnect; readiness is also re-probed when
+  the connection changes instead of staying stale until restart.
+- Fixed: `fs:path-exists`, `shell:open-external`, `shell:open-workspace-app`,
+  `gh:repo-avatar`, and `gh:list-work` ran against client-local paths while the
+  daemon owned them (`fs:list-workspace-files` was already guarded). They now
+  refuse with the address and the way back, and the "Open in …" items toast that
+  reason instead of failing silently. `path-exists` answers "exists" under a
+  remote so remote repositories are not pruned as deleted.
+- Fixed: `archductor repo|workspace|status|…` (19 command groups) opened this
+  machine's SQLite while `remote status` reported the server, silently building a
+  second inventory. They now refuse and point at `archductor archcar <command>`.
+- Added `archcar add-repository` and `archcar create-workspace`: the RPCs
+  existed but had no CLI verb, so a remote-only client could not bootstrap
+  anything.
+- Add-project's `Browse…` is disabled under a remote (it browses the wrong
+  machine) and the dialog says the path belongs to the daemon host.
+- Written tests: `archductor` bin (39, incl. three new for the refusal map and
+  the new verbs), desktop `pnpm test` (270, incl. new `remoteHandlerBlock` and
+  `shellAction` cases), `pnpm typecheck`, `pnpm build`.
+- Live smoke: CLI refusal and both new verbs against the containerized daemon;
+  Playwright drove the real window through the gate → Disconnect → Settings
+  recovery (gate cleared 1034ms after the click) and confirmed the toast.
+- Not done here: routing the 19 direct-store CLI command groups through
+  `ArchcarClient` (they refuse rather than work remotely), a daemon-side RPC for
+  the GitHub issue/PR listing, and `gh:list-repos` still uses the client's `gh`
+  auth while the clone happens on the server.
 
 Server-hosted execution on 2026-08-14:
 

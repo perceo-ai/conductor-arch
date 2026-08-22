@@ -20,6 +20,23 @@ export interface GithubWorkItem {
   author: string;
 }
 
+/** One saved daemon, as the renderer sees it — the token never leaves main. */
+export interface ClientSummary {
+  id: string;
+  label: string;
+  address: string;
+}
+
+export type ClientsResult =
+  | {
+      ok: true;
+      activeId: string | null;
+      clients: ClientSummary[];
+      envAddress?: string | null;
+      id?: string;
+    }
+  | { ok: false; error: string };
+
 interface ArchductorApi {
   request<Res = unknown>(payload: unknown): Promise<Res>;
   ensureEvents(): Promise<{ ok: boolean }>;
@@ -32,6 +49,11 @@ interface ArchductorApi {
     { ok: true; items: GithubWorkItem[] } | { ok: false; error: string }
   >;
   pathExists(p: string): Promise<{ exists: boolean }>;
+  clientsList(): Promise<ClientsResult>;
+  clientsAdd(opts: { label?: string; address: string; token: string }): Promise<ClientsResult>;
+  clientsActivate(id: string | null): Promise<ClientsResult>;
+  clientsRemove(id: string): Promise<ClientsResult>;
+  clientsRename(opts: { id: string; label: string }): Promise<ClientsResult>;
   listWorkspaceFiles(opts: { rootPath: string; cap?: number }): Promise<
     { ok: true; files: string[] } | { ok: false; error: string }
   >;
@@ -60,6 +82,15 @@ export const remoteDaemon = {
   get: () => api().remoteGet(),
   set: (config: { address: string; token: string }) => api().remoteSet(config),
   clear: () => api().remoteClear(),
+};
+
+/** Saved daemons this machine can switch between. Tokens stay in main. */
+export const clients = {
+  list: () => api().clientsList(),
+  add: (opts: { label?: string; address: string; token: string }) => api().clientsAdd(opts),
+  activate: (id: string | null) => api().clientsActivate(id),
+  remove: (id: string) => api().clientsRemove(id),
+  rename: (opts: { id: string; label: string }) => api().clientsRename(opts),
 };
 
 declare global {

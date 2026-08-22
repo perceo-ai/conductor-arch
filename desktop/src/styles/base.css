@@ -988,6 +988,21 @@ body.resizing-col {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;
 }
+
+/* Skill descriptions are prose, not paths, and some run to several hundred
+   characters — wrap to two lines instead of one long ellipsised run. */
+.chat-skill-item {
+  align-items: flex-start;
+}
+.chat-skill-description {
+  font-family: inherit;
+  white-space: normal;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.35;
+}
 .chat-toolbar {
   display: flex;
   flex-direction: row;
@@ -4983,6 +4998,11 @@ button.ws-tab-shell.ws-chat-new:hover {
   color: #9aa6b8;
 }
 
+/* Waiting on a human, not on time — the one row state worth interrupting for. */
+.workspace-row-awaiting {
+  color: #e0b341;
+}
+
 .workspace-row-shell .row-meta {
   padding-left: 14px;
   padding-right: 0;
@@ -5534,4 +5554,142 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 .ws-changes-commit-open:hover {
   color: var(--lc-text);
+}
+
+/* Sync skills / MCP dialog: a matrix of what would be written, shown before
+   anything touches ~/.claude, ~/.codex or ~/.cursor. */
+/* Wider than the default dialog because it shows paths; sizing the card
+   rather than the form keeps the footer buttons inside the scrim. */
+.dialog-card:has(.sync-dialog) {
+  width: min(720px, 94vw);
+}
+.sync-dialog {
+  min-width: 0;
+}
+.sync-providers {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 0;
+}
+.sync-providers-label {
+  color: var(--lc-text-muted, #9a9a9a);
+  font-size: 12px;
+}
+.sync-provider-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.sync-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #2f2f2f;
+  border-radius: 8px;
+  padding: 6px;
+}
+.sync-row {
+  display: grid;
+  grid-template-columns: auto 76px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+.sync-row:hover {
+  background: #232323;
+}
+.sync-row-excluded {
+  opacity: 0.45;
+}
+.sync-row-kind {
+  color: var(--lc-text-muted, #9a9a9a);
+  font-size: 11px;
+}
+.sync-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-row-state {
+  color: var(--lc-text-muted, #9a9a9a);
+  font-size: 11px;
+}
+.sync-row-ok {
+  color: #72c293;
+}
+.sync-preview {
+  margin-top: 10px;
+  border-top: 1px solid #2f2f2f;
+  padding-top: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+.sync-preview-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  min-width: 0;
+}
+.sync-preview-icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  color: #7a7a7a;
+}
+.sync-preview-target {
+  color: var(--lc-text-muted, #9a9a9a);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sync-preview-overwrite {
+  color: #e0b341;
+}
+
+/* GitHub Actions rows sit in the Checks panel beside the local checks. */
+.ws-actions-logo {
+  width: 12px;
+  height: 12px;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
+/* Sidebar workspace filter. */
+.workspace-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 10px 6px 10px;
+  padding: 4px 8px;
+  border: 1px solid #2f2f2f;
+  border-radius: 8px;
+  background: #1c1c1c;
+}
+.workspace-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.workspace-search-icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  color: #7a7a7a;
+}
+.workspace-row-pinned {
+  color: #9aa6b8;
 }

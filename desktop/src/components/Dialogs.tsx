@@ -1,13 +1,23 @@
 import { createSignal, createResource, Show, Switch, Match, For, onCleanup, onMount } from "solid-js";
-import { actions, dialogs, workspacesStore, repositoriesStore, type ConfirmSpec } from "@/store";
+import {
+  actions,
+  clientsStore,
+  dialogs,
+  workspacesStore,
+  repositoriesStore,
+  type ConfirmSpec,
+} from "@/store";
 import {
   selectFolder,
   listGithubRepos,
   listGithubWork,
+  remoteDaemon,
   send,
   type GithubRepo,
   type GithubWorkItem,
 } from "@/bridge/client";
+import { providersStore } from "@/store/providers";
+import SyncSkillsDialog from "./SyncSkillsDialog";
 
 // Global modal host. Renders the form for the active dialog spec. Every form
 // calls into `actions.*`, which logs the action, sends the archcar request, and
@@ -121,6 +131,19 @@ function AddProjectForm(props: { onDone: () => void }) {
     () => listGithubRepos(),
   );
 
+  // Paths typed here are resolved by the daemon. Pointed at a remote, the
+  // native picker would browse this machine's disk and hand back a path the
+  // server cannot see, so it is disabled rather than quietly misleading.
+  const [remote] = createResource(async () => {
+    try {
+      const res = await remoteDaemon.get();
+      return res.ok && res.address ? res.address : null;
+    } catch {
+      return null;
+    }
+  });
+  const remoteAddress = () => remote() ?? null;
+
   const dest = () => (repoName() ? joinPath(parentDir(), repoName()) : "");
 
   const filteredRepos = (): GithubRepo[] => {
@@ -232,10 +255,20 @@ function AddProjectForm(props: { onDone: () => void }) {
             <span>Destination folder</span>
             <div class="dialog-field-row">
               <input value={parentDir()} onInput={(e) => setParentDir(e.currentTarget.value)} placeholder="/home/you/code" />
-              <button class="ui-button-sm" onClick={() => pickFolder(setParentDir, "Choose destination folder")}>Browse…</button>
+              <button
+                class="ui-button-sm"
+                disabled={!!remoteAddress()}
+                title={remoteAddress() ? `Paths are resolved on ${remoteAddress()}` : undefined}
+                onClick={() => pickFolder(setParentDir, "Choose destination folder")}
+              >
+                Browse…
+              </button>
             </div>
             <Show when={dest()}>
               <span class="dialog-hint">Clones into {dest()}</span>
+            </Show>
+            <Show when={remoteAddress()}>
+              <span class="dialog-hint">Path on the daemon host ({remoteAddress()}), not this machine.</span>
             </Show>
           </label>
         </>
@@ -244,8 +277,18 @@ function AddProjectForm(props: { onDone: () => void }) {
           <span>Repository path</span>
           <div class="dialog-field-row">
             <input value={path()} onInput={(e) => setPath(e.currentTarget.value)} placeholder="/home/you/code/repo" />
-            <button class="ui-button-sm" onClick={() => pickFolder(setPath, "Select repository folder")}>Browse…</button>
+            <button
+              class="ui-button-sm"
+              disabled={!!remoteAddress()}
+              title={remoteAddress() ? `Paths are resolved on ${remoteAddress()}` : undefined}
+              onClick={() => pickFolder(setPath, "Select repository folder")}
+            >
+              Browse…
+            </button>
           </div>
+          <Show when={remoteAddress()}>
+            <span class="dialog-hint">Path on the daemon host ({remoteAddress()}), not this machine.</span>
+          </Show>
         </label>
       </Show>
       <label class="dialog-field">
@@ -360,7 +403,12 @@ function CreateWorkspaceForm(props: { repository: string; onDone: () => void }) 
     if (key === "github") {
       if (!rootPath()) return "No project path";
       if (work.loading) return "Loading";
-      if (work()?.ok === false) return "Needs gh";
+      // The probe only runs once this tab is selected, so before then we know
+      // nothing — `gh` may be signed in while this repo has no GitHub remote
+      // at all. Saying "Ready" on an unrun check is a promise we cannot keep.
+      const probe = work();
+      if (probe === undefined) return "Not checked";
+      if (probe.ok === false) return "Needs gh";
       return "Ready";
     }
     if (key === "linear") return "Needs key";
@@ -675,14 +723,24 @@ function WorkspaceActionsForm(props: { workspace: string; onDone: () => void }) 
           <span class="dialog-section-copy">Choose the provider used when this workspace opens a new chat.</span>
         </div>
         <div class="dialog-provider-grid">
-          <For each={["codex", "claude", "cursor"]}>
-            {(p) => (
+          <For each={providersStore.launchable()}>
+            {(entry) => (
               <button
                 class="dialog-provider-chip"
-                classList={{ "dialog-provider-chip-active": provider() === p }}
-                onClick={() => setProvider(p)}
+                classList={{
+                  "dialog-provider-chip-active": provider() === entry.provider_key,
+                }}
+                title={
+                  providersStore.tierBadge(entry.provider_key)
+                    ? `${entry.display_name} runs with reduced capabilities`
+                    : entry.display_name
+                }
+                onClick={() => setProvider(entry.provider_key)}
               >
-                {p}
+                {entry.display_name}
+                <Show when={providersStore.tierBadge(entry.provider_key)}>
+                  {(badge) => <span class="dialog-provider-chip-badge">{badge()}</span>}
+                </Show>
               </button>
             )}
           </For>
@@ -869,6 +927,78 @@ function BackgroundTaskForm(props: { repository: string; onDone: () => void }) {
   );
 }
 
+// Save another daemon and switch to it. Main verifies the address/token before
+// committing, so a typo fails here instead of leaving the app pointed at
+// nothing.
+function AddClientForm(props: { onDone: () => void }) {
+  const [label, setLabel] = createSignal("");
+  const [address, setAddress] = createSignal("");
+  const [token, setToken] = createSignal("");
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal("");
+
+  const submit = async () => {
+    const addr = address().trim();
+    const tok = token().trim();
+    if (!addr || !tok) {
+      setError("Address and token are required.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const ok = await clientsStore.add({
+        label: label().trim() || undefined,
+        address: addr,
+        token: tok,
+      });
+      if (ok) props.onDone();
+      else setError("Could not reach that daemon. Check the address and token.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div class="dialog-form">
+      <label class="dialog-field">
+        <span>Name (optional)</span>
+        <input value={label()} onInput={(e) => setLabel(e.currentTarget.value)} placeholder="Devbox" />
+      </label>
+      <label class="dialog-field">
+        <span>Address</span>
+        <input
+          value={address()}
+          onInput={(e) => setAddress(e.currentTarget.value)}
+          placeholder="devbox:7420"
+        />
+      </label>
+      <label class="dialog-field">
+        <span>Access token</span>
+        <input
+          type="password"
+          value={token()}
+          onInput={(e) => setToken(e.currentTarget.value)}
+          placeholder="from `archductor service token` on that machine"
+        />
+      </label>
+      <div class="dialog-hint">
+        On that machine: <code>archductor service install --listen 0.0.0.0:7420</code>, then
+        <code> archductor service token</code>.
+      </div>
+      <Show when={error()}>{(msg) => <div class="dialog-error">{msg()}</div>}</Show>
+      <div class="dialog-actions">
+        <button class="ui-button" onClick={props.onDone}>
+          Cancel
+        </button>
+        <button class="ui-button-primary" disabled={busy()} onClick={() => void submit()}>
+          {busy() ? "Connecting…" : "Add and switch"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function Dialogs() {
   const spec = dialogs.current;
   const close = () => dialogs.close();
@@ -879,6 +1009,16 @@ export default function Dialogs() {
           <Match when={s().kind === "add-project"}>
             <Modal title="Add project" onClose={close}>
               <AddProjectForm onDone={close} />
+            </Modal>
+          </Match>
+          <Match when={s().kind === "sync-skills"}>
+            <Modal title="Sync skills and MCP servers" onClose={close}>
+              <SyncSkillsDialog onDone={close} />
+            </Modal>
+          </Match>
+          <Match when={s().kind === "add-client"}>
+            <Modal title="Add client" onClose={close}>
+              <AddClientForm onDone={close} />
             </Modal>
           </Match>
           <Match when={s().kind === "create-workspace"}>

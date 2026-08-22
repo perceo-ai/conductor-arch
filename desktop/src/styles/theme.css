@@ -321,6 +321,144 @@ body,
     color: #e4e4e4;
 }
 
+/* Which machine you are working on. Sits above the nav because it scopes
+   everything below it: switching swaps the whole workspace inventory. */
+.client-switcher {
+    padding: 6px 10px 0 10px;
+}
+
+.client-switcher-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 4px 8px;
+    border: 1px solid #2f2f2f;
+    border-radius: 8px;
+    background: #1c1c1c;
+    box-shadow: none;
+    text-shadow: none;
+    text-align: left;
+}
+
+.client-switcher-button:hover:not(:disabled) {
+    background: #262626;
+    border-color: #3a3a3a;
+}
+
+.client-switcher-button:disabled {
+    opacity: 0.75;
+}
+
+/* Icon renders a bare <svg viewBox> and drops the default `ui-icon` class when
+   given one, so these must set their own box — otherwise the SVG falls back to
+   the replaced-element default and swallows the row. */
+.client-switcher-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: #9a9a9a;
+}
+
+/* The two lines must not push the chevron off the row in a narrow sidebar. */
+.client-switcher-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.client-switcher-label {
+    color: #d2d2d2;
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-switcher-address {
+    color: #8a8a8a;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-switcher-chevron {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    color: #7a7a7a;
+}
+
+.sidebar.collapsed .client-switcher {
+    display: none;
+}
+
+/* Settings ▸ Clients: the same list the switcher shows, with management. */
+.client-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.client-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid #2f2f2f;
+    border-radius: 8px;
+    background: #1c1c1c;
+}
+
+.client-row.active {
+    border-color: var(--accent, #c9a227);
+}
+
+.client-row-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: #9a9a9a;
+}
+
+.client-row-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.client-row-label {
+    color: #d2d2d2;
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-row-address {
+    color: #8a8a8a;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-row-active {
+    color: var(--accent, #c9a227);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 0 8px;
+}
+
 .sidebar-nav-group {
     padding: 8px 10px 6px 10px;
 }
@@ -4065,6 +4203,24 @@ button.chat-inline-event-expander label {
     color: #dbe8ff;
 }
 
+/* Marks an agent the daemon can only drive partially, so the picker does not
+   present reduced and full support as the same thing. */
+.dialog-provider-chip-badge {
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 999px;
+    background: #3a3320;
+    color: #d8c48a;
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.lc-theme-light .dialog-provider-chip-badge {
+    background: #f3e7c5;
+    color: #6b551f;
+}
+
 .chat-context-usage-danger {
     background-color: #2c1f1f;
     border-color: #753838;
@@ -4754,6 +4910,13 @@ textarea:focus {
     background: #171717;
     padding: 14px 10px;
     overflow: hidden;
+}
+
+/* Clears the macOS traffic lights, which overlay the top-left of the content
+   with titleBarStyle: hiddenInset. */
+.settings-titlebar-spacer {
+    height: 28px;
+    flex: 0 0 28px;
 }
 
 .settings-back-row {

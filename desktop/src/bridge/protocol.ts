@@ -2,7 +2,80 @@
 // Keep in sync when the Rust protocol changes. serde uses snake_case + an
 // internal `type` tag on the request/response/event enums.
 
-export type SessionKind = "shell" | "codex" | "claude";
+// Open on purpose: the daemon's provider set comes from its registry, so a
+// closed union here would drop any agent this build predates. The built-in
+// keys are kept for editor completion.
+export type SessionKind = "shell" | "codex" | "claude" | (string & {});
+
+/** A GitHub Actions run for a workspace's branch. */
+export type WorkflowRun = {
+  name: string;
+  status: string;
+  conclusion: string;
+  branch: string;
+  url: string;
+  started_at: string;
+  number: number;
+};
+
+export type WorkflowRunSummary = {
+  runs: WorkflowRun[];
+  failing: number;
+  running: number;
+  succeeded: number;
+  /** Set when gh could not answer (no remote, no auth, not installed). */
+  unavailable?: string | null;
+};
+
+/** One write a sync would perform. */
+export type SyncAction = {
+  /** "skill" or "mcp" */
+  kind: string;
+  item: string;
+  provider: string;
+  target: string;
+  overwrite: boolean;
+};
+
+export type SyncPlan = {
+  providers: string[];
+  /** Providers with a skills directory (Cursor has MCP config but no skills). */
+  skill_providers?: string[];
+  mcp_providers?: string[];
+  /** item name -> providers that already have it */
+  skills: Record<string, string[]>;
+  mcp_servers: Record<string, string[]>;
+  actions: SyncAction[];
+};
+
+/** Empty arrays mean "everything", which is what the one-click path sends. */
+export type SyncSelection = {
+  skills?: string[];
+  mcp_servers?: string[];
+  providers?: string[];
+};
+
+/** A skill installed on the daemon's machine (ListSkills). */
+export type AgentSkill = {
+  name: string;
+  description: string;
+  /** Provider keys that have it installed. */
+  providers: string[];
+  /** Managed by a plugin, so sync leaves it alone. */
+  plugin: boolean;
+};
+
+/** One agent as the daemon's registry sees it (ListAgentProviders). */
+export type AgentProviderSummary = {
+  provider_key: string;
+  display_name: string;
+  default_command: string;
+  launchable: boolean;
+  managed: boolean;
+  /** "full" | "partial" | "basic" | "none" */
+  tier: string;
+  auth_guidance: string;
+};
 export type ArchcarInputKind = "user" | "review_prompt" | "control_command" | "raw_terminal";
 export type ArchcarInputDelivery = "auto" | "immediate";
 export type WorkspaceGitAction = "create_pr" | "push_branch" | "merge_pr" | "open_pr";
@@ -49,6 +122,10 @@ export type ArchcarRequest =
   | { type: "get_inventory_snapshot" }
   | { type: "list_workspaces" }
   | { type: "list_repositories" }
+  | { type: "list_skills" }
+  | { type: "list_workflow_runs"; workspace: string }
+  | { type: "get_sync_plan"; selection?: SyncSelection }
+  | { type: "apply_sync"; selection?: SyncSelection }
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
   | { type: "list_chat_transcripts"; workspace: string; limit?: number }
@@ -100,6 +177,7 @@ export type ArchcarRequest =
   | { type: "get_settings"; repository?: string }
   | { type: "get_settings_source"; repository?: string; layer?: string }
   | { type: "list_repository_branches"; repository: string }
+  | { type: "list_agent_providers" }
   | { type: "list_prompt_packs"; repository: string }
   | { type: "set_active_prompt_pack"; repository: string; pack: string }
   | { type: "save_settings"; repository?: string; layer?: string; toml: string }
@@ -291,6 +369,8 @@ export interface ArchcarWorkspaceSummary {
   open_tasks?: number;
   blocked_tasks?: number;
   active_sessions: number;
+  /** An agent here is parked on a question or permission prompt. */
+  awaiting_input?: boolean;
   run_running: boolean;
   changed_files: number;
   diff_additions: number;
@@ -491,6 +571,10 @@ export type ArchcarResponse =
     }
   | { type: "workspaces"; workspaces: ArchcarWorkspaceSummary[] }
   | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
+  | { type: "skills"; skills: AgentSkill[] }
+  | { type: "workflow_runs"; workspace: string; summary: WorkflowRunSummary }
+  | { type: "sync_plan"; plan: SyncPlan }
+  | { type: "sync_applied"; applied: SyncAction[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
   | { type: "chat_transcripts"; workspace: string; transcripts: ArchcarChatTranscriptSummary[] }
@@ -561,6 +645,7 @@ export type ArchcarResponse =
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
   | { type: "repository_branches"; repository: string; branches: string[] }
+  | { type: "agent_providers"; providers: AgentProviderSummary[] }
   | { type: "prompt_packs"; repository: string; packs: string[]; active?: string }
   | { type: "settings_source"; scope: string; layer: string; toml: string }
   | { type: "settings_saved"; scope: string; layer: string }
