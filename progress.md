@@ -143,6 +143,38 @@ product model stays one repository per project), and session/task-scoped
 checkpoint creation — manual create/compare/restore/delete is the checkpoint
 surface for now.
 
+## Desktop Motion Layer and Module Split (2026-08-23)
+
+The Electron UI had two CSS transitions and no keyframes in ~11,000 lines of
+stylesheet. It now has a motion layer (`desktop/src/styles/motion.css` ->
+`motion/`): duration/easing tokens, a named keyframe library, and one global
+`prefers-reduced-motion` override, applied across chat, sidebar, dialogs,
+toasts, menus, command palette, tabs and diff.
+
+- **Generation loader.** A flowing dot-grid (`components/DotGridLoader.tsx`,
+  wave arithmetic in `lib/dotGrid.ts`) renders as the last child of
+  `.chat-messages`, so it trails the newest message inside the scroller.
+  Shown while generating or starting, hidden when the agent is blocked on the
+  user — `lib/chatGeneration.ts` is the single source for that, replacing four
+  ad-hoc signals the composer read off the store.
+- **Workspace PR-state icons.** `deriveWorkspacePrAction` now also returns a
+  `state`. The action kind collapses six situations into `view`, which made
+  merged, closed, conflicted, checks-failing, checks-running and behind-base
+  render the same glyph; twelve states now have distinct glyphs and colours,
+  shared by the sidebar and the PR bar.
+- **File split.** `base.css` (5,695) and `theme.css` (5,299) became ordered
+  manifests over per-surface files; `ChatSurface.tsx` (1,948) -> `pages/chat/*`;
+  `Settings.tsx`, `Dialogs.tsx` and `bridge/protocol.ts` likewise. Largest
+  source file is now 783 lines. Both splits were verified by byte-diffing the
+  built bundle, which was unchanged.
+
+Verified: 368 tests (52 files), `tsc --noEmit`, `pnpm build`, plus a live
+Electron smoke against a scratch daemon — loader absent when idle, 56 dots
+animating with distinct per-dot phase during a turn, absent again afterwards;
+five PR-state icons rendering distinctly in the sidebar. Not app-verified:
+checks-running, checks-failed, conflict and ready-to-merge icons, which need a
+real GitHub checks summary; those are unit-covered only.
+
 ## Conductor Reference Cross-Check (2026-08-06)
 
 The Electron surface was cross-checked against Conductor's own reference docs

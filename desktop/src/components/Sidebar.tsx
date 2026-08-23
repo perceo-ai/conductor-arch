@@ -5,12 +5,17 @@ import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } fr
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import { SIDEBAR_MAX, SIDEBAR_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
-import Icon, { type IconName } from "./Icon";
+import Icon from "./Icon";
 import {
   dashboardTriageBadges,
   type DashboardTriageBadgeTone,
 } from "@/lib/workspaceStatus";
-import { deriveWorkspacePrAction, workspacePrActionInput, type WorkspacePrActionKind } from "@/lib/workspacePrAction";
+import {
+  WORKSPACE_PR_STATE_ICON,
+  WORKSPACE_PR_STATE_MOTION,
+  deriveWorkspacePrAction,
+  workspacePrActionInput,
+} from "@/lib/workspacePrAction";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { runShellAction } from "@/lib/shellAction";
@@ -133,14 +138,6 @@ const ROW_TRIAGE_ICON: Partial<Record<DashboardTriageBadgeTone, "brain" | "play"
 
 const ROW_TRIAGE_TONES = new Set<DashboardTriageBadgeTone>(["agent", "run", "pr"]);
 
-const WORKSPACE_GIT_STATE_ICON: Record<WorkspacePrActionKind, IconName> = {
-  create: "git-pull-request",
-  push: "arrow-up",
-  merge: "git-merge",
-  view: "external",
-  none: "circle-check",
-};
-
 // Left sidebar: nav group (Dashboard/History) + workspace list. Repositories are
 // the top-level rows; each repo's workspaces are nested beneath it so a repo
 // with no workspaces yet still appears. Each workspace row reads only its own
@@ -168,11 +165,18 @@ function WorkspaceRow(props: { name: string }) {
       }}
     >
       <span class="workspace-row-head">
+        {/* Icon keys off `state`, not `action`: six situations share the
+            `view` action and used to share one glyph, which made a merged PR
+            indistinguishable from failing checks at a glance. */}
         <span
-          class={`workspace-git-state workspace-git-state-${gitState().action}`}
+          class={`workspace-git-state workspace-git-state-${gitState().state}`}
+          classList={{
+            [`workspace-git-state-motion-${WORKSPACE_PR_STATE_MOTION[gitState().state]}`]:
+              WORKSPACE_PR_STATE_MOTION[gitState().state] != null,
+          }}
           title={gitState().title}
         >
-          <Icon name={WORKSPACE_GIT_STATE_ICON[gitState().action]} />
+          <Icon name={WORKSPACE_PR_STATE_ICON[gitState().state]} />
         </span>
         <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
         {/* A blocked agent is otherwise indistinguishable from a working one

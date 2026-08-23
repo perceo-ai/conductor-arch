@@ -2,12 +2,22 @@ import type { JSX } from "solid-js";
 
 export type IconName =
   | "alert"
+  | "alert-circle"
   | "arrow-left"
   | "arrow-right"
   | "arrow-up"
+  | "arrow-up-circle"
   | "arrow-down"
+  | "arrow-down-circle"
   | "bolt"
   | "brain"
+  | "circle-dashed"
+  | "circle-dot"
+  | "circle-help"
+  | "circle-slash"
+  | "circle-x"
+  | "git-branch"
+  | "loader-circle"
   | "chevron-down"
   | "chevron-left"
   | "chevron-right"
@@ -45,10 +55,24 @@ export type IconName =
 // earlier one (icon lists render the same name many times).
 const PATHS: Record<IconName, () => JSX.Element> = {
   alert: () => <><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" /><path d="M12 9v4" /><path d="M12 17h.01" /></>,
+  "alert-circle": () => <><circle cx="12" cy="12" r="9" /><path d="M12 8v5" /><path d="M12 16h.01" /></>,
   "arrow-left": () => <path d="M19 12H5m6-6-6 6 6 6" />,
   "arrow-right": () => <path d="M5 12h14m-6-6 6 6-6 6" />,
   "arrow-up": () => <path d="M12 19V5m-6 6 6-6 6 6" />,
+  "arrow-up-circle": () => <><circle cx="12" cy="12" r="9" /><path d="M12 16V8" /><path d="m8.5 11.5 3.5-3.5 3.5 3.5" /></>,
   "arrow-down": () => <path d="M12 5v14m6-6-6 6-6-6" />,
+  "arrow-down-circle": () => <><circle cx="12" cy="12" r="9" /><path d="M12 8v8" /><path d="m8.5 12.5 3.5 3.5 3.5-3.5" /></>,
+  // Dashed ring: "nothing here yet", visually lighter than any solid ring so an
+  // untouched workspace recedes in a long list.
+  "circle-dashed": () => <><path d="M10.1 3.2a9 9 0 0 0-3.4 1.4" /><path d="M4.6 6.7A9 9 0 0 0 3.2 10.1" /><path d="M3.2 13.9a9 9 0 0 0 1.4 3.4" /><path d="M6.7 19.4a9 9 0 0 0 3.4 1.4" /><path d="M13.9 20.8a9 9 0 0 0 3.4-1.4" /><path d="M19.4 17.3a9 9 0 0 0 1.4-3.4" /><path d="M20.8 10.1a9 9 0 0 0-1.4-3.4" /><path d="M17.3 4.6a9 9 0 0 0-3.4-1.4" /></>,
+  "circle-dot": () => <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" /></>,
+  "circle-help": () => <><circle cx="12" cy="12" r="9" /><path d="M9.6 9.5a2.5 2.5 0 0 1 4.7 1.1c0 1.7-2.4 2.1-2.4 3.4" /><path d="M12 17h.01" /></>,
+  "circle-slash": () => <><circle cx="12" cy="12" r="9" /><path d="m8 16 8-8" /></>,
+  "circle-x": () => <><circle cx="12" cy="12" r="9" /><path d="m15 9-6 6" /><path d="m9 9 6 6" /></>,
+  "git-branch": () => <><path d="M6 3v12" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></>,
+  // Broken ring — the gap is what makes rotation legible; a full circle spinning
+  // looks static.
+  "loader-circle": () => <path d="M21 12a9 9 0 1 1-6.2-8.6" />,
   bolt: () => <path d="m13 2-8 13h7l-1 7 8-13h-7l1-7z" />,
   brain: () => <><path d="M9.5 2A3.5 3.5 0 0 0 6 5.5v.2A3.5 3.5 0 0 0 4 9a3.5 3.5 0 0 0 1.2 2.6A3.5 3.5 0 0 0 8.5 16H10V5.5A3.5 3.5 0 0 0 9.5 2Z" /><path d="M14.5 2A3.5 3.5 0 0 1 18 5.5v.2A3.5 3.5 0 0 1 20 9a3.5 3.5 0 0 1-1.2 2.6A3.5 3.5 0 0 1 15.5 16H14V5.5A3.5 3.5 0 0 1 14.5 2Z" /><path d="M10 16v2a4 4 0 0 0 4 4v-6" /></>,
   "chevron-down": () => <path d="m6 9 6 6 6-6" />,

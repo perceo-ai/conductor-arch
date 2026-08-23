@@ -1,0 +1,179 @@
+/* ── Motion tokens and the shared keyframe library ──
+ *
+ * Before this file the app had two CSS transitions and no keyframes at all, so
+ * every surface appeared and disappeared by teleporting. Rather than sprinkle
+ * ad-hoc durations across 11k lines of theme/base CSS, the vocabulary lives
+ * here once and every surface reads it. Two rules keep it that way:
+ *
+ *   1. Durations and easings are tokens, never literals. A literal in a
+ *      component rule is invisible to the reduced-motion override below.
+ *   2. Keyframes are named `mo-*` and defined only in this file, so the set of
+ *      motions the app can perform is enumerable by reading one screen.
+ *
+ * Motion here is functional, not decorative: it says where a thing came from
+ * (rise/scale from its anchor), that work is ongoing (wave/shimmer/spin), or
+ * that state just changed (pulse-ring). Anything that does not answer one of
+ * those does not get an animation. */
+
+:root {
+    /* Durations. Anything above --mo-slow reads as the app being sluggish;
+       anything below --mo-instant is not perceivable and may as well be 0. */
+    --mo-instant: 80ms;
+    --mo-fast: 140ms;
+    --mo-base: 220ms;
+    --mo-slow: 380ms;
+
+    /* Loops. Longer than the one-shot durations because a repeating animation
+       is ambient — it should read as texture, not as flicker. */
+    --mo-loop-fast: 1200ms;
+    --mo-loop: 1800ms;
+    --mo-loop-slow: 2600ms;
+
+    /* Easings.
+       --mo-out    decelerating; for things entering (they arrive and settle)
+       --mo-in-out symmetric; for things moving between two on-screen places
+       --mo-spring slight overshoot; reserved for confirmations, so overshoot
+                   stays meaningful instead of becoming the house style */
+    --mo-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --mo-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+    --mo-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+    /* Stagger step for list entries. Small: 12 rows x 18ms is already 216ms,
+       and a list that takes longer than that to appear reads as slow loading. */
+    --mo-stagger: 18ms;
+}
+
+/* ── Keyframes ── */
+
+@keyframes mo-fade-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+/* Content arriving in place: fades while travelling a short distance upward,
+   so the eye tracks it to where it settles. */
+@keyframes mo-rise-in {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+/* Overlays (dialogs, menus, popovers). Paired with a transform-origin at the
+   anchor so the surface reads as growing out of the control that opened it. */
+@keyframes mo-scale-in {
+    from {
+        opacity: 0;
+        transform: scale(0.96);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+/* Toasts enter from the edge they live on. */
+@keyframes mo-slide-up-in {
+    from {
+        opacity: 0;
+        transform: translateY(12px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@keyframes mo-slide-down-out {
+    from {
+        opacity: 1;
+        transform: none;
+    }
+    to {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+}
+
+/* A highlight sweeping left-to-right across text. Driven by background-position
+   over a wide gradient, so it costs no layout. Used for streaming reasoning:
+   the sweep says "still arriving" without moving the text people are reading. */
+@keyframes mo-shimmer {
+    from {
+        background-position: 200% 0;
+    }
+    to {
+        background-position: -200% 0;
+    }
+}
+
+/* Ambient breathing for an ongoing-but-unquantified state (checks running).
+   Opacity only — a scaling icon in a dense list is noise. */
+@keyframes mo-breathe {
+    0%,
+    100% {
+        opacity: 0.45;
+    }
+    50% {
+        opacity: 1;
+    }
+}
+
+/* One-shot ring expanding out of a status icon. Fires when a state *becomes*
+   true (a PR turning mergeable), never continuously — a permanent pulse is
+   indistinguishable from an alert nobody can dismiss. */
+@keyframes mo-pulse-ring {
+    from {
+        opacity: 0.55;
+        transform: scale(0.7);
+    }
+    to {
+        opacity: 0;
+        transform: scale(2.1);
+    }
+}
+
+@keyframes mo-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* Single dot in the generation loader. Neighbouring dots run this with delays
+   one phase-step apart, which is what turns 36 independent dots into one
+   travelling wave. Peak is brief relative to the trough so the crest reads as a
+   moving band rather than the whole grid brightening at once. */
+@keyframes mo-dot-wave {
+    0%,
+    100% {
+        opacity: 0.16;
+        transform: scale(1);
+    }
+    18% {
+        opacity: 1;
+        transform: translateY(-2px) scale(1.35);
+    }
+    46% {
+        opacity: 0.16;
+        transform: scale(1);
+    }
+}
+
+/* Indeterminate progress band, for "something is running" on an element wide
+   enough to host it (loading inline-event chips). */
+@keyframes mo-track-slide {
+    from {
+        transform: translateX(-100%);
+    }
+    to {
+        transform: translateX(300%);
+    }
+}

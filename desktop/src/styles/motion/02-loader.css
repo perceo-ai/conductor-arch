@@ -1,0 +1,134 @@
+/* ── Generation loader + streaming ("thinking") treatments ── */
+
+/* The flowing dot grid shown under the last message while the agent works.
+   Sits in the message column rather than in fixed chrome, so it reads as "the
+   next message is coming" instead of as a toolbar status. */
+.dot-grid-loader {
+    --dot-grid-cell: 6px;
+    --dot-grid-dot: 3.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    animation: mo-rise-in var(--mo-base) var(--mo-out) both;
+}
+
+.dot-grid-loader-grid {
+    display: grid;
+    gap: 2px;
+    align-items: center;
+    justify-items: center;
+}
+
+.dot-grid-loader-dot {
+    width: var(--dot-grid-dot);
+    height: var(--dot-grid-dot);
+    border-radius: 50%;
+    background: currentColor;
+    /* Every dot runs the same keyframe; only the inline animation-delay differs
+       (see lib/dotGrid.ts). That phase offset is what turns 36 blinking dots
+       into one wave travelling across the grid. */
+    animation: mo-dot-wave var(--mo-loop) var(--mo-in-out) infinite;
+    will-change: opacity, transform;
+}
+
+.dot-grid-loader-label {
+    font-size: var(--ui-text-sm, 12px);
+    color: var(--lc-text-muted);
+    letter-spacing: 0.01em;
+}
+
+/* Reduced motion: the wave stops, but the dots must not all collapse to the
+   keyframe's 16% trough — a row of nearly-invisible dots reads as a rendering
+   bug, not as "working". Hold them legible and let the label carry the state. */
+@media (prefers-reduced-motion: reduce) {
+    .dot-grid-loader-dot {
+        animation: none !important;
+        opacity: 0.55;
+    }
+}
+
+.chat-generation-loader {
+    color: var(--lc-accent);
+    margin-top: 10px;
+    padding: 2px 0;
+}
+
+/* ── Streaming reasoning ──
+   `.chat-reasoning-block-streaming` existed as a class but declared nothing, so
+   reasoning still arriving looked identical to reasoning that had finished.
+   Two signals now: a sweep across the text, and a lit rail in the margin. */
+.chat-reasoning-block-streaming .chat-reasoning-text {
+    background: linear-gradient(
+        100deg,
+        var(--lc-text-muted) 0%,
+        var(--lc-text-muted) 35%,
+        var(--lc-text-strong) 50%,
+        var(--lc-text-muted) 65%,
+        var(--lc-text-muted) 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: mo-shimmer var(--mo-loop-slow) linear infinite;
+}
+
+/* The rail is on the block, not the text, so it spans the full height however
+   many lines have streamed in so far. */
+.chat-reasoning-block-streaming {
+    position: relative;
+    padding-left: 10px;
+}
+
+.chat-reasoning-block-streaming::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 2px;
+    bottom: 2px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--lc-accent);
+    animation: mo-breathe var(--mo-loop) var(--mo-in-out) infinite;
+}
+
+/* Settled reasoning keeps the muted colour it always had. Declared after the
+   streaming rules so a block that finishes mid-view drops the sweep cleanly. */
+.chat-reasoning-block:not(.chat-reasoning-block-streaming) .chat-reasoning-text {
+    -webkit-text-fill-color: currentColor;
+}
+
+/* ── Inline event cards ──
+   A running tool call used to be a static blue tint, indistinguishable from a
+   finished one at a glance. Give it a progress band instead. */
+.chat-inline-event-loading .chat-inline-event-header {
+    position: relative;
+}
+
+.chat-inline-event-loading .chat-inline-event-header::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -2px;
+    height: 1px;
+    overflow: hidden;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        var(--lc-accent) 50%,
+        transparent
+    );
+    background-size: 40% 100%;
+    background-repeat: no-repeat;
+    animation: mo-track-slide var(--mo-loop-fast) var(--mo-in-out) infinite;
+}
+
+/* Timeline content arriving. Applied to the message rows rather than to the
+   container so each entry animates once, on its own mount. */
+.chat-messages > .chat-agent-text,
+.chat-messages > .chat-user-row,
+.chat-messages > .chat-reasoning-block,
+.chat-messages > .chat-inline-event {
+    animation: mo-rise-in var(--mo-base) var(--mo-out) both;
+}

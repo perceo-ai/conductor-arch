@@ -1,0 +1,112 @@
+/* ── Workspace PR-state icons ──
+ *
+ * One colour per state, keyed off `WorkspacePrStateKind` rather than the action
+ * kind. The previous action-keyed scheme had three colours for twelve
+ * situations, so a merged PR, failing checks and a branch behind base all read
+ * identically in the sidebar.
+ *
+ * The palette is deliberately grouped rather than twelve unrelated hues:
+ *
+ *   grey    nothing to do here (no changes, closed)
+ *   amber   your move — local work not yet pushed or PR'd
+ *   blue    in flight, not yours to act on (checks running, behind base)
+ *   red     broken and blocking (conflict, checks failed)
+ *   green   ready
+ *   violet  done (merged)
+ *
+ * Hue carries urgency; the glyph carries the specific state. Reading the colour
+ * alone tells you whether a row needs you, which is the question being asked
+ * when someone scans this list.
+ */
+
+.workspace-git-state {
+    position: relative;
+    transition: color var(--mo-fast) var(--mo-in-out);
+}
+
+/* Idle — nothing has happened yet, or the PR is over. Dimmest in the list so
+   these rows recede. */
+.workspace-git-state-no-changes {
+    color: #5f5f5f;
+}
+
+.workspace-git-state-closed {
+    color: #6f6f6f;
+}
+
+/* Your move. */
+.workspace-git-state-no-pr {
+    color: #b99a55;
+}
+
+.workspace-git-state-uncommitted,
+.workspace-git-state-unpushed {
+    color: var(--lc-accent);
+}
+
+/* In flight elsewhere. */
+.workspace-git-state-checks-running {
+    color: #7ba7d4;
+}
+
+.workspace-git-state-behind-base {
+    color: #8f9bb3;
+}
+
+.workspace-git-state-checks-unknown {
+    color: #7d7d7d;
+}
+
+/* Blocking. */
+.workspace-git-state-conflict,
+.workspace-git-state-checks-failed {
+    color: #e08585;
+}
+
+/* Done. */
+.workspace-git-state-ready {
+    color: #72c293;
+}
+
+.workspace-git-state-merged {
+    color: #a98cd8;
+}
+
+/* ── Motion ──
+ * Only three states move (see WORKSPACE_PR_STATE_MOTION). Motion is a scarce
+ * signal in a list: if most rows animate, movement stops distinguishing
+ * anything and just makes the sidebar restless. */
+
+.workspace-git-state-motion-spin .ui-icon {
+    animation: mo-spin var(--mo-loop) linear infinite;
+    transform-origin: 50% 50%;
+}
+
+.workspace-git-state-motion-attention {
+    animation: mo-breathe var(--mo-loop-slow) var(--mo-in-out) infinite;
+}
+
+/* A ring that expands out of the icon once, when the row mounts in a ready
+   state. Deliberately not an infinite pulse: "ready to merge" is good news, and
+   permanent motion would make it read as an alarm that cannot be dismissed. */
+.workspace-git-state-ready::after {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: 50%;
+    border: 1px solid currentColor;
+    animation: mo-pulse-ring var(--mo-slow) var(--mo-out) 1 both;
+    pointer-events: none;
+}
+
+/* The PR bar shows the same glyph as the sidebar row, at the bar's own size. */
+.ws-pr-bar .workspace-git-state {
+    width: 15px;
+    height: 15px;
+    margin-right: 2px;
+}
+
+.ws-pr-bar .workspace-git-state .ui-icon {
+    width: 15px;
+    height: 15px;
+}
