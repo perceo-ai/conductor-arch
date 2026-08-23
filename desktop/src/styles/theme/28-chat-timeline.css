@@ -60,6 +60,9 @@
     color: #c6c6c6;
     line-height: 1.55;
     margin-bottom: 0;
+    /* Previously uncapped, so replies ran the full width of the message column
+       and got wider still as the window grew. */
+    max-width: var(--chat-measure);
 }
 /* Prose needs breathing room from the actions above it; chips next to chips do
    not. Spacing is charged at the boundary, not to every row. */
@@ -83,7 +86,7 @@
 }
 .chat-reasoning-block {
     margin: 0;
-    max-width: 78ch;
+    max-width: var(--chat-measure-secondary);
 }
 .chat-reasoning-text {
     color: #818181;

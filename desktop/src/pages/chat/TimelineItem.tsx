@@ -111,8 +111,12 @@ export function TimelineItem(props: { item: ArchcarProjectionItem; agentIdle: bo
         <UserBubble body={props.item.body} />
       </Match>
       <Match when={cls() === "assistant_chat"}>
+        {/* Reasoning already marked itself as streaming; agent prose did not,
+            so a reply still arriving looked identical to a finished one and new
+            text simply appeared. */}
         <div
           class="chat-agent-text markdown-body"
+          classList={{ "chat-stream-active": props.item.stream_state === "streaming" }}
           innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
         />
       </Match>

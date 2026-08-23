@@ -239,7 +239,16 @@
   caret-color: var(--lc-text, #e4e4e4);
   outline: none;
 }
-.chat-input-view-has-preview {
+/* The composer stacks a rendered markdown preview underneath the textarea; the
+   textarea's own glyphs must be invisible or the message renders twice,
+   slightly offset. That shipped as a bug once, because a later
+   `.chat-input-view { color: ... }` at equal specificity — a completely
+   reasonable-looking rule — silently outranked this one.
+
+   So this deliberately carries more specificity (0,3,0) than any other colour
+   rule on the textarea, rather than relying on load order. Keep it that way:
+   styles/composerPreview.test.ts fails if anything out-specifies it. */
+.chat-input-shell .chat-input-view.chat-input-view-has-preview {
   color: transparent;
 }
 .chat-input-view:focus {

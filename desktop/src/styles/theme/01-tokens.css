@@ -82,4 +82,13 @@
     --ui-border: #282828;
     --ui-border-strong: #383838;
     --ui-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.5);
+
+    /* ── Reading measure ──
+       Line length for chat prose. Typographic comfort tops out around 65-75
+       characters; past that the eye loses its place returning to the next line.
+       Agent replies get the wider end because they are the thing being read;
+       reasoning is secondary and skimmed, so it sits narrower and reads as a
+       column of notes beside the answer rather than more prose of equal weight. */
+    --chat-measure: 72ch;
+    --chat-measure-secondary: 62ch;
 }

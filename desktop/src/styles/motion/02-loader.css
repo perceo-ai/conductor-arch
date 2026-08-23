@@ -98,6 +98,37 @@
     -webkit-text-fill-color: currentColor;
 }
 
+/* ── Streaming reveal ──
+ *
+ * Streamed text is one text node rewritten in place, so there is no per-token
+ * element to animate and new words simply blink into existence at the bottom
+ * edge. Feathering that edge is what turns "appears" into "emerges": the last
+ * line is always partly faded, so a word becomes legible as it moves up out of
+ * the gradient instead of switching from absent to present.
+ *
+ * A mask costs no layout and needs no per-token DOM, which matters when this
+ * element re-renders on every chunk. Removed the moment streaming ends, so
+ * settled text is never left with a soft bottom edge.
+ */
+.chat-agent-text.chat-stream-active,
+.chat-reasoning-block-streaming .chat-reasoning-text {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5em), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 1.5em), transparent);
+}
+
+/* A caret at the end of the stream, so a pause between chunks reads as the
+   agent thinking rather than as the reply having stopped. */
+.chat-agent-text.chat-stream-active::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: var(--lc-accent);
+    animation: mo-breathe var(--mo-loop-fast) var(--mo-in-out) infinite;
+}
+
 /* ── Inline event cards ──
    A running tool call used to be a static blue tint, indistinguishable from a
    finished one at a glance. Give it a progress band instead. */
