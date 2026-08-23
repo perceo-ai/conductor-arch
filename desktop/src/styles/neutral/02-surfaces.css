@@ -97,13 +97,35 @@
   stroke-width: 2.1;
 }
 
-.workspace-row-indicator-agent,
-.workspace-row-indicator-run {
+/* Live-work indicator. Replaces the row of unlabelled triage glyphs (a brain
+   for agent sessions, a play triangle for runs, a git glyph for a PR): with
+   their labels stripped they read as decoration, and the PR one repeated the
+   PR-state icon at the start of the same row. A dot answers the only question
+   a dense row has space to ask — is anything running here — and the tooltip
+   carries the detail. */
+.workspace-row-live {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   color: #72c293;
 }
 
-.workspace-row-indicator-pr {
-  color: #9aa6b8;
+.workspace-row-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  /* Breathing, because the state it reports is genuinely ongoing. */
+  animation: mo-breathe var(--mo-loop) var(--mo-in-out) infinite;
+}
+
+/* Only shown past one, so the common single-session case stays a bare dot. */
+.workspace-row-live-count {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: #7f9f8c;
 }
 
 /* Waiting on a human, not on time — the one row state worth interrupting for. */

@@ -41,6 +41,7 @@ export type IconName =
   | "play"
   | "plus"
   | "refresh"
+  | "search"
   | "circle-check"
   | "send"
   | "sidebar"
@@ -99,6 +100,7 @@ const PATHS: Record<IconName, () => JSX.Element> = {
   plus: () => <path d="M12 5v14m-7-7h14" />,
   refresh: () => <><path d="M21 12a9 9 0 0 1-15.3 6.4L3 16" /><path d="M3 12a9 9 0 0 1 15.3-6.4L21 8" /><path d="M21 4v4h-4" /><path d="M3 20v-4h4" /></>,
   "circle-check": () => <><circle cx="12" cy="12" r="9" /><path d="m8 12 2.6 2.6L16 9" /></>,
+  search: () => <><circle cx="11" cy="11" r="7" /><path d="m20 20-3.6-3.6" /></>,
   send: () => <path d="m22 2-7 20-4-9-9-4 20-7z" />,
   sidebar: () => <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M8 4v16" /></>,
   settings: () => <><path d="M12.2 2h-.4l-.8 3.1a7 7 0 0 0-1.8.7L6.4 4.1l-.3.3-2 3.5.3.2 2.3.7a7 7 0 0 0 0 2.4l-2.3.7-.3.2 2 3.5.3.3 2.8-1.7a7 7 0 0 0 1.8.7l.8 3.1h.4l.8-3.1a7 7 0 0 0 1.8-.7l2.8 1.7.3-.3 2-3.5-.3-.2-2.3-.7a7 7 0 0 0 0-2.4l2.3-.7.3-.2-2-3.5-.3-.3-2.8 1.7a7 7 0 0 0-1.8-.7L12.2 2Z" /><circle cx="12" cy="12" r="2.5" /></>,

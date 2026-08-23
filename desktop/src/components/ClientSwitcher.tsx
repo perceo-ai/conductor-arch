@@ -61,14 +61,28 @@ export default function ClientSwitcher() {
           if (e.key === "Enter" || e.key === " ") openContextMenuFromKeyboard(e, items());
         }}
       >
-        <Icon
-          name={clientsStore.state.activeId === null ? "monitor" : "cloud"}
-          class="client-switcher-icon"
-        />
+        {/* The glyph sits in its own tile so the control reads as "an identity
+            you can change" rather than as a labelled icon in a box. The tile
+            is tinted by kind, which is the fastest way to tell at a glance
+            that you are pointed at a remote machine rather than this one. */}
+        <span
+          class="client-switcher-badge"
+          classList={{ "client-switcher-badge-remote": clientsStore.state.activeId !== null }}
+        >
+          <Icon
+            name={clientsStore.state.activeId === null ? "monitor" : "cloud"}
+            class="client-switcher-icon"
+          />
+        </span>
         <span class="client-switcher-text">
           <span class="client-switcher-label">{clientsStore.activeLabel()}</span>
           <span class="client-switcher-address">{subtitle()}</span>
         </span>
+        {/* A pinned client cannot be switched, so it gets a lock-ish cue
+            instead of the chevron that implies a menu. */}
+        <Show when={clientsStore.pinned()}>
+          <span class="client-switcher-pinned" title="Pinned by environment" />
+        </Show>
         <Show when={!clientsStore.pinned()}>
           <Icon name="chevron-down" class="client-switcher-chevron" />
         </Show>

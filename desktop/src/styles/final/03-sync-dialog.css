@@ -107,31 +107,72 @@
   vertical-align: -1px;
 }
 
-/* Sidebar workspace filter. */
+/* Sidebar workspace filter.
+   A secondary control: it should sit quietly under the Workspaces header, not
+   read as the most prominent thing in the column. */
 .workspace-search {
   display: flex;
   align-items: center;
   gap: 6px;
   margin: 0 10px 6px 10px;
-  padding: 4px 8px;
-  border: 1px solid #2f2f2f;
-  border-radius: 8px;
-  background: #1c1c1c;
+  padding: 0 8px;
+  height: 26px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: #191919;
+  transition:
+    background-color var(--mo-fast) var(--mo-in-out),
+    border-color var(--mo-fast) var(--mo-in-out);
+}
+.workspace-search:hover {
+  background: #1d1d1d;
+}
+.workspace-search:focus-within {
+  background: #1d1d1d;
+  border-color: #333333;
 }
 .workspace-search input {
   flex: 1;
   min-width: 0;
+  height: 100%;
   border: none;
   background: transparent;
   color: inherit;
   font-size: 12px;
   outline: none;
+  /* The global `input` rule sets 7px 10px, which this element inherits because
+     it does not name padding. Stacked on the wrapper's own padding that made
+     the field roughly twice as tall as the rows it filters. */
+  padding: 0;
+}
+.workspace-search input:focus {
+  border: none;
+  box-shadow: none;
 }
 .workspace-search-icon {
   width: 12px;
   height: 12px;
   flex: 0 0 12px;
+  color: #6d6d6d;
+}
+/* The clear button is an affordance, not a control worth its own footprint. */
+.workspace-search .ui-button-icon {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  flex: 0 0 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
   color: #7a7a7a;
+}
+.workspace-search .ui-button-icon:hover {
+  color: var(--lc-text-strong);
+  background: transparent;
+}
+.workspace-search .ui-button-icon .ui-icon {
+  width: 11px;
+  height: 11px;
 }
 .workspace-row-pinned {
   color: #9aa6b8;
