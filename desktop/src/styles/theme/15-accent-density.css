@@ -1,0 +1,76 @@
+
+.lc-accent-blue .section-title,
+.lc-accent-blue .project-tab-active,
+.lc-accent-blue .card-activity,
+.lc-accent-blue .workspace-title {
+    color: #f5f5f5;
+    border-color: #5a5a5a;
+}
+
+.lc-accent-green .section-title,
+.lc-accent-green .project-tab-active,
+.lc-accent-green .card-activity,
+.lc-accent-green .workspace-title {
+    color: #f5f5f5;
+    border-color: #5a5a5a;
+}
+
+.lc-accent-amber .section-title,
+.lc-accent-amber .project-tab-active,
+.lc-accent-amber .card-activity,
+.lc-accent-amber .workspace-title {
+    color: #fff7ed;
+    border-color: #b35c00;
+}
+
+.lc-accent-rose .section-title,
+.lc-accent-rose .project-tab-active,
+.lc-accent-rose .card-activity,
+.lc-accent-rose .workspace-title {
+    color: #fff1f2;
+    border-color: #be123c;
+}
+
+.lc-density-compact .project-row,
+.lc-density-compact .history-row,
+.lc-density-compact .detail-row,
+.lc-density-compact .command-panel,
+.lc-density-compact .metric-card,
+.lc-density-compact .workspace-card {
+    padding: 8px;
+}
+.lc-density-compact .workspace-row-shell {
+    padding: 4px 10px;
+}
+.lc-density-compact .sidebar-nav-button {
+    min-height: 26px;
+}
+
+.lc-density-compact .detail-body,
+.lc-density-compact .page-body,
+.lc-density-compact .kanban-board,
+.lc-density-compact .page-board {
+    padding: 18px 22px;
+}
+
+.lc-density-comfortable .project-row,
+.lc-density-comfortable .history-row,
+.lc-density-comfortable .detail-row,
+.lc-density-comfortable .command-panel,
+.lc-density-comfortable .metric-card,
+.lc-density-comfortable .workspace-card {
+    padding: 14px;
+}
+.lc-density-comfortable .workspace-row-shell {
+    padding: 12px 12px;
+}
+.lc-density-comfortable .sidebar-nav-button {
+    min-height: 40px;
+}
+
+.lc-density-comfortable .detail-body,
+.lc-density-comfortable .page-body,
+.lc-density-comfortable .kanban-board,
+.lc-density-comfortable .page-board {
+    padding: 32px;
+}

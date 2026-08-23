@@ -1,0 +1,101 @@
+.chat-markdown-inline-view,
+.chat-markdown-inline-view text {
+    background-color: transparent;
+    color: #c6c6c6;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+    font-size: 13px;
+    line-height: 1.55;
+    margin: 0;
+    padding: 0;
+}
+.chat-markdown-chip {
+    background-color: #191919;
+    border: 1px solid #343434;
+    border-radius: 3px;
+    box-shadow: none;
+    color: #bdbdbd;
+    min-height: 0;
+    min-width: 0;
+    padding: 0 5px;
+}
+.chat-markdown-chip:hover {
+    background-color: #232323;
+    border-color: #4a4a4a;
+    box-shadow: none;
+}
+.chat-markdown-chip-label {
+    color: #bdbdbd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 11px;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
+.chat-markdown-file-chip {
+    border-color: rgba(195, 155, 80, 0.38);
+    padding: 0 5px;
+}
+.chat-markdown-file-chip-label {
+    color: #c39b50;
+    font-family: "Mona Sans", Inter, "Segoe UI", system-ui, sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+}
+.chat-markdown-code-chip-label,
+.chat-markdown-link-chip-label {
+    font-size: 11px;
+}
+.workspace-file-link {
+    background-color: transparent;
+    border: none;
+    border-radius: 4px;
+    box-shadow: none;
+    color: #e7e7e7;
+    font-family: "Mona Sans", Inter, "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    min-height: 22px;
+    min-width: 0;
+    padding: 2px 4px;
+}
+.workspace-file-link:hover {
+    background-color: rgba(195, 155, 80, 0.12);
+    box-shadow: none;
+}
+.workspace-file-link label {
+    color: #e6c98e;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
+.chat-inline-event-meta {
+    color: #8f8f8f;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 11px;
+}
+.chat-inline-event-body {
+    background-color: #181818;
+    border: 1px solid #2a2a2a;
+    border-radius: 5px;
+    color: #c9c9c9;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 10px;
+    line-height: 1.25;
+    padding: 0 2px;
+}
+/* Diff row/gutter styling lives in base.css and reads the shared code tokens;
+   only the terminal surface still needs its own container chrome here. */
+.chat-inline-event-terminal {
+    background-color: var(--code-surface);
+    border: 1px solid var(--code-border);
+    border-radius: 5px;
+}
+.chat-inline-event-terminal .viewport {
+    background-color: var(--code-surface);
+}
+.chat-inline-event-loading {
+    color: #b6c7e8;
+}
+.chat-inline-event-failed {
+    color: #f0a8a8;
+}

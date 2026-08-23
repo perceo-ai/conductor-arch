@@ -1,0 +1,85 @@
+/* Ported from crates/gtk-app/src/theme.rs APP_CSS — keep values in sync. */
+
+/* ── Color tokens ──
+   GTK @define-color -> CSS custom properties. Any @lc-name reference becomes var(--lc-name).
+   Includes the extra runtime tokens from main.rs CUSTOM_COLOR_TOKENS (lc-accent, lc-accent-fg, lc-warning). */
+:root {
+    --lc-bg: #111111;
+    --lc-surface: #171717;
+    --lc-surface-raised: #1d1d1d;
+    --lc-surface-muted: #141414;
+    --lc-hover: #242424;
+    --lc-hover-soft: #1f1f1f;
+    --lc-border: #292929;
+    --lc-border-strong: #3a3a3a;
+    --lc-text: #d8d8d8;
+    --lc-text-strong: #f0f0f0;
+    --lc-text-muted: #8a8a8a;
+    --lc-accent: #d4a94f;
+    --lc-accent-fg: #f5f5f5;
+    --lc-success: #d0d0d0;
+    --lc-warning: #f59e0b;
+    --lc-danger: #ff8a8a;
+
+    --lc-surface-base: #111111;
+    --lc-surface-selected: #232323;
+    --lc-border-subtle: #262626;
+    --lc-border-active: #3a3a3a;
+    --lc-text-primary: #d8d8d8;
+    --lc-text-secondary: #8a8a8a;
+    --lc-status-success: #d0d0d0;
+    --lc-status-warning: #f59e0b;
+    --lc-status-danger: #ff8a8a;
+
+    --ui-font-sans: "Mona Sans", "Inter", "SF Pro Text", "Segoe UI", sans-serif;
+    --ui-font-mono: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+
+    /* ── Code surface tokens ──
+       Every place the app shows code — the diff viewer, the file editor, and
+       markdown fences — reads these, so the three render identically.
+       --font-mono and --lc-mono are the names the older rules already ask for;
+       they were never defined, which silently dropped those surfaces to the
+       platform default monospace. Alias them here rather than chase every rule. */
+    --code-font: var(--ui-font-mono);
+    --font-mono: var(--ui-font-mono);
+    --lc-mono: var(--ui-font-mono);
+    --code-size: 12.5px;
+    --code-line: 1.5;
+    --code-tab: 2;
+    --code-surface: var(--ui-panel);
+    --code-fg: var(--lc-text);
+    --code-border: var(--lc-border);
+    --code-gutter-fg: #5f5f5f;
+    --code-line-active: rgba(255, 255, 255, 0.045);
+
+    /* Diff tints derived from the app's own change colors (--diff-add-accent /
+       --diff-del-accent, the same green and red the file-summary counts use)
+       laid over --ui-panel, so the diff reads as part of this app rather than a
+       transplanted GitHub surface. Row tint says "this line changed"; the
+       stronger word tint on top says "this is what changed in it". */
+    --diff-add-accent: #6cc58a;
+    --diff-del-accent: #e06f6f;
+    --diff-add-bg: #1c2a21;
+    --diff-add-fg: var(--lc-text);
+    --diff-add-word: rgba(108, 197, 138, 0.26);
+    --diff-del-bg: #2b1e1e;
+    --diff-del-fg: var(--lc-text);
+    --diff-del-word: rgba(224, 111, 111, 0.26);
+    --diff-hunk-bg: var(--ui-panel-3);
+    --diff-hunk-fg: var(--lc-text-muted);
+    --diff-header-bg: var(--ui-panel-2);
+    --ui-text: 13px;
+    --ui-text-sm: 12px;
+    --ui-text-xs: 11px;
+    --ui-line: 1.35;
+    --ui-radius: 6px;
+    --ui-control-h: 30px;
+    --ui-pad-x: 12px;
+    --ui-panel: #151515;
+    --ui-panel-2: #181818;
+    --ui-panel-3: #1d1d1d;
+    --ui-panel-hover: #222222;
+    --ui-border: #282828;
+    --ui-border-strong: #383838;
+    --ui-shadow-popover: 0 18px 44px rgba(0, 0, 0, 0.5);
+}

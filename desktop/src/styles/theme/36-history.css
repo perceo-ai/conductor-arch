@@ -1,0 +1,48 @@
+
+.history-page-body {
+    padding: 14px 20px 20px;
+}
+
+.history-filter-tabs {
+    margin-bottom: 10px;
+}
+
+.history-split-pane {
+    background-color: var(--lc-bg);
+    border: 1px solid var(--lc-border);
+    border-radius: 8px;
+    box-shadow: none;
+}
+
+.history-split-pane .separator {
+    background-color: var(--lc-border);
+    min-width: 1px;
+}
+
+.history-list .row {
+    margin: 0;
+    border-radius: 0;
+}
+
+.history-list .row.selected,
+.history-list .row:hover {
+    background-color: var(--lc-hover-soft);
+}
+
+.history-list .history-row {
+    background-color: transparent;
+    padding: 10px 12px;
+}
+
+.history-detail {
+    padding: 20px;
+}
+
+.history-transcript {
+    background-color: var(--lc-bg);
+    color: var(--lc-text);
+    padding: 18px;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+}

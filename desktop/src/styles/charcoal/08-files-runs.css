@@ -1,0 +1,72 @@
+
+.ws-file-summary-panel {
+  gap: 12px;
+}
+
+.ws-file-summary-row-content {
+  min-height: 32px;
+  gap: 8px;
+  padding: 0;
+  border-bottom: 1px solid #252525;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ws-file-summary-row-content:hover {
+  background: transparent;
+}
+
+.ws-file-name {
+  color: #d0d0d0;
+}
+
+.ws-file-summary-state,
+.ws-file-summary-counts {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ws-file-additions {
+  color: #6cc58a;
+}
+
+.ws-file-deletions {
+  color: #e06f6f;
+}
+
+.ws-run-section {
+  background: #111111;
+  border-top-color: #252525;
+}
+
+.ws-run-tab-bar {
+  min-height: 34px;
+  padding: 2px 10px;
+  background: #111111;
+  border-bottom: 0;
+}
+
+.ws-run-tabs-row-collapsed {
+  flex: 1 1 auto;
+}
+
+.ws-run-tab-btn,
+.ws-run-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: #858585;
+}
+
+.ws-run-tab-active,
+.ws-run-tab-btn:hover,
+.ws-run-collapse-btn:hover {
+  background: #1f1f1f;
+  color: #dedede;
+}

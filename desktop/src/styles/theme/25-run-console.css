@@ -1,0 +1,164 @@
+
+/* ── Run console section ── */
+.ws-run-section {
+    background-color: #111111;
+}
+.ws-run-body {
+    padding: 8px 0 0;
+}
+.ws-run-panel {
+    padding: 4px 12px 10px;
+}
+.ws-run-script-list {
+    display: grid;
+    gap: 6px;
+    margin: 8px 0 10px;
+}
+.ws-run-script-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 34px;
+    padding: 7px 9px;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    background: #171717;
+}
+.ws-run-script-disabled {
+    opacity: 0.58;
+}
+.ws-run-script-main,
+.ws-run-script-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+.ws-run-script-meta {
+    justify-content: flex-end;
+}
+.ws-run-script-id {
+    color: #e2e2e2;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ws-run-script-badge,
+.ws-run-script-env {
+    flex: none;
+    border-radius: 999px;
+    border: 1px solid #343434;
+    padding: 2px 7px;
+    color: #a8a8a8;
+    font-size: 11px;
+    line-height: 1.25;
+}
+.ws-run-script-badge {
+    color: #d8d8d8;
+    border-color: #4a4a4a;
+    background: #202020;
+}
+.ws-run-script-status {
+    color: #8c8c8c;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ws-run-terminal-panel {
+    padding: 0;
+    margin: 0;
+}
+.ws-run-tab-bar {
+    min-height: 38px;
+    padding: 0 6px;
+    background-color: #1a1a1a;
+    border-top: 1px solid #222222;
+}
+.ws-run-tab-btn {
+    background: transparent;
+    border: none;
+    border-bottom: none;
+    border-radius: 7px;
+    color: #7a7a7a;
+    font-size: 12px;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 4px 7px;
+    box-shadow: none;
+    text-shadow: none;
+}
+.ws-run-tab-btn:hover {
+    color: #c0c0c0;
+    background: rgba(255,255,255,0.04);
+}
+.ws-run-tab-active {
+    color: #e4e4e4;
+    border-bottom-color: #e4e4e4;
+}
+.ws-run-tab-add-btn {
+    background: transparent;
+    border: none;
+    border-radius: 2px;
+    color: #5a5a5a;
+    margin-left: 4px;
+    margin-right: 4px;
+    box-shadow: none;
+    text-shadow: none;
+}
+.ws-run-tab-add-btn:hover {
+    color: #aaaaaa;
+    background: rgba(255,255,255,0.05);
+}
+.ws-run-collapse-btn {
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    color: #5a5a5a;
+    font-size: 16px;
+    min-width: 28px;
+    min-height: 28px;
+    box-shadow: none;
+    text-shadow: none;
+}
+.ws-run-collapse-btn:hover {
+    color: #aaaaaa;
+    background: rgba(255,255,255,0.05);
+}
+.ws-prompt-modal {
+    background-color: rgba(18, 18, 18, 0.92);
+    border: 1px solid #2f2f2f;
+    border-radius: 14px;
+    padding: 14px 16px;
+    min-width: 260px;
+}
+.ws-prompt-modal .detail-label {
+    color: #e4e4e4;
+}
+.ws-run-output,
+.ws-run-output text {
+    background-color: #111111;
+    color: #c8c8c8;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+    border-radius: 0;
+}
+.ws-run-output-scroll {
+    background-color: #111111;
+}
+.ws-terminal-prompt {
+    color: #d8d8d8;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 13px;
+    padding: 0 2px 0 4px;
+}
+.ws-terminal-entry {
+    background-color: #111111;
+    border: 1px solid #303030;
+    color: #e4e4e4;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 13px;
+}

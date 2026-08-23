@@ -1,0 +1,83 @@
+
+.dashboard-header {
+  gap: 8px;
+  padding: 14px 20px 10px;
+  background: #151515;
+  border-bottom-color: var(--ui-border);
+}
+
+.dashboard-title {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.dashboard-subtitle {
+  display: none;
+}
+
+.project-tabs {
+  gap: 8px;
+}
+
+.project-tabs .ws-tab-shell {
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.dashboard .page-board {
+  padding: 18px 22px;
+}
+
+.kanban-board {
+  gap: 18px;
+  background: #111111;
+}
+
+.kanban-column {
+  min-width: 220px;
+  padding: 0;
+  gap: 10px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.kanban-column-header {
+  min-height: 30px;
+  padding: 0;
+  margin: 0;
+  border-bottom: none;
+}
+
+.column-title {
+  font-size: 13px;
+  font-weight: 620;
+  color: #dcdcdc;
+}
+
+.column-count {
+  color: #858585;
+  font-size: 12px;
+}
+
+.kanban-column .workspace-card,
+.workspace-card-action .workspace-card {
+  min-height: 92px;
+  padding: 12px;
+  border: 1px solid #303030;
+  border-left-width: 3px;
+  border-radius: 7px;
+  background: #1d1d1d;
+}
+
+.kanban-column .workspace-card:hover,
+.workspace-card-action:hover .workspace-card {
+  background: #242424;
+  border-color: #3a3a3a;
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 650;
+}

@@ -1,0 +1,89 @@
+.settings-page .page-body {
+    padding: 16px 24px;
+}
+
+.settings-page .settings-inspector,
+.settings-page .settings-content-panel {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.settings-page .settings-machine-entry:focus,
+.settings-page .settings-editor:focus,
+.settings-page .settings-editor-shell:focus-within {
+    border-color: #8a8a8a;
+    box-shadow: none;
+}
+
+.dialog-source-card {
+    background: #1c1c1c;
+    border: 1px solid #2c2c2c;
+    color: #d8d8d8;
+}
+.dialog-source-card:hover {
+    background: #222222;
+    border-color: #3a3a3a;
+}
+.dialog-source-active {
+    background: #232323;
+    border-color: #5b5b5b;
+}
+.dialog-source-warning {
+    border-color: rgba(242, 191, 126, 0.34);
+}
+.dialog-source-detail,
+.dialog-preview-label {
+    color: #858585;
+}
+.dialog-source-state {
+    border: 1px solid #343434;
+    background: #202020;
+    color: #a8a8a8;
+}
+.dialog-source-state-ready {
+    border-color: #2f6b4d;
+    background: #193225;
+    color: #9be7bb;
+}
+.dialog-source-state-action {
+    border-color: #5f4526;
+    background: #2c2114;
+    color: #f2bf7e;
+}
+.dialog-preview {
+    background: #181818;
+    border: 1px solid #2a2a2a;
+}
+.dialog-preview-title,
+.dialog-preview-value {
+    color: #d8d8d8;
+}
+.dialog-action-section {
+    background: #181818;
+    border: 1px solid #2a2a2a;
+}
+.dialog-danger-section {
+    border-color: rgba(255, 138, 138, 0.26);
+    background: rgba(255, 138, 138, 0.05);
+}
+.dialog-section-title {
+    color: #e0e0e0;
+}
+.dialog-section-copy {
+    color: #858585;
+}
+.dialog-provider-chip {
+    background: #202020;
+    border: 1px solid #343434;
+    color: #b8b8b8;
+}
+.dialog-provider-chip:hover {
+    background: #262626;
+    border-color: #454545;
+}
+.dialog-provider-chip-active {
+    background: #263044;
+    border-color: #4d6ca3;
+    color: #dbe8ff;
+}

@@ -1,0 +1,110 @@
+
+
+/* ---- Workspace intelligence panels (Summary / Context / PR) ---- */
+.ws-context-kind {
+  max-width: 120px;
+  flex: 0 0 auto;
+}
+.ws-summary-editor {
+  width: 100%;
+  min-height: 160px;
+  resize: vertical;
+  font-family: var(--lc-mono, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 4px;
+  background: var(--lc-surface-muted, #141414);
+  color: inherit;
+}
+.ws-pr-draft-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+
+.dialog-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.dialog-textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: inherit;
+}
+
+/* ---- Background development tasks (dashboard strip) ---- */
+.background-task-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+.background-task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.background-task-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 6px;
+  background: var(--lc-surface-muted, #141414);
+}
+.background-task-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.background-task-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.background-task-detail {
+  font-size: 11px;
+  color: var(--lc-text-muted, #9a9a9a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.background-task-tone-ready {
+  border-left: 3px solid #3fb27f;
+}
+.background-task-tone-failed {
+  border-left: 3px solid #c0503f;
+}
+.background-task-tone-active,
+.background-task-tone-waiting {
+  border-left: 3px solid #5b8def;
+}
+.background-task-tone-cancelled {
+  border-left: 3px solid #4a4a4a;
+}
+
+.settings-listen-input {
+  max-width: 140px;
+}
+.settings-token {
+  font-family: var(--lc-mono, monospace);
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 4px;
+  word-break: break-all;
+}
+.settings-hint {
+  font-size: 11px;
+  opacity: 0.8;
+}

@@ -1,0 +1,137 @@
+
+/* Blocking first-run setup gate. */
+.setup-scrim {
+    /* Opaque backdrop — nothing behind the gate should be interactive. */
+    background: rgba(10, 10, 10, 0.82);
+    backdrop-filter: blur(3px);
+}
+
+.setup-modal {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: min(520px, 92vw);
+    max-height: 88vh;
+    overflow: auto;
+    background-color: var(--lc-surface, #1a1a1a);
+    border: 1px solid var(--lc-border-strong, #2f2f2f);
+    border-radius: 16px;
+    padding: 24px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.setup-title {
+    color: var(--lc-text-strong, #f2f2f2);
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.setup-copy,
+.setup-feedback,
+.setup-status-detail {
+    color: var(--lc-text-muted, #9a9a9a);
+    font-size: 12px;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.setup-feedback {
+    font-size: 13px;
+}
+
+.setup-error {
+    color: var(--lc-danger, #ff8a8a);
+}
+
+.setup-status-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background-color: var(--lc-surface-muted, #151515);
+    border: 1px solid var(--lc-border, #2a2a2a);
+    border-radius: 12px;
+    padding: 10px;
+}
+
+.setup-status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+
+.setup-status-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+    min-width: 0;
+}
+
+.setup-status-ready {
+    background-color: #16211a;
+    border: 1px solid #2a4033;
+}
+
+.setup-status-missing-required {
+    background-color: #24191a;
+    border: 1px solid #4a2b2f;
+}
+
+.setup-status-missing {
+    background-color: var(--lc-surface-muted, #181818);
+    border: 1px solid var(--lc-border, #2b2b2b);
+}
+
+.setup-status-pill {
+    flex-shrink: 0;
+    min-width: 58px;
+    text-align: center;
+    color: #0f0f0f;
+    border-radius: 999px;
+    padding: 3px 10px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.setup-pill-ready {
+    background-color: #6fcf97;
+}
+
+.setup-pill-action {
+    background-color: var(--lc-warning, #f59e0b);
+}
+
+.setup-pill-missing {
+    background-color: var(--lc-danger, #ff8a8a);
+}
+
+.setup-status-name {
+    color: var(--lc-text-strong, #f2f2f2);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.setup-link {
+    flex-shrink: 0;
+    color: var(--lc-text, #f2f2f2);
+    background-color: var(--lc-surface-raised, #202020);
+    border: 1px solid var(--lc-border-strong, #303030);
+    border-radius: 9px;
+    padding: 6px 10px;
+    font-size: 12px;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.setup-link:hover {
+    background-color: var(--lc-hover, #2a2a2a);
+    border-color: #3a3a3a;
+}
+
+.setup-actions {
+    display: flex;
+    justify-content: flex-end;
+}

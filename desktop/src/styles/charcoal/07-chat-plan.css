@@ -1,0 +1,223 @@
+
+/* Populated workspace polish: chat remains the primary surface, while queue,
+   dock, and inspector content read as state instead of stacked command cards. */
+.chat-composer {
+  padding: 0 28px 14px;
+  background: #111111;
+}
+
+.chat-queue-overlay {
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.chat-queue-heading {
+  margin: 0 0 4px;
+  padding: 0 2px;
+  color: #777777;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.chat-queued-composer-row {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid #292929;
+  border-radius: 7px;
+  background: #181818;
+}
+
+.chat-queued-composer-body {
+  color: #d4d4d4;
+  font-size: 13px;
+}
+
+.chat-composer-box {
+  gap: 8px;
+  padding: 10px 12px;
+  border-color: #2b2b2b;
+  border-radius: 8px;
+  background: #181818;
+}
+
+/* Plan mode: the proposed plan reads as a document, and the review bar puts
+   approve next to the composer where the revision is typed. */
+.chat-plan-card {
+  margin: 0 16px 8px;
+  border: 1px solid #2f3a2f;
+  border-radius: 8px;
+  background: #171c17;
+  overflow: hidden;
+}
+
+.chat-plan-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #263026;
+  background: #1b211b;
+}
+
+.chat-plan-card-icon {
+  width: 14px;
+  height: 14px;
+  color: #8fbf8f;
+}
+
+.chat-plan-card-title {
+  color: #cfe3cf;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-plan-card-path {
+  overflow: hidden;
+  color: #7d8f7d;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-plan-card-body {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  color: #d4d4d4;
+  font-size: 13px;
+}
+
+.chat-plan-review {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.chat-plan-review-label {
+  flex: 1;
+  color: #9fb69f;
+  font-size: 12px;
+}
+
+.chat-plan-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #8d8d8d;
+  font-size: var(--ui-text-xs, 11px);
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.chat-plan-toggle:hover {
+  border-color: transparent;
+  background: #202020;
+  color: #ededed;
+}
+
+.chat-plan-toggle-on,
+.chat-plan-toggle-on:hover {
+  border-color: transparent;
+  background: rgba(195, 155, 80, 0.14);
+  color: var(--lc-accent, #c39b50);
+}
+
+.chat-plan-toggle .ui-icon {
+  width: 14px;
+  height: 14px;
+  opacity: 0.9;
+}
+
+.chat-interaction-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+}
+
+.chat-interaction-other {
+  display: flex;
+  gap: 6px;
+}
+
+.chat-interaction-other-input {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #2b2b2b;
+  border-radius: 6px;
+  background: #131313;
+  color: #d4d4d4;
+  font-size: 12px;
+}
+
+/* Session failures (spawn refused, provider auth, fatal stream error) surface
+   right above the composer, next to the retry that fixes them. */
+.chat-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border: 1px solid #5a2a2a;
+  border-radius: 7px;
+  background: #241818;
+}
+
+.chat-error-banner-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: #e07070;
+}
+
+.chat-error-banner-text {
+  flex: 1;
+  overflow: hidden;
+  color: #e8c4c4;
+  font-size: 12px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+}
+
+.chat-error-banner-btn {
+  padding: 3px 8px;
+  border: 1px solid #5a2a2a;
+  border-radius: 6px;
+  background: #2e1c1c;
+  color: #f0d4d4;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-error-banner-btn:hover {
+  background: #3a2222;
+}
+
+.chat-error-banner-dismiss {
+  display: flex;
+  align-items: center;
+  padding: 3px 5px;
+}
+
+.chat-input-view {
+  min-height: 42px;
+  max-height: 112px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-toolbar {
+  min-height: 30px;
+}

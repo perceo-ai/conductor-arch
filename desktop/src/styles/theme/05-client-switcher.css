@@ -1,0 +1,132 @@
+
+.client-switcher-button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 40px;
+    padding: 4px 8px;
+    border: 1px solid #2f2f2f;
+    border-radius: 8px;
+    background: #1c1c1c;
+    box-shadow: none;
+    text-shadow: none;
+    text-align: left;
+}
+
+.client-switcher-button:hover:not(:disabled) {
+    background: #262626;
+    border-color: #3a3a3a;
+}
+
+.client-switcher-button:disabled {
+    opacity: 0.75;
+}
+
+/* Icon renders a bare <svg viewBox> and drops the default `ui-icon` class when
+   given one, so these must set their own box — otherwise the SVG falls back to
+   the replaced-element default and swallows the row. */
+.client-switcher-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: #9a9a9a;
+}
+
+/* The two lines must not push the chevron off the row in a narrow sidebar. */
+.client-switcher-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.client-switcher-label {
+    color: #d2d2d2;
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-switcher-address {
+    color: #8a8a8a;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-switcher-chevron {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    color: #7a7a7a;
+}
+
+.sidebar.collapsed .client-switcher {
+    display: none;
+}
+
+/* Settings ▸ Clients: the same list the switcher shows, with management. */
+.client-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.client-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid #2f2f2f;
+    border-radius: 8px;
+    background: #1c1c1c;
+}
+
+.client-row.active {
+    border-color: var(--accent, #c9a227);
+}
+
+.client-row-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: #9a9a9a;
+}
+
+.client-row-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.client-row-label {
+    color: #d2d2d2;
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-row-address {
+    color: #8a8a8a;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-row-active {
+    color: var(--accent, #c9a227);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 0 8px;
+}

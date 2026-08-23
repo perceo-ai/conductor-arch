@@ -1,0 +1,230 @@
+
+/* Final chat-tab rail override: keep workspace tabs flat even when global tab
+   styles change elsewhere. The band owns the background; the strip inside it
+   scrolls, because clipping it hid every tab past the first on a narrow
+   window. */
+.ws-chat-tab-bar {
+  height: 30px;
+  min-height: 30px;
+  padding-right: 6px;
+  background: #111111;
+}
+
+.ws-chat-tabs-scroll {
+  height: 30px;
+  min-height: 30px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: transparent;
+  border: none;
+}
+
+.ws-chat-tabs {
+  height: 30px;
+  padding: 0 8px;
+  width: max-content;
+}
+
+.ws-chat-tabs .ws-tab-shell,
+.ws-chat-tabs button.ws-tab-shell {
+  height: 30px;
+  min-height: 30px;
+  min-width: 0;
+  padding: 0 6px;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+}
+
+.ws-chat-tabs .ws-chat-tab-shell.ws-tab-shell {
+  gap: 5px;
+}
+
+.ws-chat-tabs .ws-tab-shell.ws-tab-active {
+  background: transparent;
+  border-bottom-color: var(--lc-accent);
+  box-shadow: inset 0 -1px 0 var(--lc-accent);
+}
+
+.ws-chat-tabs .ws-tab-shell:hover {
+  background: #171717;
+}
+
+.ws-chat-tabs .ws-tab-close-button {
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
+  min-height: 18px;
+  opacity: 0;
+}
+
+.ws-chat-tabs .ws-tab-close-button .ui-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.ws-chat-tabs .ws-tab-shell:hover .ws-tab-close-button,
+.ws-chat-tabs .ws-tab-shell.ws-tab-active .ws-tab-close-button {
+  opacity: 0.55;
+}
+
+/* Conductor-density composer and selectors. */
+.chat-composer {
+  padding: 0 12px 12px;
+  background: #151515;
+}
+
+.chat-composer-box {
+  gap: 7px;
+  padding: 10px 12px 8px;
+  border-color: #242424;
+  border-radius: 12px;
+  background: #161616;
+  box-shadow: none;
+}
+
+.chat-composer-box:focus-within {
+  border-color: #303030;
+}
+
+.chat-input-view {
+  min-height: 36px;
+  max-height: 116px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-toolbar {
+  min-height: 25px;
+  gap: 6px;
+}
+
+.chat-toolbar-left,
+.chat-toolbar-right {
+  gap: 5px;
+}
+
+.compact-select-trigger {
+  height: 25px;
+  min-height: 25px;
+  max-width: 154px;
+  gap: 5px;
+  padding: 0 7px;
+  border-color: #2b2b2b;
+  border-radius: 6px;
+  background: #171717;
+  color: #cfcfcf;
+  font-size: 10px;
+}
+
+.compact-select-trigger:hover,
+.compact-select-trigger[aria-expanded="true"] {
+  background: #1d1d1d;
+  border-color: #3a3a3a;
+  color: #eeeeee;
+}
+
+.compact-select-icon {
+  width: 13px;
+  height: 13px;
+  color: #8f8f8f;
+}
+
+.compact-select-caret {
+  width: 11px;
+  height: 11px;
+  color: #737373;
+}
+
+/* Composer controls read as labelled icons, not boxed dropdowns: no border, no
+   fill until hover, and no chevrons — four carets in a row is pure noise when
+   the label already says what the control is. Scoped to the composer so the
+   boxed CompactSelect stays intact everywhere else. */
+.chat-toolbar .compact-select-trigger {
+  height: 26px;
+  min-height: 26px;
+  gap: 6px;
+  padding: 0 8px;
+  border-color: transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: #8d8d8d;
+  font-size: var(--ui-text-xs, 11px);
+  font-weight: 550;
+}
+
+.chat-toolbar .compact-select-trigger:hover,
+.chat-toolbar .compact-select-trigger[aria-expanded="true"] {
+  border-color: transparent;
+  background: #202020;
+  color: #ededed;
+}
+
+.chat-toolbar .compact-select-caret {
+  display: none;
+}
+
+.chat-toolbar .compact-select-icon {
+  width: 14px;
+  height: 14px;
+  color: inherit;
+  opacity: 0.9;
+}
+
+.chat-toolbar-left,
+.chat-toolbar-right {
+  gap: 2px;
+}
+
+.chat-toolbar .chat-context-usage {
+  height: 26px;
+  border-radius: 7px;
+  color: #7d7d7d;
+}
+
+.chat-toolbar .chat-plan-toggle {
+  height: 26px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.chat-agent-select .compact-select-trigger,
+.chat-effort-select .compact-select-trigger {
+  max-width: 112px;
+}
+
+.compact-select-agent-model .compact-select-trigger,
+.compact-select-model .compact-select-trigger {
+  max-width: 178px;
+}
+
+.chat-send-btn {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  margin-left: 6px;
+  border-color: transparent;
+  border-radius: 8px;
+  background: #242424;
+  color: #9d9d9d;
+}
+
+.chat-send-btn-active {
+  border-color: transparent;
+  background: #f2f2f2;
+  color: #141414;
+}
+
+.chat-send-btn:hover {
+  background: #2c2c2c;
+  color: #efefef;
+}
+
+.chat-send-btn-active:hover {
+  background: #ffffff;
+  color: #111111;
+}
+
+.chat-send-btn .ui-icon {
+  width: 15px;
+  height: 15px;
+}

@@ -1,0 +1,174 @@
+
+/* ---- Composer pickers ---- */
+.chat-picker {
+  font-size: 11px;
+  /* Room on the right for our own caret; the native arrow is removed below. */
+  padding: 3px 20px 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  background-color: #1e1e1e;
+  color: var(--lc-text, #d4d4d4);
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  /* Chevron drawn as an inline SVG so it renders identically everywhere (no
+     font/emoji dependency) and sits aligned inside the padding. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a8a8a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+}
+.chat-picker:hover {
+  border-color: var(--lc-border-strong, #3a3a3a);
+}
+
+.ui-icon,
+button.ui-button-icon .ui-icon,
+.ws-tab-close-button .ui-icon,
+.chat-queued-action-btn .ui-icon,
+.chat-attachment-chip-remove .ui-icon,
+.ws-run-collapse-btn .ui-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  display: block;
+}
+
+.compact-select {
+  position: relative;
+  min-width: 0;
+}
+
+.compact-select-trigger {
+  height: 25px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 168px;
+  padding: 0 7px 0 9px;
+  border: 1px solid var(--lc-border, #2b2b2b);
+  border-radius: 6px;
+  background: #181818;
+  color: var(--lc-text, #d8d8d8);
+  font-size: 11px;
+  font-weight: 560;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.compact-select-trigger:hover,
+.compact-select:focus-within .compact-select-trigger {
+  background: #202020;
+  border-color: #373737;
+  color: #eeeeee;
+}
+
+.compact-select-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compact-select-caret {
+  width: 12px;
+  height: 12px;
+  color: #8a8a8a;
+}
+
+.compact-select-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: #9a9a9a;
+}
+
+.compact-select-agent-model .compact-select-trigger,
+.compact-select-model .compact-select-trigger {
+  max-width: 210px;
+}
+
+.compact-select-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 5px);
+  z-index: 80;
+  min-width: max(100%, 180px);
+  max-width: 280px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid #343434;
+  border-radius: 8px;
+  background: #1b1b1b;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.42);
+}
+/* Portalled to <body> and positioned against the trigger from JS, so a
+   scrolling ancestor cannot clip it. Above the popover layer. */
+.compact-select-menu-floating {
+  z-index: 220;
+}
+.compact-select-group {
+  padding: 7px 8px 3px;
+  color: #858585;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.compact-select-option-grouped {
+  padding-left: 18px;
+}
+
+.compact-select-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #c8c8c8;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.compact-select-option:hover,
+.compact-select-option-focused,
+.compact-select-option-active {
+  background: #2a2a2a;
+  color: #f0f0f0;
+}
+.ws-new-provider {
+  margin-left: 4px;
+}
+.chat-queued-composer-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: #202020;
+  font-size: 12px;
+  color: var(--lc-text-muted, #b0b0b0);
+}
+.chat-queued-composer-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-queued-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.chat-stop-btn {
+  color: #e06c6c;
+}

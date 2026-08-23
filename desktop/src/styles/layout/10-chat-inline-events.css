@@ -1,0 +1,104 @@
+
+/* ---- Chat inline-event cards ---- */
+.chat-inline-event {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 0;
+}
+.chat-inline-event-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+}
+/* Small square toggle (GTK inline_event expander). */
+.chat-inline-event-expander {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #8f8f8f;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  line-height: 1;
+  cursor: pointer;
+}
+.chat-inline-event-expander:hover:not(:disabled) {
+  background: #202020;
+  color: #e7e7e7;
+}
+.chat-inline-event-expander:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.chat-inline-event-expander .ui-icon,
+.chat-inline-event-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+.chat-inline-event-expander-glyph {
+  display: block;
+  color: inherit;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+.chat-inline-event-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: #5e5e5e;
+}
+.chat-inline-event-icon {
+  color: #777777;
+}
+/* Verb (Ran / Read / Edited …). */
+.chat-inline-event-action {
+  flex: 0 0 auto;
+  color: #8f8f8f;
+  font-size: 11px;
+  font-weight: 600;
+}
+/* Content chip: the command / filename in mono, GTK chip look. */
+.chat-inline-event-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  border: 1px solid #343434;
+  border-radius: 3px;
+  background: #191919;
+  padding: 0 5px;
+  overflow: hidden;
+}
+.chat-inline-event-chip-label {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #bdbdbd;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.chat-inline-event-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin-left: 18px;
+  border: 1px solid #2a2a2a;
+  border-radius: 5px;
+  background: #181818;
+  color: #c9c9c9;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  padding: 6px 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}

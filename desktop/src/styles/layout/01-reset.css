@@ -1,0 +1,66 @@
+/* Structural layout the GTK widgets got from container properties (flex, fixed
+ * heights, expand flags). theme.css owns colors/typography; this owns geometry.
+ * Values match the UI map: 320px sidebar, 52px column headers. */
+
+* {
+  box-sizing: border-box;
+}
+
+/* Themed scrollbars everywhere (Chromium/Electron). Thin, track-less, and
+ * tinted to the surface palette so they don't read as stock OS grey. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--lc-border-strong, #3a3a3a) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--lc-border-strong, #3a3a3a);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--lc-text-muted, #8a8a8a);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* The Solid app mounts into #root, so #root — not body — is the real flex
+ * column that lets .window-content (flex: 1) fill the window height. */
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+body {
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.window-content {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}

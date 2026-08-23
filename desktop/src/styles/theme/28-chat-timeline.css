@@ -1,0 +1,166 @@
+.chat-timeline-scroll {
+    background-color: #151515;
+}
+.chat-messages {
+    padding: 14px 22px 16px;
+}
+.chat-working-indicator {
+    margin: 0 0 6px;
+    padding: 4px 0;
+    color: #b8c7de;
+}
+.chat-working-indicator .card-meta {
+    color: #b8c7de;
+}
+.chat-user-row {
+    margin-top: 5px;
+    margin-bottom: 5px;
+}
+.chat-user-bubble {
+    background-color: #2e2e2e;
+    color: #f4f7ff;
+    border-radius: 14px;
+    padding: 8px 14px;
+    line-height: 1.4;
+    min-height: 0;
+}
+.chat-queued-row {
+    margin-top: 4px;
+    margin-bottom: 4px;
+    padding: 6px 9px;
+    border: 1px solid #2d2d2d;
+    border-radius: 6px;
+    background-color: #181818;
+}
+.chat-queued-label {
+    color: #8f8f8f;
+    font-size: 11px;
+    font-weight: 600;
+}
+.chat-queued-body {
+    color: #e2e2e2;
+    font-size: 13px;
+    line-height: 1.4;
+    padding: 0;
+}
+.chat-interrupted-row {
+    margin-top: 2px;
+    margin-bottom: 5px;
+}
+.chat-interrupted-pill {
+    background-color: #262626;
+    color: #a5a5a5;
+    border: 1px solid #3a3a3a;
+    border-radius: 999px;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 700;
+}
+.chat-agent-text {
+    color: #c6c6c6;
+    line-height: 1.55;
+    margin-bottom: 0;
+}
+/* Prose needs breathing room from the actions above it; chips next to chips do
+   not. Spacing is charged at the boundary, not to every row. */
+.chat-agent-text:not(:first-child),
+.chat-reasoning-block:not(:first-child),
+.chat-user-row:not(:first-child) {
+    margin-top: 8px;
+}
+/* A chip that follows other content starts a new group and gets air; chips
+   inside the same run stack directly. Order matters: the adjacent-sibling rule
+   has to come last to win over the group rule. */
+.chat-inline-event:not(:first-child) {
+    margin-top: 6px;
+}
+.chat-inline-event + .chat-inline-event {
+    margin-top: 0;
+}
+.chat-inline-event + .chat-agent-text,
+.chat-inline-event + .chat-reasoning-block {
+    margin-top: 10px;
+}
+.chat-reasoning-block {
+    margin: 0;
+    max-width: 78ch;
+}
+.chat-reasoning-text {
+    color: #818181;
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.45;
+    margin: 0;
+    white-space: pre-wrap;
+}
+.chat-inline-event {
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    margin-bottom: 0;
+    padding: 0;
+}
+.chat-inline-event-chip {
+    background-color: #191919;
+    border: 1px solid #343434;
+    border-radius: 2px;
+    box-shadow: none;
+    color: #bdbdbd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 9px;
+    font-weight: 500;
+    min-height: 0;
+    min-width: 0;
+    padding: 0 3px;
+}
+.chat-inline-event-action {
+    color: #8f8f8f;
+    font-size: 11px;
+    font-weight: 600;
+    margin: 0;
+    padding: 0;
+}
+.chat-inline-event-expander {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    box-shadow: none;
+    color: #8f8f8f;
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+}
+button.chat-inline-event-expander {
+    border-radius: 5px;
+    line-height: 1;
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+}
+button.chat-inline-event-expander label {
+    line-height: 1;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
+.chat-inline-event-expander:hover,
+.chat-inline-event-expander:checked,
+.chat-inline-event-expander.checked {
+    background-color: #202020;
+    border-color: transparent;
+    box-shadow: none;
+    color: #e7e7e7;
+}
+.chat-inline-event-chip:hover {
+    background-color: #232323;
+    border-color: #4a4a4a;
+    box-shadow: none;
+}
+.chat-inline-event-chip-label {
+    color: #bdbdbd;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 9px;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}

@@ -1,0 +1,328 @@
+
+.settings-shell {
+    background-color: #1e1e1e;
+    border: 1px solid #2a2a2a;
+    border-radius: 14px;
+    padding: 14px;
+}
+
+.settings-toolbar {
+    background-color: #1e1e1e;
+    border-bottom: 1px solid #2a2a2a;
+    padding-bottom: 12px;
+}
+
+.settings-toolbar-row {
+    margin: 0;
+}
+
+.settings-status {
+    color: #8a8a8a;
+    font-size: 12px;
+}
+
+.settings-health-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
+}
+
+.settings-health-card {
+    align-items: stretch;
+}
+
+.settings-readiness-card {
+    grid-column: 1 / -1;
+}
+
+.settings-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+}
+
+.settings-readiness-pill {
+    flex: 0 0 auto;
+    border-radius: 999px;
+    border: 1px solid #5a2a2a;
+    background: #321b1b;
+    color: #ffaaaa;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 750;
+}
+
+.settings-readiness-pill-ready {
+    border-color: #2f6b4d;
+    background: #193225;
+    color: #9be7bb;
+}
+
+.settings-action-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.settings-inspector {
+    margin-top: 2px;
+}
+
+.settings-rail {
+    background-color: #202020;
+    border: 1px solid #2a2a2a;
+    border-radius: 14px;
+    padding: 8px;
+}
+
+.settings-rail-button,
+.settings-rail-button-active {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    box-shadow: none;
+    text-shadow: none;
+    padding: 9px 10px;
+}
+
+.settings-rail-button {
+    color: #b4b4b4;
+}
+
+.settings-rail-button:hover {
+    background-color: #2c2c2c;
+    border-color: transparent;
+}
+
+.settings-rail-button-active {
+    color: #e4e4e4;
+    background-color: #2e2e2e;
+    border-color: transparent;
+}
+
+.settings-rail-title {
+    color: #e4e4e4;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.settings-rail-copy {
+    color: #8a8a8a;
+    font-size: 11px;
+}
+
+.settings-content-shell {
+    background-color: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+
+.settings-content-panel {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+}
+
+.settings-group {
+    background-color: #202020;
+    border: 1px solid #2a2a2a;
+    border-radius: 14px;
+    padding: 14px;
+}
+
+.settings-group-title {
+    color: #e4e4e4;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.settings-group-copy {
+    color: #8a8a8a;
+    font-size: 12px;
+}
+
+.settings-group-body {
+    margin-top: 2px;
+}
+
+.settings-field-row {
+    margin-top: 2px;
+}
+
+.settings-field,
+.settings-editor-field,
+.settings-toggle-row {
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid #2a2a2a;
+    border-radius: 0;
+    padding: 10px 0 12px;
+}
+
+.settings-field-title {
+    color: #e4e4e4;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.settings-field-copy {
+    color: #8a8a8a;
+    font-size: 12px;
+}
+
+.settings-layer-strip {
+    margin-top: 8px;
+}
+
+.settings-prompt-packs {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 0;
+}
+.settings-pack-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.settings-pack-chip {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    border: 1px solid #333;
+    color: #b0b0b0;
+    background: #161616;
+    cursor: pointer;
+}
+.settings-pack-chip:hover:not(:disabled) {
+    border-color: #555;
+    color: #e6e6e6;
+}
+.settings-pack-chip:disabled {
+    cursor: default;
+}
+.settings-pack-chip-active {
+    border-color: var(--lc-accent, #c39b50);
+    color: var(--lc-accent, #c39b50);
+}
+
+.settings-appearance {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    padding: 10px 0 12px;
+    border-bottom: 1px solid #2a2a2a;
+}
+.settings-appearance-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.settings-accent-swatch {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.settings-accent-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--swatch, #c39b50);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.15);
+}
+
+.settings-split {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 12px 16px 16px;
+    overflow: hidden;
+}
+
+.settings-pane {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.settings-pane-head {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.settings-pane-head .card-meta {
+    margin-left: auto;
+}
+
+.settings-source-area {
+    flex: 1 1 auto;
+    min-height: 0;
+    resize: none;
+    border: none;
+    outline: none;
+    padding: 12px;
+    background: #161616;
+    color: #e6e6e6;
+    font-family: var(--lc-mono, ui-monospace, monospace);
+    font-size: 12.5px;
+    line-height: 1.5;
+    tab-size: 2;
+    white-space: pre;
+    overflow: auto;
+}
+
+.settings-pane .ws-diff-view {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.settings-inherited-label {
+    color: #aaaaaa;
+    font-size: 11px;
+    font-style: italic;
+}
+
+.settings-machine-entry,
+.settings-editor,
+.settings-editor text,
+.settings-editor .view,
+.settings-editor .widget {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+}
+
+.settings-editor-shell {
+    background-color: #151515;
+    border: 1px solid #2a2a2a;
+    border-radius: 10px;
+}
+
+.settings-editor {
+    background-color: #151515;
+    color: #e4e4e4;
+    padding: 8px;
+}
+
+.settings-shell input,
+.settings-shell .combobox,
+.settings-shell textarea,
+.settings-shell .scrolledwindow {
+    border-radius: 7px;
+}
+
+.settings-shell .checkbutton {
+    color: #e4e4e4;
+}
