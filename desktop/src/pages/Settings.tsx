@@ -21,6 +21,7 @@ import {  setShortcutBinding, shortcutBindingKey } from "./settings/shortcuts";
 import { SkillsCard } from "./settings/SkillsCard";
 import { RemoteDaemonCard } from "./settings/RemoteDaemonCard";
 import { BackgroundServiceCard } from "./settings/BackgroundServiceCard";
+import { McpRegistrationCard } from "./settings/McpRegistrationCard";
 
 // Settings page — two panes per scope:
 //   Effective : the merged, read-only config (get_settings) for reference.
@@ -366,6 +367,7 @@ export function SettingsPage() {
             </SettingsSectionBlock>
             <SettingsSectionBlock title="Host Access">
               <BackgroundServiceCard />
+              <McpRegistrationCard />
               <SettingsRow
                 title="Multiple clients"
                 description="Hosted web, Perceo mobile, CLI, and MCP clients can all connect to the same listening archcar."

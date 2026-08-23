@@ -117,6 +117,7 @@ export type ArchcarResponse =
   | { type: "review_comment_added"; comment: ReviewComment }
   | { type: "service_status"; status: ServiceStatus }
   | { type: "remote_access"; listen?: string; token: string; token_path: string }
+  | { type: "mcp_registration"; clients: McpClientRegistration[] }
   | { type: "background_task_saved"; task: BackgroundTask }
   | { type: "background_tasks"; tasks: BackgroundTask[] }
   | { type: "pull_request_created"; workspace: string; output: string }
@@ -143,6 +144,15 @@ export type ArchcarResponse =
 
 // --- Daemon service (launchd / systemd) ------------------------------------
 // Mirrors crates/core/src/service.rs.
+
+/// One agent CLI's view of the Archductor MCP server.
+/// Mirrors crates/core/src/archcar/protocol.rs.
+export interface McpClientRegistration {
+  client: string; // "claude" | "codex"
+  installed: boolean;
+  registered: boolean;
+  detail?: string;
+}
 
 export interface ServiceStatus {
   manager: string; // "launchd" | "systemd" | "unsupported"

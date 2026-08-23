@@ -8,7 +8,6 @@ import type {
   ArchcarChecksSummary,
   ContextAttachment,
   ContextKind,
-  SessionContribution,
   SessionOverlap,
   Summary,
   Task,
@@ -145,18 +144,6 @@ export function SummaryPanel(props: { workspace: string }) {
       }
     },
   );
-  const [contributions] = createResource(
-    () => `${props.workspace}:${intelStore.version()}`,
-    async (): Promise<SessionContribution[]> => {
-      try {
-        const res = await send({ type: "list_session_contributions", workspace: props.workspace });
-        return res.type === "session_contributions" ? res.contributions : [];
-      } catch {
-        return [];
-      }
-    },
-  );
-
   const [editing, setEditing] = createSignal(false);
   const [draftBody, setDraftBody] = createSignal<string | null>(null);
   const [feedback, setFeedback] = createSignal("");
@@ -268,7 +255,13 @@ export function SummaryPanel(props: { workspace: string }) {
   const provenance = () => {
     const summary = stored();
     if (!summary) return "No summary yet";
-    const author = summary.source_refs.includes("human:desktop") ? "Human-edited" : "Auto-maintained";
+    // Three authors, and which one wrote it changes how much to trust it: the
+    // agent's own note, a human's edit, or the daemon's placeholder draft.
+    const author = summary.source_refs.includes("human:desktop")
+      ? "Human-edited"
+      : summary.source_refs.includes("archductor:agent")
+        ? "Agent-maintained"
+        : "Placeholder draft";
     return `${author} · updated ${relativeTime(summary.updated_at)}`;
   };
 
@@ -312,7 +305,7 @@ export function SummaryPanel(props: { workspace: string }) {
       >
         <textarea
           class="ws-summary-editor"
-          placeholder="Branch-local summary: goal, files touched, decisions, checks, blockers, next actions."
+          placeholder="What is going on here, for whoever works on this next: the goal, where it stands, decisions made, what is next, open questions."
           value={text()}
           onInput={(e) => setDraftBody(e.currentTarget.value)}
         />
@@ -358,33 +351,6 @@ export function SummaryPanel(props: { workspace: string }) {
         </For>
       </Show>
 
-      <div class="ws-flat-section-label">Agent contributions</div>
-      <Show
-        when={(contributions() ?? []).length > 0}
-        fallback={
-          <div class="ws-check-empty">
-            {contributions.loading ? "Loading…" : "No agent sessions in this workspace yet."}
-          </div>
-        }
-      >
-        <For each={contributions()}>
-          {(contribution) => (
-            <SummaryRow
-              icon="brain"
-              title={contribution.title}
-              detail={[
-                contribution.model || contribution.provider,
-                `${contribution.files_touched.length} file${contribution.files_touched.length === 1 ? "" : "s"}`,
-                contribution.still_present.length > 0
-                  ? `${contribution.still_present.length} live`
-                  : "",
-              ]
-                .filter(Boolean)
-                .join(" · ")}
-            />
-          )}
-        </For>
-      </Show>
     </div>
   );
 }

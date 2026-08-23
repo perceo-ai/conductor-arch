@@ -175,6 +175,55 @@ five PR-state icons rendering distinctly in the sidebar. Not app-verified:
 checks-running, checks-failed, conflict and ready-to-merge icons, which need a
 real GitHub checks summary; those are unit-covered only.
 
+## Agent-Maintained Context (2026-08-23)
+
+The workspace summary is now prose an agent writes, not a mechanical dump, and
+the naming pipeline no longer depends on the agent answering a one-shot ask.
+
+- **Summary is agent-authored.** `<archductor_metadata>` carries a `summary`
+  field alongside the names; it is stored with the `archductor:agent` source ref
+  and capped at 1,200 chars. `refresh_summary` refuses to overwrite an
+  agent-authored body, and `draft_workspace_summary` shrank to a seed (goal,
+  blockers, next actions) — the Files touched / Sessions / Checks sections are
+  gone, because Changes, Files and Checks already show them. The Summary tab
+  leads with the prose and tasks and no longer lists agent contributions.
+- **Asking is paced, not one-shot.** The hidden block is built by
+  `archductor_context_instruction` from an `ArchductorContextRequest` (naming
+  and/or summary in one block). Naming retries up to `CHAT_NAMING_ATTEMPT_LIMIT`
+  and only once the agent has answered something (`naming_requested_seq` vs the
+  metadata cursor). The summary ask fires every `SUMMARY_ASK_INTERVAL` user
+  turns and carries the stored prose so the agent revises rather than rewrites.
+- **A naming floor.** A chat is titled from its first message immediately;
+  workspace and branch fall back to a name derived from the request only after
+  the ask is spent. A silent or non-managed agent no longer leaves a workspace
+  on its codename.
+- **Directives apply at the turn boundary.** `apply_agent_metadata_for_thread`
+  runs on `TurnCompleted`/`SessionMessagesUpdated` against a per-thread
+  `metadata_cursor_seq`; reading a transcript now only strips the block. A
+  headless session gets renamed without a client watching it.
+- **MCP is the primary channel.** `set_workspace_context` (archcar
+  `ApplyAgentContext`) sets the summary and the names as a tool call, with the
+  workspace resolved from `ARCHDUCTOR_WORKSPACE` or the session's cwd and the
+  thread from `ARCHDUCTOR_THREAD_ID`. `archductor mcp serve --profile session`
+  exposes six tools; `--profile full` is the external surface.
+  `archductor mcp register` adds Archductor through each client's own
+  `claude mcp add` / `codex mcp add`, so it appears like any other MCP server,
+  with a Settings card (Clients -> Host Access) over the same archcar RPCs.
+- **Claude also gets prompt and hooks.** `--append-system-prompt` carries the
+  standing contract plus the stored summary; `SessionStart` and `PostToolUse`
+  hooks answer with `additionalContext` — the contract at start, a staleness
+  nudge mid-run, debounced through the same turn counter.
+
+Verified: 888 core tests (the four known macOS-only failures aside), 391 desktop
+tests, `tsc --noEmit`, clippy and fmt clean, a live archcar socket smoke where an
+MCP `set_workspace_context` call renamed `berlin` to `context-mcp-wiring` and
+stored the summary (a following `refresh-summary` reported `changed=false`), cwd
+based workspace resolution with no env set, and an Electron smoke showing
+"Agent-maintained · updated 3m ago" with the prose and tasks, plus the MCP
+registration card reading both clients' live state. Not verified end to end: a
+real claude session exercising the SessionStart/PostToolUse hooks, and the
+register/unregister write path against a real `~/.claude.json` / `~/.codex/config.toml`.
+
 ## Conductor Reference Cross-Check (2026-08-06)
 
 The Electron surface was cross-checked against Conductor's own reference docs

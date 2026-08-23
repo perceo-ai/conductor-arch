@@ -23,6 +23,66 @@ use crate::archcar::protocol::{ArchcarRequest, ArchcarResponse, WorkspaceChangeS
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "archductor";
 
+/// Names the workspace a tool call belongs to when the caller does not. Set on
+/// agent sessions Archductor spawns, so a device-wide MCP registration still
+/// lands on the right workspace.
+pub const WORKSPACE_ENV: &str = "ARCHDUCTOR_WORKSPACE";
+/// Same idea for the chat thread, which only a chat title needs.
+pub const THREAD_ENV: &str = "ARCHDUCTOR_THREAD_ID";
+
+/// How much of the tool surface to expose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum McpProfile {
+    /// Everything: the surface an external client or another machine drives.
+    #[default]
+    Full,
+    /// What an agent working inside a workspace needs to keep its own context
+    /// current. Deliberately small — every tool costs budget on every turn of
+    /// every session, and this server is registered device-wide.
+    Session,
+}
+
+impl McpProfile {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "full" => Ok(Self::Full),
+            "session" => Ok(Self::Session),
+            other => anyhow::bail!("unknown MCP profile `{other}` (expected `full` or `session`)"),
+        }
+    }
+
+    fn includes(self, tool: &ToolSpec) -> bool {
+        match self {
+            Self::Full => true,
+            Self::Session => SESSION_PROFILE_TOOLS.contains(&tool.name),
+        }
+    }
+}
+
+/// The session profile's tool set: name things, keep the handoff summary
+/// current, track tasks, and read back what is already known.
+const SESSION_PROFILE_TOOLS: [&str; 6] = [
+    "set_workspace_context",
+    "get_context_briefing",
+    "get_summary",
+    "list_tasks",
+    "create_task",
+    "update_task",
+];
+
+/// How the server was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct McpOptions {
+    pub read_only: bool,
+    pub profile: McpProfile,
+}
+
+impl McpOptions {
+    pub fn new(read_only: bool, profile: McpProfile) -> Self {
+        Self { read_only, profile }
+    }
+}
+
 /// One MCP tool and the archcar request it turns into.
 pub struct ToolSpec {
     pub name: &'static str,
@@ -403,6 +463,55 @@ pub fn tools() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "set_workspace_context",
+            description:
+                "Set this workspace's durable context: a short summary for whoever works here next, \
+                 and real names for the workspace, branch, and chat while they are still \
+                 placeholders. Call it when you learn what the task actually is, and again when \
+                 the state of the work changes. The summary replaces the stored one, so write it \
+                 whole: goal, where the work stands, decisions made, what is next, open questions. \
+                 Leave out file lists, session lists, and check status — Archductor shows those in \
+                 its own tabs. Workspace and branch names are accepted once per workspace.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "thread_id": {"type": "integer"},
+                        "summary": {"type": "string", "description": "At most 150 words of prose for the next agent."},
+                        "workspace_name": {"type": "string", "description": "2-4 words naming the task, lowercase."},
+                        "branch_name": {"type": "string", "description": "kebab-case slug of the task, no prefix."},
+                        "chat_title": {"type": "string", "description": "At most 48 characters, title case."},
+                    }),
+                    &[],
+                )
+            },
+            mutating: true,
+            build: |args| {
+                let request = ArchcarRequest::ApplyAgentContext {
+                    workspace: string_arg(args, "workspace")?,
+                    thread_id: args.get("thread_id").and_then(Value::as_i64),
+                    workspace_name: optional_string(args, "workspace_name"),
+                    branch_name: optional_string(args, "branch_name"),
+                    chat_title: optional_string(args, "chat_title"),
+                    summary: optional_string(args, "summary"),
+                };
+                if let ArchcarRequest::ApplyAgentContext {
+                    workspace_name: None,
+                    branch_name: None,
+                    chat_title: None,
+                    summary: None,
+                    ..
+                } = &request
+                {
+                    anyhow::bail!(
+                        "set_workspace_context needs at least one of `summary`, \
+                         `workspace_name`, `branch_name`, or `chat_title`"
+                    );
+                }
+                Ok(request)
+            },
+        },
+        ToolSpec {
             name: "refresh_summary",
             description:
                 "Refresh and store the operational summary for a workspace, session/current chat, or task from branch-local evidence.",
@@ -709,10 +818,11 @@ pub fn tools() -> Vec<ToolSpec> {
     ]
 }
 
-pub fn tool_definitions(read_only: bool) -> Vec<Value> {
+pub fn tool_definitions(options: McpOptions) -> Vec<Value> {
     tools()
         .into_iter()
-        .filter(|tool| !read_only || !tool.mutating)
+        .filter(|tool| options.profile.includes(tool))
+        .filter(|tool| !options.read_only || !tool.mutating)
         .map(|tool| {
             json!({
                 "name": tool.name,
@@ -723,12 +833,79 @@ pub fn tool_definitions(read_only: bool) -> Vec<Value> {
         .collect()
 }
 
+/// Which workspace a call belongs to when the caller did not say. Archductor
+/// registers one MCP server for the whole device, so the agent should not have
+/// to know a workspace name it never chose — the session's environment or the
+/// directory it is working in answers for it.
+fn default_workspace(client: &ArchcarClient) -> Option<String> {
+    if let Some(name) = std::env::var(WORKSPACE_ENV)
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+    {
+        return Some(name);
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let ArchcarResponse::Workspaces { workspaces } =
+        client.send(ArchcarRequest::ListWorkspaces).ok()?
+    else {
+        return None;
+    };
+    // Both sides are canonicalized: on macOS `/tmp` is a symlink, so a stored
+    // workspace path and the agent's cwd routinely disagree about the same
+    // directory. Longest matching root wins, so a nested workspace beats its
+    // parent.
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+    workspaces
+        .into_iter()
+        .filter(|workspace| {
+            let path = std::path::PathBuf::from(&workspace.path);
+            let path = std::fs::canonicalize(&path).unwrap_or(path);
+            cwd.starts_with(&path)
+        })
+        .max_by_key(|workspace| workspace.path.len())
+        .map(|workspace| workspace.name)
+}
+
+fn default_thread_id() -> Option<i64> {
+    std::env::var(THREAD_ENV).ok()?.trim().parse().ok()
+}
+
+/// Fill in the workspace and thread the caller omitted. Only touches keys the
+/// tool actually accepts, so a tool without a workspace argument is untouched.
+fn with_session_defaults(client: &ArchcarClient, tool: &ToolSpec, args: &Value) -> Value {
+    let schema = (tool.schema)();
+    let accepts = |key: &str| {
+        schema
+            .get("properties")
+            .and_then(|properties| properties.get(key))
+            .is_some()
+    };
+    let mut args = args.clone();
+    let Some(object) = args.as_object_mut() else {
+        return args;
+    };
+    if accepts("workspace")
+        && optional_string(&Value::Object(object.clone()), "workspace").is_none()
+    {
+        if let Some(workspace) = default_workspace(client) {
+            object.insert("workspace".to_owned(), Value::String(workspace));
+        }
+    }
+    if accepts("thread_id") && object.get("thread_id").and_then(Value::as_i64).is_none() {
+        if let Some(thread_id) = default_thread_id() {
+            object.insert("thread_id".to_owned(), Value::from(thread_id));
+        }
+    }
+    args
+}
+
 /// Run one tool by name and return its archcar response as JSON.
 pub fn call_tool(
     client: &ArchcarClient,
     name: &str,
     args: &Value,
-    read_only: bool,
+    options: McpOptions,
 ) -> Result<Value> {
     let tools = tools();
     let tool = tools
@@ -736,10 +913,15 @@ pub fn call_tool(
         .find(|tool| tool.name == name)
         .with_context(|| format!("unknown tool `{name}`"))?;
     anyhow::ensure!(
-        !read_only || !tool.mutating,
+        options.profile.includes(tool),
+        "`{name}` is not available in this server's tool profile"
+    );
+    anyhow::ensure!(
+        !options.read_only || !tool.mutating,
         "`{name}` changes state and this server is running read-only"
     );
-    let request = (tool.build)(args)?;
+    let args = with_session_defaults(client, tool, args);
+    let request = (tool.build)(&args)?;
     let response = client.send(request)?;
     if let ArchcarResponse::Error { message } = &response {
         anyhow::bail!("{message}");
@@ -748,7 +930,7 @@ pub fn call_tool(
 }
 
 /// Serve MCP over stdio until the client closes the stream.
-pub fn serve_stdio(client: &ArchcarClient, read_only: bool) -> Result<()> {
+pub fn serve_stdio(client: &ArchcarClient, options: McpOptions) -> Result<()> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut line = String::new();
@@ -761,7 +943,7 @@ pub fn serve_stdio(client: &ArchcarClient, read_only: bool) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let Some(response) = handle_message(client, &line, read_only) else {
+        let Some(response) = handle_message(client, &line, options) else {
             // Notifications get no reply, per JSON-RPC.
             continue;
         };
@@ -771,7 +953,7 @@ pub fn serve_stdio(client: &ArchcarClient, read_only: bool) -> Result<()> {
 }
 
 /// Handle one JSON-RPC message. Returns `None` for notifications.
-pub fn handle_message(client: &ArchcarClient, line: &str, read_only: bool) -> Option<String> {
+pub fn handle_message(client: &ArchcarClient, line: &str, options: McpOptions) -> Option<String> {
     let message: Value = match serde_json::from_str(line) {
         Ok(value) => value,
         Err(err) => {
@@ -794,7 +976,7 @@ pub fn handle_message(client: &ArchcarClient, line: &str, read_only: bool) -> Op
             "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tool_definitions(read_only)})),
+        "tools/list" => Ok(json!({"tools": tool_definitions(options)})),
         "tools/call" => {
             let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
             let name = params
@@ -806,7 +988,7 @@ pub fn handle_message(client: &ArchcarClient, line: &str, read_only: bool) -> Op
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match call_tool(client, &name, &args, read_only) {
+            match call_tool(client, &name, &args, options) {
                 Ok(value) => Ok(json!({
                     "content": [{
                         "type": "text",
@@ -862,8 +1044,8 @@ mod tests {
 
     #[test]
     fn read_only_mode_hides_mutating_tools() {
-        let all = tool_definitions(false);
-        let safe = tool_definitions(true);
+        let all = tool_definitions(McpOptions::default());
+        let safe = tool_definitions(McpOptions::new(true, McpProfile::Full));
 
         assert!(safe.len() < all.len());
         let safe_names: Vec<&str> = safe
@@ -930,7 +1112,7 @@ mod tests {
         assert!(names.contains(&"save_summary"));
 
         // The briefing is read-only; refresh mutates stored summaries.
-        let read_only: Vec<Value> = tool_definitions(true);
+        let read_only: Vec<Value> = tool_definitions(McpOptions::new(true, McpProfile::Full));
         let read_only_names: Vec<&str> = read_only
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
@@ -1012,7 +1194,7 @@ mod tests {
         let initialized = handle_message(
             &client,
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#,
-            false,
+            McpOptions::default(),
         )
         .expect("response");
         let value: Value = serde_json::from_str(&initialized).unwrap();
@@ -1022,7 +1204,7 @@ mod tests {
         let listed = handle_message(
             &client,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
-            false,
+            McpOptions::default(),
         )
         .expect("response");
         let value: Value = serde_json::from_str(&listed).unwrap();
@@ -1036,18 +1218,85 @@ mod tests {
         assert!(handle_message(
             &client,
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-            false
+            McpOptions::default(),
         )
         .is_none());
 
         let response = handle_message(
             &client,
             r#"{"jsonrpc":"2.0","id":7,"method":"resources/list"}"#,
-            false,
+            McpOptions::default(),
         )
         .expect("response");
         let value: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn the_session_profile_exposes_only_the_context_tools() {
+        let names: Vec<String> = tool_definitions(McpOptions::new(false, McpProfile::Session))
+            .into_iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect();
+
+        assert!(
+            names.contains(&"set_workspace_context".to_owned()),
+            "{names:?}"
+        );
+        assert!(names.contains(&"update_task".to_owned()), "{names:?}");
+        // A session does not need to create or archive workspaces to keep its
+        // own context current, and every extra tool is paid for on every turn.
+        assert!(!names.contains(&"create_workspace".to_owned()), "{names:?}");
+        assert!(
+            !names.contains(&"create_pull_request".to_owned()),
+            "{names:?}"
+        );
+        assert_eq!(names.len(), SESSION_PROFILE_TOOLS.len());
+    }
+
+    #[test]
+    fn a_full_profile_tool_is_refused_under_the_session_profile() {
+        let client = ArchcarClient::remote("127.0.0.1:1", "unused");
+
+        let err = call_tool(
+            &client,
+            "create_pull_request",
+            &json!({"workspace": "berlin"}),
+            McpOptions::new(false, McpProfile::Session),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("tool profile"), "{err}");
+    }
+
+    #[test]
+    fn set_workspace_context_needs_something_to_set() {
+        let tools = tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "set_workspace_context")
+            .expect("set_workspace_context tool");
+
+        let err = (tool.build)(&json!({"workspace": "berlin"})).unwrap_err();
+        assert!(err.to_string().contains("at least one"), "{err}");
+
+        let request = (tool.build)(&json!({
+            "workspace": "berlin",
+            "thread_id": 4,
+            "summary": "Retry backoff fixed; tests still to write.",
+            "chat_title": "Billing Webhook Retries",
+        }))
+        .unwrap();
+        assert!(matches!(
+            request,
+            ArchcarRequest::ApplyAgentContext {
+                thread_id: Some(4),
+                ref chat_title,
+                ref summary,
+                ..
+            } if chat_title.as_deref() == Some("Billing Webhook Retries")
+                && summary.as_deref() == Some("Retry backoff fixed; tests still to write.")
+        ));
     }
 
     #[test]
@@ -1058,7 +1307,7 @@ mod tests {
             &client,
             "create_pull_request",
             &json!({"workspace": "berlin"}),
-            true,
+            McpOptions::new(true, McpProfile::Full),
         )
         .unwrap_err();
 

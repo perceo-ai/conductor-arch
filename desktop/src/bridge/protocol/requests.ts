@@ -118,6 +118,14 @@ export type ArchcarRequest =
   | { type: "uninstall_service" }
   | { type: "get_remote_access" }
   | { type: "rotate_remote_token" }
+  // Archductor's own MCP server, registered with the agent CLIs on this device.
+  | { type: "get_mcp_registration" }
+  | {
+      type: "set_mcp_registration";
+      register: boolean;
+      clients?: string[];
+      session_profile?: boolean;
+    }
   // Background development tasks.
   | { type: "start_background_task"; input: StartBackgroundTaskInput }
   | { type: "list_background_tasks"; active_only?: boolean }

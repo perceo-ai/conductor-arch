@@ -566,6 +566,43 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "naming_requested_at",
         "ALTER TABLE chat_threads ADD COLUMN naming_requested_at TEXT",
     )?;
+    // How many times we have asked this chat for names without getting them
+    // back. A model can ignore the block, so the ask retries against this cap
+    // and then falls back to a name derived from the request itself.
+    ensure_column(
+        conn,
+        "chat_threads",
+        "naming_attempts",
+        "ALTER TABLE chat_threads ADD COLUMN naming_attempts INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // Metadata cursor at the moment the last naming ask went out. A retry may
+    // only go out once the agent has answered something, otherwise a fast
+    // follow-up message would ask again while the first ask is still in flight.
+    ensure_column(
+        conn,
+        "chat_threads",
+        "naming_requested_seq",
+        "ALTER TABLE chat_threads ADD COLUMN naming_requested_seq INTEGER NOT NULL DEFAULT -1",
+    )?;
+    // Highest provider timeline sequence whose assistant text has already been
+    // scanned for an Archductor metadata block. Without it every turn boundary
+    // would re-apply the whole transcript's directives.
+    ensure_column(
+        conn,
+        "chat_threads",
+        "metadata_cursor_seq",
+        "ALTER TABLE chat_threads ADD COLUMN metadata_cursor_seq INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // User turns in this workspace since an agent last wrote the workspace
+    // summary. Drives how often the hidden block asks for a summary update, so
+    // the ask is periodic rather than every-turn noise. New rows start at the
+    // interval so a workspace's very first message carries the ask.
+    ensure_column(
+        conn,
+        "workspaces",
+        "summary_turns_since_write",
+        "ALTER TABLE workspaces ADD COLUMN summary_turns_since_write INTEGER NOT NULL DEFAULT 3",
+    )?;
     Ok(())
 }
 

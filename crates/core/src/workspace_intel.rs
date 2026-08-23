@@ -29,6 +29,40 @@ pub const CONTEXT_SOURCES: [&str; 2] = ["local", "archivum"];
 /// Context attachment shapes.
 pub const CONTEXT_KINDS: [&str; 5] = ["note", "summary", "context_pack", "file", "memory"];
 
+/// Marks a summary body as agent prose rather than a mechanical draft. The
+/// daemon's auto-refresh treats a body carrying this ref as owned by the agent
+/// and leaves it alone.
+pub const AGENT_SUMMARY_SOURCE_REF: &str = "archductor:agent";
+
+/// How much agent summary we store. The summary is a handoff note, not a
+/// transcript, and it rides back into the next session's context on every
+/// staleness prompt — so the ceiling is a budget, not just tidiness.
+pub const AGENT_SUMMARY_MAX_CHARS: usize = 1_200;
+
+/// True when this summary body was written by an agent.
+pub fn summary_is_agent_authored(summary: &Summary) -> bool {
+    summary
+        .source_refs
+        .iter()
+        .any(|source| source == AGENT_SUMMARY_SOURCE_REF)
+}
+
+/// Trim agent prose to the stored budget, cutting on a character boundary and
+/// dropping a half-written trailing line rather than storing a torn sentence.
+fn clamp_agent_summary(body: &str) -> String {
+    let body = body.trim();
+    if body.chars().count() <= AGENT_SUMMARY_MAX_CHARS {
+        return body.to_owned();
+    }
+    let clamped: String = body.chars().take(AGENT_SUMMARY_MAX_CHARS).collect();
+    match clamped.rfind('\n') {
+        Some(index) if index > AGENT_SUMMARY_MAX_CHARS / 2 => {
+            clamped[..index].trim_end().to_owned()
+        }
+        _ => clamped.trim_end().to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub id: i64,
@@ -719,6 +753,34 @@ impl WorkspaceStore {
             .context("summary was not stored")
     }
 
+    /// Store the workspace summary an agent wrote for itself and its successors.
+    /// Agent prose outranks the mechanical draft: once this exists, the daemon's
+    /// auto-refresh stops rewriting the body and only the agent (or a human
+    /// editing the tab) changes it.
+    pub fn save_agent_workspace_summary(
+        &self,
+        workspace_name: &str,
+        body_markdown: &str,
+    ) -> Result<Summary> {
+        let body = clamp_agent_summary(body_markdown);
+        anyhow::ensure!(!body.is_empty(), "summary body is required");
+        self.save_summary(
+            workspace_name,
+            "workspace",
+            None,
+            &body,
+            &[AGENT_SUMMARY_SOURCE_REF.to_owned()],
+        )
+    }
+
+    /// The workspace summary an agent should be handed so it edits rather than
+    /// rewrites. `None` when nothing durable has been written yet.
+    pub fn agent_workspace_summary(&self, workspace_name: &str) -> Result<Option<Summary>> {
+        Ok(self
+            .get_summary(workspace_name, "workspace", None)?
+            .filter(summary_is_agent_authored))
+    }
+
     pub fn get_summary(
         &self,
         workspace_name: &str,
@@ -767,17 +829,16 @@ impl WorkspaceStore {
     }
 
     /// Build the branch-local continuity summary: goal, files touched, checks,
-    /// blockers, and next actions. This is the minimum quality bar for the
-    /// Summary tab when no external memory service is enabled.
+    /// blockers, and next actions. This is the seed the Summary tab shows before
+    /// an agent has written its own prose, so it deliberately stops at what the
+    /// other tabs do not already say — no file lists, no session roster, no check
+    /// status, because Changes, Files, and Checks own those.
     pub fn draft_workspace_summary(&self, workspace_name: &str) -> Result<String> {
         let workspace = self.get_by_name(workspace_name)?;
         let checks = self.checks_summary(workspace_name)?;
         let changed = self.changed_files(workspace_name).unwrap_or_default();
         let tasks = self.list_tasks(workspace_name)?;
         let sessions = self.list_chat_threads(workspace_name)?;
-        let contributions = self
-            .session_contributions(workspace_name)
-            .unwrap_or_default();
 
         let mut out = String::new();
         out.push_str(&format!("# {} ({})\n\n", workspace.name, workspace.branch));
@@ -795,50 +856,6 @@ impl WorkspaceStore {
             })
             .unwrap_or_else(|| format!("Work on branch {}", workspace.branch));
         out.push_str(&format!("{goal}\n\n"));
-
-        out.push_str("## Files touched\n\n");
-        if changed.is_empty() {
-            out.push_str("- No uncommitted changes\n");
-        } else {
-            for path in changed.iter().take(30) {
-                out.push_str(&format!("- {path}\n"));
-            }
-            if changed.len() > 30 {
-                out.push_str(&format!("- …and {} more\n", changed.len() - 30));
-            }
-        }
-        out.push('\n');
-
-        out.push_str("## Sessions\n\n");
-        if contributions.is_empty() {
-            out.push_str("- No agent sessions yet\n");
-        } else {
-            for contribution in &contributions {
-                out.push_str(&format!(
-                    "- {} ({}, {}) — {} file(s) touched\n",
-                    contribution.title,
-                    contribution.provider,
-                    contribution.status,
-                    contribution.files_touched.len()
-                ));
-            }
-        }
-        out.push('\n');
-
-        out.push_str("## Checks\n\n");
-        out.push_str(&format!(
-            "- Latest check: {}\n- Latest run: {}\n- Active sessions: {}\n",
-            checks
-                .check_status
-                .map(|status| status.as_str().to_owned())
-                .unwrap_or_else(|| "none".to_owned()),
-            checks
-                .run_status
-                .map(|status| status.as_str().to_owned())
-                .unwrap_or_else(|| "none".to_owned()),
-            checks.active_sessions
-        ));
-        out.push('\n');
 
         out.push_str("## Blockers\n\n");
         let blocked: Vec<&Task> = tasks
@@ -993,6 +1010,35 @@ impl WorkspaceStore {
 
         let existing_state = self.summary_refresh_state(workspace.id, scope_type, scope_id)?;
         let existing_summary = self.get_summary(workspace_name, scope_type, Some(scope_id))?;
+        // Agent prose wins. The mechanical draft is a seed for the empty case,
+        // so once an agent has written the summary the daemon stops rewriting it
+        // — otherwise every file change would erase the handoff note.
+        if let Some(summary) = existing_summary
+            .as_ref()
+            .filter(|summary| summary_is_agent_authored(summary))
+        {
+            let state = match &existing_state {
+                Some(state) => state.clone(),
+                None => {
+                    self.record_summary_refresh_state(
+                        workspace.id,
+                        scope_type,
+                        scope_id,
+                        source,
+                        &hash,
+                        latest_message_id,
+                        latest_provider_sequence,
+                    )?;
+                    self.summary_refresh_state(workspace.id, scope_type, scope_id)?
+                        .context("summary refresh state was not stored")?
+                }
+            };
+            return Ok(SummaryRefreshResult {
+                summary: summary.clone(),
+                state,
+                changed: false,
+            });
+        }
         if let (Some(state), Some(summary)) = (&existing_state, &existing_summary) {
             if state.evidence_hash == hash {
                 return Ok(SummaryRefreshResult {
@@ -1010,6 +1056,36 @@ impl WorkspaceStore {
             body,
             &["archductor:refresh".to_owned()],
         )?;
+        self.record_summary_refresh_state(
+            workspace.id,
+            scope_type,
+            scope_id,
+            source,
+            &hash,
+            latest_message_id,
+            latest_provider_sequence,
+        )?;
+        let state = self
+            .summary_refresh_state(workspace.id, scope_type, scope_id)?
+            .context("summary refresh state was not stored")?;
+        Ok(SummaryRefreshResult {
+            summary,
+            state,
+            changed: true,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_summary_refresh_state(
+        &self,
+        workspace_id: i64,
+        scope_type: &str,
+        scope_id: i64,
+        source: &str,
+        evidence_hash: &str,
+        latest_message_id: Option<i64>,
+        latest_provider_sequence: Option<i64>,
+    ) -> Result<()> {
         self.conn.execute(
             "INSERT INTO summary_refresh_state (
                 workspace_id, scope_type, scope_id, source, evidence_hash,
@@ -1022,24 +1098,17 @@ impl WorkspaceStore {
                 latest_provider_sequence = excluded.latest_provider_sequence,
                 last_refreshed_at = excluded.last_refreshed_at",
             params![
-                workspace.id,
+                workspace_id,
                 scope_type,
                 scope_id,
                 source,
-                hash,
+                evidence_hash,
                 latest_message_id,
                 latest_provider_sequence,
                 timestamp()
             ],
         )?;
-        let state = self
-            .summary_refresh_state(workspace.id, scope_type, scope_id)?
-            .context("summary refresh state was not stored")?;
-        Ok(SummaryRefreshResult {
-            summary,
-            state,
-            changed: true,
-        })
+        Ok(())
     }
 
     fn summary_refresh_state(
@@ -1805,7 +1874,7 @@ fn extract_action_items(content: &str) -> Vec<String> {
 /// Chats open on a placeholder title and keep it until the agent supplies a real
 /// one. Surfacing "New chat" as a goal or a pull request title is worse than
 /// falling through to the branch name.
-fn is_placeholder_chat_title(title: &str) -> bool {
+pub(crate) fn is_placeholder_chat_title(title: &str) -> bool {
     let title = title.trim();
     title.is_empty() || title.eq_ignore_ascii_case("new chat")
 }

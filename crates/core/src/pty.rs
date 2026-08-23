@@ -356,6 +356,9 @@ mod tests {
         let out = session
             .read_until("T=", Duration::from_secs(5))
             .expect("child reported TERM");
-        assert!(out.contains("T=dumb"), "expected caller TERM to win, got {out:?}");
+        assert!(
+            out.contains("T=dumb"),
+            "expected caller TERM to win, got {out:?}"
+        );
     }
 }
