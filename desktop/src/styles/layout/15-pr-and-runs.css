@@ -234,6 +234,66 @@
   overflow-wrap: anywhere;
   overflow-y: auto;
 }
+/* Setup/Run console. Command output, so it is styled as a terminal surface
+   rather than as a prose block: same mono stack and dark field as the PTY tabs
+   next to it, so switching between them does not feel like changing app. */
+.ws-run-console {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 8px;
+  background: #131313;
+  color: #c8c8c8;
+  font-family: var(--ui-font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  /* pre-wrap, not pre: unlike a PTY there is no column count to hard-wrap
+     against, so long lines must wrap rather than force a horizontal scrollbar
+     under every other line. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-y: auto;
+}
+
+/* Waiting on a script that has not run yet: this is the generated prompt, not
+   output, so it reads back a step. */
+.ws-run-console-idle {
+  color: #9a9a9a;
+}
+
+.ws-run-console-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ws-run-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #72c293;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ws-run-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: mo-breathe var(--mo-loop) var(--mo-in-out) infinite;
+}
+
+/* Occupies the space the start/stop button vacates while a request is in
+   flight, so the action row does not reflow under the pointer. */
+.ws-run-pending {
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 12px;
+}
+
 .ws-run-prompt-actions {
   flex: 0 0 auto;
   display: flex;

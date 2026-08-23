@@ -19,6 +19,11 @@ pub struct PtySession {
     exited: bool,
 }
 
+/// Terminal type advertised to PTY children. The renderer is xterm.js, which
+/// speaks the xterm sequence set and supports 256 colours, so this is an
+/// accurate claim rather than an optimistic one.
+const DEFAULT_TERM: &str = "xterm-256color";
+
 impl PtySession {
     pub fn spawn_shell(cwd: &Path, env: Vec<(String, OsString)>) -> Result<Self> {
         let shell = crate::platform::shell_program();
@@ -55,6 +60,16 @@ impl PtySession {
         let mut command = CommandBuilder::new(&program);
         command.cwd(cwd);
         command.args(args);
+
+        // CommandBuilder starts from an empty environment, so without this the
+        // child runs with no TERM at all: `tput` fails outright ("No value for
+        // $TERM"), and ncurses programs, `clear`, pagers and colour output all
+        // misbehave. Set before the caller's pairs so an explicit TERM still
+        // wins.
+        if !env.iter().any(|(key, _)| key == "TERM") {
+            command.env("TERM", DEFAULT_TERM);
+        }
+
         for (key, value) in env {
             command.env(key, value);
         }
@@ -290,5 +305,57 @@ fn terminate_process(_pid: u32, _force: bool) -> std::io::Result<bool> {
 impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A PTY child with no TERM cannot run `tput`, `clear`, or any ncurses
+    /// program, and tools fall back to uncoloured output. Asserted through a
+    /// real PTY rather than by inspecting the builder, because the empty-env
+    /// behaviour being compensated for here belongs to portable_pty.
+    #[cfg(unix)]
+    #[test]
+    fn spawns_children_with_a_usable_term() {
+        let mut session = PtySession::spawn(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "printf T=%s\\\\n \"$TERM\"".into()],
+            Path::new("/tmp"),
+            Vec::new(),
+            24,
+            80,
+        )
+        .expect("spawn pty");
+
+        let out = session
+            .read_until("T=", Duration::from_secs(5))
+            .expect("child reported TERM");
+        assert!(
+            out.contains("T=xterm-256color"),
+            "expected TERM to default to xterm-256color, got {out:?}"
+        );
+    }
+
+    /// An explicit TERM from the caller must win over the default.
+    #[cfg(unix)]
+    #[test]
+    fn lets_an_explicit_term_override_the_default() {
+        let mut session = PtySession::spawn(
+            PathBuf::from("/bin/sh"),
+            vec!["-c".into(), "printf T=%s\\\\n \"$TERM\"".into()],
+            Path::new("/tmp"),
+            vec![("TERM".to_string(), OsString::from("dumb"))],
+            24,
+            80,
+        )
+        .expect("spawn pty");
+
+        let out = session
+            .read_until("T=", Duration::from_secs(5))
+            .expect("child reported TERM");
+        assert!(out.contains("T=dumb"), "expected caller TERM to win, got {out:?}");
     }
 }
