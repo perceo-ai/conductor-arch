@@ -20,7 +20,7 @@ use archductor_core::provider_interactions::ProviderInteractionRecord;
 use archductor_core::repository::{AddRepository, RepositoryStore};
 use archductor_core::service;
 use archductor_core::settings::{
-    app_shared_settings_to_toml, save_app_shared_settings_from_toml,
+    app_shared_settings_to_toml, repository_settings_from_toml, save_app_shared_settings_from_toml,
     save_repository_settings_from_toml, SettingsLayer,
 };
 use archductor_core::workspace::{
@@ -61,6 +61,10 @@ enum Command {
     Settings {
         #[command(subcommand)]
         command: AppSettingsCommand,
+    },
+    Layout {
+        #[command(subcommand)]
+        command: LayoutCommand,
     },
     Repo {
         #[command(subcommand)]
@@ -213,6 +217,25 @@ enum AppSettingsCommand {
     },
     Import {
         input: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LayoutCommand {
+    Presets {
+        #[arg(long)]
+        repository: Option<String>,
+    },
+    Show {
+        id: String,
+    },
+    Delete {
+        id: String,
+    },
+    SetDefault {
+        id: String,
+        #[arg(long)]
+        repository: String,
     },
 }
 
@@ -557,6 +580,8 @@ enum ArchcarCommand {
         #[arg(long)]
         repository: Option<String>,
     },
+    /// List layout presets known to the daemon.
+    LayoutPresets,
     /// Read one settings layer's raw editable source TOML.
     SettingsSource {
         #[arg(long)]
@@ -1317,6 +1342,61 @@ fn run_cli() -> Result<()> {
                 );
             }
         },
+        Command::Layout { command } => {
+            let client = ArchcarClient::from_paths(&paths);
+            match command {
+                LayoutCommand::Presets { repository } => {
+                    let presets = layout_presets_from_response(
+                        client.send(ArchcarRequest::ListLayoutPresets)?,
+                    )?;
+                    let default = match repository {
+                        Some(repository) => match client.send(ArchcarRequest::GetSettings {
+                            repository: Some(repository),
+                        })? {
+                            ArchcarResponse::Settings { toml, .. } => {
+                                repository_settings_from_toml(&toml)?
+                                    .customization
+                                    .view
+                                    .default_layout_preset
+                            }
+                            ArchcarResponse::Error { message } => anyhow::bail!(message),
+                            response => anyhow::bail!(
+                                "unexpected layout settings response: {}",
+                                archductor_core::archcar::protocol::archcar_response_summary(
+                                    &response
+                                )
+                            ),
+                        },
+                        None => None,
+                    };
+                    print!(
+                        "{}",
+                        render_layout_preset_list(&presets, default.as_deref())
+                    );
+                }
+                LayoutCommand::Show { id } => {
+                    let presets = layout_presets_from_response(
+                        client.send(ArchcarRequest::ListLayoutPresets)?,
+                    )?;
+                    let preset = presets
+                        .into_iter()
+                        .find(|preset| preset.id == id)
+                        .with_context(|| format!("unknown layout preset {id}"))?;
+                    println!("{}", preset.layout_json);
+                }
+                LayoutCommand::Delete { id } => {
+                    print_archcar_response(client.send(ArchcarRequest::DeleteLayoutPreset { id })?);
+                }
+                LayoutCommand::SetDefault { id, repository } => {
+                    print_archcar_response(client.send(
+                        ArchcarRequest::SetProjectDefaultPreset {
+                            repository,
+                            preset_id: id,
+                        },
+                    )?);
+                }
+            }
+        }
         Command::Import { command } => match command {
             ImportCommand::Conductor { source } => {
                 let source = source.unwrap_or_else(default_conductor_app_database);
@@ -2213,6 +2293,9 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetSettings { repository })?,
                     );
+                }
+                ArchcarCommand::LayoutPresets => {
+                    print_archcar_response(client.send(ArchcarRequest::ListLayoutPresets)?);
                 }
                 ArchcarCommand::SettingsSource { repository, layer } => {
                     print_archcar_response(
@@ -3326,6 +3409,41 @@ fn local_store_command_name(command: &Command) -> Option<&'static str> {
     }
 }
 
+fn layout_presets_from_response(
+    response: ArchcarResponse,
+) -> Result<Vec<archductor_core::layout_presets::LayoutPreset>> {
+    match response {
+        ArchcarResponse::LayoutPresets { presets } => Ok(presets),
+        ArchcarResponse::Error { message } => anyhow::bail!(message),
+        response => anyhow::bail!(
+            "unexpected layout preset response: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&response)
+        ),
+    }
+}
+
+fn render_layout_preset_list(
+    presets: &[archductor_core::layout_presets::LayoutPreset],
+    default: Option<&str>,
+) -> String {
+    presets
+        .iter()
+        .map(|preset| {
+            format!(
+                "{} {}\t{}{}\n",
+                if default == Some(preset.id.as_str()) {
+                    "*"
+                } else {
+                    " "
+                },
+                preset.id,
+                preset.name,
+                if preset.builtin { " [built-in]" } else { "" }
+            )
+        })
+        .collect()
+}
+
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
@@ -3720,6 +3838,12 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Settings { scope, toml } => {
             println!("settings {scope}");
             print!("{toml}");
+        }
+        ArchcarResponse::LayoutPresets { presets } => {
+            print!("{}", render_layout_preset_list(&presets, None));
+        }
+        ArchcarResponse::LayoutPresetSaved { preset } => {
+            println!("layout_preset_saved {}", preset.id);
         }
         ArchcarResponse::RepositoryBranches {
             repository,
@@ -5483,6 +5607,76 @@ mod tests {
         };
         assert_eq!(repository, "demo");
         assert_eq!(branch, "feature/ws");
+    }
+
+    #[test]
+    fn parses_layout_preset_commands() {
+        let presets = command_of(&["archductor", "layout", "presets", "--repository", "demo"]);
+        assert!(matches!(
+            presets,
+            Command::Layout {
+                command: LayoutCommand::Presets { repository: Some(ref name) }
+            } if name == "demo"
+        ));
+        assert!(matches!(
+            command_of(&["archductor", "layout", "show", "custom-one"]),
+            Command::Layout {
+                command: LayoutCommand::Show { ref id }
+            } if id == "custom-one"
+        ));
+        assert!(matches!(
+            command_of(&["archductor", "layout", "delete", "custom-one"]),
+            Command::Layout {
+                command: LayoutCommand::Delete { ref id }
+            } if id == "custom-one"
+        ));
+        assert!(matches!(
+            command_of(&[
+                "archductor",
+                "layout",
+                "set-default",
+                "custom-one",
+                "--repository",
+                "demo",
+            ]),
+            Command::Layout {
+                command: LayoutCommand::SetDefault { ref id, ref repository }
+            } if id == "custom-one" && repository == "demo"
+        ));
+        assert!(matches!(
+            command_of(&["archductor", "archcar", "layout-presets"]),
+            Command::Archcar {
+                command: ArchcarCommand::LayoutPresets
+            }
+        ));
+    }
+
+    #[test]
+    fn layout_preset_list_marks_default_and_builtins() {
+        let presets = vec![
+            archductor_core::layout_presets::LayoutPreset {
+                id: "code".to_owned(),
+                name: "Code".to_owned(),
+                builtin: true,
+                layout_json: "{}".to_owned(),
+                hidden_json: "[]".to_owned(),
+                created_at: "0".to_owned(),
+                updated_at: "0".to_owned(),
+            },
+            archductor_core::layout_presets::LayoutPreset {
+                id: "custom-one".to_owned(),
+                name: "My layout".to_owned(),
+                builtin: false,
+                layout_json: "{}".to_owned(),
+                hidden_json: "[]".to_owned(),
+                created_at: "1".to_owned(),
+                updated_at: "1".to_owned(),
+            },
+        ];
+        assert_eq!(
+            render_layout_preset_list(&presets, Some("custom-one")),
+            "  code\tCode [built-in]\n* custom-one\tMy layout\n"
+        );
     }
 
     #[test]

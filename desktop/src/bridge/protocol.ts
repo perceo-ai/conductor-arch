@@ -80,6 +80,16 @@ export type ArchcarInputKind = "user" | "review_prompt" | "control_command" | "r
 export type ArchcarInputDelivery = "auto" | "immediate";
 export type WorkspaceGitAction = "create_pr" | "push_branch" | "merge_pr" | "open_pr";
 
+export type LayoutPresetRecord = {
+  id: string;
+  name: string;
+  builtin: boolean;
+  layout_json: string;
+  hidden_json: string;
+  created_at: string;
+  updated_at: string;
+};
+
 // --- Requests (payload of the envelope sent to archcar) --------------------
 // Only the variants the UI currently issues are typed here; add as needed.
 export type ArchcarRequest =
@@ -175,6 +185,10 @@ export type ArchcarRequest =
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
+  | { type: "list_layout_presets" }
+  | { type: "save_layout_preset"; preset: LayoutPresetRecord }
+  | { type: "delete_layout_preset"; id: string }
+  | { type: "set_project_default_preset"; repository: string; preset_id: string }
   | { type: "get_settings_source"; repository?: string; layer?: string }
   | { type: "list_repository_branches"; repository: string }
   | { type: "list_agent_providers" }
@@ -644,6 +658,8 @@ export type ArchcarResponse =
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
+  | { type: "layout_presets"; presets: LayoutPresetRecord[] }
+  | { type: "layout_preset_saved"; preset: LayoutPresetRecord }
   | { type: "repository_branches"; repository: string; branches: string[] }
   | { type: "agent_providers"; providers: AgentProviderSummary[] }
   | { type: "prompt_packs"; repository: string; packs: string[]; active?: string }

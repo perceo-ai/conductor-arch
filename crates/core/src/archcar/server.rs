@@ -1709,6 +1709,63 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListLayoutPresets => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| store.list_layout_presets()) {
+                Ok(presets) => ArchcarResponse::LayoutPresets { presets },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SaveLayoutPreset { preset } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.save_layout_preset(&preset))
+            {
+                Ok(preset) => ArchcarResponse::LayoutPresetSaved { preset },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::DeleteLayoutPreset { id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.delete_layout_preset(&id))
+            {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SetProjectDefaultPreset {
+            repository,
+            preset_id,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result: anyhow::Result<()> = WorkspaceStore::open_app(&db_path).and_then(|store| {
+                anyhow::ensure!(
+                    store
+                        .list_layout_presets()?
+                        .iter()
+                        .any(|preset| preset.id == preset_id),
+                    "unknown layout preset {preset_id}"
+                );
+                RepositoryStore::open(&db_path)
+                    .and_then(|store| store.get_by_name(&repository))
+                    .and_then(|record| {
+                        crate::settings::set_default_layout_preset(&record.root_path, &preset_id)
+                    })
+            });
+            match result {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListRepositoryBranches { repository } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match RepositoryStore::open(&db_path)
@@ -4068,6 +4125,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::ListLayoutPresets
             | ArchcarRequest::ListRepositoryBranches { .. }
             | ArchcarRequest::ListAgentProviders
             | ArchcarRequest::ListPromptPacks { .. }
@@ -5448,6 +5506,92 @@ mod tests {
             ]
         );
         assert_eq!(command.failure_context, "run git clone");
+    }
+
+    #[test]
+    fn layout_preset_dispatch_lists_saves_sets_default_and_deletes() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+        let added = dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: None,
+            },
+            &state,
+        );
+        assert!(matches!(added, ArchcarResponse::RepositoryAdded { .. }));
+
+        let listed = dispatch_request(ArchcarRequest::ListLayoutPresets, &state);
+        assert!(
+            matches!(listed, ArchcarResponse::LayoutPresets { ref presets } if presets.len() == 4)
+        );
+        let preset = crate::layout_presets::LayoutPreset {
+            id: "custom-one".to_owned(),
+            name: "Custom one".to_owned(),
+            builtin: false,
+            layout_json: "{\"version\":1,\"docks\":[]}".to_owned(),
+            hidden_json: "[]".to_owned(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let saved = dispatch_request(
+            ArchcarRequest::SaveLayoutPreset {
+                preset: preset.clone(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(saved, ArchcarResponse::LayoutPresetSaved { ref preset } if preset.id == "custom-one")
+        );
+        let listed = dispatch_request(ArchcarRequest::ListLayoutPresets, &state);
+        assert!(
+            matches!(listed, ArchcarResponse::LayoutPresets { ref presets } if presets.len() == 5)
+        );
+
+        let defaulted = dispatch_request(
+            ArchcarRequest::SetProjectDefaultPreset {
+                repository: "demo".to_owned(),
+                preset_id: "custom-one".to_owned(),
+            },
+            &state,
+        );
+        assert_eq!(defaulted, ArchcarResponse::Ack);
+        assert_eq!(
+            crate::settings::load_repository_settings(&repo_path)
+                .unwrap()
+                .customization
+                .view
+                .default_layout_preset
+                .as_deref(),
+            Some("custom-one")
+        );
+
+        let deleted = dispatch_request(
+            ArchcarRequest::DeleteLayoutPreset {
+                id: "custom-one".to_owned(),
+            },
+            &state,
+        );
+        assert_eq!(deleted, ArchcarResponse::Ack);
+        let listed = dispatch_request(ArchcarRequest::ListLayoutPresets, &state);
+        assert!(
+            matches!(listed, ArchcarResponse::LayoutPresets { ref presets } if presets.len() == 4)
+        );
     }
 
     #[test]

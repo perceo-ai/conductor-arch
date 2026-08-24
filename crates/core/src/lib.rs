@@ -11,6 +11,7 @@ pub mod github_actions;
 pub mod github_pr;
 pub mod harness;
 pub mod import;
+pub mod layout_presets;
 pub mod linear;
 pub mod local_chat;
 pub mod mcp;

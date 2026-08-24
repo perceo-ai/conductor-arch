@@ -443,6 +443,15 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_summary_refresh_state_workspace
           ON summary_refresh_state(workspace_id, scope_type, scope_id);
+
+        CREATE TABLE IF NOT EXISTS layout_presets (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          layout_json TEXT NOT NULL,
+          hidden_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
         ",
     )?;
     remove_chat_events_exact_unique_constraint(conn)?;
