@@ -7,12 +7,14 @@ import { ReviewPromptButton } from "@/pages/WorkspaceTabs";
 import Icon from "./Icon";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import { announceLayout } from "./LayoutControls";
+import { usePanelDnd } from "./PanelDnd";
 
 function domId(region: Region, panel: PanelId, suffix: string) {
   return `workbench-${region}-${panel.replace(/[^a-zA-Z0-9_-]/g, "-")}-${suffix}`;
 }
 
 export default function PanelRegion(props: { workspace: string; region: Region }) {
+  const dnd = usePanelDnd();
   const stack = () => layoutStore.layout().regions[props.region];
   const activeId = () => stack().panels[stack().active];
   const activeDescriptor = () => (activeId() ? panelDescriptor(activeId()) : undefined);
@@ -96,7 +98,10 @@ export default function PanelRegion(props: { workspace: string; region: Region }
         "ws-center": props.region === "center",
         "ws-left-panel": props.region === "left",
         "ws-bottom-panel": props.region === "bottom",
+        "workbench-drop-allowed": !!dnd.state()?.dragging && dnd.state()!.allowedRegions.includes(props.region),
+        "workbench-drop-hover": dnd.state()?.target?.region === props.region,
       }}
+      ref={(element) => dnd.registerRegion(props.region, element)}
       data-region={props.region}
       data-focus-target={props.region === "right" ? "workspace-panel" : undefined}
       tabIndex={-1}
@@ -122,6 +127,14 @@ export default function PanelRegion(props: { workspace: string; region: Region }
               }}
             >
               <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
+              <button
+                class="workbench-panel-grip"
+                aria-label={`Drag ${descriptor.title}`}
+                title={`Drag ${descriptor.title}`}
+                onPointerDown={(event) => dnd.begin(event, id)}
+              >
+                <Icon name="layout-dashboard" />
+              </button>
             </div>
           );
         }}
@@ -155,6 +168,7 @@ export default function PanelRegion(props: { workspace: string; region: Region }
                     aria-controls={domId(props.region, id, "panel")}
                     tabIndex={selected() ? 0 : -1}
                     onClick={() => activate(id)}
+                    onPointerDown={(event) => dnd.begin(event, id)}
                     onKeyDown={(event) => {
                       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
                         openContextMenuFromKeyboard(event, panelMenu(id));
@@ -205,7 +219,6 @@ export default function PanelRegion(props: { workspace: string; region: Region }
                 role="tabpanel"
                 aria-labelledby={domId(props.region, descriptor().id, "tab")}
                 data-panel-id={descriptor().id}
-                data-panel-kind="tab"
               >
                 <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
               </div>
@@ -233,6 +246,14 @@ export default function PanelRegion(props: { workspace: string; region: Region }
                 }
               }}
             >
+              <button
+                class="workbench-panel-grip workbench-dock-grip"
+                aria-label={`Drag ${descriptor.title}`}
+                title={`Drag ${descriptor.title}`}
+                onPointerDown={(event) => dnd.begin(event, id)}
+              >
+                <Icon name="layout-dashboard" />
+              </button>
               <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
             </div>
           );

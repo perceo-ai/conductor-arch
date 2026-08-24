@@ -27,6 +27,7 @@ export interface DropTarget {
 export interface DropTargetRegion {
   region: Region;
   allowed: boolean;
+  rect?: { left: number; top: number; width: number; height: number };
   tabs: Array<{ left: number; width: number }>;
 }
 
@@ -237,8 +238,16 @@ export function sanitizeLayout(layout: unknown): Layout {
 }
 
 export function dropTarget(regions: DropTargetRegion[], pointer: { x: number; y: number }): DropTarget | null {
-  void pointer.y;
-  const target = regions.find((region) => region.allowed);
+  const target = regions.find((region) => {
+    if (!region.allowed) return false;
+    if (!region.rect) return true;
+    return (
+      pointer.x >= region.rect.left &&
+      pointer.x <= region.rect.left + region.rect.width &&
+      pointer.y >= region.rect.top &&
+      pointer.y <= region.rect.top + region.rect.height
+    );
+  });
   if (!target) return null;
   const index = target.tabs.findIndex((tab) => pointer.x < tab.left + tab.width / 2);
   return { region: target.region, index: index === -1 ? target.tabs.length : index };

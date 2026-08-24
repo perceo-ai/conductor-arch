@@ -8,6 +8,7 @@ import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
 import WorkspaceWorkbench from "@/components/WorkspaceWorkbench";
 import LayoutControls from "@/components/LayoutControls";
+import PanelDnd from "@/components/PanelDnd";
 import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
 
 function TopBar(props: { workspace: string }) {
@@ -92,7 +93,9 @@ export default function CommandCenter() {
     <Show when={workspace()} fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}>
       {(ws) => (
         <div class="ws-command-center page-shell" data-focus-target="workspace-main" tabIndex={-1}>
-          <WorkspaceWorkbench workspace={ws()} topbar={<TopBar workspace={ws()} />} />
+          <PanelDnd>
+            <WorkspaceWorkbench workspace={ws()} topbar={<TopBar workspace={ws()} />} />
+          </PanelDnd>
         </div>
       )}
     </Show>

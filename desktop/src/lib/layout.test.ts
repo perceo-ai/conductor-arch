@@ -176,4 +176,13 @@ describe("layout", () => {
   it("does not offer a drop target in a disallowed region", () => {
     expect(dropTarget([{ region: "bottom", allowed: false, tabs: [] }], { x: 5, y: 0 })).toBeNull();
   });
+
+  it("selects only the allowed region under the pointer", () => {
+    const regions = [
+      { region: "left" as const, allowed: true, rect: { left: 0, top: 0, width: 100, height: 100 }, tabs: [] },
+      { region: "bottom" as const, allowed: true, rect: { left: 0, top: 100, width: 200, height: 100 }, tabs: [{ left: 0, width: 60 }] },
+    ];
+    expect(dropTarget(regions, { x: 80, y: 150 })).toEqual({ region: "bottom", index: 1 });
+    expect(dropTarget(regions, { x: 240, y: 150 })).toBeNull();
+  });
 });
