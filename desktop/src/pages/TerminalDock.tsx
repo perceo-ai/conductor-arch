@@ -1,9 +1,10 @@
-import { For, Match, Show, Switch, createResource, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { send } from "@/bridge/client";
-import { terminalStore, nav, threadsStore, toastsStore } from "@/store";
+import { terminalStore, nav, threadsStore, toastsStore, workspacesStore } from "@/store";
 import TerminalPanel from "./TerminalPanel";
 import type { ArchcarRunScript } from "@/bridge/protocol";
-import { runScriptAvailabilityLabel, runScriptStatusText } from "@/lib/runScripts";
+import { runScriptAvailabilityLabel, runScriptStatusText, scriptConsoleActions } from "@/lib/runScripts";
+import { ansiToHtml } from "@/lib/ansi";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
@@ -107,6 +108,7 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
       toastsStore.push(err instanceof Error ? err.message : "Unable to start script.", "error");
     } finally {
       setStarting(false);
+      void refetchLog();
     }
   }
 
@@ -124,6 +126,9 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
       toastsStore.push(err instanceof Error ? err.message : "Unable to stop run.", "error");
     } finally {
       setStopping(false);
+      // The poll only runs while `running` is true, so a stop would otherwise
+      // leave the last line of output permanently missing.
+      void refetchLog();
     }
   }
 
@@ -148,35 +153,99 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
       .catch(() => {});
   }
 
+  // The console shows live output when a script has produced any, and falls
+  // back to the generated build-this-script prompt when it has not — which is
+  // the state a workspace with no script yet is permanently in.
+  const [log, { refetch: refetchLog }] = createResource(
+    () => props.workspace,
+    async (ws): Promise<string> => {
+      try {
+        const res = await send({ type: "get_run_log", workspace: ws });
+        return res.type === "run_log" ? res.log : "";
+      } catch {
+        return "";
+      }
+    },
+  );
+
+  const running = () => Boolean(workspacesStore.row(props.workspace)?.runRunning);
+  const actions = () =>
+    scriptConsoleActions({
+      kind: props.kind,
+      running: running(),
+      pending: starting() || stopping(),
+      prompt: prompt() ?? "",
+    });
+
+  // Poll only while something is actually running, so an idle dock is silent.
+  createEffect(() => {
+    if (!running()) return;
+    const timer = setInterval(() => void refetchLog(), 1500);
+    onCleanup(() => clearInterval(timer));
+  });
+
+  const body = () => (log() ?? "").trim();
+
   return (
     <div class="ws-run-panel">
-      <div class="detail-label">{heading()}</div>
+      <div class="ws-run-console-head">
+        <span class="detail-label">{heading()}</span>
+        <Show when={running()}>
+          <span class="ws-run-live" title="A run script is running">
+            <span class="ws-run-live-dot" />
+            Running
+          </span>
+        </Show>
+      </div>
       <Show when={props.kind === "run"}>
         <RunScriptsList workspace={props.workspace} />
       </Show>
-      <pre class="ws-run-prompt">{prompt.loading ? "Loading…" : prompt()}</pre>
+      {/* Styled as a terminal rather than a prose block: this is command output,
+          and ANSI in it should render as colour instead of as escape codes. */}
+      <Show
+        when={body()}
+        fallback={
+          <pre class="ws-run-console ws-run-console-idle">
+            {prompt.loading ? "Loading…" : prompt() || "No output yet."}
+          </pre>
+        }
+      >
+        <pre class="ws-run-console" innerHTML={ansiToHtml(body())} />
+      </Show>
       <div class="ws-run-prompt-actions">
         <span class="ws-run-modal-title">{modalTitle()}</span>
-        <button class="ui-button-secondary" onClick={() => void startScript()} disabled={starting()}>
-          {starting() ? "Starting…" : startLabel()}
-        </button>
-        <Show when={props.kind === "run"}>
-          <button class="ui-button-secondary" onClick={() => void stopRun()} disabled={stopping()}>
-            {stopping() ? "Stopping…" : "Stop Run"}
+        {/* Start and stop are mutually exclusive, and a pending request hides
+            both — a control that cannot act is worse than an absent one. */}
+        <Show when={actions().canStart}>
+          <button class="ui-button-secondary" onClick={() => void startScript()}>
+            {startLabel()}
           </button>
         </Show>
-        <button class="suggested-action" onClick={queueDraft} disabled={!(prompt() ?? "").trim()}>
-          {buttonLabel()}
-        </button>
+        <Show when={actions().canStop}>
+          <button class="ui-button-secondary" onClick={() => void stopRun()}>
+            Stop Run
+          </button>
+        </Show>
+        <Show when={starting() || stopping()}>
+          <span class="ws-run-pending">{starting() ? "Starting…" : "Stopping…"}</span>
+        </Show>
+        <Show when={actions().canQueueDraft}>
+          <button class="suggested-action" onClick={queueDraft}>
+            {buttonLabel()}
+          </button>
+        </Show>
       </div>
     </div>
   );
 }
 
 export default function TerminalDock(props: { workspace: string; region?: Region }) {
-  // Collapsed by default so the chat remains primary; terminals/scripts are a
-  // utility drawer the user opens when needed.
-  const [expanded, setExpandedRaw] = createSignal(localStorage.getItem(DOCK_EXPANDED_KEY) === "1");
+  // Open by default. It was collapsed on the theory that chat is primary and
+  // the dock is a drawer, but the terminal and the setup/run consoles are part
+  // of the normal loop, and a collapsed dock hides that they exist at all. An
+  // explicit collapse still persists — only the never-touched case changed.
+  const stored = localStorage.getItem(DOCK_EXPANDED_KEY);
+  const [expanded, setExpandedRaw] = createSignal(stored === null ? true : stored === "1");
   const setExpanded = (next: boolean | ((value: boolean) => boolean)) => {
     setExpandedRaw((prev) => {
       const value = typeof next === "function" ? next(prev) : next;

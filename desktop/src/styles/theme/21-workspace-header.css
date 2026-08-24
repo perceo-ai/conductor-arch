@@ -1,0 +1,101 @@
+
+/* ── Workspace title bar ── */
+.ws-title-bar {
+    background-color: #1e1e1e;
+    border-bottom: 1px solid #000;
+    padding: 0 14px;
+    min-height: 46px;
+}
+.ws-breadcrumb {
+    font-size: 14px;
+    font-weight: 500;
+    color: #e0e0e0;
+}
+.ws-pr-badge {
+    border-radius: 7px;
+}
+.ws-pr-num {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e0e0e0;
+    background-color: #2e2e2e;
+    padding: 5px 11px;
+}
+.ws-pr-sep {
+    min-width: 1px;
+    background-color: #252525;
+}
+.ws-pr-state {
+    font-size: 13px;
+    font-weight: 600;
+    color: #c8c8c8;
+    background-color: #252525;
+    padding: 5px 13px;
+}
+
+/* ── Center panel / tab bar ── */
+.ws-center {
+    background-color: #191919;
+}
+.ws-topbar-summary {
+    color: #8e8e8e;
+}
+.ws-briefing {
+    background: #171717;
+    border-color: #252525;
+}
+.ws-briefing-kicker,
+.ws-briefing-label {
+    color: #7f8792;
+}
+.ws-briefing-action,
+.ws-briefing-value {
+    color: #e2e8f0;
+}
+.ws-briefing-tile {
+    background: #1d1d1d;
+    border: 1px solid #2c2c2c;
+    box-shadow: none;
+}
+.ws-briefing-tile:hover {
+    background: #232323;
+    border-color: #3a3a3a;
+}
+.ws-briefing-running {
+    border-color: rgba(63, 178, 127, 0.42);
+    background: rgba(63, 178, 127, 0.08);
+}
+.ws-briefing-review {
+    border-color: rgba(91, 141, 239, 0.42);
+    background: rgba(91, 141, 239, 0.08);
+}
+.ws-briefing-changes {
+    border-color: rgba(195, 155, 80, 0.45);
+    background: rgba(195, 155, 80, 0.09);
+}
+.ws-briefing-danger {
+    border-color: rgba(255, 138, 138, 0.48);
+    background: rgba(255, 138, 138, 0.09);
+}
+.ws-briefing-archived {
+    opacity: 0.72;
+}
+.nav-button-count {
+    background: #343434;
+    color: #d8d8d8;
+}
+.ws-blocker-chip {
+    background: rgba(255, 138, 138, 0.09);
+    border: 1px solid rgba(255, 138, 138, 0.34);
+    color: #ffb4b4;
+}
+.ws-blocker-chip:hover {
+    background: rgba(255, 138, 138, 0.15);
+    border-color: rgba(255, 138, 138, 0.52);
+}
+.ws-force-push-action {
+    opacity: 0.72;
+}
+.ws-force-push-action:hover {
+    opacity: 1;
+}

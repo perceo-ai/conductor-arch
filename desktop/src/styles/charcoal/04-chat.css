@@ -1,0 +1,115 @@
+
+.chat-composer {
+  padding: 0 28px 18px;
+}
+
+.chat-composer-box {
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: #181818;
+}
+
+.chat-input-view {
+  min-height: 74px;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #dedede;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.chat-input-view::placeholder {
+  color: #767676;
+}
+
+.chat-toolbar {
+  min-height: var(--ui-control-h);
+  gap: 8px;
+}
+
+.chat-toolbar-left,
+.chat-toolbar-right {
+  gap: 8px;
+}
+
+.chat-context-usage {
+  height: var(--ui-control-h);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius);
+  color: #8a8a8a;
+  font-size: var(--ui-text-xs);
+  font-weight: 560;
+}
+
+.chat-send-btn {
+  width: var(--ui-control-h);
+  min-width: var(--ui-control-h);
+  height: var(--ui-control-h);
+  border-radius: var(--ui-radius);
+  border-color: #303030;
+  background: #202020;
+  color: #a7a7a7;
+}
+
+.chat-send-btn-active {
+  background: #f0f0f0;
+  border-color: #f0f0f0;
+  color: #161616;
+}
+
+.chat-send-btn:hover {
+  background: #282828;
+  color: #eeeeee;
+}
+
+.chat-send-btn-active:hover {
+  background: #ffffff;
+  color: #111111;
+}
+
+.compact-select-trigger {
+  height: var(--ui-control-h);
+  min-height: var(--ui-control-h);
+  padding: 0 9px;
+  border: 1px solid #303030;
+  border-radius: var(--ui-radius);
+  background: #1b1b1b;
+  color: #d8d8d8;
+  font-size: var(--ui-text-sm);
+  font-weight: 560;
+}
+
+.compact-select-trigger:hover,
+.compact-select-trigger[aria-expanded="true"] {
+  background: #222222;
+  border-color: #3c3c3c;
+}
+
+.compact-select-menu {
+  padding: 5px;
+  border-color: #343434;
+  border-radius: 8px;
+  background: #1a1a1a;
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.compact-select-option {
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: var(--ui-radius);
+  color: #cfcfcf;
+  font-size: var(--ui-text-sm);
+}
+
+.compact-select-option:hover,
+.compact-select-option-focused,
+.compact-select-option-active {
+  background: #292929;
+  color: #f0f0f0;
+}

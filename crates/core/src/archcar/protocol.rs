@@ -26,6 +26,22 @@ pub struct RpcEnvelope<T> {
     pub payload: T,
 }
 
+/// One agent CLI's view of the Archductor MCP server: whether that client is on
+/// this machine at all, whether it lists Archductor, and what the last
+/// register/unregister attempt said.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpClientRegistration {
+    pub client: String,
+    pub installed: bool,
+    pub registered: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ArchcarInputKind {
@@ -555,6 +571,23 @@ pub enum ArchcarRequest {
         workspace: String,
         new_name: String,
     },
+    /// Agent-supplied context metadata: the names a workspace/branch/chat should
+    /// carry and the workspace summary the next agent will read. This is the same
+    /// path the hidden `<archductor_metadata>` block takes, exposed so an agent
+    /// can drive it with a tool call instead of prose.
+    ApplyAgentContext {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
     DuplicateWorkspace {
         workspace: String,
         new_name: String,
@@ -661,6 +694,20 @@ pub enum ArchcarRequest {
         native_response: serde_json::Value,
     },
     // ---- Daemon service and remote access ---------------------------------
+    /// Which agent CLIs on this device currently list Archductor as an MCP
+    /// server.
+    GetMcpRegistration,
+    /// Add or remove the Archductor MCP server in each agent CLI's own
+    /// configuration, so it appears there like any other MCP server.
+    SetMcpRegistration {
+        register: bool,
+        /// Empty means every client Archductor knows about.
+        #[serde(default)]
+        clients: Vec<String>,
+        /// Register the small session tool profile rather than the full surface.
+        #[serde(default = "default_true")]
+        session_profile: bool,
+    },
     GetServiceStatus,
     InstallService {
         input: InstallService,
@@ -1134,6 +1181,10 @@ pub enum ArchcarResponse {
     PullRequestCreated {
         workspace: String,
         output: String,
+    },
+    /// Where the Archductor MCP server is registered, one entry per agent CLI.
+    McpRegistration {
+        clients: Vec<McpClientRegistration>,
     },
     ServiceStatus {
         status: ServiceStatus,
@@ -1948,6 +1999,21 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             workspace,
             new_name,
         } => format!("rename_workspace workspace={workspace} new_name={new_name}"),
+        ArchcarRequest::ApplyAgentContext {
+            workspace,
+            thread_id,
+            workspace_name,
+            branch_name,
+            chat_title,
+            summary,
+        } => format!(
+            "apply_agent_context workspace={workspace} thread_id={} name={} branch={} title={} summary_chars={}",
+            thread_id.map(|id| id.to_string()).unwrap_or_else(|| "-".to_owned()),
+            workspace_name.as_deref().unwrap_or("-"),
+            branch_name.as_deref().unwrap_or("-"),
+            chat_title.as_deref().unwrap_or("-"),
+            summary.as_deref().map(str::len).unwrap_or_default(),
+        ),
         ArchcarRequest::DuplicateWorkspace {
             workspace,
             new_name,
@@ -2059,6 +2125,19 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetPullRequestDraft { workspace } => {
             format!("get_pull_request_draft workspace={workspace}")
         }
+        ArchcarRequest::GetMcpRegistration => "get_mcp_registration".to_owned(),
+        ArchcarRequest::SetMcpRegistration {
+            register,
+            clients,
+            session_profile,
+        } => format!(
+            "set_mcp_registration register={register} clients={} session_profile={session_profile}",
+            if clients.is_empty() {
+                "all".to_owned()
+            } else {
+                clients.join(",")
+            }
+        ),
         ArchcarRequest::GetServiceStatus => "get_service_status".to_owned(),
         ArchcarRequest::InstallService { input } => format!(
             "install_service listen={}",
@@ -2561,6 +2640,14 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::ServiceStatus { status } => format!(
             "service_status manager={} installed={} running={}",
             status.manager, status.installed, status.running
+        ),
+        ArchcarResponse::McpRegistration { clients } => format!(
+            "mcp_registration {}",
+            clients
+                .iter()
+                .map(|client| format!("{}={}", client.client, client.registered))
+                .collect::<Vec<_>>()
+                .join(" ")
         ),
         // The token is a credential: report its length, never its value.
         ArchcarResponse::RemoteAccess { listen, token, .. } => format!(

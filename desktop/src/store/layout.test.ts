@@ -40,7 +40,11 @@ describe("layoutStore", () => {
 
     expect(layoutStore.activePreset().id).toBe("wide");
     expect(layoutStore.layout().regions.right.panels).toEqual(["summary", "changes", "checks"]);
-    expect(warn).toHaveBeenCalledOnce();
+    expect(
+      warn.mock.calls.filter(
+        ([message]) => message === "[layout] Dropped unknown panel id: removed-by-future-build",
+      ),
+    ).toHaveLength(1);
   });
 
   it("does not let applied or returned preset objects mutate built-ins", async () => {

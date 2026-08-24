@@ -256,6 +256,182 @@ fn parse_toml_mcp_keys(toml: &str, source: &str) -> Vec<McpServer> {
     servers
 }
 
+/// The name Archductor registers itself under with the agent CLIs.
+pub const ARCHDUCTOR_MCP_SERVER_NAME: &str = "archductor";
+
+/// An agent CLI that owns its own MCP configuration. Archductor registers
+/// through each client's own `mcp add`, so the entry lands wherever that client
+/// keeps its servers and shows up in its own listings — no config file of ours
+/// grafted onto theirs, and nothing to clean up when they change format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpClientKind {
+    Claude,
+    Codex,
+}
+
+impl McpClientKind {
+    pub const ALL: [Self; 2] = [Self::Claude, Self::Codex];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "claude" | "claude-code" => Some(Self::Claude),
+            "codex" => Some(Self::Codex),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn executable(self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// What happened when Archductor tried to register with one client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpRegistrationOutcome {
+    pub client: &'static str,
+    pub ok: bool,
+    pub detail: String,
+}
+
+/// Register `archductor mcp serve` with each client's own MCP configuration.
+/// Re-registering is the update path: the old entry is removed first, so a moved
+/// binary or a changed profile takes effect without a stale duplicate.
+pub fn register_archductor_mcp(
+    executable: &Path,
+    clients: &[McpClientKind],
+    session_profile: bool,
+) -> Vec<McpRegistrationOutcome> {
+    let profile = if session_profile { "session" } else { "full" };
+    clients
+        .iter()
+        .map(|client| {
+            if !command_exists(client.executable()) {
+                return McpRegistrationOutcome {
+                    client: client.as_str(),
+                    ok: false,
+                    detail: format!("{} is not installed", client.as_str()),
+                };
+            }
+            let _ = remove_registration(*client);
+            let executable = executable.to_string_lossy().to_string();
+            let args: Vec<String> = match client {
+                McpClientKind::Claude => vec![
+                    "mcp".to_owned(),
+                    "add".to_owned(),
+                    "--scope".to_owned(),
+                    "user".to_owned(),
+                    ARCHDUCTOR_MCP_SERVER_NAME.to_owned(),
+                    "--".to_owned(),
+                    executable,
+                    "mcp".to_owned(),
+                    "serve".to_owned(),
+                    "--profile".to_owned(),
+                    profile.to_owned(),
+                ],
+                McpClientKind::Codex => vec![
+                    "mcp".to_owned(),
+                    "add".to_owned(),
+                    ARCHDUCTOR_MCP_SERVER_NAME.to_owned(),
+                    "--".to_owned(),
+                    executable,
+                    "mcp".to_owned(),
+                    "serve".to_owned(),
+                    "--profile".to_owned(),
+                    profile.to_owned(),
+                ],
+            };
+            run_client(*client, &args)
+        })
+        .collect()
+}
+
+/// Remove the registration from each client that has one.
+pub fn unregister_archductor_mcp(clients: &[McpClientKind]) -> Vec<McpRegistrationOutcome> {
+    clients
+        .iter()
+        .map(|client| {
+            if !command_exists(client.executable()) {
+                return McpRegistrationOutcome {
+                    client: client.as_str(),
+                    ok: false,
+                    detail: format!("{} is not installed", client.as_str()),
+                };
+            }
+            remove_registration(*client)
+        })
+        .collect()
+}
+
+/// Whether each client currently lists Archductor among its MCP servers.
+pub fn archductor_mcp_registered() -> Vec<(McpClientKind, bool)> {
+    let home = crate::platform::home_dir();
+    let claude = home
+        .as_ref()
+        .map(|home| read_claude_mcp(&home.join(".claude.json")))
+        .unwrap_or_default();
+    let codex = home
+        .as_ref()
+        .map(|home| read_codex_mcp(&home.join(".codex/config.toml")))
+        .unwrap_or_default();
+    vec![
+        (McpClientKind::Claude, names_archductor(&claude)),
+        (McpClientKind::Codex, names_archductor(&codex)),
+    ]
+}
+
+fn names_archductor(servers: &[McpServer]) -> bool {
+    servers
+        .iter()
+        .any(|server| server.name == ARCHDUCTOR_MCP_SERVER_NAME)
+}
+
+fn remove_registration(client: McpClientKind) -> McpRegistrationOutcome {
+    let mut args = vec!["mcp".to_owned(), "remove".to_owned()];
+    if matches!(client, McpClientKind::Claude) {
+        args.push("--scope".to_owned());
+        args.push("user".to_owned());
+    }
+    args.push(ARCHDUCTOR_MCP_SERVER_NAME.to_owned());
+    run_client(client, &args)
+}
+
+fn run_client(client: McpClientKind, args: &[String]) -> McpRegistrationOutcome {
+    match std::process::Command::new(client.executable())
+        .args(args)
+        .output()
+    {
+        Ok(output) if output.status.success() => McpRegistrationOutcome {
+            client: client.as_str(),
+            ok: true,
+            detail: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        },
+        Ok(output) => McpRegistrationOutcome {
+            client: client.as_str(),
+            ok: false,
+            detail: {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                if stderr.is_empty() {
+                    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+                } else {
+                    stderr
+                }
+            },
+        },
+        Err(err) => McpRegistrationOutcome {
+            client: client.as_str(),
+            ok: false,
+            detail: err.to_string(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

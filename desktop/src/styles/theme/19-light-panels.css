@@ -1,0 +1,142 @@
+.lc-theme-light .project-avatar,
+.lc-theme-light .project-avatar-fallback {
+    background-color: #e2e8f0;
+    color: #334155;
+}
+.lc-theme-light .sidebar-nav-button:hover,
+.lc-theme-light .project-row:hover,
+.lc-theme-light .workspace-row-shell:hover {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .workspace-row-shell.selected {
+    background-color: #e2e8f0;
+}
+.lc-theme-light .sidebar-nav-button.active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .project-add {
+    color: #667085;
+}
+
+/* Dialogs / modals in light. */
+.lc-theme-light .modal-body {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .dialog-title {
+    color: #111827;
+}
+.lc-theme-light .dialog-field > span,
+.lc-theme-light .dialog-field-head {
+    color: #334155;
+}
+.lc-theme-light .dialog-hint {
+    color: #667085;
+}
+.lc-theme-light button.ui-button,
+.lc-theme-light button.ui-button-sm {
+    background-color: #f1f5f9;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-tabs .ui-button-sm.active,
+.lc-theme-light button.ui-button-sm.active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+.lc-theme-light .dialog-source-card {
+    background: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2937;
+}
+.lc-theme-light .dialog-source-card:hover {
+    background: #f8fafc;
+    border-color: #b9c6d8;
+}
+.lc-theme-light .dialog-source-active {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+.lc-theme-light .dialog-source-warning {
+    border-color: #fed7aa;
+}
+.lc-theme-light .dialog-source-detail,
+.lc-theme-light .dialog-preview-label {
+    color: #64748b;
+}
+.lc-theme-light .dialog-source-state {
+    background: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #475569;
+}
+.lc-theme-light .dialog-source-state-ready {
+    background: #ecfdf5;
+    border-color: #bbf7d0;
+    color: #047857;
+}
+.lc-theme-light .dialog-source-state-action {
+    background: #fff7ed;
+    border-color: #fed7aa;
+    color: #c2410c;
+}
+.lc-theme-light .dialog-preview {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-preview-title,
+.lc-theme-light .dialog-preview-value {
+    color: #1f2937;
+}
+.lc-theme-light .dialog-action-section {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .dialog-danger-section {
+    background: #fff1f2;
+    border-color: #fecdd3;
+}
+.lc-theme-light .dialog-section-title {
+    color: #111827;
+}
+.lc-theme-light .dialog-section-copy {
+    color: #64748b;
+}
+.lc-theme-light .dialog-provider-chip {
+    background: #ffffff;
+    border-color: #d9e0e8;
+    color: #334155;
+}
+.lc-theme-light .dialog-provider-chip:hover {
+    background: #f1f5f9;
+    border-color: #b9c6d8;
+}
+.lc-theme-light .dialog-provider-chip-active {
+    background: #eff6ff;
+    border-color: #93c5fd;
+    color: #1d4ed8;
+}
+.lc-theme-light .modal-body input,
+.lc-theme-light .dialog-field input,
+.lc-theme-light .dialog-field textarea {
+    background-color: #ffffff;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .composer-bar input,
+.lc-theme-light input {
+    background-color: #ffffff;
+    color: #1f2937;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .chrome-button:hover,
+.lc-theme-light .panel-switcher button:hover,
+.lc-theme-light .panel-switcher button:checked,
+.lc-theme-light .panel-switcher button.checked {
+    background-color: #edf2f7;
+    border-color: transparent;
+    color: #111827;
+}

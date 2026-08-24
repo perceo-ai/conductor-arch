@@ -1,0 +1,19 @@
+
+/* ---- Professional charcoal pass -----------------------------------------
+   Late normalization for the main Electron surface. Older GTK-port rules above
+   use many one-off sizes; these tokens make the visible app read as one system. */
+body {
+  font-family: var(--ui-font-sans);
+  font-size: var(--ui-text);
+  line-height: var(--ui-line);
+  background: var(--lc-bg);
+  color: var(--lc-text);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  letter-spacing: 0;
+}

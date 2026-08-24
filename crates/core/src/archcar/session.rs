@@ -918,17 +918,34 @@ fn build_thread_session_launch(
     harness: SessionHarnessOptions,
     controller: &dyn HarnessController,
 ) -> Result<ThreadSessionLaunch> {
-    if kind == SessionKind::CODEX {
-        return codex_app_server_session_launch(store, workspace, thread_record, harness);
-    }
-    if kind == SessionKind::CLAUDE {
-        return claude_stream_session_launch(store, workspace, thread_record, harness);
-    }
-    Ok(ThreadSessionLaunch {
-        launch: controller.build_launch(store, workspace, harness)?,
-        startup_recovery_context: None,
-        provider_port_reservation: None,
-    })
+    let mut launch = if kind == SessionKind::CODEX {
+        codex_app_server_session_launch(store, workspace, thread_record, harness)?
+    } else if kind == SessionKind::CLAUDE {
+        claude_stream_session_launch(store, workspace, thread_record, harness)?
+    } else {
+        ThreadSessionLaunch {
+            launch: controller.build_launch(store, workspace, harness)?,
+            startup_recovery_context: None,
+            provider_port_reservation: None,
+        }
+    };
+    bind_session_to_workspace(&mut launch.launch, workspace, thread_record.id);
+    Ok(launch)
+}
+
+/// Tell everything downstream of this process — including an MCP server the
+/// agent spawns from its own device-wide configuration — which workspace and
+/// chat it is working in. Without this the agent would have to name a workspace
+/// it never chose.
+fn bind_session_to_workspace(launch: &mut SessionLaunch, workspace: &str, thread_id: i64) {
+    launch.env.push((
+        crate::mcp_server::WORKSPACE_ENV.to_owned(),
+        OsString::from(workspace),
+    ));
+    launch.env.push((
+        crate::mcp_server::THREAD_ENV.to_owned(),
+        OsString::from(thread_id.to_string()),
+    ));
 }
 
 fn codex_app_server_session_launch(
@@ -1025,7 +1042,18 @@ fn claude_stream_session_launch(
         ),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
-        append_system_prompt: None,
+        // The standing contract: what Archductor is, what the workspace summary
+        // is for, and the tool that maintains it. The SessionStart hook repeats
+        // it with fresher prose, but a system prompt survives compaction.
+        append_system_prompt: Some(crate::workspace::archductor_session_system_prompt(
+            workspace,
+            store
+                .agent_workspace_summary(workspace)
+                .ok()
+                .flatten()
+                .as_ref()
+                .map(|summary| summary.body_markdown.as_str()),
+        )),
         settings_json: hook_settings,
     });
     launch.harness_metadata = non_interactive_harness_metadata("claude-stream-json", &harness);

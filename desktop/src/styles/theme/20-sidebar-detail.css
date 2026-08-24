@@ -1,0 +1,79 @@
+
+/* ── Sidebar status dots ── */
+.status-dot {
+    min-width: 8px;
+    min-height: 8px;
+    border-radius: 50%;
+    background-color: #8a8a8a;
+    opacity: 0.5;
+    margin-top: 5px;
+}
+.status-dot-active {
+    background-color: #aaaaaa;
+    opacity: 1.0;
+}
+.status-dot-running {
+    background-color: #aaaaaa;
+    opacity: 1.0;
+}
+.status-dot-idle {
+    background-color: #8a8a8a;
+    opacity: 0.45;
+}
+
+/* ── Sidebar row timestamp ── */
+.workspace-row-timestamp {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 11px;
+    color: #8a8a8a;
+}
+
+/* ── Sidebar bottom bar ── */
+.sidebar-bottom-bar {
+    background-color: #1e1e1e;
+    border-top: 1px solid #2a2a2a;
+    padding: 6px 10px;
+    min-height: 44px;
+}
+
+/* ── Section header ── */
+.repo-section-row {
+    padding: 8px 6px 4px 10px;
+}
+.repo-section-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lc-text);
+    letter-spacing: 0;
+}
+.repo-section-icon {
+    min-width: 14px;
+    color: var(--lc-text-muted);
+}
+
+/* ── Updated workspace row shell ── */
+.workspace-row-shell {
+    padding: 7px 14px 7px 10px;
+}
+
+.sidebar-icon-button {
+    min-width: 24px;
+    min-height: 24px;
+}
+
+.sidebar-arrow-button {
+    min-width: 24px;
+    min-height: 24px;
+    color: #9a9a9a;
+}
+
+.sidebar-arrow-button:hover {
+    background-color: #2c2c2c;
+    color: #e4e4e4;
+}
+
+/* ── Workspace empty state ── */
+.workspace-empty-label {
+    font-size: 14px;
+    color: #8a8a8a;
+}

@@ -2153,6 +2153,22 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 message: err.to_string(),
             },
         },
+        ArchcarRequest::ApplyAgentContext {
+            workspace,
+            thread_id,
+            workspace_name,
+            branch_name,
+            chat_title,
+            summary,
+        } => apply_agent_context(
+            state,
+            &workspace,
+            thread_id,
+            workspace_name,
+            branch_name,
+            chat_title,
+            summary,
+        ),
         ArchcarRequest::DuplicateWorkspace {
             workspace,
             new_name,
@@ -2472,6 +2488,33 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         // ---- Daemon service and remote access ---------------------------
         // Service management reads the process environment's paths, which is
         // where this daemon's own state lives.
+        ArchcarRequest::GetMcpRegistration => mcp_registration_response(Vec::new()),
+        ArchcarRequest::SetMcpRegistration {
+            register,
+            clients,
+            session_profile,
+        } => match mcp_clients_from_names(&clients) {
+            Ok(clients) => {
+                let outcomes = if register {
+                    match std::env::current_exe() {
+                        Ok(executable) => crate::mcp::register_archductor_mcp(
+                            &executable,
+                            &clients,
+                            session_profile,
+                        ),
+                        Err(err) => {
+                            return ArchcarResponse::Error {
+                                message: err.to_string(),
+                            }
+                        }
+                    }
+                } else {
+                    crate::mcp::unregister_archductor_mcp(&clients)
+                };
+                mcp_registration_response(outcomes)
+            }
+            Err(message) => ArchcarResponse::Error { message },
+        },
         ArchcarRequest::GetServiceStatus => match crate::service::status(&AppPaths::from_env()) {
             Ok(status) => ArchcarResponse::ServiceStatus { status },
             Err(err) => ArchcarResponse::Error {
@@ -3211,6 +3254,135 @@ fn refresh_workspace_context_after_change(
     }
 }
 
+/// Read each client's current registration, folding in whatever the run that
+/// just happened reported so a failure explains itself instead of showing up as
+/// a silent "not registered".
+fn mcp_registration_response(outcomes: Vec<crate::mcp::McpRegistrationOutcome>) -> ArchcarResponse {
+    use crate::archcar::protocol::McpClientRegistration;
+    let clients = crate::mcp::archductor_mcp_registered()
+        .into_iter()
+        .map(|(client, registered)| {
+            let outcome = outcomes
+                .iter()
+                .find(|outcome| outcome.client == client.as_str());
+            McpClientRegistration {
+                client: client.as_str().to_owned(),
+                installed: crate::doctor::command_exists(client.as_str()),
+                registered,
+                detail: outcome
+                    .map(|outcome| outcome.detail.clone())
+                    .unwrap_or_default(),
+            }
+        })
+        .collect();
+    ArchcarResponse::McpRegistration { clients }
+}
+
+fn mcp_clients_from_names(names: &[String]) -> Result<Vec<crate::mcp::McpClientKind>, String> {
+    use crate::mcp::McpClientKind;
+    if names.is_empty() {
+        return Ok(McpClientKind::ALL.to_vec());
+    }
+    names
+        .iter()
+        .map(|name| {
+            McpClientKind::parse(name)
+                .ok_or_else(|| format!("unknown MCP client `{name}` (expected claude or codex)"))
+        })
+        .collect()
+}
+
+/// Agent-supplied names and summary arriving as a tool call. Same store path as
+/// the hidden metadata block, same events out, so a workspace renamed by tool
+/// and one renamed by prose are indistinguishable to every client.
+#[allow(clippy::too_many_arguments)]
+fn apply_agent_context(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    thread_id: Option<i64>,
+    workspace_name: Option<String>,
+    branch_name: Option<String>,
+    chat_title: Option<String>,
+    summary: Option<String>,
+) -> ArchcarResponse {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let before = thread_id.and_then(|thread_id| thread_naming_snapshot(&db_path, thread_id));
+    let wrote_summary = summary.is_some();
+    let applied = WorkspaceStore::open_app(&db_path).and_then(|store| {
+        // Resolve the id first: applying the metadata can rename the workspace
+        // out from under the name the caller used.
+        let workspace_id = store.get_by_name(workspace)?.id;
+        store.apply_agent_context_metadata(
+            workspace,
+            thread_id,
+            workspace_name,
+            branch_name,
+            chat_title,
+            summary,
+        )?;
+        store.workspace_name_by_id(workspace_id)
+    });
+    let name = match applied {
+        Ok(name) => name,
+        Err(err) => {
+            return ArchcarResponse::Error {
+                message: err.to_string(),
+            }
+        }
+    };
+    if let Some(thread_id) = thread_id {
+        broadcast_naming_changes(state, &db_path, thread_id, before);
+    }
+    if wrote_summary {
+        if let Ok(Some(stored)) = WorkspaceStore::open_app(&db_path)
+            .and_then(|store| store.get_summary(&name, "workspace", None))
+        {
+            broadcast_summary_updated(state, &name, &stored);
+        }
+    }
+    ArchcarResponse::WorkspaceUpdated { name }
+}
+
+/// Apply whatever the agent put in `<archductor_metadata>` during this turn:
+/// names and the workspace summary. Managed providers record assistant text as
+/// provider events, so this runs at the turn boundary rather than when a client
+/// happens to read the thread — a headless session must get named too.
+fn apply_agent_metadata_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let Ok(store) = WorkspaceStore::open_app(&db_path) else {
+        return;
+    };
+    let Ok(cursor) = store.chat_metadata_cursor(thread_id) else {
+        return;
+    };
+    let Ok(records) = ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id) else {
+        return;
+    };
+    let projection = provider_projection_from_records(&records);
+    let fresh = projection
+        .items
+        .iter()
+        .filter(|item| item.render_class.role_label() == "assistant")
+        .filter(|item| item.timeline_seq.unwrap_or_default() > cursor)
+        .collect::<Vec<_>>();
+    if fresh.is_empty() {
+        return;
+    }
+    let before = thread_naming_snapshot(&db_path, thread_id);
+    let mut highest = cursor;
+    for item in fresh {
+        let text = provider_projection_item_text(item);
+        if let Err(err) = store.apply_agent_chat_metadata_directive(thread_id, &text) {
+            warn!(thread_id, error = %err, "failed to apply agent metadata at turn boundary");
+        }
+        highest = highest.max(item.timeline_seq.unwrap_or_default());
+    }
+    if let Err(err) = store.set_chat_metadata_cursor(thread_id, highest) {
+        warn!(thread_id, error = %err, "failed to advance agent metadata cursor");
+    }
+    broadcast_naming_changes(state, &db_path, thread_id, before);
+}
+
 /// Resolve a chat thread to its workspace name, for event-driven refreshes.
 fn workspace_name_for_thread(state: &Arc<Mutex<ServerState>>, thread_id: i64) -> Option<String> {
     let db_path = state.lock().unwrap().db_path.clone();
@@ -3319,12 +3491,12 @@ fn queue_chat_input(
             kind != crate::archcar::protocol::ArchcarInputKind::RawTerminal,
             "raw terminal input cannot be queued"
         );
-        // The first human message of a chat carries a hidden request for real
-        // workspace/branch/chat names. It rides the provider-bound text only; the
-        // transcript keeps the visible text, so the user never sees the block.
+        // A human message can carry a hidden request for real workspace/branch/chat
+        // names and a refreshed workspace summary. It rides the provider-bound text
+        // only; the transcript keeps the visible text, so the user never sees it.
         let (input, visible_input) = match kind {
             crate::archcar::protocol::ArchcarInputKind::User => {
-                match store.decorate_first_chat_input(thread_id, &input)? {
+                match store.decorate_chat_input(thread_id, &input)? {
                     Some(decorated) => (
                         decorated,
                         Some(visible_input.clone().unwrap_or_else(|| input.clone())),
@@ -3921,6 +4093,7 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         drain_queued_input_for_thread(state, thread_id);
     }
     if let Some(thread_id) = refresh_thread_id {
+        apply_agent_metadata_for_thread(state, thread_id);
         if let Some(workspace) = workspace_name_for_thread(state, thread_id) {
             refresh_workspace_context_after_change(state, &workspace, Some(thread_id));
         }
@@ -4565,8 +4738,11 @@ fn session_messages_for_thread(db_path: &Path, thread_id: i64) -> Result<Vec<Arc
     }
     for item in provider_items {
         let content = provider_projection_item_text(&item);
+        // Reading a transcript must not apply directives: the turn boundary owns
+        // that, and re-applying on every read would keep resetting the summary
+        // staleness counter. Here we only hide the block from the reader.
         let content = if item.render_class.role_label() == "assistant" {
-            store.apply_agent_chat_metadata_directive(thread_id, &content)?
+            crate::workspace::strip_archductor_metadata_block(&content)
         } else {
             content
         };
@@ -5825,6 +6001,87 @@ mod tests {
         let before = thread_naming_snapshot(&db_path, thread.id);
         broadcast_naming_changes(&state, &db_path, thread.id, before);
         assert!(subscriber_rx.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn apply_agent_context_renames_retitles_and_stores_the_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::ApplyAgentContext {
+                workspace: "berlin".to_owned(),
+                thread_id: Some(thread.id),
+                workspace_name: Some("billing webhook fix".to_owned()),
+                branch_name: None,
+                chat_title: Some("Billing Webhook Fix".to_owned()),
+                summary: Some("Retry backoff is the culprit; fix drafted.".to_owned()),
+            },
+            &state,
+        );
+
+        assert!(
+            matches!(&response, ArchcarResponse::WorkspaceUpdated { name } if name == "billing-webhook-fix"),
+            "{response:?}"
+        );
+        let stored = store
+            .agent_workspace_summary("billing-webhook-fix")
+            .unwrap()
+            .unwrap();
+        assert!(stored.body_markdown.contains("Retry backoff"), "{stored:?}");
+
+        // Clients address workspaces by name, so a tool-driven rename has to
+        // reach them the same way a prose-driven one does.
+        let events = subscriber_rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::WorkspaceRenamed { old_name, new_name }
+                    if old_name == "berlin" && new_name == "billing-webhook-fix"
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, ArchcarEvent::SummaryUpdated { .. })),
+            "{events:?}"
+        );
     }
 
     #[test]

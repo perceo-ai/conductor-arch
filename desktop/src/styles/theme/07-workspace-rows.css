@@ -1,0 +1,78 @@
+
+.workspace-row-shell,
+.project-row,
+.history-row {
+    padding: 8px 10px;
+}
+
+.workspace-row-diff-added,
+.workspace-row-diff-removed {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.workspace-row-diff-added {
+    color: var(--lc-success);
+}
+
+.workspace-row-diff-removed {
+    color: var(--lc-danger);
+}
+
+.workspace-row-branch-icon {
+    min-width: 14px;
+    color: var(--lc-text-muted);
+}
+
+.workspace-name {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.workspace-meta,
+.card-meta,
+.detail-label,
+.repo-section-header {
+    font-size: 11px;
+}
+
+.repo-section-header {
+    letter-spacing: 0.1em;
+}
+
+.repo-empty-label {
+    padding: 4px 12px 10px 12px;
+}
+
+.workspace-status-chip,
+.workspace-status-chip-active {
+    padding: 1px 0;
+    border-radius: 7px;
+    font-size: 11px;
+    font-weight: 600;
+    min-width: 0;
+}
+
+.workspace-status-chip {
+    color: #b8b8b8;
+    background-color: transparent;
+    border: none;
+}
+
+.workspace-status-chip-active {
+    color: #e4e4e4;
+    background-color: transparent;
+    border: none;
+}
+
+.project-icon {
+    color: #8a8a8a;
+}
+
+.project-icon-hot,
+.card-diff-hot,
+.run-dot-active,
+.stat-running {
+    color: #aaaaaa;
+}

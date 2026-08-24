@@ -1,0 +1,59 @@
+
+/* ── Minimal sidebar search ── */
+.sidebar-search-minimal {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid #2a2a2a;
+    border-radius: 0;
+    font-size: 12px;
+    color: #8a8a8a;
+    padding: 6px 12px;
+    margin: 0;
+}
+.sidebar-search-minimal:focus {
+    border-bottom-color: #aaaaaa;
+    color: #e4e4e4;
+}
+
+/* ── Title bar nav / breadcrumb ── */
+.ws-nav-btn {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    color: #7e7e7e;
+    padding: 5px 6px;
+    min-width: 26px;
+    min-height: 26px;
+    border-radius: 6px;
+    font-size: 14px;
+}
+.ws-nav-btn:hover {
+    background-color: #2c2c2c;
+    color: #e4e4e4;
+}
+.ws-panel-toggle {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    color: #7e7e7e;
+    padding: 5px;
+    min-width: 28px;
+    min-height: 28px;
+    border-radius: 6px;
+    margin-right: 6px;
+}
+.ws-panel-toggle:hover {
+    background-color: #2c2c2c;
+    color: #e4e4e4;
+}
+.ws-breadcrumb-sep {
+    color: #4a4a4a;
+    font-size: 14px;
+}
+.ws-breadcrumb-dots {
+    color: #4a4a4a;
+    letter-spacing: 2px;
+    font-size: 13px;
+}

@@ -1,0 +1,312 @@
+/* ── Motion applied across the app ──
+ *
+ * The app previously had two transitions in ~11,000 lines of CSS, so every
+ * surface appeared, moved and vanished by teleporting. This file adds the
+ * missing feedback, under three rules:
+ *
+ *   1. Animate transform and opacity. They are compositor-only; animating
+ *      width/height/top on a list that re-renders while an agent streams is
+ *      how you get a janky sidebar.
+ *   2. Entrances only, mostly. Solid removes DOM on <Show> immediately, so an
+ *      exit animation needs the element kept alive — not worth the state for
+ *      most surfaces. Toasts are the exception: they already have a dismiss
+ *      lifecycle to hang it on.
+ *   3. Overlays grow from where they were opened. transform-origin does the
+ *      work of explaining what spawned what.
+ */
+
+/* ── Controls ──
+   One rule for the shared interactive vocabulary. `:active` scale is small on
+   purpose — enough to feel the press, not enough to read as a bounce. */
+button,
+.ui-button-icon,
+.ui-button,
+.suggested-action,
+.secondary-action,
+.destructive-action,
+.pill-button,
+.mini-action {
+    transition:
+        background-color var(--mo-fast) var(--mo-in-out),
+        border-color var(--mo-fast) var(--mo-in-out),
+        color var(--mo-fast) var(--mo-in-out),
+        opacity var(--mo-fast) var(--mo-in-out);
+}
+
+button:active,
+.ui-button-icon:active,
+.ui-button:active,
+.suggested-action:active,
+.secondary-action:active,
+.destructive-action:active {
+    transform: scale(0.97);
+    transition-duration: var(--mo-instant);
+}
+
+/* Disabled controls must not appear to respond to a press. */
+button:disabled:active,
+.ui-button-icon:disabled:active,
+.ui-button:disabled:active {
+    transform: none;
+}
+
+input,
+textarea,
+select {
+    transition:
+        border-color var(--mo-fast) var(--mo-in-out),
+        background-color var(--mo-fast) var(--mo-in-out),
+        box-shadow var(--mo-fast) var(--mo-in-out);
+}
+
+/* ── Sidebar ── */
+
+.workspace-row-shell,
+.project-row,
+.sidebar-nav-button {
+    transition:
+        background-color var(--mo-fast) var(--mo-in-out),
+        color var(--mo-fast) var(--mo-in-out);
+}
+
+/* Selection rail. A pseudo-element that scales in from the row's vertical
+   centre, rather than a border that pops into existence at full height. */
+.workspace-row-shell {
+    position: relative;
+}
+
+.workspace-row-shell::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 4px;
+    bottom: 4px;
+    width: 2px;
+    border-radius: 0 2px 2px 0;
+    background: var(--lc-accent);
+    transform: scaleY(0);
+    transform-origin: center;
+    opacity: 0;
+    transition:
+        transform var(--mo-base) var(--mo-spring),
+        opacity var(--mo-fast) var(--mo-in-out);
+    pointer-events: none;
+}
+
+.workspace-row-shell.selected::before {
+    transform: scaleY(1);
+    opacity: 1;
+}
+
+/* Rows entering the list — after a filter change or a new workspace. Staggered
+   via nth-child rather than per-row inline delays, so it costs nothing at
+   render time. Capped at 12: past that the last rows would arrive late enough
+   to read as the list loading slowly. */
+.workspace-list .workspace-row-shell {
+    animation: mo-rise-in var(--mo-base) var(--mo-out) both;
+}
+
+.workspace-list .workspace-row-shell:nth-child(1) { animation-delay: 0ms; }
+.workspace-list .workspace-row-shell:nth-child(2) { animation-delay: calc(var(--mo-stagger) * 1); }
+.workspace-list .workspace-row-shell:nth-child(3) { animation-delay: calc(var(--mo-stagger) * 2); }
+.workspace-list .workspace-row-shell:nth-child(4) { animation-delay: calc(var(--mo-stagger) * 3); }
+.workspace-list .workspace-row-shell:nth-child(5) { animation-delay: calc(var(--mo-stagger) * 4); }
+.workspace-list .workspace-row-shell:nth-child(6) { animation-delay: calc(var(--mo-stagger) * 5); }
+.workspace-list .workspace-row-shell:nth-child(7) { animation-delay: calc(var(--mo-stagger) * 6); }
+.workspace-list .workspace-row-shell:nth-child(8) { animation-delay: calc(var(--mo-stagger) * 7); }
+.workspace-list .workspace-row-shell:nth-child(n + 9) { animation-delay: calc(var(--mo-stagger) * 8); }
+
+/* The awaiting-input indicator is the one sidebar element that should keep
+   moving: it marks a session parked until the user acts, which is exactly the
+   thing that otherwise goes unnoticed for minutes. */
+.workspace-row-awaiting {
+    animation: mo-breathe var(--mo-loop) var(--mo-in-out) infinite;
+}
+
+.project-avatar {
+    transition: transform var(--mo-base) var(--mo-out);
+}
+
+.project-row:hover .project-avatar {
+    transform: scale(1.06);
+}
+
+/* ── Toasts ──
+   The one surface with a real exit: dismissal is already a lifecycle step, so
+   there is something to animate against. */
+.toast-item {
+    animation: mo-slide-up-in var(--mo-base) var(--mo-out) both;
+    transition:
+        transform var(--mo-fast) var(--mo-in-out),
+        box-shadow var(--mo-fast) var(--mo-in-out);
+}
+
+.toast-item:hover {
+    transform: translateY(-1px);
+}
+
+/* Still mounted only so the exit can play — it must not be clickable during
+   those ~160ms, or a fading toast can eat a click meant for what is behind it. */
+.toast-item-leaving {
+    animation: mo-slide-down-out var(--mo-fast) var(--mo-in-out) both;
+    pointer-events: none;
+}
+
+/* ── Dialogs and modals ──
+   Scrim fades; the panel scales up from centre. The panel is faster than the
+   scrim so the thing being read settles first. */
+.modal-scrim,
+.setup-scrim,
+.cmdk-overlay,
+.context-menu-backdrop {
+    animation: mo-fade-in var(--mo-fast) var(--mo-in-out) both;
+}
+
+.dialog-card,
+.modal-body,
+.setup-modal {
+    animation: mo-scale-in var(--mo-base) var(--mo-out) both;
+    transform-origin: center;
+}
+
+/* ── Popovers anchored to a control ──
+   Origin is the top edge, which is where these are positioned from, so the
+   menu reads as unrolling out of its trigger. */
+.context-menu,
+.compact-select-menu,
+.chat-menu-panel {
+    animation: mo-scale-in var(--mo-fast) var(--mo-out) both;
+    transform-origin: top center;
+}
+
+.context-menu-item,
+.compact-select-option,
+.cmdk-item {
+    transition:
+        background-color var(--mo-instant) var(--mo-in-out),
+        color var(--mo-instant) var(--mo-in-out);
+}
+
+/* ── Command palette ──
+   Origin at the top: the panel is pinned near the top of the viewport, and
+   growing from centre would make it drift upward as it opens. */
+.cmdk-panel {
+    animation: mo-scale-in var(--mo-base) var(--mo-out) both;
+    transform-origin: top center;
+}
+
+/* Results stagger, but only the first handful — a long result list must not
+   take longer to appear the further down you look. */
+.cmdk-list .cmdk-item {
+    animation: mo-fade-in var(--mo-fast) var(--mo-out) both;
+}
+
+.cmdk-list .cmdk-item:nth-child(1) { animation-delay: 0ms; }
+.cmdk-list .cmdk-item:nth-child(2) { animation-delay: calc(var(--mo-stagger) * 1); }
+.cmdk-list .cmdk-item:nth-child(3) { animation-delay: calc(var(--mo-stagger) * 2); }
+.cmdk-list .cmdk-item:nth-child(4) { animation-delay: calc(var(--mo-stagger) * 3); }
+.cmdk-list .cmdk-item:nth-child(n + 5) { animation-delay: calc(var(--mo-stagger) * 4); }
+
+/* ── Tabs ── */
+
+.ws-tab-shell,
+.ws-chat-tab-shell,
+.ws-file-tab,
+.project-tab {
+    transition:
+        background-color var(--mo-fast) var(--mo-in-out),
+        color var(--mo-fast) var(--mo-in-out),
+        border-color var(--mo-fast) var(--mo-in-out);
+}
+
+/* Active-tab underline. Scales out from the tab's centre on activation instead
+   of the border simply switching colour. */
+.ws-tab-shell::after,
+.ws-chat-tab-shell::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    bottom: 0;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--lc-accent);
+    transform: scaleX(0);
+    transition: transform var(--mo-base) var(--mo-out);
+    pointer-events: none;
+}
+
+.ws-tab-shell,
+.ws-chat-tab-shell {
+    position: relative;
+}
+
+.ws-tab-shell.ws-tab-active::after,
+.ws-chat-tab-shell.ws-tab-active::after {
+    transform: scaleX(1);
+}
+
+/* A chat tab whose agent is waiting on the user. Same breathing signal the
+   sidebar uses, so the two surfaces say "your turn" the same way. */
+.ws-chat-tab-needs-input .ws-chat-tab-dot {
+    animation: mo-breathe var(--mo-loop) var(--mo-in-out) infinite;
+}
+
+/* ── Diff ── */
+
+.diff-row {
+    transition: background-color var(--mo-instant) var(--mo-in-out);
+}
+
+.diff-file-header {
+    transition: background-color var(--mo-fast) var(--mo-in-out);
+}
+
+/* The chevron rotates rather than swapping glyph, so collapsing and expanding
+   are visibly the same control in two positions. */
+.diff-chevron {
+    transition: transform var(--mo-fast) var(--mo-out);
+}
+
+.diff-file-collapsed .diff-chevron {
+    transform: rotate(-90deg);
+}
+
+.diff-hunk {
+    animation: mo-fade-in var(--mo-fast) var(--mo-in-out) both;
+}
+
+/* ── Panels and cards ── */
+
+.workspace-card,
+.dashboard-card,
+.repo-card {
+    transition:
+        transform var(--mo-fast) var(--mo-out),
+        border-color var(--mo-fast) var(--mo-in-out),
+        background-color var(--mo-fast) var(--mo-in-out);
+}
+
+.workspace-card:hover,
+.repo-card:hover {
+    transform: translateY(-1px);
+}
+
+.ws-right-panel,
+.chat-timeline-scroll {
+    scroll-behavior: smooth;
+}
+
+/* Right-panel tab content swapping. Fade only — sliding a panel that can hold a
+   long diff means animating a large repaint every time someone switches tab. */
+.ws-panel-body,
+.ws-flat-section {
+    animation: mo-fade-in var(--mo-fast) var(--mo-in-out) both;
+}
+
+/* ── Focus ──
+   Focus rings appear instantly (a delayed focus ring is a usability bug) but
+   are allowed to fade out with the rest of the control's transition. */
+:focus-visible {
+    transition: outline-color var(--mo-instant) var(--mo-in-out);
+}

@@ -1,0 +1,26 @@
+/* ── Motion layer ──
+ *
+ * Loaded last (see index.tsx), because it both reads tokens declared by
+ * theme.css and has to be able to override motion-related declarations made
+ * anywhere above it.
+ *
+ * ORDER IS LOAD-BEARING, as it is in base.css and theme.css:
+ *
+ *   01-tokens    durations, easings, and the whole keyframe library
+ *   02-loader    generation loader + streaming/"thinking" treatments
+ *   03-pr-state  workspace PR-state icon colours and their motion
+ *   04-surfaces  motion applied across the rest of the app
+ *   99-reduced   the prefers-reduced-motion override — must come last of all,
+ *                since it wins by being the final matching declaration
+ *
+ * Adding motion: define the keyframe in 01-tokens (so the set of motions the
+ * app can perform stays enumerable from one file) and apply it from whichever
+ * file owns that surface. Use the duration/easing tokens, never literals — a
+ * literal is invisible to 99-reduced and ships an accessibility bug.
+ */
+
+@import "./motion/01-tokens.css";
+@import "./motion/02-loader.css";
+@import "./motion/03-pr-state.css";
+@import "./motion/04-surfaces.css";
+@import "./motion/99-reduced.css";

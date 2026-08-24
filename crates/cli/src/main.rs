@@ -910,6 +910,27 @@ enum McpCommand {
         /// Refuse tools that change state.
         #[arg(long)]
         read_only: bool,
+        /// Which tool surface to expose: `full` for an external client, or
+        /// `session` for the small set an agent uses to keep its own workspace
+        /// context current.
+        #[arg(long, default_value = "full")]
+        profile: String,
+    },
+    /// Register the Archductor MCP server with the agent CLIs on this device
+    /// (claude and codex), so it appears alongside every other MCP server.
+    Register {
+        /// Register only this client (`claude` or `codex`). Defaults to both.
+        #[arg(long)]
+        client: Option<String>,
+        /// Expose the full tool surface instead of the session profile.
+        #[arg(long)]
+        full: bool,
+    },
+    /// Remove the Archductor MCP server registration from the agent CLIs.
+    Unregister {
+        /// Unregister only this client (`claude` or `codex`). Defaults to both.
+        #[arg(long)]
+        client: Option<String>,
     },
     /// First-run setup: install the archcar background service, make sure an
     /// access token exists, and print the MCP client configuration.
@@ -3039,9 +3060,24 @@ fn run_cli() -> Result<()> {
                     WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
                 print_mcp_status(store.mcp_status(&workspace)?);
             }
-            McpCommand::Serve { read_only } => {
+            McpCommand::Serve { read_only, profile } => {
                 let client = ArchcarClient::from_paths(&paths);
-                archductor_core::mcp_server::serve_stdio(&client, read_only)?;
+                let options = archductor_core::mcp_server::McpOptions::new(
+                    read_only,
+                    archductor_core::mcp_server::McpProfile::parse(&profile)?,
+                );
+                archductor_core::mcp_server::serve_stdio(&client, options)?;
+            }
+            McpCommand::Register { client, full } => {
+                let clients = mcp_clients(client.as_deref())?;
+                let exe = std::env::current_exe()?;
+                print_mcp_registrations(archductor_core::mcp::register_archductor_mcp(
+                    &exe, &clients, !full,
+                ));
+            }
+            McpCommand::Unregister { client } => {
+                let clients = mcp_clients(client.as_deref())?;
+                print_mcp_registrations(archductor_core::mcp::unregister_archductor_mcp(&clients));
             }
             McpCommand::Setup {
                 listen,
@@ -3340,9 +3376,51 @@ fn handle_archcar_claude_hook() -> Result<bool> {
     io::stdin()
         .read_to_string(&mut stdin)
         .context("read Claude hook stdin")?;
-    let output = handle_claude_hook_json(thread_id, &stdin);
+    let output = match claude_hook_context_reply(thread_id, &stdin) {
+        Some(reply) => reply,
+        None => handle_claude_hook_json(thread_id, &stdin),
+    };
     println!("{output}");
     Ok(true)
+}
+
+/// Answer the context-maintenance hooks. `SessionStart` hands over Archductor's
+/// contract and the stored summary; `PostToolUse` reminds a session whose
+/// context has drifted. Everything else falls through to the permission path.
+///
+/// Failures here are silent on purpose: a hook that cannot reach the database
+/// must not break the session it is attached to.
+fn claude_hook_context_reply(thread_id: i64, stdin: &str) -> Option<serde_json::Value> {
+    use archductor_core::provider_adapters::claude_hooks::{
+        classify_claude_hook_request, encode_claude_hook_context, encode_claude_hook_noop,
+        ClaudeHookRequest,
+    };
+
+    let request = serde_json::from_str::<serde_json::Value>(stdin).ok()?;
+    let request = classify_claude_hook_request(&request);
+    if !request.is_context_event() {
+        return None;
+    }
+    let paths = AppPaths::from_env();
+    let store = WorkspaceStore::open_app(&paths.database_path).ok()?;
+    let gaps = store.workspace_context_gaps(thread_id).ok()?;
+    match request {
+        ClaudeHookRequest::SessionStart => Some(encode_claude_hook_context(
+            "SessionStart",
+            &archductor_core::workspace::archductor_session_system_prompt(
+                &gaps.workspace,
+                gaps.summary.as_deref(),
+            ),
+        )),
+        ClaudeHookRequest::PostToolUse if !gaps.is_empty() => {
+            let _ = store.note_context_nudge(thread_id);
+            Some(encode_claude_hook_context(
+                "PostToolUse",
+                &archductor_core::workspace::archductor_context_nudge(&gaps),
+            ))
+        }
+        _ => Some(encode_claude_hook_noop()),
+    }
 }
 
 fn refresh_all_repository_prompt_snapshots(paths: &AppPaths) -> Result<usize> {
@@ -3447,6 +3525,22 @@ fn render_layout_preset_list(
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
+        ArchcarResponse::McpRegistration { clients } => {
+            for client in clients {
+                let state = if !client.installed {
+                    "not installed"
+                } else if client.registered {
+                    "registered"
+                } else {
+                    "not registered"
+                };
+                if client.detail.is_empty() {
+                    println!("{}: {state}", client.client);
+                } else {
+                    println!("{}: {state} — {}", client.client, client.detail);
+                }
+            }
+        }
         ArchcarResponse::SessionSpawnQueued { workspace, kind } => {
             println!("queued {} session for {}", kind.display_name(), workspace);
             // The id does not exist until the spawn lands, and `send` needs
@@ -4818,6 +4912,31 @@ fn mcp_client_config_json(executable: &str) -> String {
         }
     }))
     .unwrap_or_default()
+}
+
+/// Which agent CLIs a register/unregister run should touch. No `--client` means
+/// every client Archductor knows how to talk to.
+fn mcp_clients(client: Option<&str>) -> anyhow::Result<Vec<archductor_core::mcp::McpClientKind>> {
+    use archductor_core::mcp::McpClientKind;
+    match client {
+        None => Ok(McpClientKind::ALL.to_vec()),
+        Some(name) => McpClientKind::parse(name)
+            .map(|client| vec![client])
+            .ok_or_else(|| {
+                anyhow::anyhow!("unknown MCP client `{name}` (expected claude or codex)")
+            }),
+    }
+}
+
+fn print_mcp_registrations(outcomes: Vec<archductor_core::mcp::McpRegistrationOutcome>) {
+    for outcome in outcomes {
+        let mark = if outcome.ok { "ok" } else { "skipped" };
+        if outcome.detail.is_empty() {
+            println!("{}: {mark}", outcome.client);
+        } else {
+            println!("{}: {mark} — {}", outcome.client, outcome.detail);
+        }
+    }
 }
 
 fn print_mcp_status(status: archductor_core::mcp::McpStatus) {

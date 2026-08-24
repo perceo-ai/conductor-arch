@@ -1,0 +1,206 @@
+.lc-theme-light .context-menu-item {
+    color: #1f2328;
+}
+.lc-theme-light .context-menu-item:hover,
+.lc-theme-light .context-menu-item-focused {
+    background-color: #f1f5f9;
+}
+.lc-theme-light .context-menu-item-destructive {
+    color: #cf222e;
+}
+.lc-theme-light .context-menu-item-destructive:hover,
+.lc-theme-light .context-menu-item-destructive.context-menu-item-focused {
+    background-color: #ffebe9;
+}
+.lc-theme-light .toast,
+.lc-theme-light .toast-item {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .repo-picker {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .repo-search {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .repo-card:hover {
+    background-color: #f1f5f9;
+}
+.lc-theme-light .repo-card.selected {
+    background-color: #eef4ff;
+    border-color: #cdd9ec;
+}
+.lc-theme-light .project-template-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .project-template-card:hover {
+    background-color: #f1f5f9;
+    border-color: #cdd6e0;
+}
+.lc-theme-light .project-template-card-selected {
+    background-color: #eef4ff;
+    border-color: #9db4e0;
+}
+.lc-theme-light .project-template-title {
+    color: #111827;
+}
+/* PR status bar (top-right of a workspace): the chip had a hard dark #232323
+   background and the title used light --lc-text, both wrong on the light bar. */
+.lc-theme-light .ws-pr-chip {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .ws-pr-chip-empty {
+    color: #57606a;
+}
+.lc-theme-light .ws-pr-status-title {
+    color: #57606a;
+}
+/* Active right-panel + run tab pills used dark #232323 in light mode. */
+.lc-theme-light .ws-right-tab-active,
+.lc-theme-light .ws-run-tab-active {
+    background-color: #e2e8f0;
+    color: #111827;
+}
+/* Chat tool-call cards (reasoning/command/edit events): body/chip/expander used
+   dark #18/#19/#17 surfaces, unreadable in light mode. (The ANSI terminal card
+   stays dark by convention.) */
+.lc-theme-light .chat-inline-event-body {
+    background-color: #f6f8fa;
+    border-color: #d9e0e8;
+    color: #1f2328;
+}
+.lc-theme-light .chat-inline-event-chip {
+    background-color: #eef1f5;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .chat-inline-event-chip-label {
+    color: #57606a;
+}
+.lc-theme-light .chat-inline-event-expander {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+    color: #57606a;
+}
+
+.lc-theme-light .dashboard-title,
+.lc-theme-light .workspace-name,
+.lc-theme-light .card-title,
+.lc-theme-light .metric-value,
+.lc-theme-light .detail-value,
+.lc-theme-light .column-title {
+    color: #111827;
+}
+
+.lc-theme-light .card-meta,
+.lc-theme-light .workspace-meta,
+.lc-theme-light .detail-label,
+.lc-theme-light .project-tab,
+.lc-theme-light .column-count,
+.lc-theme-light .empty-label,
+.lc-theme-light .card-branch,
+.lc-theme-light .card-diff {
+    color: #667085;
+}
+.lc-theme-light .card-activity {
+    color: #334155;
+}
+
+/* Workspace command center — the main working surface. Without these it stays
+   fully dark in light mode (dark center/right-panel/composer on a light app). */
+.lc-theme-light .ws-center,
+.lc-theme-light .ws-tab-bar,
+.lc-theme-light .chat-surface {
+    background-color: #ffffff;
+    color: #1f2937;
+}
+/* The transcript scroll paints its own dark #151515, overriding the light
+   chat-surface — the message area stayed a dark block in light mode. */
+.lc-theme-light .chat-timeline-scroll {
+    background-color: #ffffff;
+}
+/* Code surfaces in light mode: the GitHub light palette, set once on the shared
+   tokens so the diff viewer, file editor, and markdown fences all follow. */
+.lc-theme-light {
+    --code-surface: #ffffff;
+    --code-fg: #1f2328;
+    --code-border: #d9e0e8;
+    --code-gutter-fg: #9aa0a6;
+    --code-line-active: rgba(0, 0, 0, 0.04);
+
+    --diff-add-accent: #2e8b57;
+    --diff-del-accent: #c14545;
+    --diff-add-bg: #eaf7ee;
+    --diff-add-fg: #1f2328;
+    --diff-add-word: rgba(108, 197, 138, 0.45);
+    --diff-del-bg: #fdeded;
+    --diff-del-fg: #1f2328;
+    --diff-del-word: rgba(224, 111, 111, 0.35);
+    --diff-hunk-bg: #f1f3f5;
+    --diff-hunk-fg: #57606a;
+    --diff-header-bg: #f6f8fa;
+}
+.lc-theme-light .diff-view {
+    background-color: #ffffff;
+    color: #1f2328;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-topbar {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-topbar-repo,
+.lc-theme-light .ws-topbar-branch {
+    color: #1f2937;
+}
+.lc-theme-light .ws-topbar-summary {
+    color: #64748b;
+}
+.lc-theme-light .ws-briefing {
+    background: #f8fafc;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .ws-briefing-kicker,
+.lc-theme-light .ws-briefing-label {
+    color: #64748b;
+}
+.lc-theme-light .ws-briefing-action,
+.lc-theme-light .ws-briefing-value {
+    color: #172033;
+}
+.lc-theme-light .ws-briefing-tile {
+    background: #ffffff;
+    border: 1px solid #dbe3ef;
+}
+.lc-theme-light .ws-briefing-tile:hover {
+    border-color: #b9c6d8;
+    background: #f4f7fb;
+}
+.lc-theme-light .nav-button-count {
+    background: #e2e8f0;
+    color: #334155;
+}
+/* Code editor: dark --lc-surface container + light --lc-text base color meant
+   the editor was a dark block with invisible plain text in light mode. */
+.lc-theme-light .ws-file-editor-scroll {
+    background-color: #ffffff;
+}
+.lc-theme-light .ws-file-editor-highlight,
+.lc-theme-light .ws-file-editor-area {
+    caret-color: #1f2328;
+}
+.lc-theme-light pre.ws-file-editor-highlight.hljs {
+    color: #1f2328;
+}
+/* highlight.js ships github-DARK globally (bright tokens, unreadable on white).
+   Remap the tokens to the github-LIGHT palette under the light theme so the
+   editor, diff viewer, and markdown code blocks all read correctly. */
+.lc-theme-light .hljs {
+    color: #1f2328;
+}

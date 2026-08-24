@@ -1,0 +1,44 @@
+
+.sidebar {
+    background-color: var(--lc-surface-raised);
+    border-right: 1px solid var(--lc-border);
+    padding-top: 0;
+}
+
+.sidebar-chrome {
+    padding: 10px;
+    background-color: #181818;
+    border-bottom: 1px solid #232323;
+}
+
+.integrated-window-controls {
+    padding: 0 8px;
+    background: transparent;
+}
+
+.sidebar-icon-button,
+.sidebar-reopen-button,
+.sidebar-arrow-button {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    padding: 0;
+    min-width: 28px;
+    min-height: 28px;
+    border-radius: 7px;
+    color: #8a8a8a;
+}
+
+.sidebar-icon-button:hover,
+.sidebar-reopen-button:hover,
+.sidebar-arrow-button:hover {
+    background-color: #2c2c2c;
+    color: #e4e4e4;
+}
+
+/* Which machine you are working on. Sits above the nav because it scopes
+   everything below it: switching swaps the whole workspace inventory. */
+.client-switcher {
+    padding: 6px 10px 0 10px;
+}

@@ -1,0 +1,156 @@
+
+input,
+input.text,
+.combobox,
+.combobox button,
+.combobox .box,
+.sidebar-search,
+.composer-bar input,
+.workspace-modal-field,
+.settings-machine-entry,
+.settings-editor,
+.settings-editor text {
+    background-color: #0d0d0d;
+    border-color: #343434;
+    color: #f8fafc;
+}
+
+.chat-composer-box .chat-input-scroll,
+.chat-composer-box .chat-input-view,
+.chat-composer-box .chat-input-view text {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    color: #f8fafc;
+    min-height: 36px;
+}
+
+input,
+.combobox,
+.combobox button,
+textarea,
+.workspace-modal-field,
+.settings-machine-entry {
+    border-radius: 8px;
+    min-height: 40px;
+}
+
+input::placeholder,
+textarea::placeholder {
+    color: #737373;
+}
+
+input:disabled,
+.combobox:disabled,
+textarea:disabled,
+.workspace-modal-field:disabled,
+.settings-machine-entry:disabled {
+    background-color: #121212;
+    border-color: #242424;
+    color: #6f6f6f;
+}
+
+input:focus,
+.sidebar-search:focus,
+.composer-bar input:focus,
+.workspace-modal-field:focus,
+.settings-machine-entry:focus,
+.settings-editor:focus,
+.combobox:focus,
+.combobox button:focus,
+textarea:focus {
+    border-color: #8a8a8a;
+    box-shadow: none;
+}
+/* Composer has no boxed outline — keep it flat even when focused. */
+.chat-composer-box:focus-within {
+    border: 1px solid #3a3a3a;
+    box-shadow: none;
+}
+
+.chat-composer-box .chat-input-scroll:focus-within,
+.chat-composer-box .chat-input-view:focus,
+.chat-composer-box .chat-input-view text:focus {
+    border: none;
+    box-shadow: none;
+}
+
+.workspace-modal-field:focus,
+.settings-machine-entry:focus,
+.settings-editor:focus {
+    border-color: #8a8a8a;
+    box-shadow: none;
+}
+
+.chat-user-bubble {
+    background-color: #2f2f2f;
+    color: #f5f5f5;
+}
+
+.chat-inline-event-body {
+    background-color: #0d0d0d;
+    border-color: #2b2b2b;
+    color: #d6d6d6;
+}
+
+.chat-inline-event-loading .chat-inline-event-chip {
+    color: #c5d5f4;
+}
+
+.chat-inline-event-failed .chat-inline-event-chip {
+    color: #f0a8a8;
+}
+
+.chat-context-usage-empty {
+    background-color: #181818;
+    border-color: #2b2b2b;
+    color: #a3a3a3;
+}
+
+.chat-context-usage-normal {
+    background-color: #181818;
+    border-color: #2b2b2b;
+    color: #a3a3a3;
+}
+
+.chat-context-usage-warning {
+    background-color: #332b12;
+    border-color: #f59e0b;
+    color: #fde68a;
+}
+
+.chat-context-usage-danger {
+    background-color: #3f1d2a;
+    border-color: #ef4444;
+    color: #fecdd3;
+}
+
+.chat-repo-icon,
+.chat-editor-icon,
+.chat-mode-icon,
+.chat-menu-item-icon,
+.chat-focus-btn img,
+.chat-focus-btn svg,
+.chat-toolbar-btn img,
+.chat-toolbar-btn svg,
+.sidebar-nav-icon {
+    color: #93c5fd;
+}
+
+.workspace-row-branch-icon {
+    color: var(--lc-text-muted);
+}
+
+.ws-check-icon-active,
+.diff-added,
+.status-running,
+.workspace-status-running {
+    color: #aaaaaa;
+}
+
+.diff-removed,
+.status-error,
+.workspace-status-error,
+.ws-check-icon-fail {
+    color: #fb7185;
+}

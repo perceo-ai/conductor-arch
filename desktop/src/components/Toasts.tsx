@@ -7,7 +7,13 @@ export default function Toasts() {
     <div class="toast-stack">
       <For each={toastsStore.state.items}>
         {(t) => (
-          <div class="toast-item" classList={{ "toast-item-error": t.kind === "error" }}>
+          <div
+            class="toast-item"
+            classList={{
+              "toast-item-error": t.kind === "error",
+              "toast-item-leaving": Boolean(t.leaving),
+            }}
+          >
             <span class="toast-item-message">{t.message}</span>
             <Show when={t.action}>
               {(action) => (

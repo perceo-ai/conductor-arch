@@ -1,0 +1,194 @@
+
+.app-header,
+.headerbar {
+    background-color: #1e1e1e;
+    border-bottom: 1px solid #2a2a2a;
+}
+
+.chrome-button {
+    border-radius: 7px;
+    background: transparent;
+    border: 1px solid transparent;
+}
+
+button {
+    background-image: none;
+    background-color: transparent;
+    color: #e4e4e4;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    box-shadow: none;
+    text-shadow: none;
+    padding: 7px 12px;
+    min-height: 34px;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+button.text-button,
+button.icon-button {
+    background-image: none;
+    background-color: transparent;
+    color: #e4e4e4;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    box-shadow: none;
+    text-shadow: none;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+button.ui-button {
+    background-image: none;
+    background-color: transparent;
+    color: #e4e4e4;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    box-shadow: none;
+    text-shadow: none;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+button.text-button {
+    padding: 7px 12px;
+    min-height: 34px;
+}
+
+button.ui-button-xs,
+button.text-button.ui-button-xs {
+    border-radius: 2px;
+    font-size: 11px;
+    line-height: 1;
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+}
+
+button.ui-button-xs label,
+button.text-button.ui-button-xs label {
+    line-height: 1;
+    margin: 0;
+    min-height: 0;
+    padding: 0;
+}
+
+button.icon-button,
+button.ui-button-icon {
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    min-width: 30px;
+    min-height: 30px;
+}
+
+button.icon-button img,
+button.icon-button svg,
+button.ui-button-icon img,
+button.ui-button-icon svg {
+    min-width: 16px;
+}
+
+button.ui-button-sm {
+    min-height: 30px;
+    padding: 5px 10px;
+}
+
+button.icon-button.ui-button-sm,
+button.ui-button-icon.ui-button-sm {
+    padding: 0;
+    min-width: 30px;
+    min-height: 30px;
+}
+
+button.ui-button-md {
+    min-height: 34px;
+    padding: 7px 12px;
+}
+
+button:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+    border-color: transparent;
+}
+
+button:active {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+button.suggested-action {
+    background-color: #282828;
+    color: #e4e4e4;
+    border-color: transparent;
+}
+
+button.ui-button-primary {
+    background-color: #282828;
+    color: #e4e4e4;
+    border-color: transparent;
+}
+
+button.suggested-action:hover,
+button.ui-button-primary:hover {
+    background-color: #333333;
+    border-color: transparent;
+}
+
+button.secondary-action,
+button.ui-button-secondary {
+    background-color: #202020;
+    color: #b4b4b4;
+    border-color: #2a2a2a;
+}
+
+button.secondary-action:hover,
+button.ui-button-secondary:hover {
+    background-color: #2c2c2c;
+    color: #e4e4e4;
+    border-color: #2a2a2a;
+}
+
+button.flat-action,
+button.ui-button-flat,
+button.ui-button-menu-item {
+    background-image: none;
+    background-color: transparent;
+    color: #b4b4b4;
+    border-color: transparent;
+}
+
+button.flat-action:hover,
+button.ui-button-flat:hover,
+button.ui-button-menu-item:hover {
+    background-color: #2c2c2c;
+    color: #e4e4e4;
+    border-color: transparent;
+}
+
+button.destructive-action,
+button.ui-button-destructive {
+    background-color: #3a1f24;
+    color: #e4e4e4;
+    border-color: transparent;
+}
+
+button.destructive-action:hover,
+button.ui-button-destructive:hover {
+    background-color: #4a252c;
+    border-color: transparent;
+}
+
+/* GTK checkbutton -> checkbox label wrapper */
+.checkbutton {
+    color: #b4b4b4;
+}
+
+.chrome-button:hover {
+    background-color: #2c2c2c;
+    border-color: transparent;
+}

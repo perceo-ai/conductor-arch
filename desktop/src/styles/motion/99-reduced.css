@@ -1,0 +1,20 @@
+/* ── Reduced motion ──
+ *
+ * One override for the whole app rather than a per-component opt-out, so a new
+ * animation is accessible by default instead of by remembering. Durations
+ * collapse to ~0 (not `none`) so transitionend/animationend listeners still
+ * fire and nothing waits forever on a callback that never arrives.
+ *
+ * Loaders are the exception worth calling out: `mo-dot-wave` stops, but the dots
+ * stay visible at a legible opacity (see .dot-grid-loader), so "work is
+ * ongoing" is still communicated — by presence rather than by movement. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 1ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 1ms !important;
+        scroll-behavior: auto !important;
+    }
+}

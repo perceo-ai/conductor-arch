@@ -1,0 +1,383 @@
+
+/* dev update-metrics overlay */
+.metrics-overlay {
+  position: fixed;
+  bottom: 8px;
+  left: 8px;
+  z-index: 200;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--lc-text-muted);
+  background: rgba(20, 20, 20, 0.85);
+  border: 1px solid var(--lc-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  max-height: 40vh;
+  overflow: auto;
+  pointer-events: none;
+}
+
+/* --- Dialog / modal host (create project, workspace, lifecycle) --------- */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.dialog-card {
+  width: min(460px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+}
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.dialog-title {
+  font-weight: 700;
+  font-size: 15px;
+}
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dialog-message {
+  color: var(--lc-text, #d4d4d4);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.dialog-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.dialog-tabs .ui-button-sm.active {
+  background: var(--lc-surface-selected, #2a2a2a);
+}
+.dialog-source-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.dialog-source-card {
+  min-width: 0;
+  min-height: 76px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+}
+.dialog-source-card-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.dialog-source-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 750;
+}
+.dialog-source-state {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.25;
+}
+.dialog-source-detail {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.dialog-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #9a9a9a;
+}
+.dialog-field input,
+.dialog-field textarea,
+.dialog-field select,
+.repo-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--lc-text, #e6e6e6);
+  background: var(--lc-surface, #1f1f1f);
+  border: 1px solid var(--lc-border, #2f2f2f);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+.dialog-field input::placeholder,
+.dialog-field textarea::placeholder,
+.repo-search::placeholder {
+  color: #6a6a6a;
+}
+.dialog-field input:focus,
+.dialog-field textarea:focus,
+.dialog-field select:focus,
+.repo-search:focus {
+  border-color: var(--lc-accent, #c39b50);
+  box-shadow: 0 0 0 3px rgba(195, 155, 80, 0.18);
+}
+.dialog-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.dialog-field-head .ui-button-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.dialog-field-head .ui-button-icon:disabled {
+  opacity: 0.5;
+}
+.dialog-field-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.dialog-field-row input {
+  flex: 1;
+}
+.dialog-field-row .ui-button-sm {
+  white-space: nowrap;
+}
+.dialog-hint {
+  font-size: 11px;
+  color: #7a7a7a;
+}
+.dialog-preview {
+  display: grid;
+  gap: 5px;
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+.dialog-preview-title {
+  font-size: 11px;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.dialog-preview-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+.dialog-preview-label,
+.dialog-preview-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.dialog-action-section {
+  display: grid;
+  gap: 9px;
+  border-radius: 8px;
+  padding: 10px;
+}
+.dialog-section-head {
+  display: grid;
+  gap: 3px;
+}
+.dialog-section-title {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+.dialog-section-copy {
+  font-size: 11px;
+  line-height: 1.35;
+}
+.dialog-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.dialog-provider-chip {
+  min-width: 0;
+  min-height: 32px;
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+@media (max-width: 560px) {
+  .dialog-source-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dialog-provider-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* GitHub repo picker: bounded scroll of flush cards. */
+.repo-search {
+  margin-bottom: 6px;
+}
+.repo-picker {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  border-radius: 8px;
+  background: var(--lc-surface, #1f1f1f);
+}
+.repo-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+  cursor: pointer;
+  text-align: left;
+  color: var(--lc-text, #e6e6e6);
+}
+.repo-card:last-child {
+  border-bottom: none;
+}
+.repo-card:hover {
+  background: var(--lc-surface-raised, #262626);
+}
+.repo-card.selected {
+  background: var(--lc-surface-selected, #2a2a2a);
+}
+.repo-card-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  flex: 0 0 auto;
+  background: #2a2a2a;
+  object-fit: cover;
+}
+
+.repo-card-avatar-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #cfcfcf;
+  font-size: 10px;
+  font-weight: 720;
+}
+.repo-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.repo-card-title {
+  font-size: 13px;
+  color: var(--lc-text, #e6e6e6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.repo-card-sub {
+  font-size: 11px;
+  color: #8a8a8a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.repo-card-action {
+  font-size: 12px;
+  color: var(--lc-text-muted, #8a8a8a);
+  flex-shrink: 0;
+}
+.repo-card:hover .repo-card-action {
+  color: var(--lc-text, #e4e4e4);
+}
+.repo-card.selected .repo-card-action {
+  color: var(--lc-accent, #c39b50);
+  font-weight: 600;
+}
+.repo-empty {
+  padding: 16px 10px;
+  font-size: 12px;
+  color: #7a7a7a;
+  text-align: center;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dialog-actions-wrap {
+  flex-wrap: wrap;
+}
+.dialog-divider {
+  height: 1px;
+  background: var(--lc-border, #2a2a2a);
+  margin: 6px 0;
+}
+.dialog-linked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+}
+.dialog-linked-row {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+.dialog-linked-target {
+  color: var(--lc-text, #e6e6e6);
+  flex: 0 0 auto;
+}
+.dialog-linked-path {
+  color: var(--lc-text-muted, #8a8a8a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dialog-error {
+  color: #ff6b6b;
+  font-size: 12px;
+}
+.project-workspace-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.project-workspace-row .history-row {
+  flex: 1;
+}
+.repo-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

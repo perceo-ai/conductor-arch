@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   dashboardTriageBadges,
+  workspaceRowActivity,
   workspaceStatusKind,
   STATUS_COLOR,
   STATUS_LABEL,
@@ -100,5 +101,46 @@ describe("dashboardTriageBadges", () => {
         openTodos: 0,
       }),
     ).toEqual([]);
+  });
+});
+
+describe("workspaceRowActivity", () => {
+  it("reports nothing when the workspace is idle", () => {
+    expect(workspaceRowActivity({})).toBeNull();
+    expect(workspaceRowActivity({ activeSessions: 0, runRunning: false })).toBeNull();
+  });
+
+  it("ignores state that is not actually running", () => {
+    // A PR, changed files and open todos all say something about a workspace,
+    // but none of them mean work is in flight — and each used to add its own
+    // unlabelled glyph to the row.
+    expect(
+      workspaceRowActivity({ prNumber: 7, prState: "open", changedFiles: 4, openTodos: 3 }),
+    ).toBeNull();
+  });
+
+  it("counts a single agent session", () => {
+    expect(workspaceRowActivity({ activeSessions: 1 })).toEqual({
+      count: 1,
+      title: "1 agent session running",
+    });
+  });
+
+  it("pluralizes multiple sessions", () => {
+    expect(workspaceRowActivity({ activeSessions: 3 })?.title).toBe("3 agent sessions running");
+  });
+
+  it("counts a run script on its own", () => {
+    expect(workspaceRowActivity({ runRunning: true })).toEqual({
+      count: 1,
+      title: "run script running",
+    });
+  });
+
+  it("combines sessions and a run into one indicator", () => {
+    expect(workspaceRowActivity({ activeSessions: 2, runRunning: true })).toEqual({
+      count: 3,
+      title: "2 agent sessions and run script running",
+    });
   });
 });

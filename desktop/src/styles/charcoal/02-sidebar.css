@@ -1,0 +1,133 @@
+
+.window-content,
+.content-area,
+.page-shell,
+.ws-command-center,
+.chat-surface {
+  background: var(--lc-bg);
+}
+
+.sidebar {
+  background: #141414;
+  border-right-color: var(--ui-border);
+}
+
+.sidebar-chrome {
+  height: 50px;
+  min-height: 50px;
+  padding: 0 12px;
+}
+
+.sidebar-nav-group {
+  gap: 1px;
+  padding: 6px 8px;
+}
+
+.sidebar-nav-button {
+  min-height: 34px;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: var(--ui-radius);
+  color: #a4a4a4;
+  font-size: var(--ui-text);
+  font-weight: 500;
+}
+
+.sidebar-nav-button:hover {
+  background: #1d1d1d;
+  color: #dcdcdc;
+}
+
+.sidebar-nav-button.active {
+  background: #202020;
+  color: #f0f0f0;
+  box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+.sidebar-nav-icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  color: #8d8d8d;
+}
+
+.sidebar-nav-button.active .sidebar-nav-icon {
+  color: var(--lc-accent);
+}
+
+.projects-header {
+  padding: 12px 14px 5px;
+}
+
+.projects-header .title,
+.project-row .project-name {
+  font-size: var(--ui-text-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.workspace-list {
+  gap: 3px;
+  padding: 4px 8px 10px;
+}
+
+.project-row {
+  min-height: 32px;
+  padding: 5px 8px;
+  border-radius: var(--ui-radius);
+}
+
+.project-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+}
+
+.workspace-row-shell {
+  min-height: 48px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--ui-radius);
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-row-shell:hover {
+  background: #1d1d1d;
+}
+
+.workspace-row-shell.selected {
+  background: #1d1d1d;
+  box-shadow: none;
+}
+
+.workspace-status-dot {
+  width: 7px;
+  height: 7px;
+}
+
+.workspace-status-dot-spacer {
+  width: 7px;
+  height: 7px;
+}
+
+/* Per-state colours moved to motion/03-pr-state.css, which keys off the PR
+   *state* rather than the action. These five action-keyed rules gave six
+   distinct situations (merged, closed, conflicted, checks-failing,
+   checks-running, behind-base) the same colour, because they share one action. */
+
+.workspace-row-shell .row-name {
+  font-size: var(--ui-text);
+  font-weight: 560;
+}
+
+.workspace-row-shell .row-meta {
+  padding-left: 15px;
+  font-size: var(--ui-text-sm);
+  line-height: 1.25;
+}
+
+.sidebar-footer {
+  padding: 7px 8px;
+  border-top-color: var(--ui-border);
+}

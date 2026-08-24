@@ -1,0 +1,217 @@
+
+.lc-theme-dark .dashboard,
+.lc-theme-dark .page-shell,
+.lc-theme-dark .history-view {
+    background-color: #191919;
+    color: #e4e4e4;
+}
+
+.lc-theme-dark .page-header {
+    background-color: #1e1e1e;
+    border-color: #2a2a2a;
+}
+
+.lc-theme-dark .workspace-card,
+.lc-theme-dark .command-panel,
+.lc-theme-dark .metric-card,
+.lc-theme-dark .detail-row,
+.lc-theme-dark .settings-panel {
+    background-color: #202020;
+    border-color: #2a2a2a;
+}
+
+.lc-theme-dark .dashboard-title,
+.lc-theme-dark .workspace-name,
+.lc-theme-dark .card-title,
+.lc-theme-dark .metric-value,
+.lc-theme-dark .detail-value,
+.lc-theme-dark .column-title {
+    color: #e4e4e4;
+}
+
+.lc-theme-dark .card-meta,
+.lc-theme-dark .workspace-meta,
+.lc-theme-dark .detail-label,
+.lc-theme-dark .project-tab,
+.lc-theme-dark .column-count,
+.lc-theme-dark .empty-label,
+.lc-theme-dark .card-branch,
+.lc-theme-dark .card-diff {
+    color: #8a8a8a;
+}
+
+.lc-theme-dark .composer-bar input,
+.lc-theme-dark input {
+    background-color: #191919;
+    color: #e4e4e4;
+    border-color: #2a2a2a;
+}
+
+.lc-theme-dark .chrome-button:hover,
+.lc-theme-dark .panel-switcher button:hover,
+.lc-theme-dark .panel-switcher button:checked,
+.lc-theme-dark .panel-switcher button.checked {
+    background-color: #2e2e2e;
+    border-color: transparent;
+    color: #e4e4e4;
+}
+
+.lc-theme-dark .settings-shell {
+    background-color: #1e1e1e;
+    border-color: #2a2a2a;
+}
+
+.lc-theme-dark .settings-toolbar,
+.lc-theme-dark .settings-content-shell,
+.lc-theme-dark .settings-group,
+.lc-theme-dark .settings-rail {
+    border-color: #2a2a2a;
+}
+
+.lc-theme-light .dashboard,
+.lc-theme-light .page-shell,
+.lc-theme-light .history-view {
+    background-color: #f8fafc;
+    color: #1f2937;
+}
+
+.lc-theme-light .page-header {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+
+.lc-theme-light .workspace-card,
+.lc-theme-light .command-panel,
+.lc-theme-light .metric-card,
+.lc-theme-light .detail-row,
+.lc-theme-light .settings-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+
+/* Dashboard board surfaces: without these the dark board/column backgrounds
+   remain, leaving dark blocks on the light page and dark-on-dark column titles. */
+.lc-theme-light .kanban-board {
+    background-color: #f8fafc;
+}
+.lc-theme-light .kanban-column,
+.lc-theme-light .dashboard .kanban-column {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .kanban-column-header {
+    border-color: #e2e8f0;
+}
+.lc-theme-light .kanban-column .workspace-card,
+.lc-theme-light .workspace-card-action .workspace-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .card-state,
+.lc-theme-light .triage-badge {
+    background-color: #f8fafc;
+    border-color: #d9e0e8;
+    color: #475467;
+}
+.lc-theme-light .triage-badge-agent {
+    background-color: #ecfdf3;
+    border-color: #b7e4c7;
+    color: #087443;
+}
+.lc-theme-light .triage-badge-run {
+    background-color: #eefbf4;
+    border-color: #b7e4c7;
+    color: #067647;
+}
+.lc-theme-light .triage-badge-pr {
+    background-color: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1d4ed8;
+}
+.lc-theme-light .triage-badge-changes {
+    background-color: #fffbeb;
+    border-color: #fde68a;
+    color: #92400e;
+}
+.lc-theme-light .triage-badge-todo {
+    background-color: #faf5ff;
+    border-color: #e9d5ff;
+    color: #7e22ce;
+}
+.lc-theme-light .dashboard-subtitle {
+    color: #667085;
+}
+/* Onboarding card (fresh-install empty state — the first thing a new user sees)
+   used dark --lc-surface + light --lc-text-strong: a dark card with the title
+   invisible on a light page. */
+.lc-theme-light .onboarding-card {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .onboarding-title {
+    color: #111827;
+}
+.lc-theme-light .onboarding-copy {
+    color: #667085;
+}
+/* Setup first-run modal status rows: dark tinted backgrounds + light
+   --lc-text-strong name, unreadable on the light modal. Light-tint them. */
+.lc-theme-light .setup-status-ready {
+    background-color: #e6ffec;
+    border-color: #aceebb;
+}
+.lc-theme-light .setup-status-missing-required {
+    background-color: #ffebe9;
+    border-color: #ffcecb;
+}
+.lc-theme-light .setup-status-missing {
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .setup-status-name {
+    color: #111827;
+}
+.lc-theme-light .setup-status-detail {
+    color: #57606a;
+}
+/* Command palette (Cmd+K/Cmd+P): dark --lc-surface-raised panel + light
+   --lc-text items, unreadable in light mode. Force the panel light. */
+.lc-theme-light .cmdk-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+.lc-theme-light .cmdk-input {
+    color: #1f2328;
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .cmdk-item {
+    color: #1f2328;
+}
+/* Keyboard-shortcuts help overlay ("?"): dark --lc-surface-raised panel + dark
+   kbd chips, all unreadable in light mode. */
+.lc-theme-light .shortcuts-panel {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
+}
+.lc-theme-light .shortcuts-head {
+    border-bottom-color: #d9e0e8;
+}
+.lc-theme-light .shortcuts-keys {
+    color: #1f2328;
+    background-color: #f1f5f9;
+    border-color: #d9e0e8;
+}
+.lc-theme-light .shortcuts-label {
+    color: #57606a;
+}
+/* Popovers / menus / toasts / add-project flow: all used dark surfaces with no
+   light override (scan of dark-bg classes lacking .lc-theme-light). */
+.lc-theme-light .context-menu,
+.lc-theme-light .chat-menu-popover,
+.lc-theme-light .project-create-menu {
+    background-color: #ffffff;
+    border-color: #d9e0e8;
+    box-shadow: 0 16px 40px rgba(15, 23, 42, 0.16);
+}

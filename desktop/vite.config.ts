@@ -11,10 +11,10 @@ export default defineConfig({
   base: "./",
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
-    // Vitest transforms TSX through its SSR pipeline even for per-file jsdom
-    // tests. Prefer Solid's browser exports there so component regression tests
-    // exercise the live DOM renderer instead of the server-only stubs.
-    ...(process.env.VITEST ? { conditions: ["browser"] } : {}),
+    // Under vitest, solid-js otherwise resolves to its server build and any
+    // component test dies on "Client-only API called on the server side".
+    // Guarded on VITEST so the app and electron builds resolve as before.
+    conditions: process.env.VITEST ? ["browser", "development"] : undefined,
   },
   plugins: [
     solid(),

@@ -1,0 +1,129 @@
+
+/* ---- Dashboard / kanban structural layout (GTK box orientation -> flex) ---- */
+.dashboard-header {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dashboard-heading-row {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.dashboard-new-workspace {
+  flex: 0 0 auto;
+}
+.project-tabs {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  overflow-x: auto;
+}
+.kanban-board {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  /* Columns size to their content so a sparse board doesn't show tall empty
+     voids; a full column caps at the board height and scrolls internally. */
+  align-items: flex-start;
+  overflow: auto;
+}
+.kanban-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+}
+.kanban-column-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.column-title {
+  flex: 1 1 auto;
+}
+.workspace-card-action {
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+.workspace-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* status-colored accent stripe (inline border-left-color from the status
+     kind); width/style here so the inline color always shows. */
+  border-left-width: 3px;
+  border-left-style: solid;
+}
+.dashboard-card-top,
+.dashboard-card-footer {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.dashboard-card-badges {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.triage-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  max-width: 100%;
+  padding: 1px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-branch,
+.card-activity,
+.card-state {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card-state {
+  flex: 0 0 auto;
+}
+.card-title {
+  overflow-wrap: anywhere;
+}
+.card-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-tab-shell {
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 760px) {
+  .dashboard-heading-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .dashboard-new-workspace {
+    width: 100%;
+  }
+}

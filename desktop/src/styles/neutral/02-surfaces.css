@@ -1,0 +1,302 @@
+
+/* ---- Dense Conductor-style chrome pass ---- */
+.sidebar {
+  background: #121212;
+}
+
+.sidebar-chrome,
+.window-controls {
+  height: 40px;
+  min-height: 40px;
+}
+
+.sidebar-chrome {
+  padding: 0 8px;
+}
+
+.sidebar-nav-group {
+  padding: 6px;
+  gap: 1px;
+}
+
+.sidebar-nav-button {
+  min-height: 30px;
+  gap: 8px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.sidebar-nav-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.projects-header {
+  padding: 10px 12px 4px;
+}
+
+.workspace-list {
+  padding: 3px 6px 8px;
+}
+
+.project-row {
+  min-height: 28px;
+  padding: 4px 6px;
+}
+
+.project-avatar {
+  width: 16px;
+  height: 16px;
+}
+
+.workspace-row-shell {
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.workspace-row-head {
+  gap: 7px;
+}
+
+.workspace-row-shell .row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.workspace-row-indicators {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  color: #9b9b9b;
+}
+
+.workspace-row-indicator {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 5px;
+  color: #9a9a9a;
+  background: transparent;
+}
+
+.workspace-row-indicator .ui-icon {
+  width: 11px;
+  height: 11px;
+  stroke-width: 2.1;
+}
+
+/* Live-work indicator. Replaces the row of unlabelled triage glyphs (a brain
+   for agent sessions, a play triangle for runs, a git glyph for a PR): with
+   their labels stripped they read as decoration, and the PR one repeated the
+   PR-state icon at the start of the same row. A dot answers the only question
+   a dense row has space to ask — is anything running here — and the tooltip
+   carries the detail. */
+.workspace-row-live {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #72c293;
+}
+
+.workspace-row-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  /* Breathing, because the state it reports is genuinely ongoing. */
+  animation: mo-breathe var(--mo-loop) var(--mo-in-out) infinite;
+}
+
+/* Only shown past one, so the common single-session case stays a bare dot. */
+.workspace-row-live-count {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: #7f9f8c;
+}
+
+/* Waiting on a human, not on time — the one row state worth interrupting for. */
+.workspace-row-awaiting {
+  color: #e0b341;
+}
+
+.workspace-row-shell .row-meta {
+  padding-left: 14px;
+  padding-right: 0;
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.workspace-row-branch {
+  padding-right: 50px;
+}
+
+.workspace-row-diff {
+  gap: 4px;
+  min-width: max-content;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.workspace-row-additions {
+  color: #74d69a;
+}
+
+.workspace-row-deletions {
+  color: #f17f7f;
+}
+
+.sidebar-footer {
+  padding: 5px 6px;
+}
+
+.ws-topbar {
+  height: 40px;
+  min-height: 40px;
+  padding: 0 10px;
+  gap: 8px;
+  background: #111111;
+}
+
+.ws-topbar-repo {
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.ws-topbar-branch,
+.ws-topbar-summary {
+  font-size: 11px;
+}
+
+.ws-topbar-actions {
+  height: 100%;
+  gap: 5px;
+}
+
+.ws-topbar-actions .ui-button-icon {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 5px;
+}
+
+.ws-open-menu-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  border-radius: 5px;
+  color: #d7d7d7;
+}
+
+.ws-open-menu-button .ui-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  opacity: 1;
+}
+
+.ws-open-menu-chevron {
+  display: none;
+}
+
+.ws-right-topbar {
+  min-height: 40px;
+  height: 40px;
+  padding: 0 10px;
+  gap: 6px;
+  background: #111111;
+}
+
+.ws-pr-bar {
+  height: 28px;
+  gap: 5px;
+}
+
+.ws-pr-status-title {
+  font-size: 11px;
+  max-width: none;
+}
+
+.ws-pr-action-button {
+  height: 24px;
+  min-height: 24px;
+  max-height: 24px;
+  padding: 0 8px;
+  font-size: 10px;
+  border-radius: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+}
+
+.ws-right-tabs {
+  min-height: 40px;
+  height: 40px;
+  padding: 5px 10px;
+  background: #111111;
+}
+
+.nav-button,
+.ws-right-tabs .nav-button,
+.ws-changes-scope .nav-button {
+  min-height: 24px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 10px;
+}
+
+.nav-button-count {
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  font-size: 9px;
+}
+
+.dashboard-header,
+.page-header {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.dashboard .page-board {
+  padding-top: 12px;
+}
+
+.kanban-board {
+  gap: 10px;
+}
+
+.kanban-column {
+  gap: 6px;
+}
+
+.workspace-card {
+  gap: 8px;
+}
+
+.card-meta,
+.card-activity,
+.column-empty {
+  font-size: 12px;
+  color: #858585;
+}

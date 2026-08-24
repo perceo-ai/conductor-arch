@@ -1,0 +1,128 @@
+
+.sidebar-nav-group {
+    padding: 8px 10px 6px 10px;
+}
+
+.sidebar-nav-button {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    padding: 0;
+    min-height: 32px;
+    margin: 0 0 2px 0;
+    border-radius: 8px;
+}
+
+.sidebar-nav-button:hover {
+    background-color: #2c2c2c;
+}
+
+/* GTK `image` child -> icon element inside the button */
+.sidebar-nav-button .sidebar-nav-icon,
+.sidebar-nav-button img,
+.sidebar-nav-button svg {
+    min-width: 16px;
+}
+
+.sidebar-nav-icon {
+    min-width: 16px;
+    color: #9a9a9a;
+}
+
+.sidebar-nav-label {
+    color: #d2d2d2;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.projects-header {
+    padding: 12px 6px 6px 10px;
+}
+
+.nav-row,
+.nav-row-active,
+.nav-button,
+.nav-button-active {
+    margin: 0;
+    padding: 9px 12px;
+    border-radius: 7px;
+    background: transparent;
+    border: 1px solid transparent;
+    box-shadow: none;
+    text-shadow: none;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.nav-row,
+.nav-button {
+    color: #b4b4b4;
+}
+
+.nav-row-active,
+.nav-button-active {
+    color: #e4e4e4;
+    background-color: #2e2e2e;
+    border-color: transparent;
+}
+
+.nav-button:hover,
+.nav-row:hover {
+    color: #e4e4e4;
+    background-color: #2c2c2c;
+    border-color: transparent;
+}
+
+.sidebar-search,
+.composer-bar input,
+input {
+    background-color: #151515;
+    color: #e4e4e4;
+    /* Flat, filled inputs (GTK look): the fill provides the affordance, so the
+       border stays invisible until focus instead of boxing every field. */
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-size: 13px;
+    padding: 7px 10px;
+}
+
+.sidebar-search:focus,
+.composer-bar input:focus,
+input:focus {
+    border-color: #4b7bec;
+    box-shadow: none;
+}
+
+/* GTK `entry placeholder` / `textview placeholder` -> ::placeholder */
+input::placeholder,
+textarea::placeholder {
+    color: #737373;
+}
+
+input:disabled,
+.combobox:disabled,
+textarea:disabled {
+    background-color: #121212;
+    color: #6f6f6f;
+    border-color: #242424;
+}
+
+.workspace-list {
+    background-color: transparent;
+}
+
+.workspace-list .row {
+    border-radius: 7px;
+    margin: 2px 6px 2px 10px;
+    padding: 0;
+}
+
+.workspace-list .row:hover {
+    background-color: var(--lc-hover);
+}
+
+.workspace-list .row:hover .workspace-row-shell,
+.workspace-list .row.selected .workspace-row-shell {
+    background-color: var(--lc-hover-soft);
+}
