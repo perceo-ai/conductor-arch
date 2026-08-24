@@ -26,6 +26,7 @@ export { toastsStore } from "./toasts";
 export type { Toast } from "./toasts";
 export { prefsStore } from "./prefs";
 export type { Prefs } from "./prefs";
+export { layoutStore } from "./layout";
 export { updateMetrics, metricsEnabled } from "./metrics";
 export { uiStore } from "./ui";
 

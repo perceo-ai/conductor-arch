@@ -1,41 +1,19 @@
-import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, onCleanup, onMount } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
+import { layoutStore } from "@/store/layout";
+import { collapseRegion } from "@/lib/layout";
 import { openExternal, openWorkspaceApp } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
 import { runShellAction } from "@/lib/shellAction";
-import ChatSurface from "./ChatSurface";
-import WorkspaceFiles from "./WorkspaceFiles";
-import { ChangesRows } from "./WorkspaceChanges";
-import TerminalDock from "./TerminalDock";
-import WorkspacePrBar from "./WorkspacePrBar";
-import { ChecksPanel, ReviewPromptButton } from "./WorkspaceTabs";
-import { SummaryPanel } from "./WorkspaceIntel";
-import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
-import { openFileInCenter } from "./openFileBridge";
-import ResizeHandle from "@/components/ResizeHandle";
-import { createPersistedWidth } from "@/lib/persistedWidth";
-import { RIGHT_MAX, RIGHT_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
 import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
+import WorkspaceWorkbench from "@/components/WorkspaceWorkbench";
 import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
 
-
-// Right-panel tabs: a quiet inspector beside the chat. Deeper intelligence
-// records remain in the data model, but they are not promoted as peer surfaces.
-const RIGHT_TABS: { tab: RightPanelTab; label: string }[] = PRODUCT_RIGHT_PANEL_TABS.map(
-  (tab) => ({ tab: tab.id, label: tab.label }),
-);
-
-// Workspace command center. Chat is the primary surface; the right side is a
-// contextual inspector and the terminal dock is utility output.
-
-function TopBar(props: {
-  workspace: string;
-  rightCollapsed: boolean;
-  onToggleRight: () => void;
-}) {
+function TopBar(props: { workspace: string }) {
   let openButton: HTMLButtonElement | undefined;
   const row = () => workspacesStore.row(props.workspace);
+  const rightCollapsed = () => layoutStore.layout().regions.right.collapsed;
   const repoRoot = () => {
     const repo = row()?.repository;
     return repo ? repositoriesStore.row(repo)?.rootPath : undefined;
@@ -56,11 +34,7 @@ function TopBar(props: {
           label: `Open in ${app.label}`,
           iconSrc: app.logoSrc,
           iconAlt: app.label,
-          run: () =>
-            runShellAction(
-              `Open in ${app.label}`,
-              openWorkspaceApp({ rootPath: root, appId: app.id }),
-            ),
+          run: () => runShellAction(`Open in ${app.label}`, openWorkspaceApp({ rootPath: root, appId: app.id })),
         });
       }
     }
@@ -68,17 +42,19 @@ function TopBar(props: {
     if (prUrl) items.push({ label: "Open pull request", icon: "external", run: () => void openExternal(prUrl) });
     return items;
   };
-  function openMenu(e: MouseEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  function openMenu(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     openContextMenuAt(rect.left, rect.bottom + 4, openItems());
+  }
+  function toggleRight() {
+    layoutStore.mutate((layout) => collapseRegion(layout, "right", !rightCollapsed()));
   }
   onMount(() => {
     const onOpen = () => {
       const rect = openButton?.getBoundingClientRect();
-      if (!rect) return;
-      openContextMenuAt(rect.left, rect.bottom + 4, openItems());
+      if (rect) openContextMenuAt(rect.left, rect.bottom + 4, openItems());
     };
     window.addEventListener("archductor:open-workspace-menu", onOpen);
     onCleanup(() => window.removeEventListener("archductor:open-workspace-menu", onOpen));
@@ -91,137 +67,40 @@ function TopBar(props: {
         <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
       </div>
       <div class="ws-topbar-actions">
-        <button class="ws-open-menu-button ws-topbar-btn" title="Open" ref={openButton} onClick={openMenu}>
+        <button class="ws-open-menu-button ws-topbar-btn" aria-label="Open workspace" title="Open" ref={openButton} onClick={openMenu}>
           <Icon name="external" />
           <Icon name="chevron-down" class="ws-open-menu-chevron" />
         </button>
         <button
           class="ui-button-icon ws-topbar-btn"
-          title={props.rightCollapsed ? "Show right panel" : "Collapse right panel"}
-          onClick={props.onToggleRight}
+          aria-label={rightCollapsed() ? "Show right panel" : "Collapse right panel"}
+          title={rightCollapsed() ? "Show right panel" : "Collapse right panel"}
+          onClick={toggleRight}
         >
-          <Icon name={props.rightCollapsed ? "panel-left" : "panel-right"} />
+          <Icon name={rightCollapsed() ? "panel-left" : "panel-right"} />
         </button>
       </div>
     </div>
   );
 }
 
-function RightPanel(props: { workspace: string }) {
-  const [width, setWidth] = createPersistedWidth("rightPanel.width", 300, RIGHT_MIN, RIGHT_MAX);
-  const row = () => workspacesStore.row(props.workspace);
-  const tabCount = (tab: RightPanelTab) => {
-    const r = row();
-    if (!r) return "";
-    if (tab === "summary" && (r.openTasks > 0 || r.blockedTasks > 0)) {
-      return r.blockedTasks > 0 ? String(r.blockedTasks) : String(r.openTasks);
-    }
-    if (tab === "changes" && r.changedFiles > 0) return String(r.changedFiles);
-    if (tab === "checks" && (r.activeSessions > 0 || r.runRunning)) {
-      return r.runRunning ? "run" : String(r.activeSessions);
-    }
-    return "";
-  };
-  return (
-    <aside
-      class="ws-right-panel"
-      data-focus-target="workspace-panel"
-      tabIndex={-1}
-      style={{ width: `${width()}px`, "flex-basis": `${width()}px` }}
-    >
-      <ResizeHandle
-        edge="left"
-        width={width}
-        min={RIGHT_MIN}
-        max={() =>
-          panelDragMax({
-            viewportWidth: window.innerWidth,
-            otherPanelWidth: measuredWidth(".sidebar"),
-            hardMax: RIGHT_MAX,
-            panelMin: RIGHT_MIN,
-          })
-        }
-        onChange={setWidth}
-      />
-      <div class="ws-right-mid">
-        <div class="ws-right-topbar">
-          <WorkspacePrBar workspace={props.workspace} />
-        </div>
-        <div class="command-center-strip ws-right-tabs">
-          <For each={RIGHT_TABS}>
-            {(t) => (
-              <button
-                class="nav-button"
-                classList={{ "nav-button-active": nav.rightPanelTab() === t.tab }}
-                onClick={() => nav.setRightPanelTab(t.tab)}
-              >
-                <span>{t.label}</span>
-                <Show when={tabCount(t.tab)}>
-                  {(count) => <span class="nav-button-count">{count()}</span>}
-                </Show>
-              </button>
-            )}
-          </For>
-          <ReviewPromptButton workspace={props.workspace} />
-        </div>
-        <div class="ws-right-body">
-          <Switch>
-            <Match when={nav.rightPanelTab() === "summary"}>
-              <SummaryPanel workspace={props.workspace} />
-            </Match>
-            <Match when={nav.rightPanelTab() === "files"}>
-              <WorkspaceFiles
-                workspace={props.workspace}
-                rootPath={row()?.path}
-                openFile={(p) => openFileInCenter(props.workspace, p)}
-              />
-            </Match>
-            <Match when={nav.rightPanelTab() === "changes"}>
-              <ChangesRows
-                workspace={props.workspace}
-                openFile={(p, scope) => openFileInCenter(props.workspace, p, scope)}
-              />
-            </Match>
-            <Match when={nav.rightPanelTab() === "checks"}>
-              <ChecksPanel workspace={props.workspace} />
-            </Match>
-          </Switch>
-        </div>
-      </div>
-      <TerminalDock workspace={props.workspace} />
-    </aside>
-  );
-}
-
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
-  const [rightCollapsed, setRightCollapsed] = createSignal(false);
+
   onMount(() => {
-    const onToggle = () => setRightCollapsed((c) => !c);
+    const onToggle = () => {
+      const collapsed = layoutStore.layout().regions.right.collapsed;
+      layoutStore.mutate((layout) => collapseRegion(layout, "right", !collapsed));
+    };
     window.addEventListener("archductor:toggle-right-panel", onToggle);
     onCleanup(() => window.removeEventListener("archductor:toggle-right-panel", onToggle));
   });
 
   return (
-    <Show
-      when={workspace()}
-      fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}
-    >
+    <Show when={workspace()} fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}>
       {(ws) => (
         <div class="ws-command-center page-shell" data-focus-target="workspace-main" tabIndex={-1}>
-          <div class="ws-center">
-            <TopBar
-              workspace={ws()}
-              rightCollapsed={rightCollapsed()}
-              onToggleRight={() => setRightCollapsed((c) => !c)}
-            />
-            <div class="ws-center-content">
-              <ChatSurface workspace={ws()} />
-            </div>
-          </div>
-          <Show when={!rightCollapsed()}>
-            <RightPanel workspace={ws()} />
-          </Show>
+          <WorkspaceWorkbench workspace={ws()} topbar={<TopBar workspace={ws()} />} />
         </div>
       )}
     </Show>

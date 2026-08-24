@@ -7,6 +7,7 @@ import { runScriptAvailabilityLabel, runScriptStatusText } from "@/lib/runScript
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
+import type { Region } from "@/lib/layout";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
 // collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
@@ -172,7 +173,7 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
   );
 }
 
-export default function TerminalDock(props: { workspace: string }) {
+export default function TerminalDock(props: { workspace: string; region?: Region }) {
   // Collapsed by default so the chat remains primary; terminals/scripts are a
   // utility drawer the user opens when needed.
   const [expanded, setExpandedRaw] = createSignal(localStorage.getItem(DOCK_EXPANDED_KEY) === "1");
@@ -186,6 +187,8 @@ export default function TerminalDock(props: { workspace: string }) {
   const [tab, setTab] = createSignal<RunTab>("setup");
   // Right-panel density is high, so the dock split is draggable and persisted.
   const [height, setHeight] = createPersistedWidth("terminalDock.height", 280, DOCK_MIN, DOCK_MAX);
+  const isRightDock = () => (props.region ?? "right") === "right";
+  const isExpanded = () => !isRightDock() || expanded();
   const terms = () => terminalStore.terminals(props.workspace);
   const activeTermId = () => {
     const t = tab();
@@ -227,15 +230,18 @@ export default function TerminalDock(props: { workspace: string }) {
       class="ws-run-section"
       data-focus-target="terminal-dock"
       tabIndex={-1}
-      classList={{ "ws-run-section-expanded": expanded() }}
-      style={expanded() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
+      classList={{
+        "ws-run-section-expanded": isExpanded(),
+        [`ws-run-section-${props.region ?? "right"}`]: true,
+      }}
+      style={isExpanded() && isRightDock() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
     >
-      <Show when={expanded()}>
+      <Show when={isExpanded() && isRightDock()}>
         <ResizeHandle edge="top" width={height} min={DOCK_MIN} max={DOCK_MAX} onChange={setHeight} />
       </Show>
       <div class="ws-run-tab-bar">
         <Show
-          when={expanded()}
+          when={isExpanded()}
           fallback={
             <div class="ws-run-tabs-row ws-run-tabs-row-collapsed">
               <button class="ws-run-tab-btn" title="Open terminal dock" onClick={() => setExpanded(true)}>
@@ -305,11 +311,13 @@ export default function TerminalDock(props: { workspace: string }) {
             </button>
           </div>
         </Show>
-        <button class="ws-run-collapse-btn" title={expanded() ? "Collapse" : "Expand"} onClick={toggle}>
-          <Icon name={expanded() ? "chevron-down" : "chevron-up"} />
-        </button>
+        <Show when={isRightDock()}>
+          <button class="ws-run-collapse-btn" title={expanded() ? "Collapse" : "Expand"} onClick={toggle}>
+            <Icon name={expanded() ? "chevron-down" : "chevron-up"} />
+          </button>
+        </Show>
       </div>
-      <Show when={expanded()}>
+      <Show when={isExpanded()}>
         <div class="ws-run-body">
           <Switch>
             <Match when={tab() === "setup"}>

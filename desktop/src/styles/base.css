@@ -2430,6 +2430,7 @@ body.resizing-col {
   color: #eeeeee;
   cursor: pointer;
 }
+
 .ws-pr-action-button:hover:not(:disabled) {
   background: #2c2c2c;
   border-color: #4a4a4a;
@@ -5692,4 +5693,129 @@ button.ws-tab-shell.ws-chat-new:hover {
 }
 .workspace-row-pinned {
   color: #9aa6b8;
+}
+
+/* Modular workbench */
+.ws-command-center,
+.ws-workbench,
+.ws-workbench-main,
+.ws-workbench-region-shell,
+.workbench-region,
+.workbench-panel-body,
+.workbench-dock {
+  min-width: 0;
+  min-height: 0;
+}
+
+.ws-workbench {
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
+}
+
+.ws-workbench-main {
+  display: flex;
+  overflow: hidden;
+}
+
+.ws-workbench-region-shell {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ws-workbench-region-shell-center {
+  flex: 1 1 0;
+  min-width: 360px;
+}
+
+.ws-workbench-region-shell-left,
+.ws-workbench-region-shell-right {
+  flex: 0 0 auto;
+}
+
+.ws-workbench-region-shell-bottom {
+  width: 100%;
+  max-height: 60vh;
+  border-top: 1px solid var(--ui-border, #262626);
+}
+
+.workbench-region {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  contain: layout paint;
+  overflow: hidden;
+}
+
+.workbench-region.ws-right-panel {
+  display: flex;
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+}
+
+.workbench-region-left {
+  border-right: 1px solid var(--ui-border, #262626);
+}
+
+.workbench-region-bottom {
+  height: 100%;
+}
+
+.workbench-panel-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.workbench-dock {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workbench-region-center > .workbench-tablist-single {
+  display: none;
+}
+
+.workbench-region-center > .workbench-panel-body {
+  overflow: hidden;
+}
+
+.workbench-region-left .ws-right-topbar,
+.workbench-region-bottom .ws-right-topbar,
+.workbench-region-center .ws-right-topbar {
+  min-height: 40px;
+}
+
+.workbench-region-left .ws-run-section,
+.workbench-region-center .ws-run-section,
+.workbench-region-bottom .ws-run-section,
+.ws-run-section-left,
+.ws-run-section-center,
+.ws-run-section-bottom {
+  flex: 1 1 auto;
+  height: 100%;
+}
+
+.workbench-tab:focus-visible,
+.workbench-region:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: -2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-workbench *,
+  .ws-workbench *::before,
+  .ws-workbench *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }
