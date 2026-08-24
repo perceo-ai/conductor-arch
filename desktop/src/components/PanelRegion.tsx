@@ -205,20 +205,20 @@ export default function PanelRegion(props: { workspace: string; region: Region }
           </Show>
         </div>
 
-        <Show when={activeDescriptor()}>
+        <Show when={activeDescriptor()} keyed>
           {(descriptor) => {
-            const Component = descriptor().component;
+            const Component = descriptor.component;
             return (
               <div
-                id={domId(props.region, descriptor().id, "panel")}
+                id={domId(props.region, descriptor.id, "panel")}
                 class="workbench-panel-body"
                 classList={{
                   "ws-right-body": props.region === "right",
                   "ws-center-content": props.region === "center",
                 }}
                 role="tabpanel"
-                aria-labelledby={domId(props.region, descriptor().id, "tab")}
-                data-panel-id={descriptor().id}
+                aria-labelledby={domId(props.region, descriptor.id, "tab")}
+                data-panel-id={descriptor.id}
               >
                 <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
               </div>

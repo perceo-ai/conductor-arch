@@ -11,6 +11,10 @@ export default defineConfig({
   base: "./",
   resolve: {
     alias: { "@": path.resolve(__dirname, "src") },
+    // Vitest transforms TSX through its SSR pipeline even for per-file jsdom
+    // tests. Prefer Solid's browser exports there so component regression tests
+    // exercise the live DOM renderer instead of the server-only stubs.
+    ...(process.env.VITEST ? { conditions: ["browser"] } : {}),
   },
   plugins: [
     solid(),
