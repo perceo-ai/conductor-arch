@@ -3596,7 +3596,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn raw_terminal_write_failure_emits_error_and_terminates_session() {
         let temp = tempfile::tempdir().unwrap();

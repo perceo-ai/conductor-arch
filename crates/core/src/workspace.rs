@@ -16196,16 +16196,16 @@ working_directory = "apps/web"
                 "pwd; printf 'root=%s\\nwork=%s\\n' \"$ARCHDUCTOR_WORKSPACE_PATH\" \"$ARCHDUCTOR_WORKING_DIRECTORY\"",
             )
             .unwrap();
+        let working_directory = workspace.path.join("apps/web").canonicalize().unwrap();
 
-        assert_eq!(result.cwd, workspace.path.join("apps/web"));
+        assert_eq!(result.cwd, working_directory);
         assert!(result.stdout.contains(result.cwd.to_str().unwrap()));
         assert!(result
             .stdout
             .contains(&format!("root={}", workspace.path.to_string_lossy())));
-        assert!(result.stdout.contains(&format!(
-            "work={}",
-            workspace.path.join("apps/web").to_string_lossy()
-        )));
+        assert!(result
+            .stdout
+            .contains(&format!("work={}", working_directory.to_string_lossy())));
     }
 
     #[test]
@@ -17526,12 +17526,10 @@ working_directory = "apps/api"
         let setup = store.setup_workspace("berlin").unwrap();
         wait_for_log(&setup.log_path, "work=");
         let log = store.read_latest_setup_log("berlin").unwrap();
+        let working_directory = workspace.path.join("apps/api").canonicalize().unwrap();
 
-        assert!(log.contains(workspace.path.join("apps/api").to_str().unwrap()));
-        assert!(log.contains(&format!(
-            "work={}",
-            workspace.path.join("apps/api").to_string_lossy()
-        )));
+        assert!(log.contains(working_directory.to_str().unwrap()));
+        assert!(log.contains(&format!("work={}", working_directory.to_string_lossy())));
     }
 
     #[test]
@@ -18648,15 +18646,16 @@ working_directory = "apps/worker"
             .unwrap();
 
         let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
+        let working_directory = workspace.path.join("apps/worker").canonicalize().unwrap();
 
-        assert_eq!(launch.cwd, workspace.path.join("apps/worker"));
+        assert_eq!(launch.cwd, working_directory);
         assert_eq!(
             launch.env_value("ARCHDUCTOR_WORKSPACE_PATH"),
             workspace.path.to_str()
         );
         assert_eq!(
             launch.env_value("ARCHDUCTOR_WORKING_DIRECTORY"),
-            workspace.path.join("apps/worker").to_str()
+            working_directory.to_str()
         );
     }
 
