@@ -49,7 +49,11 @@ pub fn summary_is_agent_authored(summary: &Summary) -> bool {
 
 /// Trim agent prose to the stored budget, cutting on a character boundary and
 /// dropping a half-written trailing line rather than storing a torn sentence.
+/// Archductor's own markup is defanged on the way in: this text is replayed into
+/// later sessions, so it must not be able to forge a directive or break out of
+/// the fence it is quoted inside.
 fn clamp_agent_summary(body: &str) -> String {
+    let body = crate::workspace::defang_archductor_markup(body);
     let body = body.trim();
     if body.chars().count() <= AGENT_SUMMARY_MAX_CHARS {
         return body.to_owned();

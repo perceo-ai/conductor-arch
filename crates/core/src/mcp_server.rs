@@ -871,9 +871,24 @@ fn default_thread_id() -> Option<i64> {
     std::env::var(THREAD_ENV).ok()?.trim().parse().ok()
 }
 
-/// Fill in the workspace and thread the caller omitted. Only touches keys the
-/// tool actually accepts, so a tool without a workspace argument is untouched.
-fn with_session_defaults(client: &ArchcarClient, tool: &ToolSpec, args: &Value) -> Value {
+/// Bind a call to the session it came from.
+///
+/// The session profile is registered device-wide and injected into every agent
+/// session, so without this an agent could name any workspace it liked and
+/// rename it, overwrite its summary, or retitle a chat in it. Under that profile
+/// the session's own workspace and thread win, and a call naming a different one
+/// is refused rather than silently redirected — the model should learn that the
+/// argument is not its to choose.
+///
+/// The full profile keeps caller-supplied identities: it is the surface an
+/// external client (or another machine) drives across every workspace. Both
+/// profiles fill in what the caller omitted.
+fn bind_session_arguments(
+    client: &ArchcarClient,
+    tool: &ToolSpec,
+    args: &Value,
+    profile: McpProfile,
+) -> Result<Value> {
     let schema = (tool.schema)();
     let accepts = |key: &str| {
         schema
@@ -883,21 +898,50 @@ fn with_session_defaults(client: &ArchcarClient, tool: &ToolSpec, args: &Value) 
     };
     let mut args = args.clone();
     let Some(object) = args.as_object_mut() else {
-        return args;
+        return Ok(args);
     };
-    if accepts("workspace")
-        && optional_string(&Value::Object(object.clone()), "workspace").is_none()
-    {
-        if let Some(workspace) = default_workspace(client) {
-            object.insert("workspace".to_owned(), Value::String(workspace));
+
+    if accepts("workspace") {
+        let supplied = optional_string(&Value::Object(object.clone()), "workspace");
+        // Resolving costs a round trip when the environment does not answer, so
+        // only ask when the value is actually going to be used.
+        let session = (profile == McpProfile::Session || supplied.is_none())
+            .then(|| default_workspace(client))
+            .flatten();
+        if let Some(session) = session {
+            if profile == McpProfile::Session {
+                if let Some(supplied) = supplied.as_deref() {
+                    anyhow::ensure!(
+                        supplied == session,
+                        "this session belongs to workspace `{session}`, so it cannot act on \
+                         `{supplied}`"
+                    );
+                }
+                object.insert("workspace".to_owned(), Value::String(session));
+            } else if supplied.is_none() {
+                object.insert("workspace".to_owned(), Value::String(session));
+            }
         }
     }
-    if accepts("thread_id") && object.get("thread_id").and_then(Value::as_i64).is_none() {
-        if let Some(thread_id) = default_thread_id() {
-            object.insert("thread_id".to_owned(), Value::from(thread_id));
+
+    if accepts("thread_id") {
+        let supplied = object.get("thread_id").and_then(Value::as_i64);
+        if let Some(session) = default_thread_id() {
+            if profile == McpProfile::Session {
+                if let Some(supplied) = supplied {
+                    anyhow::ensure!(
+                        supplied == session,
+                        "this session is chat {session}, so it cannot act on chat {supplied}"
+                    );
+                }
+                object.insert("thread_id".to_owned(), Value::from(session));
+            } else if supplied.is_none() {
+                object.insert("thread_id".to_owned(), Value::from(session));
+            }
         }
     }
-    args
+
+    Ok(args)
 }
 
 /// Run one tool by name and return its archcar response as JSON.
@@ -920,7 +964,7 @@ pub fn call_tool(
         !options.read_only || !tool.mutating,
         "`{name}` changes state and this server is running read-only"
     );
-    let args = with_session_defaults(client, tool, args);
+    let args = bind_session_arguments(client, tool, args, options.profile)?;
     let request = (tool.build)(&args)?;
     let response = client.send(request)?;
     if let ArchcarResponse::Error { message } = &response {
@@ -1025,6 +1069,14 @@ fn error_response(id: Value, code: i64, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// The session-binding tests read process environment, so they cannot run
+    /// beside each other.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn every_tool_has_a_unique_name_and_an_object_schema() {
@@ -1252,6 +1304,101 @@ mod tests {
             "{names:?}"
         );
         assert_eq!(names.len(), SESSION_PROFILE_TOOLS.len());
+    }
+
+    #[test]
+    fn a_session_cannot_reach_a_workspace_that_is_not_its_own() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os(WORKSPACE_ENV);
+        std::env::set_var(WORKSPACE_ENV, "berlin");
+        // Unreachable address: binding has to refuse before anything is dialed.
+        let client = ArchcarClient::remote("127.0.0.1:1", "unused");
+        let tools = tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "set_workspace_context")
+            .expect("set_workspace_context tool");
+
+        let refused = bind_session_arguments(
+            &client,
+            tool,
+            &json!({"workspace": "lisbon", "summary": "hi"}),
+            McpProfile::Session,
+        )
+        .unwrap_err();
+
+        // Omitting the workspace is fine — it binds to this session's own.
+        let bound = bind_session_arguments(
+            &client,
+            tool,
+            &json!({"summary": "hi"}),
+            McpProfile::Session,
+        )
+        .unwrap();
+
+        // The full profile is the cross-workspace surface and keeps its argument.
+        let full = bind_session_arguments(
+            &client,
+            tool,
+            &json!({"workspace": "lisbon", "summary": "hi"}),
+            McpProfile::Full,
+        )
+        .unwrap();
+
+        if let Some(previous) = previous {
+            std::env::set_var(WORKSPACE_ENV, previous);
+        } else {
+            std::env::remove_var(WORKSPACE_ENV);
+        }
+
+        assert!(refused.to_string().contains("berlin"), "{refused}");
+        assert!(refused.to_string().contains("lisbon"), "{refused}");
+        assert_eq!(bound["workspace"], "berlin");
+        assert_eq!(full["workspace"], "lisbon");
+    }
+
+    #[test]
+    fn a_session_cannot_retitle_another_chat() {
+        let _guard = env_lock().lock().unwrap();
+        let previous_workspace = std::env::var_os(WORKSPACE_ENV);
+        let previous_thread = std::env::var_os(THREAD_ENV);
+        std::env::set_var(WORKSPACE_ENV, "berlin");
+        std::env::set_var(THREAD_ENV, "4");
+        let client = ArchcarClient::remote("127.0.0.1:1", "unused");
+        let tools = tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "set_workspace_context")
+            .expect("set_workspace_context tool");
+
+        let refused = bind_session_arguments(
+            &client,
+            tool,
+            &json!({"thread_id": 9, "chat_title": "Something Else"}),
+            McpProfile::Session,
+        )
+        .unwrap_err();
+        let bound = bind_session_arguments(
+            &client,
+            tool,
+            &json!({"chat_title": "This Chat"}),
+            McpProfile::Session,
+        )
+        .unwrap();
+
+        if let Some(previous) = previous_workspace {
+            std::env::set_var(WORKSPACE_ENV, previous);
+        } else {
+            std::env::remove_var(WORKSPACE_ENV);
+        }
+        if let Some(previous) = previous_thread {
+            std::env::set_var(THREAD_ENV, previous);
+        } else {
+            std::env::remove_var(THREAD_ENV);
+        }
+
+        assert!(refused.to_string().contains("chat 9"), "{refused}");
+        assert_eq!(bound["thread_id"], 4);
     }
 
     #[test]
