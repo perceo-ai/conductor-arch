@@ -87,15 +87,6 @@ function TopBar(props: { workspace: string }) {
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
 
-  onMount(() => {
-    const onToggle = () => {
-      const collapsed = layoutStore.layout().regions.right.collapsed;
-      layoutStore.mutate((layout) => collapseRegion(layout, "right", !collapsed));
-    };
-    window.addEventListener("archductor:toggle-right-panel", onToggle);
-    onCleanup(() => window.removeEventListener("archductor:toggle-right-panel", onToggle));
-  });
-
   return (
     <Show when={workspace()} fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}>
       {(ws) => (

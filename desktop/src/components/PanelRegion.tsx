@@ -76,6 +76,7 @@ export default function PanelRegion(props: { workspace: string; region: Region }
               class="workbench-strip ws-right-topbar"
               data-panel-id={id}
               data-panel-kind="strip"
+              tabIndex={-1}
             >
               <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
             </div>
@@ -151,7 +152,7 @@ export default function PanelRegion(props: { workspace: string; region: Region }
           if (!descriptor) return null;
           const Component = descriptor.component;
           return (
-            <div class="workbench-dock" data-panel-id={id} data-panel-kind="dock">
+            <div class="workbench-dock" data-panel-id={id} data-panel-kind="dock" tabIndex={-1}>
               <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
             </div>
           );

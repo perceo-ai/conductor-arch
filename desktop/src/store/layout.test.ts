@@ -1,8 +1,9 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 describe("layoutStore", () => {
   beforeEach(() => vi.resetModules());
+  afterEach(() => vi.unstubAllGlobals());
 
   it("starts from an independent copy of the immutable Code preset", async () => {
     const { BUILTIN_PRESETS } = await import("@/lib/layoutPresets");
@@ -53,5 +54,57 @@ describe("layoutStore", () => {
 
     expect(layoutStore.layout().regions.center.panels).toEqual(["changes"]);
     expect(BUILTIN_PRESETS[2].layout.regions.center.panels).toEqual(["changes"]);
+  });
+
+  it("reveals a hidden panel, opens its region, activates tabs, and schedules focus", async () => {
+    const focus = vi.fn();
+    const querySelector = vi.fn(() => ({ focus }));
+    vi.stubGlobal("document", { querySelector });
+    const { collapseRegion, hidePanel } = await import("@/lib/layout");
+    const { layoutStore } = await import("./layout");
+    const { actions } = await import("./actions");
+    layoutStore.mutate((layout) => collapseRegion(hidePanel(layout, "changes"), "right", true));
+
+    actions.revealPanel("changes");
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+
+    expect(layoutStore.layout().regions.right).toMatchObject({
+      panels: ["summary", "files", "checks", "changes"],
+      active: 3,
+      collapsed: false,
+    });
+    expect(querySelector).toHaveBeenCalledWith("[data-panel-id='changes']");
+    expect(focus).toHaveBeenCalledOnce();
+  });
+
+  it("reveals strips and docks without changing the active tab", async () => {
+    const { hidePanel } = await import("@/lib/layout");
+    const { layoutStore } = await import("./layout");
+    const { actions } = await import("./actions");
+    layoutStore.mutate((layout) => hidePanel(hidePanel(layout, "pr"), "terminal"));
+
+    actions.revealPanel("pr");
+    actions.revealPanel("terminal");
+
+    expect(layoutStore.layout().regions.right.strips).toEqual(["pr"]);
+    expect(layoutStore.layout().regions.right.docks).toEqual(["terminal"]);
+    expect(layoutStore.layout().regions.right.active).toBe(2);
+  });
+
+  it("cycles only visible tabs in region order and wraps both directions", async () => {
+    vi.stubGlobal("document", { querySelector: vi.fn(() => null) });
+    const { movePanel } = await import("@/lib/layout");
+    const { layoutStore } = await import("./layout");
+    layoutStore.mutate((layout) => {
+      let next = movePanel(layout, "files", "left", 0);
+      next = movePanel(next, "checks", "bottom", 0);
+      return next;
+    });
+    layoutStore.setFocusedRegion("right");
+
+    expect(layoutStore.cyclePanel(1)).toBe("checks");
+    expect(layoutStore.focusedRegion()).toBe("bottom");
+    expect(layoutStore.cyclePanel(1)).toBe("files");
+    expect(layoutStore.cyclePanel(-1)).toBe("checks");
   });
 });

@@ -8,9 +8,9 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore, actions } from "@/store";
 import type { Accent } from "@/store/prefs";
-import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
+import { workspacePanels } from "@/lib/panelRegistry";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
@@ -29,12 +29,6 @@ interface Command {
   group: string;
   run: () => void;
 }
-
-// Right-panel targets the palette can jump to (these actually drive the
-// CommandCenter right panel via nav.setRightPanelTab).
-const WORKSPACE_PANELS: { tab: RightPanelTab; label: string }[] = PRODUCT_RIGHT_PANEL_TABS.map(
-  (tab) => ({ tab: tab.id, label: tab.label }),
-);
 
 export default function CommandPalette() {
   const [open, setOpen] = createSignal(false);
@@ -122,26 +116,19 @@ export default function CommandPalette() {
         run: () => nav.selectWorkspace(name),
       });
     }
-    // Workspace views (only meaningful with a selected workspace). These focus
-    // the workspace and drive the CommandCenter right-panel tab.
+    // Workspace panels are generated from the live registry so hidden and
+    // dynamically registered surfaces always retain a keyboard path.
     const active = nav.selectedWorkspace();
     if (active) {
-      list.push({
-        id: "view:chats",
-        label: "Chats",
-        hint: titleCaseWorkspace(active),
-        group: "Workspace",
-        run: () => nav.selectWorkspace(active),
-      });
-      for (const t of WORKSPACE_PANELS) {
+      for (const panel of workspacePanels()) {
         list.push({
-          id: `panel:${t.tab}`,
-          label: t.label,
+          id: `panel:${panel.id}`,
+          label: `Show: ${panel.title}`,
           hint: titleCaseWorkspace(active),
-          group: "Workspace",
+          group: "Panels",
           run: () => {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab(t.tab);
+            actions.revealPanel(panel.id);
           },
         });
       }

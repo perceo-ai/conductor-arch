@@ -1,5 +1,5 @@
 import { createSignal } from "solid-js";
-import { sanitizeLayout, visiblePanelIds, type Layout, type PanelId, type Region } from "@/lib/layout";
+import { activatePanel, sanitizeLayout, visiblePanelIds, type Layout, type PanelId, type Region } from "@/lib/layout";
 import { builtinPreset, type LayoutPreset } from "@/lib/layoutPresets";
 import { workspacePanels } from "@/lib/panelRegistry";
 import { prefsStore } from "./prefs";
@@ -44,6 +44,30 @@ export const layoutStore = {
   hiddenPanels,
   focusedRegion,
   setFocusedRegion,
+
+  focusPanel(id: PanelId) {
+    const escaped = id.replace(/[\\']/g, "\\$&");
+    queueMicrotask(() => {
+      if (typeof document !== "undefined") {
+        document.querySelector<HTMLElement>(`[data-panel-id='${escaped}']`)?.focus();
+      }
+    });
+  },
+
+  cyclePanel(delta: 1 | -1): PanelId | undefined {
+    const tabs = REGIONS.flatMap((region) => layout().regions[region].panels);
+    if (tabs.length === 0) return undefined;
+    const currentStack = layout().regions[focusedRegion()];
+    const current = currentStack.panels[currentStack.active];
+    const currentIndex = Math.max(0, tabs.indexOf(current));
+    const id = tabs[(currentIndex + delta + tabs.length) % tabs.length];
+    const region = REGIONS.find((candidate) => layout().regions[candidate].panels.includes(id));
+    if (!region) return undefined;
+    this.mutate((currentLayout) => activatePanel(currentLayout, id));
+    setFocusedRegion(region);
+    this.focusPanel(id);
+    return id;
+  },
 
   applyLayout(source: LayoutPreset) {
     const preset = normalizedPreset(source);

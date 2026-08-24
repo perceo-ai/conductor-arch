@@ -628,6 +628,7 @@ export function ReviewPromptButton(props: { workspace: string }) {
 
   async function queueReviewPrompt() {
     if (busy()) return;
+    actions.revealPanel("changes");
     setBusy(true);
     try {
       const thread = await activeWorkspaceChatThread(props.workspace);

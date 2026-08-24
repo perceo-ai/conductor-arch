@@ -22,10 +22,11 @@ import {
   actions,
   workspacesStore,
   repositoriesStore,
+  layoutStore,
 } from "./store";
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
-import { PRODUCT_RIGHT_PANEL_TABS } from "./lib/rightPanelTabs";
+import { collapseRegion } from "./lib/layout";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 import { parseKeybindingOverrides, resolveShortcut, type ShortcutAction } from "./lib/shortcuts";
 
@@ -141,14 +142,6 @@ export default function App() {
     return false;
   }
 
-  function moveRightPanel(delta: 1 | -1) {
-    const current = nav.rightPanelTab();
-    const tabs = PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id);
-    const index = Math.max(0, tabs.indexOf(current));
-    nav.setRightPanelTab(tabs[(index + delta + tabs.length) % tabs.length]);
-    queueMicrotask(() => focusFirst(["[data-focus-target='workspace-panel']", "[data-focus-target='workspace-main']"]));
-  }
-
   function moveWorkspace(delta: 1 | -1) {
     const names = workspacesStore.state.order.filter((name) => workspacesStore.row(name)?.status !== "archived");
     if (names.length === 0) return;
@@ -198,7 +191,7 @@ export default function App() {
           setSidebarCollapsed((c) => !c);
           break;
         case "toggle-right-panel":
-          window.dispatchEvent(new CustomEvent("archductor:toggle-right-panel"));
+          layoutStore.mutate((layout) => collapseRegion(layout, "right", !layout.regions.right.collapsed));
           break;
         case "nav-back":
           nav.back();
@@ -230,7 +223,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("changes");
+            actions.revealPanel("changes");
           }
           break;
         }
@@ -273,10 +266,10 @@ export default function App() {
           queueMicrotask(() => focusFirst(["[data-focus-target='sidebar-search']", ".sidebar-search", ".sidebar-search-minimal"]));
           break;
         case "next-panel":
-          moveRightPanel(1);
+          layoutStore.cyclePanel(1);
           break;
         case "prev-panel":
-          moveRightPanel(-1);
+          layoutStore.cyclePanel(-1);
           break;
         case "next-workspace":
           moveWorkspace(1);
@@ -296,13 +289,14 @@ export default function App() {
           window.dispatchEvent(new CustomEvent("archductor:new-chat"));
           break;
         case "toggle-terminal":
+          actions.revealPanel("terminal");
           window.dispatchEvent(new CustomEvent("archductor:toggle-terminal-dock"));
           break;
         case "show-uncommitted": {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("changes");
+            actions.revealPanel("changes");
           }
           break;
         }
@@ -310,7 +304,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("files");
+            actions.revealPanel("files");
           }
           break;
         }
@@ -318,7 +312,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("checks");
+            actions.revealPanel("checks");
           }
           break;
         }
@@ -326,7 +320,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("summary");
+            actions.revealPanel("summary");
           }
           break;
         }
