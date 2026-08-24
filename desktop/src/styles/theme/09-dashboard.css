@@ -1,0 +1,170 @@
+
+.project-tabs {
+    padding-bottom: 8px;
+}
+
+.project-tab,
+.project-tab-active {
+    font-size: 13px;
+    font-weight: 600;
+    padding-bottom: 10px;
+}
+
+.project-tab-active,
+.card-activity,
+.workspace-title {
+    color: #aaaaaa;
+}
+
+.project-tab-active {
+    border-bottom: 2px solid #aaaaaa;
+}
+
+.kanban-column {
+    min-width: 250px;
+    padding: 12px;
+    border-radius: 12px;
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
+}
+
+.kanban-board {
+    background-color: #101010;
+}
+
+.dashboard .page-board {
+    padding: 16px 20px;
+}
+
+.dashboard .kanban-column {
+    padding: 8px;
+    border: 1px solid #2b2b2b;
+}
+
+.workspace-card-action {
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+
+.workspace-card-action .workspace-card {
+    border: 1px solid #303030;
+    box-shadow: none;
+}
+
+.workspace-card-action:focus-visible .workspace-card {
+    border-color: #6f8fbd;
+}
+
+.kanban-column-header {
+    border-bottom: 1px solid #2b2b2b;
+    padding-bottom: 8px;
+    margin-bottom: 2px;
+}
+
+.shell-card,
+.workspace-card,
+.command-panel,
+.metric-card,
+.detail-row,
+.settings-panel {
+    background-color: #202020;
+    border: 1px solid #2a2a2a;
+    border-radius: 14px;
+}
+
+.workspace-card,
+.command-panel,
+.metric-card,
+.detail-row {
+    padding: 12px;
+}
+
+.workspace-card {
+    min-height: 104px;
+}
+
+.kanban-column .workspace-card {
+    background-color: #151515;
+    border-color: #303030;
+    border-radius: 10px;
+    padding: 10px;
+    box-shadow: none;
+}
+
+.kanban-column .workspace-card:hover {
+    background-color: #1d1d1d;
+    border-color: #454545;
+}
+
+.dashboard-card-top,
+.dashboard-card-footer {
+    min-height: 22px;
+}
+
+.card-branch,
+.card-state,
+.card-diff,
+.column-empty,
+.empty-label,
+.status-detail,
+.info-text {
+    color: #8a8a8a;
+}
+.card-state,
+.triage-badge {
+    border-radius: 6px;
+    border: 1px solid #343434;
+    background-color: #202020;
+    color: #b8b8b8;
+    font-size: 11px;
+    font-weight: 650;
+    line-height: 16px;
+}
+.card-state {
+    padding: 1px 6px;
+    text-transform: capitalize;
+}
+.triage-badge-agent {
+    border-color: #36513f;
+    background-color: #17251d;
+    color: #8fd2a6;
+}
+.triage-badge-run {
+    border-color: #345445;
+    background-color: #14271f;
+    color: #9adfbd;
+}
+.triage-badge-pr {
+    border-color: #334768;
+    background-color: #151f33;
+    color: #9bbcf4;
+}
+.triage-badge-changes {
+    border-color: #5a4a2e;
+    background-color: #2a2214;
+    color: #e2c071;
+}
+.triage-badge-todo {
+    border-color: #57445f;
+    background-color: #241a2a;
+    color: #d7a6ea;
+}
+
+.metric-value {
+    font-size: 16px;
+    font-weight: 700;
+}
+.card-meta.ws-pr-status-ready {
+    color: #cfcfcf;
+}
+.card-meta.ws-pr-status-pending {
+    color: #a8a8a8;
+}
+.card-meta.ws-pr-status-failed {
+    color: #ff8a8a;
+}
+.card-meta.ws-pr-status-merged {
+    color: #c6a3ff;
+}

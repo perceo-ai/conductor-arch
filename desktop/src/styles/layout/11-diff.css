@@ -1,0 +1,230 @@
+/* ---- Diff viewer ----
+   Layout follows the conventions of GitHub and editor diff panes: a collapsible
+   block per file with a sticky path header, collapsible hunks, old/new line
+   number columns pinned against horizontal scroll, and word-level tints inside
+   changed lines. Colors come from the shared code tokens in theme.css. */
+.diff {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: var(--code-font);
+  font-size: var(--code-size);
+  line-height: var(--code-line);
+  tab-size: var(--code-tab);
+  color: var(--code-fg);
+}
+.diff-preamble {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
+  font-size: 11px;
+}
+.diff-note {
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
+  font-size: 12px;
+}
+
+.diff-file {
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  background: var(--code-surface);
+  /* Clips the rounded corners and, as a scrollport, scopes the sticky header
+     to its own file the way GitHub's per-file headers behave. */
+  overflow: hidden;
+}
+.diff-file-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--code-border);
+  background: var(--diff-header-bg);
+  color: var(--lc-text);
+  font-family: var(--ui-font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-file-header:hover {
+  box-shadow: inset 0 0 0 999px var(--code-line-active);
+}
+.diff-chevron,
+.diff-file-icon {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--lc-text-muted);
+}
+.diff-file-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--code-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diff-file-oldpath {
+  color: var(--lc-text-muted);
+  text-decoration: line-through;
+}
+.diff-file-arrow {
+  margin: 0 4px;
+  color: var(--lc-text-muted);
+}
+.diff-file-status {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--code-border);
+  border-radius: 999px;
+  color: var(--lc-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.diff-file-status-added {
+  border-color: var(--diff-add-word);
+  color: var(--diff-add-accent);
+}
+.diff-file-status-deleted {
+  border-color: var(--diff-del-word);
+  color: var(--diff-del-accent);
+}
+.diff-file-counts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 6px;
+  font-family: var(--code-font);
+  font-size: 11px;
+}
+.diff-file-add {
+  color: var(--diff-add-accent);
+}
+.diff-file-del {
+  color: var(--diff-del-accent);
+}
+.diff-file-body {
+  overflow-x: auto;
+}
+.diff-file-empty {
+  padding: 8px 12px;
+  color: var(--lc-text-muted);
+  font-family: var(--ui-font-sans);
+  font-size: 12px;
+}
+
+/* One width for every row, taken from the longest line and never narrower than
+   the scrollport. Rows and hunk headers then take 100% of it, so their tints
+   run the whole scroll extent instead of stopping at the fold. */
+.diff-file-rows {
+  width: max-content;
+  min-width: 100%;
+}
+.diff-hunk-header {
+  display: block;
+  width: 100%;
+  padding: 1px 0;
+  border: 0;
+  background: var(--diff-hunk-bg);
+  color: var(--diff-hunk-fg);
+  font-family: var(--code-font);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.diff-hunk-inner {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 0 10px 0 6px;
+}
+.diff-hunk-section {
+  overflow: hidden;
+  color: var(--lc-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-row {
+  display: flex;
+  width: 100%;
+  background: var(--code-surface);
+  color: var(--code-fg);
+  white-space: pre;
+}
+.diff-row-added {
+  background: var(--diff-add-bg);
+  color: var(--diff-add-fg);
+}
+.diff-row-removed {
+  background: var(--diff-del-bg);
+  color: var(--diff-del-fg);
+}
+
+/* The three gutter columns stay pinned while the code scrolls sideways. Their
+   text is drawn as generated content: user-select: none still lands in
+   Selection.toString(), but ::before content never does, so copying a diff
+   yields code without line numbers or +/- signs. */
+.diff-gutter,
+.diff-sign {
+  position: sticky;
+  z-index: 1;
+  flex: 0 0 auto;
+  background: inherit;
+  color: var(--code-gutter-fg);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.diff-gutter::before,
+.diff-sign::before {
+  content: attr(data-n);
+}
+.diff-gutter {
+  width: calc(var(--diff-gutter-w, 2ch) + 12px);
+  padding: 0 6px;
+  text-align: right;
+}
+.diff-gutter-old {
+  left: 0;
+}
+.diff-gutter-new {
+  left: calc(var(--diff-gutter-w, 2ch) + 12px);
+  border-right: 1px solid var(--code-border);
+}
+.diff-sign {
+  left: calc((var(--diff-gutter-w, 2ch) + 12px) * 2);
+  width: 2ch;
+  padding-left: 4px;
+}
+.diff-code {
+  flex: 1 1 auto;
+  padding: 0 10px 0 2px;
+}
+.diff-word {
+  border-radius: 2px;
+}
+.diff-row-added .diff-word {
+  background: var(--diff-add-word);
+}
+.diff-row-removed .diff-word {
+  background: var(--diff-del-word);
+}
+.chat-inline-event-terminal {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre;
+  overflow-x: auto;
+  margin: 0;
+}

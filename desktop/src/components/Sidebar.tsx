@@ -5,12 +5,14 @@ import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } fr
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import { SIDEBAR_MAX, SIDEBAR_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
-import Icon, { type IconName } from "./Icon";
+import Icon from "./Icon";
+import { workspaceRowActivity } from "@/lib/workspaceStatus";
 import {
-  dashboardTriageBadges,
-  type DashboardTriageBadgeTone,
-} from "@/lib/workspaceStatus";
-import { deriveWorkspacePrAction, workspacePrActionInput, type WorkspacePrActionKind } from "@/lib/workspacePrAction";
+  WORKSPACE_PR_STATE_ICON,
+  WORKSPACE_PR_STATE_MOTION,
+  deriveWorkspacePrAction,
+  workspacePrActionInput,
+} from "@/lib/workspacePrAction";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { runShellAction } from "@/lib/shellAction";
@@ -125,22 +127,6 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
 }
 
 
-const ROW_TRIAGE_ICON: Partial<Record<DashboardTriageBadgeTone, "brain" | "play" | "git-compare">> = {
-  agent: "brain",
-  run: "play",
-  pr: "git-compare",
-};
-
-const ROW_TRIAGE_TONES = new Set<DashboardTriageBadgeTone>(["agent", "run", "pr"]);
-
-const WORKSPACE_GIT_STATE_ICON: Record<WorkspacePrActionKind, IconName> = {
-  create: "git-pull-request",
-  push: "arrow-up",
-  merge: "git-merge",
-  view: "external",
-  none: "circle-check",
-};
-
 // Left sidebar: nav group (Dashboard/History) + workspace list. Repositories are
 // the top-level rows; each repo's workspaces are nested beneath it so a repo
 // with no workspaces yet still appears. Each workspace row reads only its own
@@ -151,10 +137,7 @@ function WorkspaceRow(props: { name: string }) {
   const selected = () => nav.selectedWorkspace() === props.name;
   const gitState = () => deriveWorkspacePrAction(workspacePrActionInput(row(), undefined));
   const hasDiffStats = () => ((row()?.additions ?? 0) > 0 || (row()?.deletions ?? 0) > 0);
-  const compactBadges = () =>
-    dashboardTriageBadges(row() ?? {})
-      .filter((badge) => ROW_TRIAGE_TONES.has(badge.tone))
-      .slice(0, 2);
+  const activity = () => workspaceRowActivity(row() ?? {});
   return (
     <button
       class="workspace-row-shell"
@@ -168,11 +151,18 @@ function WorkspaceRow(props: { name: string }) {
       }}
     >
       <span class="workspace-row-head">
+        {/* Icon keys off `state`, not `action`: six situations share the
+            `view` action and used to share one glyph, which made a merged PR
+            indistinguishable from failing checks at a glance. */}
         <span
-          class={`workspace-git-state workspace-git-state-${gitState().action}`}
+          class={`workspace-git-state workspace-git-state-${gitState().state}`}
+          classList={{
+            [`workspace-git-state-motion-${WORKSPACE_PR_STATE_MOTION[gitState().state]}`]:
+              WORKSPACE_PR_STATE_MOTION[gitState().state] != null,
+          }}
           title={gitState().title}
         >
-          <Icon name={WORKSPACE_GIT_STATE_ICON[gitState().action]} />
+          <Icon name={WORKSPACE_PR_STATE_ICON[gitState().state]} />
         </span>
         <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
         {/* A blocked agent is otherwise indistinguishable from a working one
@@ -190,19 +180,18 @@ function WorkspaceRow(props: { name: string }) {
             <Icon name="alert" />
           </span>
         </Show>
-        <Show when={compactBadges().length > 0}>
-          <span class="workspace-row-indicators">
-            <For each={compactBadges()}>
-              {(badge) => {
-                const icon = ROW_TRIAGE_ICON[badge.tone] ?? "git-compare";
-                return (
-                  <span class={`workspace-row-indicator workspace-row-indicator-${badge.tone}`} title={badge.title}>
-                    <Icon name={icon} />
-                  </span>
-                );
-              }}
-            </For>
-          </span>
+        {/* One indicator for "something is live here", not a row of unlabelled
+            glyphs. A PR badge used to sit here too, duplicating the PR-state
+            icon at the start of the row. */}
+        <Show when={activity()}>
+          {(live) => (
+            <span class="workspace-row-live" title={live().title}>
+              <span class="workspace-row-live-dot" />
+              <Show when={live().count > 1}>
+                <span class="workspace-row-live-count">{live().count}</span>
+              </Show>
+            </span>
+          )}
         </Show>
         <Show when={hasDiffStats()}>
           <span class="workspace-row-diff">
@@ -363,7 +352,8 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
       </div>
 
       <label class="workspace-search">
-        <Icon name="file" class="workspace-search-icon" />
+        {/* Was a document glyph, which read as "file" rather than "search". */}
+        <Icon name="search" class="workspace-search-icon" />
         <input
           value={workspaceFilter()}
           placeholder="Filter workspaces"

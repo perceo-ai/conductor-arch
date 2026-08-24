@@ -1,0 +1,179 @@
+.ws-tab-bar {
+    min-height: 30px;
+    padding: 0 8px 0 0;
+    background-color: #191919;
+}
+.ws-chat-tabs-scroll {
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    height: 30px;
+    min-height: 30px;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+/* GTK scrollbar child -> native scrollbar; use ::-webkit-scrollbar */
+.ws-chat-tabs-scroll::-webkit-scrollbar {
+    min-height: 0;
+    min-width: 0;
+}
+.ws-chat-tabs {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    background-color: transparent;
+}
+.ws-tab-sep {
+    min-height: 1px;
+    background-color: #282828;
+}
+button.ws-tab-shell {
+    background-image: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    text-shadow: none;
+}
+.ws-tab-shell {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex: 0 0 132px;
+    width: 132px;
+    min-width: 132px;
+    max-width: 132px;
+    min-height: 30px;
+    padding: 0 6px;
+    gap: 5px;
+    border-bottom: 2px solid transparent;
+    background-color: transparent;
+    overflow: hidden;
+    text-align: left;
+}
+.ws-tab-label {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 400;
+    color: #8a8a8a;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ws-tab-close-button {
+    flex: 0 0 24px;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    text-shadow: none;
+    border-radius: 5px;
+    padding: 0;
+    min-width: 24px;
+    min-height: 24px;
+}
+.ws-tab-close-button:hover {
+    background-color: rgba(255, 255, 255, 0.06);
+}
+.ws-tab-close-icon {
+    color: #747474;
+    min-width: 14px;
+    min-height: 14px;
+}
+.ws-chat-tab-indicator {
+    min-width: 14px;
+    min-height: 14px;
+}
+.ws-chat-tab-spinner {
+    min-width: 12px;
+    min-height: 12px;
+    color: #8fb5ff;
+}
+.ws-chat-tab-dot {
+    flex: 0 0 12px;
+    min-width: 12px;
+    min-height: 12px;
+    color: #f0c36a;
+    font-size: 18px;
+    font-weight: 700;
+}
+.ws-chat-tab-meta {
+    color: #777777;
+}
+.ws-chat-tab-meta-active {
+    color: #b6c7e8;
+}
+.ws-chat-tab-meta-needs-input {
+    color: #f2bf7e;
+}
+.ws-chat-tab-text {
+    display: flex;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+.ws-file-tab-icon {
+    flex: 0 0 16px;
+    width: 16px;
+    height: 16px;
+    color: #8a8a8a;
+}
+.ws-chat-new {
+    align-self: center;
+    flex: 0 0 28px;
+    width: 28px;
+    min-width: 28px;
+    min-height: 28px;
+    height: 28px;
+    padding: 0;
+    border-radius: 5px;
+    margin: 0;
+}
+.ws-chat-new .ui-icon {
+    width: 15px;
+    height: 15px;
+}
+.ws-tab-shell:hover .ws-tab-label,
+.ws-tab-shell:hover .ws-tab-close-icon {
+    color: #c6c6c6;
+}
+.ws-tab-shell.ws-tab-running {
+    border-bottom-color: transparent;
+}
+.ws-tab-shell.ws-tab-running .ws-tab-label,
+.ws-tab-shell.ws-tab-running .ws-tab-close-icon {
+    color: #d7e5ff;
+    font-weight: 500;
+}
+.ws-tab-shell.ws-tab-unread {
+    border-bottom-color: #5a5a5a;
+}
+.ws-tab-shell.ws-tab-unread .ws-tab-label,
+.ws-tab-shell.ws-tab-unread .ws-tab-close-icon {
+    color: #d7d7d7;
+    font-weight: 500;
+}
+.ws-tab-shell.ws-tab-active {
+    background-color: transparent;
+    border-bottom-color: #f0c36a;
+}
+.ws-tab-shell.ws-tab-active .ws-tab-label,
+.ws-tab-shell.ws-tab-active .ws-tab-close-icon {
+    color: #e8e8e8;
+    font-weight: 600;
+}
+.ws-tab-shell.ws-tab-editing {
+    background-color: #222a24;
+    border-bottom-color: #62c073;
+}
+.ws-tab-shell.ws-tab-editing .ws-tab-label,
+.ws-tab-shell.ws-tab-editing .ws-tab-close-icon {
+    color: #d7f2dc;
+    font-weight: 600;
+}
+.ws-mode-switcher button {
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 5px;
+}

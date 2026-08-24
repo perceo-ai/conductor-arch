@@ -1,0 +1,206 @@
+
+/* ── 2026 design refresh: graphite developer cockpit ── */
+body,
+.app-root,
+.dashboard,
+.page-shell,
+.history-view,
+.chat-surface,
+.session-surface,
+.terminal-panel,
+.settings-shell {
+    background-color: #101010;
+    color: #f8fafc;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+}
+
+.page-header,
+.dashboard-header,
+.sidebar,
+.chat-composer-box,
+.settings-toolbar,
+.settings-rail,
+.workspace-card,
+.shell-card,
+.kanban-column,
+.modal-body,
+.workspace-modal,
+.terminal-panel,
+.session-tool-surface,
+.session-transcript,
+.terminal-transcript-dark,
+.history-row,
+.project-row {
+    background-color: var(--lc-surface-muted);
+    border-color: var(--lc-border);
+    color: var(--lc-text-strong);
+}
+
+.workspace-row-shell {
+    background-color: transparent;
+    border-color: transparent;
+    color: var(--lc-text-strong);
+}
+
+.chat-composer-box,
+.workspace-card,
+.shell-card,
+.workspace-modal-preview,
+.chat-menu-popover {
+    background-color: #1f1f1f;
+    border: 1px solid #2b2b2b;
+    box-shadow: none;
+}
+
+.chat-composer-box {
+    background-color: #1b1b1b;
+    border: 1px solid #282828;
+    border-radius: 10px;
+}
+
+.dashboard-title,
+.card-title,
+.workspace-name,
+.detail-value,
+.metric-value,
+.column-title,
+.chat-repo-label,
+.chat-branch-label,
+.chat-agent-text,
+.chat-input-view,
+.chat-input-view text,
+.settings-group-title,
+.settings-field-title {
+    color: #f8fafc;
+}
+
+.card-meta,
+.workspace-meta,
+.detail-label,
+.project-tab,
+.column-count,
+.workspace-path-label,
+.section-title,
+.sidebar-header,
+.repo-section-header,
+.settings-group-copy,
+.settings-field-copy,
+.chat-placeholder,
+.chat-inline-event-meta,
+.chat-mode-label,
+.chat-editor-label {
+    color: #a3a3a3;
+}
+
+.workspace-meta,
+.card-branch,
+.workspace-path-label,
+.detail-label,
+.chat-context-usage,
+.chat-inline-event-meta,
+.chat-inline-event-body,
+.terminal-transcript-dark,
+.session-transcript,
+.history-view,
+.settings-editor,
+.settings-machine-entry,
+.ws-diff-view,
+.ws-diff-view text,
+.ws-file-code-view,
+.ws-file-code-view text {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+}
+
+.sidebar-icon-button,
+.sidebar-reopen-button,
+.sidebar-arrow-button,
+.chat-focus-btn,
+.chat-context-btn,
+.chat-toolbar-btn,
+.chat-mode-btn,
+.chat-mode-menu,
+.chat-editor-menu,
+.icon-button,
+.text-button,
+.flat-action,
+.secondary-action {
+    color: #d0d0d0;
+    background-color: transparent;
+    border-color: transparent;
+}
+
+.sidebar-icon-button:hover,
+.sidebar-reopen-button:hover,
+.sidebar-arrow-button:hover,
+.chat-focus-btn:hover,
+.chat-context-btn:hover,
+.chat-toolbar-btn:hover,
+.chat-mode-btn:hover,
+.chat-mode-menu:hover,
+.chat-editor-menu:hover,
+.icon-button:hover,
+.text-button:hover,
+.flat-action:hover,
+.secondary-action:hover,
+.workspace-list .row:hover,
+.nav-button:hover,
+.nav-row:hover,
+.chat-menu-item:hover {
+    background-color: var(--lc-hover);
+    color: var(--lc-text-strong);
+}
+
+.nav-row-active,
+.nav-button-active,
+.workspace-list .row.selected,
+.chat-mode-selected,
+.chat-menu-item-selected,
+.project-tab-active {
+    background-color: #2c2c2c;
+    border-color: #5a5a5a;
+    color: #f8fafc;
+}
+
+.kanban-board {
+    background-color: #101010;
+}
+
+.kanban-column {
+    background-color: #181818;
+    border: 1px solid #2b2b2b;
+    border-radius: 12px;
+    box-shadow: none;
+}
+
+.kanban-column-header {
+    border-bottom: 1px solid #2b2b2b;
+}
+
+.kanban-column .workspace-card {
+    background-color: #151515;
+    border-color: #303030;
+    box-shadow: none;
+}
+
+.kanban-column .workspace-card:hover {
+    background-color: #1d1d1d;
+    border-color: #454545;
+}
+
+.suggested-action {
+    background-color: #282828;
+    border-color: #4a4a4a;
+    color: #f4f4f4;
+}
+
+.suggested-action:hover {
+    background-color: #333333;
+    border-color: #5a5a5a;
+    color: #ffffff;
+}
+
+.destructive-action {
+    background-color: #3f1d2a;
+    border-color: #ef4444;
+    color: #fecdd3;
+}

@@ -1,0 +1,50 @@
+
+/* Neutral charcoal pass: avoid slate/blue casts in the workspace chrome. */
+:root {
+  --lc-bg: #0f0f0f;
+  --lc-surface: #151515;
+  --lc-surface-raised: #1a1a1a;
+  --lc-surface-muted: #121212;
+  --lc-hover: #202020;
+  --lc-hover-soft: #1a1a1a;
+  --lc-border: #262626;
+  --lc-border-strong: #363636;
+  --ui-panel: #121212;
+  --ui-panel-2: #151515;
+  --ui-panel-3: #1a1a1a;
+  --ui-panel-hover: #202020;
+  --ui-border: #262626;
+}
+
+.ws-command-center,
+.chat-surface,
+.ws-center,
+.ws-right-panel,
+.ws-file-summary-panel,
+.ws-tab-panel {
+  background: #0f0f0f;
+}
+
+.ws-topbar,
+.ws-chat-tab-bar {
+  background: #121212;
+  border-color: #252525;
+}
+
+.ws-right-tabs,
+.ws-run-section,
+.ws-run-tab-bar {
+  background: #0f0f0f;
+}
+
+.triage-badge-pr,
+.triage-badge-todo {
+  background: #202020;
+  border-color: #333333;
+  color: #d0d0d0;
+}
+
+.ws-tab-shell.ws-tab-active,
+.nav-button-active {
+  background: #202020;
+}

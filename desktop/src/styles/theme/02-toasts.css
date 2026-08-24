@@ -1,0 +1,70 @@
+
+.toast {
+    background-color: #202020;
+    color: var(--lc-text-strong);
+    border: 1px solid #3a3a3a;
+    border-radius: 10px;
+    box-shadow: none;
+    margin: 6px;
+    padding: 6px;
+}
+
+/* toast > widget -> GTK internal child; rely on a wrapped element */
+.toast > * {
+    margin: 0;
+}
+
+.toast > button.circular.flat {
+    color: #8f8f8f;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+}
+
+.toast > button.circular.flat:hover {
+    background-color: #303030;
+    color: var(--lc-text-strong);
+}
+
+.toast-content {
+    min-width: 280px;
+    padding: 4px 2px 4px 4px;
+}
+
+.toast-icon-shell {
+    min-width: 28px;
+    min-height: 28px;
+    border-radius: 8px;
+}
+
+.toast-icon {
+    min-width: 16px;
+    min-height: 16px;
+}
+
+.toast-message {
+    color: var(--lc-text-strong);
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.35;
+}
+
+.toast-info .toast-icon-shell {
+    background-color: rgba(74, 144, 226, 0.16);
+    color: #7ab7ff;
+}
+
+.toast-success .toast-icon-shell {
+    background-color: rgba(54, 179, 126, 0.16);
+    color: #64d69b;
+}
+
+.toast-warning .toast-icon-shell {
+    background-color: rgba(245, 166, 35, 0.16);
+    color: #f4bf67;
+}
+
+.toast-error .toast-icon-shell {
+    background-color: rgba(232, 84, 84, 0.16);
+    color: #ff8a8a;
+}

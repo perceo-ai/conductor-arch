@@ -1,0 +1,455 @@
+
+.ws-right-panel {
+  background: #151515;
+  border-left-color: var(--ui-border);
+}
+
+.ws-right-topbar {
+  min-height: 50px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  background: #121212;
+  border-bottom: 1px solid #252525;
+}
+
+.ws-right-topbar .ws-pr-bar {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ws-right-topbar .ws-pr-action-button {
+  min-width: 70px;
+  justify-content: center;
+}
+
+.ws-right-tabs {
+  min-height: 42px;
+  padding: 6px 12px;
+  background: #121212;
+  border-bottom-color: var(--ui-border);
+}
+
+.nav-button,
+.ws-right-tabs .nav-button,
+.ws-changes-scope .nav-button {
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: var(--ui-radius);
+  font-size: var(--ui-text-sm);
+  font-weight: 540;
+  color: #969696;
+}
+
+.ws-right-tabs .nav-button:hover,
+.ws-changes-scope .nav-button:hover {
+  background: #202020;
+  color: #dadada;
+}
+
+.nav-button-active {
+  background: #232323;
+  color: #eeeeee;
+}
+
+.nav-button-count {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  background: #353535;
+  color: #d6d6d6;
+}
+
+.ws-file-summary-panel,
+.ws-tab-panel {
+  padding: 14px 16px;
+  background: #151515;
+}
+
+.ws-checks-panel-flat,
+.ws-review-action-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: #151515;
+}
+
+.ws-flat-section-label {
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 16px;
+  color: #8a8a8a;
+}
+
+.ws-git-status-line,
+.ws-check-row-flat {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 7px;
+  border-radius: 5px;
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ws-check-row-flat {
+  padding: 0 2px;
+}
+
+.ws-check-row-flat:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ws-check-glyph {
+  flex: 0 0 13px;
+  width: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.ws-check-glyph-passed {
+  color: #46c978;
+}
+
+.ws-check-glyph-failed {
+  color: #f06464;
+}
+
+.ws-check-glyph-running {
+  color: #d6a84f;
+}
+
+.ws-check-glyph-unknown {
+  color: #777777;
+}
+
+.ws-check-provider-icon {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+  opacity: 0.78;
+}
+
+.ws-check-provider-local {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #8b8b8b;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.ws-check-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-check-status {
+  flex: 0 1 auto;
+  max-width: 82px;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-check-open {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  padding: 0;
+  background: transparent;
+  color: #8c8c8c;
+  cursor: pointer;
+}
+
+.ws-check-open:hover {
+  background: #222222;
+  color: #d8d8d8;
+}
+
+.ws-check-open .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.ws-check-empty {
+  padding: 2px 0;
+  color: #747474;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* ---- Summary tab ----
+   Same flat vocabulary as the Checks tab above: one surface, quiet section
+   labels, single-line rows. Nothing here draws its own card. */
+.ws-summary-panel {
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.ws-summary-status {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 4px;
+}
+
+.ws-summary-provenance {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-edit-active {
+  background: #222222;
+  color: #d8d8d8;
+}
+
+.ws-summary-feedback {
+  color: #8a8a8a;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* Agent prose. The panel is ~300px wide, so the shared .markdown-body sizes
+   are stepped down and headings stop competing with the section labels. */
+.ws-summary-prose {
+  font-size: 12px;
+  line-height: 1.55;
+  color: #c6c6c6;
+  overflow-wrap: anywhere;
+}
+
+.ws-summary-prose h1,
+.ws-summary-prose h2,
+.ws-summary-prose h3 {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #e0e0e0;
+}
+
+.ws-summary-prose > :first-child {
+  margin-top: 0;
+}
+
+.ws-summary-prose ul,
+.ws-summary-prose ol {
+  margin: 4px 0;
+  padding-left: 18px;
+}
+
+.ws-summary-prose li {
+  margin: 1px 0;
+}
+
+.ws-summary-prose p {
+  margin: 4px 0;
+}
+
+.ws-summary-row {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  gap: 7px;
+  padding: 0 2px;
+  border-radius: 5px;
+  color: #d6d6d6;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.ws-summary-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ws-summary-row-icon {
+  flex: 0 0 13px;
+  width: 13px;
+  height: 13px;
+  color: #777777;
+}
+
+.ws-summary-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-summary-row-detail,
+.ws-summary-row-status {
+  flex: 0 1 auto;
+  max-width: 96px;
+  overflow: hidden;
+  color: #858585;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The one write this panel keeps. Chromeless until hovered so a column of
+   these does not read as a form. */
+.ws-summary-row-select {
+  flex: 0 0 auto;
+  max-width: 88px;
+  /* The native arrow makes a column of these read as a form; the control is
+     still discoverable because the whole row lifts on hover. */
+  appearance: none;
+  border: 0;
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: transparent;
+  color: #858585;
+  font: inherit;
+  font-size: 11px;
+  text-align: right;
+  cursor: pointer;
+}
+
+.ws-summary-row:hover .ws-summary-row-select,
+.ws-summary-row-select:focus {
+  background: #222222;
+  color: #d8d8d8;
+  outline: none;
+}
+
+.ws-summary-row-note {
+  padding: 0 2px 2px 22px;
+  color: #c08a4a;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.ws-summary-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ws-review-prompt-button {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  border: 0;
+  border-radius: 4px;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--lc-accent);
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ws-review-prompt-button:hover {
+  background: transparent;
+  color: #f0c36a;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.ws-review-prompt-button:disabled {
+  cursor: default;
+  opacity: 0.56;
+}
+
+.ws-changes-header,
+.ws-pr-nav,
+.ws-run-header {
+  min-height: 42px;
+  padding: 0 0 12px;
+  border-bottom-color: #272727;
+}
+
+.ws-changes-title,
+.section-title,
+.detail-label {
+  font-size: var(--ui-text-sm);
+  font-weight: 700;
+  letter-spacing: 0;
+  color: #e0e0e0;
+}
+
+.ws-file-summary-row-content,
+.ws-file-summary-row {
+  min-height: 30px;
+  padding: 5px 7px;
+  border-radius: var(--ui-radius);
+}
+
+.ws-file-name,
+.ws-file-summary-counts,
+.card-branch,
+.commit-list,
+.ws-run-prompt,
+.terminal-panel {
+  font-family: var(--ui-font-mono);
+}
+
+.ws-file-name {
+  font-size: var(--ui-text-sm);
+}
+
+.ws-run-section {
+  background: #121212;
+  border-top-color: var(--ui-border);
+}
+
+.ws-run-tab-bar {
+  min-height: 40px;
+  padding: 5px 10px;
+  background: #151515;
+  border-top-color: transparent;
+  border-bottom-color: #272727;
+}
+
+.ws-run-tabs-row {
+  gap: 6px;
+}
+
+.ws-run-tab-btn {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: var(--ui-radius);
+  color: #8f8f8f;
+}
+
+.ws-run-tab-btn:hover,
+.ws-run-tab-active {
+  background: #242424;
+  color: #eeeeee;
+}
+
+.ws-run-collapse-btn {
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: var(--ui-radius);
+}

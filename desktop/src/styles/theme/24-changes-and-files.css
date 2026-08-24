@@ -1,0 +1,162 @@
+.ws-changes-menu-btn,
+.ws-run-collapse-btn {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    color: #8e8e8e;
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+    font-size: 13px;
+    min-width: 30px;
+    min-height: 30px;
+    border-radius: 6px;
+}
+.ws-changes-menu-btn:hover,
+.ws-run-collapse-btn:hover {
+    background-color: #242424;
+    color: #e4e4e4;
+}
+.ws-changes-popover {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}
+/* GTK popover internals (contents/arrow) -> web popover content wrapper */
+.ws-changes-popover .contents,
+.ws-changes-popover .popover-contents {
+    background-color: #1b1b1b;
+    border: none;
+    border-radius: 8px;
+    box-shadow: none;
+    padding: 0;
+}
+/* popover.ws-changes-popover arrow -> no arrow element in web; kept as comment:
+   .ws-changes-popover .arrow { background-color: #1b1b1b; border: none; } */
+.ws-changes-menu-list {
+    min-width: 260px;
+    padding: 2px;
+}
+.ws-changes-menu-row {
+    min-height: 34px;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 6px;
+    box-shadow: none;
+    background: transparent;
+}
+.ws-changes-menu-row:hover {
+    background-color: #262626;
+}
+.ws-changes-menu-title {
+    color: #e2e2e2;
+    font-size: 13px;
+    font-weight: 600;
+}
+.ws-changes-menu-subtitle {
+    color: #8f8f8f;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 11px;
+}
+.ws-changes-menu-counts {
+    color: #bfc7d5;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+    font-weight: 700;
+}
+.ws-changes-menu-separator {
+    margin: 2px 4px;
+    min-height: 1px;
+    background-color: #303030;
+}
+.ws-changes-menu-info {
+    color: #b7b7b7;
+    font-size: 12px;
+    padding: 6px 8px;
+}
+.ws-file-summary-panel {
+    padding: 10px 12px 14px;
+    background-color: #151515;
+}
+.ws-file-summary-row {
+    min-height: 32px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: none;
+    box-shadow: none;
+    background: transparent;
+}
+.ws-file-summary-row:hover {
+    background-color: #1f1f1f;
+}
+.ws-file-summary-state {
+    color: #9a9a9a;
+    font-size: 12px;
+}
+.ws-file-summary-counts {
+    color: #bfc7d5;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+/* ── File list ── */
+.ws-file-list {
+    background: transparent;
+}
+.ws-file-list .row {
+    min-height: 0;
+}
+.ws-dir-row {
+    padding: 1px 3px;
+}
+.ws-folder-icon {
+    color: #c39b50;
+    min-width: 13px;
+    min-height: 13px;
+}
+.ws-folder-toggle {
+    min-width: 12px;
+    min-height: 13px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #777777;
+    font-size: 12px;
+}
+.ws-folder-name {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+    font-weight: 500;
+    color: #b0b0b0;
+}
+.ws-file-row {
+    padding: 1px 3px;
+}
+.ws-file-icon {
+    color: #8091a7;
+    min-width: 13px;
+    min-height: 13px;
+}
+.ws-file-name {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+    color: #c0c0c0;
+}
+.ws-file-dir {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 11px;
+    color: #5d5d5d;
+}
+.ws-file-list .row.selected {
+    background-color: #293243;
+}
+.ws-file-list .row:hover {
+    background-color: #20242b;
+}
+.row.selected .ws-file-name,
+.row.selected .ws-folder-name {
+    color: #e8e8e8;
+}
+.row:hover .ws-file-name,
+.row:hover .ws-folder-name {
+    color: #cacaca;
+}

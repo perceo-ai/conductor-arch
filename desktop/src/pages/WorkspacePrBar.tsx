@@ -2,7 +2,13 @@ import { Show, createMemo, createResource, createSignal, onCleanup, onMount } fr
 import { send, openExternal } from "@/bridge/client";
 import { nav, threadsStore, workspacesStore, toastsStore } from "@/store";
 import type { ArchcarChatThread, ArchcarChecksSummary, SessionKind, WorkspaceGitAction } from "@/bridge/protocol";
-import { deriveWorkspacePrAction, workspacePrActionInput } from "@/lib/workspacePrAction";
+import {
+  WORKSPACE_PR_STATE_ICON,
+  WORKSPACE_PR_STATE_MOTION,
+  deriveWorkspacePrAction,
+  workspacePrActionInput,
+} from "@/lib/workspacePrAction";
+import Icon from "@/components/Icon";
 
 // Compact top-nav PR control. This keeps PR management present without making
 // it a peer surface beside chat. Data comes from the workspace summary
@@ -107,6 +113,18 @@ export default function WorkspacePrBar(props: { workspace: string }) {
 
   return (
     <div class="ws-pr-bar" classList={{ [st().cssClass]: true }}>
+      {/* Same glyph and colour the sidebar row shows for this workspace, so the
+          two surfaces cannot describe the same PR differently. */}
+      <span
+        class={`workspace-git-state workspace-git-state-${st().state}`}
+        classList={{
+          [`workspace-git-state-motion-${WORKSPACE_PR_STATE_MOTION[st().state]}`]:
+            WORKSPACE_PR_STATE_MOTION[st().state] != null,
+        }}
+        title={st().title}
+      >
+        <Icon name={WORKSPACE_PR_STATE_ICON[st().state]} />
+      </span>
       <Show when={row()?.prNumber}>
         <button
           class="ws-pr-chip"

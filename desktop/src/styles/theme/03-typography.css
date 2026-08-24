@@ -1,0 +1,129 @@
+
+body,
+.app-root {
+    background-color: var(--lc-bg);
+    color: var(--lc-text);
+    font-family: "Mona Sans", "Adwaita Sans", "SF Pro Text", "Segoe UI", Cantarell, "Noto Sans", sans-serif;
+}
+
+.dev-instance-banner {
+    background-color: #6d28d9;
+    border-bottom: 1px solid #8b5cf6;
+    min-height: 30px;
+    padding: 5px 16px;
+}
+
+.dev-instance-banner-label {
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
+/* Empty GTK grouping selector (button, entry, combobox, textview, .workspace-card, ...) had no
+   declarations in the source and is a no-op. Preserved as a comment so nothing is lost:
+   button, entry, combobox, textview, .workspace-card, .shell-card, .metric-card, .kanban-column,
+   .workspace-row-shell, .project-row, .history-row, .nav-button, .nav-row, .ws-tab-shell,
+   .ws-tab-label, .ws-tab-close-icon, .chat-menu-item, .chat-composer-box, .chat-inline-event-chip,
+   .chat-inline-event-body, .settings-content-panel, .settings-inspector, .workspace-modal,
+   .workspace-modal-preview, .project-template-card {} */
+
+.dashboard,
+.page-shell,
+.history-view {
+    background-color: var(--lc-bg);
+    color: var(--lc-text);
+}
+
+.page-header,
+.dashboard-header {
+    padding: 24px 30px 12px 30px;
+    border-bottom: 1px solid #2a2a2a;
+    background-color: #1e1e1e;
+}
+
+.page-body,
+.detail-body,
+.page-board,
+.kanban-board {
+    padding: 24px 30px;
+}
+
+.dashboard-title {
+    color: #e4e4e4;
+    font-size: 22px;
+    font-weight: 600;
+}
+
+.dashboard-subtitle {
+    color: #8a8a8a;
+    font-size: 13px;
+}
+
+.section-title,
+.sidebar-header,
+.repo-section-header {
+    color: #8a8a8a;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+}
+
+.section-title {
+    margin-top: 8px;
+}
+
+.workspace-meta,
+.card-branch,
+.workspace-path-label,
+.detail-label {
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+}
+
+.card-meta,
+.workspace-meta,
+.detail-label,
+.project-tab,
+.column-count,
+.workspace-path-label {
+    color: #8a8a8a;
+}
+
+.detail-value,
+.metric-value,
+.column-title,
+.card-title,
+.workspace-name {
+    color: #e4e4e4;
+}
+
+.text-page-title {
+    color: #e4e4e4;
+    font-size: 22px;
+    font-weight: 600;
+}
+
+.text-section-title {
+    color: #8a8a8a;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+}
+
+.text-body {
+    color: #e4e4e4;
+    font-size: 13px;
+}
+
+.text-meta,
+.text-empty,
+.text-status {
+    color: #8a8a8a;
+    font-size: 13px;
+}
+
+.text-mono {
+    color: #b4b4b4;
+    font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;
+    font-size: 12px;
+}

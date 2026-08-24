@@ -1,0 +1,189 @@
+
+.client-switcher-button {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    min-height: 38px;
+    padding: 5px 8px;
+    /* No resting border or fill. This is the first thing in the sidebar, and a
+       bordered card there competed with the workspace rows below — the thing
+       people actually scan. The affordance arrives on hover instead. */
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    box-shadow: none;
+    text-shadow: none;
+    text-align: left;
+    transition:
+        background-color var(--mo-fast) var(--mo-in-out),
+        border-color var(--mo-fast) var(--mo-in-out);
+}
+
+.client-switcher-button:hover:not(:disabled) {
+    background: #1d1d1d;
+    border-color: #2c2c2c;
+}
+
+.client-switcher-button:hover:not(:disabled) .client-switcher-chevron {
+    color: var(--lc-text-muted);
+}
+
+.client-switcher-button:disabled {
+    opacity: 0.75;
+}
+
+/* Rounded tile behind the glyph. */
+.client-switcher-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 26px;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: #232323;
+    color: #a8a8a8;
+    transition:
+        background-color var(--mo-fast) var(--mo-in-out),
+        color var(--mo-fast) var(--mo-in-out);
+}
+
+/* Remote clients are tinted: "am I driving this machine or another one" is the
+   question this control exists to answer, and colour answers it before the
+   label is read. */
+.client-switcher-badge-remote {
+    background: rgba(123, 167, 212, 0.16);
+    color: #8fb4dc;
+}
+
+.client-switcher-button:hover:not(:disabled) .client-switcher-badge {
+    background: #2a2a2a;
+}
+
+.client-switcher-button:hover:not(:disabled) .client-switcher-badge-remote {
+    background: rgba(123, 167, 212, 0.24);
+}
+
+/* Icon renders a bare <svg viewBox> and drops the default `ui-icon` class when
+   given one, so these must set their own box — otherwise the SVG falls back to
+   the replaced-element default and swallows the row. */
+.client-switcher-icon {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    color: currentColor;
+}
+
+/* Environment-pinned: no menu will open, so show a static marker where the
+   chevron would be rather than leaving a gap. */
+.client-switcher-pinned {
+    flex: 0 0 6px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--lc-warning);
+    opacity: 0.7;
+}
+
+/* The two lines must not push the chevron off the row in a narrow sidebar. */
+.client-switcher-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.client-switcher-label {
+    color: var(--lc-text-strong);
+    font-size: 12.5px;
+    font-weight: 560;
+    letter-spacing: -0.005em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Pulled well back from the label: two lines at similar weight read as two
+   competing facts rather than as a name and its detail. */
+.client-switcher-address {
+    color: #7c7c7c;
+    font-size: 10.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-switcher-chevron {
+    width: 12px;
+    height: 12px;
+    flex: 0 0 12px;
+    color: #5f5f5f;
+    transition: color var(--mo-fast) var(--mo-in-out);
+}
+
+.sidebar.collapsed .client-switcher {
+    display: none;
+}
+
+/* Settings ▸ Clients: the same list the switcher shows, with management. */
+.client-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.client-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid #2f2f2f;
+    border-radius: 8px;
+    background: #1c1c1c;
+}
+
+.client-row.active {
+    border-color: var(--accent, #c9a227);
+}
+
+.client-row-icon {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    color: #9a9a9a;
+}
+
+.client-row-text {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.client-row-label {
+    color: #d2d2d2;
+    font-size: 13px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-row-address {
+    color: #8a8a8a;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.client-row-active {
+    color: var(--accent, #c9a227);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 0 8px;
+}

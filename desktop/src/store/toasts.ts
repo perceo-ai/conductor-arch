@@ -13,7 +13,15 @@ export interface Toast {
   kind: "error" | "info";
   message: string;
   action?: ToastAction;
+  /** Dismissed, but still mounted so its exit animation can play. Nothing else
+   *  should treat a leaving toast as live — see `dismiss`. */
+  leaving?: boolean;
 }
+
+/** Kept in step with the exit animation in motion/04-surfaces.css
+ *  (`.toast-item-leaving` uses --mo-fast). Erring long only delays removal of
+ *  an already-invisible element; erring short truncates the animation. */
+const TOAST_EXIT_MS = 160;
 
 let seq = 1;
 const [state, setState] = createStore<{ items: Toast[] }>({ items: [] });
@@ -32,7 +40,15 @@ export const toastsStore = {
     return this.push(message, "error", ttlMs);
   },
 
+  /** Two-step so the toast can animate out: mark it leaving, then unmount.
+   *  Guarded against a second call (auto-expire racing a click on Dismiss),
+   *  which would otherwise queue a duplicate removal and restart the exit. */
   dismiss(id: number): void {
-    setState("items", (items) => items.filter((t) => t.id !== id));
+    const toast = state.items.find((t) => t.id === id);
+    if (!toast || toast.leaving) return;
+    setState("items", (items) => items.map((t) => (t.id === id ? { ...t, leaving: true } : t)));
+    setTimeout(() => {
+      setState("items", (items) => items.filter((t) => t.id !== id));
+    }, TOAST_EXIT_MS);
   },
 };

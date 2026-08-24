@@ -1,0 +1,85 @@
+
+.repo-section-row {
+    padding: 0;
+}
+
+.repo-section-icon,
+.workspace-row-icon {
+    color: var(--lc-text-muted);
+}
+
+.workspace-row-icon-active {
+    color: var(--lc-text);
+}
+
+.repo-section-header {
+    color: var(--lc-text);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0;
+}
+
+.repo-section-count {
+    color: var(--lc-text-muted);
+    font-size: 13px;
+}
+
+.repo-header-add {
+    min-width: 24px;
+    min-height: 24px;
+    padding: 0;
+    color: var(--lc-text-muted);
+    border: none;
+}
+
+.repo-header-add:hover {
+    color: var(--lc-text);
+}
+
+.settings-cta {
+    background-color: #202020;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    padding: 12px 14px;
+}
+
+.action-row,
+.project-actions-row,
+.workspace-title-row {
+    margin-top: 2px;
+    margin-bottom: 2px;
+}
+
+.action-stack {
+    background-color: #202020;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    padding: 10px;
+}
+
+.toolbar-label {
+    color: #8a8a8a;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+}
+
+.action-input-row {
+    background-color: transparent;
+}
+
+.surface-note {
+    color: #8a8a8a;
+    font-size: 12px;
+}
+
+.modal-body {
+    background-color: #1e1e1e;
+    border: 1px solid #2a2a2a;
+    border-radius: 14px;
+    padding: 18px;
+}
+
+.workspace-modal {
+    padding: 18px;
+}

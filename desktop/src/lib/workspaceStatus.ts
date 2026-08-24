@@ -55,6 +55,36 @@ export const STATUS_LABEL: Record<WorkspaceStatusKind, string> = {
   archived: "Archived",
 };
 
+/**
+ * What is running in a workspace, for the sidebar row's activity indicator.
+ *
+ * The row used to borrow the dashboard's triage badges and render them as bare
+ * glyphs with their labels stripped — a brain for agent sessions, a play
+ * triangle for a run script, a git glyph for a PR. Unlabelled, those read as
+ * decoration rather than status: the brain in particular looked random, and the
+ * PR glyph duplicated the PR-state icon at the start of the row.
+ *
+ * The dashboard keeps the labelled badges, where the text carries the meaning.
+ * A sidebar row is a dense one-liner, so it gets one indicator that answers a
+ * single question — is anything live here — with the detail in its tooltip.
+ */
+export interface WorkspaceRowActivity {
+  /** Live things: agent sessions plus a running run-script. */
+  count: number;
+  title: string;
+}
+
+export function workspaceRowActivity(w: WorkspaceStatusInput): WorkspaceRowActivity | null {
+  const agents = w.activeSessions ?? 0;
+  const run = w.runRunning ? 1 : 0;
+  if (agents + run === 0) return null;
+
+  const parts: string[] = [];
+  if (agents > 0) parts.push(plural(agents, "agent session"));
+  if (run > 0) parts.push("run script");
+  return { count: agents + run, title: `${parts.join(" and ")} running` };
+}
+
 export type DashboardTriageBadgeTone = "agent" | "run" | "pr" | "changes" | "todo" | "task";
 
 export interface DashboardTriageBadge {

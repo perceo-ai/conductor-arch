@@ -1,0 +1,252 @@
+
+/* ---- File browser + changes/diff ---- */
+.ws-file-list,
+.ws-file-summary-panel {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  min-height: 0;
+}
+.ws-dir-row,
+.ws-file-row,
+.ws-file-summary-row-content {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  padding: 3px 8px;
+  background: transparent;
+  border: none;
+  color: var(--lc-text, #d4d4d4);
+  font-size: 13px;
+}
+.ws-dir-row:hover,
+.ws-file-row:hover,
+.ws-file-summary-row-content:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+/* Marks the row whose diff is showing below, so a narrowed diff is legible
+   rather than looking like the scope silently lost most of its content. */
+.ws-file-summary-row-selected {
+  background: var(--lc-surface-selected, #232323);
+  box-shadow: inset 2px 0 0 var(--lc-accent, #d4a94f);
+}
+.ws-folder-toggle,
+.ws-folder-icon,
+.ws-file-icon {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  width: 14px;
+  height: 14px;
+}
+.ws-file-name,
+.ws-folder-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-file-summary-state {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 11px;
+}
+.ws-file-summary-counts {
+  flex: 0 0 auto;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+}
+.ws-changes-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+/* Scope picker sits to the right of the title and takes the leftover width, so
+   a long commit subject truncates instead of pushing the title around. */
+.ws-changes-scope {
+  margin-left: auto;
+  min-width: 0;
+  max-width: 60%;
+}
+/* Which scope an opened file's diff is showing. */
+.ws-file-view-scope {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--code-border);
+  border-radius: 999px;
+  color: var(--lc-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.ws-commit-box {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-commit-box .ws-text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.ws-commits-section {
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+  padding: 8px 10px;
+}
+.ws-commits-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.ws-commits-log {
+  margin: 0;
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--lc-text-muted, #9a9a9a);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
+.ws-commit-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--lc-text-muted, #9a9a9a);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.ws-commit-row:hover {
+  background: var(--lc-hover-soft, rgba(255, 255, 255, 0.05));
+  color: var(--lc-text, #e6e6e6);
+}
+.ws-changes-title {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+.ws-changes-scope {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+}
+.ws-changes-tab {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+.ws-changes-tab .ws-file-summary-panel {
+  flex: 0 0 auto;
+  max-height: 45%;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-diff-view {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+}
+.ws-diff-text {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre;
+  padding: 12px 16px;
+  margin: 0;
+  color: #cfcfcf;
+}
+
+/* ---- Workspace command-center panels (todos/checkpoints/review) ---- */
+.ws-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 20px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.ws-tab-panel .action-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.ws-tab-panel .detail-row {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: baseline;
+}
+.ws-tab-panel .detail-label {
+  flex: 0 0 auto;
+  min-width: 120px;
+  color: var(--lc-text-muted, #8a8a8a);
+  font-size: 12px;
+}
+.ws-tab-panel .detail-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--lc-text, #d4d4d4);
+  overflow-wrap: anywhere;
+}
+/* Review comments and timeline events aren't key/value pairs: a long body/
+   summary squeezed into the remaining row width wraps one word per line in the
+   narrow panel. Stack the meta label over a full-width body instead. */
+.ws-tab-panel .detail-row.ws-review-comment,
+.ws-tab-panel .detail-row.ws-timeline-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-tab-panel .ws-review-comment .detail-value,
+.ws-tab-panel .ws-timeline-row .detail-value {
+  white-space: normal;
+}
+.ws-text-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  background: #151515;
+  color: var(--lc-text, #e4e4e4);
+  font: inherit;
+  outline: none;
+}
+.ws-text-input:focus {
+  border-color: #4f6a92;
+}
+.ws-tab-panel .suggested-action,
+.ws-tab-panel .secondary-action {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  background: #242424;
+  color: #cfcfcf;
+  cursor: pointer;
+}
+.ws-tab-panel .suggested-action {
+  background: #3a5a86;
+  border-color: #4f6a92;
+  color: #fff;
+}

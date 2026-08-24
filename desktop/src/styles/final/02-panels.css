@@ -1,0 +1,155 @@
+
+.ws-material-icon,
+.ws-folder-icon,
+.ws-file-icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  opacity: 0.94;
+}
+
+.ws-file-icon {
+  color: #c0c6cf;
+  fill: rgba(192, 198, 207, 0.24);
+}
+
+.ws-file-list {
+  padding: 6px;
+}
+
+.ws-dir-row,
+.ws-file-row {
+  min-height: 22px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  gap: 5px;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.ws-folder-name,
+.ws-file-name {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.ws-checks-panel-flat.command-panel,
+.ws-review-action-panel.command-panel {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.ws-right-body .ws-checks-panel-flat,
+.ws-right-body .ws-review-action-panel {
+  padding: 12px 14px;
+}
+
+.ws-right-body .ws-review-prompt-button {
+  height: 28px;
+  min-height: 28px;
+  padding: 0 9px;
+  border-radius: 5px;
+  font-size: 11px;
+}
+
+.ws-right-tabs .ws-review-prompt-button {
+  flex: 0 0 auto;
+  align-self: center;
+  height: 24px;
+  min-height: 24px;
+  margin-left: 2px;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 540;
+  white-space: nowrap;
+}
+
+.ws-right-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: hidden;
+}
+
+.ws-right-tabs .nav-button {
+  flex: 1 1 0;
+  min-width: 0;
+  justify-content: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.ws-right-tabs .nav-button > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-run-tab-bar {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ws-run-tabs-row {
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.ws-run-terminal-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 92px;
+}
+
+.ws-run-terminal-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-run-terminal-tab .ws-tab-close-button {
+  display: none;
+}
+
+.ws-run-terminal-tab:hover .ws-tab-close-button,
+.ws-run-terminal-tab.ws-run-tab-active .ws-tab-close-button {
+  display: inline-flex;
+}
+
+.ws-run-add,
+.ws-run-collapse-btn,
+.ws-run-tabs-row > .ws-run-tab-btn:not(.ws-run-terminal-tab) {
+  flex: 0 0 28px;
+}
+
+@media (max-width: 1100px) {
+  .chat-composer {
+    padding: 0 18px 16px;
+  }
+
+  .chat-messages {
+    padding: 20px 18px;
+  }
+}
+
+.ws-changes-commit-open {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lc-text-muted);
+  cursor: pointer;
+}
+.ws-changes-commit-open:hover {
+  color: var(--lc-text);
+}

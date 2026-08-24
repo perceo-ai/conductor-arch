@@ -8,11 +8,21 @@ const ARCHCAR_CLAUDE_HOOK_FLAG: &str = "--archcar-claude-hook";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeHookRequest {
-    PreToolUse { event_name: String },
+    PreToolUse {
+        event_name: String,
+    },
     PermissionRequest,
     AskUserQuestion,
     ExitPlanMode,
-    Unknown { event_name: String },
+    /// Fires after each tool call. Archductor uses it to remind a session that
+    /// its workspace summary has gone stale, without interrupting the turn.
+    PostToolUse,
+    /// Fires as the session starts, before any request. Carries Archductor's
+    /// standing contract and the summary the last session left behind.
+    SessionStart,
+    Unknown {
+        event_name: String,
+    },
 }
 
 impl ClaudeHookRequest {
@@ -22,9 +32,32 @@ impl ClaudeHookRequest {
             Self::PermissionRequest => "PermissionRequest",
             Self::AskUserQuestion => "AskUserQuestion",
             Self::ExitPlanMode => "ExitPlanMode",
+            Self::PostToolUse => "PostToolUse",
+            Self::SessionStart => "SessionStart",
             Self::Unknown { event_name } => event_name,
         }
     }
+
+    /// True for the events Archductor answers with context rather than a
+    /// permission decision.
+    pub fn is_context_event(&self) -> bool {
+        matches!(self, Self::PostToolUse | Self::SessionStart)
+    }
+}
+
+/// The hook reply that hands text to the model without deciding anything.
+pub fn encode_claude_hook_context(event_name: &str, context: &str) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": event_name,
+            "additionalContext": context,
+        }
+    })
+}
+
+/// A reply that says nothing, for a context event with nothing to add.
+pub fn encode_claude_hook_noop() -> Value {
+    json!({})
 }
 
 pub fn build_claude_hook_settings(executable: &Path, thread_id: i64) -> Value {
@@ -49,6 +82,17 @@ pub fn build_claude_hook_settings(executable: &Path, thread_id: i64) -> Value {
             }],
             "ExitPlanMode": [{
                 "matcher": "AskUserQuestion|ExitPlanMode",
+                "hooks": [hook.clone()]
+            }],
+            // Context maintenance, not permissions: these two let Archductor
+            // hand the session its workspace summary at the start and remind it
+            // when the summary has gone stale mid-run.
+            "SessionStart": [{
+                "matcher": ".*",
+                "hooks": [hook.clone()]
+            }],
+            "PostToolUse": [{
+                "matcher": ".*",
                 "hooks": [hook]
             }]
         }
@@ -70,6 +114,8 @@ pub fn classify_claude_hook_request(input: &Value) -> ClaudeHookRequest {
         "PermissionRequest" => ClaudeHookRequest::PermissionRequest,
         "AskUserQuestion" => ClaudeHookRequest::AskUserQuestion,
         "ExitPlanMode" => ClaudeHookRequest::ExitPlanMode,
+        "PostToolUse" => ClaudeHookRequest::PostToolUse,
+        "SessionStart" => ClaudeHookRequest::SessionStart,
         "PreToolUse" if tool_name == Some("AskUserQuestion") => ClaudeHookRequest::AskUserQuestion,
         "PreToolUse" if tool_name == Some("ExitPlanMode") => ClaudeHookRequest::ExitPlanMode,
         "PreToolUse" => ClaudeHookRequest::PreToolUse {
@@ -314,6 +360,40 @@ mod tests {
                     "permissionDecisionReason": "Keep planning"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn claude_hook_settings_register_the_context_events() {
+        let settings = build_claude_hook_settings(Path::new("/usr/local/bin/archductor"), 7);
+
+        for event in ["SessionStart", "PostToolUse"] {
+            let hook = &settings["hooks"][event][0]["hooks"][0];
+            assert_eq!(hook["command"], "/usr/local/bin/archductor", "{event}");
+            assert_eq!(hook["args"][1], "7", "{event}");
+        }
+    }
+
+    #[test]
+    fn context_events_are_classified_apart_from_permission_events() {
+        let session_start = classify_claude_hook_request(&json!({
+            "hook_event_name": "SessionStart"
+        }));
+        let post_tool = classify_claude_hook_request(&json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash"
+        }));
+        let permission = classify_claude_hook_request(&json!({
+            "hook_event_name": "PermissionRequest"
+        }));
+
+        assert!(session_start.is_context_event());
+        assert!(post_tool.is_context_event());
+        assert!(!permission.is_context_event());
+        assert_eq!(
+            encode_claude_hook_context("PostToolUse", "update your summary")["hookSpecificOutput"]
+                ["additionalContext"],
+            "update your summary"
         );
     }
 

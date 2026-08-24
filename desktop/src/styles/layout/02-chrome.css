@@ -1,0 +1,116 @@
+
+/* --- custom window chrome (frameless) --- */
+.window-controls {
+  position: fixed;
+  top: 0;
+  left: 0;
+  /* Match the 52px sidebar-chrome band and center within it so the window
+     buttons line up vertically with the back/forward/toggle buttons. */
+  height: 52px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  z-index: 100;
+  -webkit-app-region: no-drag;
+}
+.window-controls .chrome-button {
+  width: 46px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--lc-text-muted);
+}
+.window-controls .chrome-button:hover {
+  background: var(--lc-hover);
+  color: var(--lc-text-strong);
+}
+.window-controls .chrome-button.close:hover {
+  background: #b91c1c;
+  color: #fff;
+}
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+/* --- sidebar --- */
+/* Column widths (see lib/panelWidths.ts): both side columns are drag-sized and
+   may give ground as the window narrows, but never below their minimum, and
+   never past the centre column's own minimum. */
+.sidebar {
+  position: relative;
+  width: 280px;
+  min-width: 220px;
+  /* Cap by viewport share too: at the 900px minimum window the two side
+     columns and the centre's 360px minimum add up to exactly the width. */
+  max-width: min(420px, 30vw);
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--lc-border);
+  background: var(--lc-surface-muted);
+}
+
+/* --- draggable column resize handle --- */
+.resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 10;
+  cursor: col-resize;
+}
+.resize-handle-right {
+  right: -4px;
+}
+.resize-handle-left {
+  left: -4px;
+}
+/* Top-edge handle: drags vertically (bottom terminal dock). */
+.resize-handle-top {
+  top: -4px;
+  left: 0;
+  right: 0;
+  bottom: auto;
+  width: auto;
+  height: 8px;
+  cursor: row-resize;
+}
+.resize-handle-top::after {
+  top: 50%;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 2px;
+  transform: translateY(-50%);
+}
+body.resizing-row .resize-handle-top::after {
+  background: var(--lc-accent, #4b7bec);
+}
+body.resizing-row {
+  cursor: row-resize;
+  user-select: none;
+}
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.resize-handle:hover::after,
+body.resizing-col .resize-handle::after {
+  background: var(--lc-accent, #4b7bec);
+}
+body.resizing-col {
+  cursor: col-resize;
+  user-select: none;
+}

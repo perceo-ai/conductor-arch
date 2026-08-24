@@ -1,13 +1,27 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal, onMount, type JSX } from "solid-js";
-import { repositoriesStore, prefsStore, nav, clientsStore, dialogs } from "@/store";
+import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
+import { repositoriesStore, prefsStore, nav } from "@/store";
 import { ACCENT_HEX } from "@/store/prefs";
 import { checkForUpdates, openExternal, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS, modelLabel, providerLabel } from "@/lib/models";
 import { DEFAULT_SHORTCUTS, parseKeybindingOverrides } from "@/lib/shortcuts";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
 import { SetupReadinessCard } from "@/components/SetupReadiness";
-import Icon, { type IconName } from "@/components/Icon";
-import type { ServiceStatus } from "@/bridge/protocol";
+import Icon, {  } from "@/components/Icon";
+import {
+  SETTINGS_SECTIONS,
+  type SettingsSection,
+  SettingsBoolSelect,
+  SettingsNavButton,
+  SettingsRow,
+  SettingsSectionBlock,
+  SettingsTextInput
+} from "./settings/SettingsControls";
+import { readTomlValue, writeTomlValue, type TomlValueKind } from "./settings/toml";
+import {  setShortcutBinding, shortcutBindingKey } from "./settings/shortcuts";
+import { SkillsCard } from "./settings/SkillsCard";
+import { RemoteDaemonCard } from "./settings/RemoteDaemonCard";
+import { BackgroundServiceCard } from "./settings/BackgroundServiceCard";
+import { McpRegistrationCard } from "./settings/McpRegistrationCard";
 
 // Settings page — two panes per scope:
 //   Effective : the merged, read-only config (get_settings) for reference.
@@ -17,539 +31,6 @@ import type { ServiceStatus } from "@/bridge/protocol";
 // committed ("repository") or "local" override layer.
 
 type Layer = "repository" | "local";
-type SettingsSection = "general" | "clients" | "agents" | "repository" | "advanced";
-type TomlValueKind = "string" | "number" | "bool";
-
-function shortcutBindingKey(index: number): string {
-  const binding = DEFAULT_SHORTCUTS[index];
-  return binding.aliases?.[0] ?? binding.action;
-}
-
-function serializeShortcutBindings(bindings: typeof DEFAULT_SHORTCUTS): string {
-  return bindings
-    .map((binding, index) => ({ binding, index }))
-    .filter(({ binding }) => binding.keys.trim())
-    .map(({ binding, index }) => `${shortcutBindingKey(index)}=${binding.keys.trim()}`)
-    .join("; ");
-}
-
-function setShortcutBinding(index: number, keys: string) {
-  const current = parseKeybindingOverrides(prefsStore.state.keybindings, DEFAULT_SHORTCUTS);
-  current[index] = { ...current[index], keys };
-  prefsStore.setKeybindings(serializeShortcutBindings(current));
-}
-
-const SETTINGS_SECTIONS: Array<{
-  id: SettingsSection;
-  label: string;
-  group: string;
-  icon: IconName;
-}> = [
-  { id: "general", label: "General", group: "Personal", icon: "settings" },
-  { id: "clients", label: "Clients", group: "Archcars", icon: "panel-right" },
-  { id: "agents", label: "Agents", group: "Agents & environment", icon: "brain" },
-  { id: "repository", label: "Repository behavior", group: "Repositories", icon: "folder" },
-  { id: "advanced", label: "Advanced", group: "More", icon: "wrench" },
-];
-
-function SettingsNavButton(props: {
-  active: boolean;
-  icon: IconName;
-  label: string;
-  detail?: string;
-  onClick: () => void;
-}) {
-  return (
-    <button class="settings-nav-button" classList={{ active: props.active }} onClick={props.onClick}>
-      <Icon name={props.icon} class="settings-nav-icon" />
-      <span class="settings-nav-text">
-        <span class="settings-nav-label">{props.label}</span>
-        <Show when={props.detail}>
-          <span class="settings-nav-detail">{props.detail}</span>
-        </Show>
-      </span>
-    </button>
-  );
-}
-
-function SettingsSectionBlock(props: { title: string; children: JSX.Element }) {
-  return (
-    <section class="settings-section-block">
-      <h2>{props.title}</h2>
-      <div class="settings-section-list">{props.children}</div>
-    </section>
-  );
-}
-
-function SettingsRow(props: {
-  title: string;
-  description?: JSX.Element;
-  meta?: JSX.Element;
-  control?: JSX.Element;
-  accent?: boolean;
-}) {
-  return (
-    <div class="settings-row" classList={{ "settings-row-accent": props.accent }}>
-      <div class="settings-row-copy">
-        <div class="settings-row-title">{props.title}</div>
-        <Show when={props.description}>
-          <div class="settings-row-description">{props.description}</div>
-        </Show>
-        <Show when={props.meta}>
-          <div class="settings-row-meta">{props.meta}</div>
-        </Show>
-      </div>
-      <Show when={props.control}>
-        <div class="settings-row-control">{props.control}</div>
-      </Show>
-    </div>
-  );
-}
-
-function tomlSectionBounds(lines: string[], section: string): [number, number] | null {
-  const header = `[${section}]`;
-  const start = lines.findIndex((line) => line.trim() === header);
-  if (start < 0) return null;
-  let end = lines.length;
-  for (let index = start + 1; index < lines.length; index += 1) {
-    if (/^\s*\[[^\]]+\]\s*$/.test(lines[index])) {
-      end = index;
-      break;
-    }
-  }
-  return [start, end];
-}
-
-function readTomlValue(toml: string, section: string, key: string): string {
-  const lines = toml.split("\n");
-  const bounds = tomlSectionBounds(lines, section);
-  if (!bounds) return "";
-  const [, end] = bounds;
-  for (let index = bounds[0] + 1; index < end; index += 1) {
-    const match = lines[index].match(new RegExp(`^\\s*${key}\\s*=\\s*(.*)$`));
-    if (!match) continue;
-    const raw = match[1].trim();
-    if (raw.startsWith('"') && raw.endsWith('"')) {
-      try {
-        return JSON.parse(raw);
-      } catch {
-        return raw.slice(1, -1);
-      }
-    }
-    return raw;
-  }
-  return "";
-}
-
-function formatTomlValue(value: string, kind: TomlValueKind): string | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  if (kind === "bool") return trimmed === "true" ? "true" : trimmed === "false" ? "false" : null;
-  if (kind === "number") return /^-?\d+$/.test(trimmed) ? trimmed : null;
-  return JSON.stringify(value);
-}
-
-function writeTomlValue(toml: string, section: string, key: string, value: string, kind: TomlValueKind): string {
-  const formatted = formatTomlValue(value, kind);
-  const lines = toml.trimEnd().split("\n");
-  if (lines.length === 1 && lines[0] === "") lines.length = 0;
-  let bounds = tomlSectionBounds(lines, section);
-  if (!bounds && formatted == null) return toml;
-  if (!bounds) {
-    if (lines.length > 0 && lines[lines.length - 1].trim() !== "") lines.push("");
-    lines.push(`[${section}]`);
-    bounds = [lines.length - 1, lines.length];
-  }
-  const [start, end] = bounds;
-  const existing = lines.findIndex((line, index) => index > start && index < end && new RegExp(`^\\s*${key}\\s*=`).test(line));
-  if (formatted == null) {
-    if (existing >= 0) lines.splice(existing, 1);
-    return `${lines.join("\n").trimEnd()}\n`;
-  }
-  const next = `${key} = ${formatted}`;
-  if (existing >= 0) {
-    lines[existing] = next;
-  } else {
-    lines.splice(end, 0, next);
-  }
-  return `${lines.join("\n").trimEnd()}\n`;
-}
-
-function SettingsTextInput(props: {
-  value: string;
-  placeholder?: string;
-  onInput: (value: string) => void;
-}) {
-  return (
-    <input
-      class="settings-control"
-      value={props.value}
-      placeholder={props.placeholder}
-      onInput={(e) => props.onInput(e.currentTarget.value)}
-    />
-  );
-}
-
-function SettingsBoolSelect(props: { value: string; onInput: (value: string) => void }) {
-  return (
-    <select class="settings-control settings-boolean-control" value={props.value} onChange={(e) => props.onInput(e.currentTarget.value)}>
-      <option value="">Inherit</option>
-      <option value="true">On</option>
-      <option value="false">Off</option>
-    </select>
-  );
-}
-
-// Skills and MCP servers live in each agent's own config on the daemon's
-// machine, which drifts the moment you install something in one of them.
-function SkillsCard() {
-  const [skills, { refetch }] = createResource(async () => {
-    try {
-      const res = await send({ type: "list_skills" });
-      return res.type === "skills" ? res.skills : [];
-    } catch {
-      return [];
-    }
-  });
-  const [plan] = createResource(async () => {
-    try {
-      const res = await send({ type: "get_sync_plan", selection: {} });
-      return res.type === "sync_plan" ? res.plan : null;
-    } catch {
-      return null;
-    }
-  });
-
-  const pending = () => plan()?.actions.length ?? 0;
-
-  return (
-    <div class="settings-field settings-health-card">
-      <div class="settings-field-title">Skills</div>
-      <div class="settings-status">
-        {skills()?.length ?? 0} skill{(skills()?.length ?? 0) === 1 ? "" : "s"} installed across
-        this machine's agents. Type <code>/</code> in a chat to use one.
-      </div>
-      <div class="settings-status settings-hint">
-        <Show when={pending() > 0} fallback="Every agent is in sync.">
-          {pending()} change{pending() === 1 ? "" : "s"} would bring every agent into sync.
-        </Show>
-      </div>
-      <div class="settings-action-row">
-        <button
-          class="ui-button-secondary"
-          onClick={() => dialogs.open({ kind: "sync-skills" })}
-        >
-          Sync across agents…
-        </button>
-        <button class="ui-button-secondary" onClick={() => void refetch()}>
-          Refresh
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// Server-hosted execution: the daemons this machine can point at. One is
-// active and owns the workspaces/sessions you see; the app is a pure client of
-// it. The same selection moves this machine's CLI, because both read the
-// profile that `saveClients` mirrors. Day-to-day switching happens in the
-// sidebar; this card is where the list is managed.
-function RemoteDaemonCard() {
-  const [address, setAddress] = createSignal("");
-  const [label, setLabel] = createSignal("");
-  const [token, setToken] = createSignal("");
-  const [feedback, setFeedback] = createSignal("");
-
-  onMount(() => void clientsStore.refresh());
-
-  const busy = () => clientsStore.state.busy;
-
-  async function add() {
-    const addr = address().trim();
-    const tok = token().trim();
-    if (!addr || !tok) {
-      setFeedback("Address and token are required.");
-      return;
-    }
-    setFeedback("Connecting…");
-    const ok = await clientsStore.add({
-      label: label().trim() || undefined,
-      address: addr,
-      token: tok,
-    });
-    if (ok) {
-      setAddress("");
-      setLabel("");
-      setToken("");
-      setFeedback(`Connected to ${addr}.`);
-    } else {
-      setFeedback("Could not reach that daemon. Check the address and token.");
-    }
-  }
-
-  const rename = (id: string, current: string) =>
-    dialogs.open({
-      kind: "confirm",
-      title: `Rename ${current}`,
-      message: "Give this client a new name.",
-      confirmLabel: "Rename",
-      input: { label: "Name", initialValue: current },
-      onConfirm: (value) => {
-        if (value && value !== current) void clientsStore.rename(id, value);
-      },
-    });
-
-  const remove = (id: string, current: string) =>
-    dialogs.open({
-      kind: "confirm",
-      title: `Forget ${current}?`,
-      message: "The daemon keeps running; this machine just stops remembering how to reach it.",
-      confirmLabel: "Forget",
-      destructive: true,
-      onConfirm: () => void clientsStore.remove(id),
-    });
-
-  return (
-    <div class="settings-field settings-health-card">
-      <div class="settings-field-title">Clients</div>
-      <Show
-        when={!clientsStore.pinned()}
-        fallback={
-          <div class="settings-status">
-            ARCHDUCTOR_ARCHCAR_REMOTE pins this machine to {clientsStore.state.envAddress}; unset it
-            to manage saved clients here.
-          </div>
-        }
-      >
-        <div class="settings-status">
-          Switch between these anywhere with the picker above the sidebar.
-        </div>
-
-        <div class="client-rows">
-          <div class="client-row" classList={{ active: clientsStore.state.activeId === null }}>
-            <Icon name="monitor" class="client-row-icon" />
-            <span class="client-row-text">
-              <span class="client-row-label">This machine</span>
-              <span class="client-row-address">local daemon</span>
-            </span>
-            <Show
-              when={clientsStore.state.activeId !== null}
-              fallback={<span class="client-row-active">Active</span>}
-            >
-              <button
-                class="ui-button-secondary"
-                disabled={busy()}
-                onClick={() => void clientsStore.activate(null)}
-              >
-                Use
-              </button>
-            </Show>
-          </div>
-          <For each={clientsStore.state.clients}>
-            {(client) => (
-              <div
-                class="client-row"
-                classList={{ active: clientsStore.state.activeId === client.id }}
-              >
-                <Icon name="cloud" class="client-row-icon" />
-                <span class="client-row-text">
-                  <span class="client-row-label">{client.label}</span>
-                  <span class="client-row-address">{client.address}</span>
-                </span>
-                <Show
-                  when={clientsStore.state.activeId !== client.id}
-                  fallback={<span class="client-row-active">Active</span>}
-                >
-                  <button
-                    class="ui-button-secondary"
-                    disabled={busy()}
-                    onClick={() => void clientsStore.activate(client.id)}
-                  >
-                    Use
-                  </button>
-                </Show>
-                <button
-                  class="ui-button-secondary"
-                  disabled={busy()}
-                  onClick={() => rename(client.id, client.label)}
-                >
-                  Rename
-                </button>
-                <button
-                  class="ui-button-secondary"
-                  disabled={busy()}
-                  onClick={() => remove(client.id, client.label)}
-                >
-                  Forget
-                </button>
-              </div>
-            )}
-          </For>
-        </div>
-
-        <div class="settings-action-row">
-          <input
-            class="ws-text-input"
-            placeholder="name (optional)"
-            value={label()}
-            onInput={(e) => setLabel(e.currentTarget.value)}
-          />
-          <input
-            class="ws-text-input"
-            placeholder="host:port (e.g. devbox:7420)"
-            value={address()}
-            onInput={(e) => setAddress(e.currentTarget.value)}
-          />
-          <input
-            class="ws-text-input"
-            type="password"
-            placeholder="access token"
-            value={token()}
-            onInput={(e) => setToken(e.currentTarget.value)}
-          />
-          <button class="ui-button-secondary" disabled={busy()} onClick={() => void add()}>
-            Add
-          </button>
-        </div>
-        <div class="settings-status settings-hint">
-          On the other machine: `archductor service install --listen 0.0.0.0:7420`, then
-          `archductor service token` for the token. This machine's CLI follows the same
-          selection (`archductor remote list`).
-        </div>
-        <Show when={feedback()}>
-          <div class="settings-status">{feedback()}</div>
-        </Show>
-      </Show>
-    </div>
-  );
-}
-
-// Background service + remote access. The daemon has to be running for the app,
-// the CLI, and MCP clients to work, so the OS should keep it up; and a
-// token-guarded TCP listener is what lets a client on another machine reach it.
-function BackgroundServiceCard() {
-  const [status, { refetch }] = createResource(async (): Promise<ServiceStatus | null> => {
-    try {
-      const res = await send({ type: "get_service_status" });
-      return res.type === "service_status" ? res.status : null;
-    } catch {
-      return null;
-    }
-  });
-  const [access, { refetch: refetchAccess }] = createResource(async () => {
-    try {
-      const res = await send({ type: "get_remote_access" });
-      return res.type === "remote_access" ? res : null;
-    } catch {
-      return null;
-    }
-  });
-  const [busy, setBusy] = createSignal(false);
-  const [feedback, setFeedback] = createSignal("");
-  const [listen, setListen] = createSignal("7420");
-  const [showToken, setShowToken] = createSignal(false);
-
-  const supported = () => (status()?.manager ?? "unsupported") !== "unsupported";
-
-  const stateText = () => {
-    const current = status();
-    if (!current) return "Could not read the service status.";
-    if (!supported()) return "This platform has no supported per-user service manager.";
-    if (!current.installed) return "Not installed — archductor starts the daemon on demand.";
-    return `${current.manager}: ${current.running ? "running" : "installed, not running"}${
-      current.listen ? ` · listening on ${current.listen}` : ""
-    }`;
-  };
-
-  async function run(label: string, action: () => Promise<void>) {
-    if (busy()) return;
-    setBusy(true);
-    setFeedback(`${label}…`);
-    try {
-      await action();
-      await Promise.all([refetch(), refetchAccess()]);
-    } catch (err) {
-      setFeedback(`${label} failed: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const install = () =>
-    run("Installing service", async () => {
-      const res = await send({
-        type: "install_service",
-        input: { listen: listen().trim() || undefined },
-      });
-      setFeedback(res.type === "error" ? res.message : res.type === "service_status" ? res.status.detail : "");
-    });
-
-  const uninstall = () =>
-    run("Removing service", async () => {
-      const res = await send({ type: "uninstall_service" });
-      setFeedback(res.type === "error" ? res.message : "Service removed.");
-    });
-
-  const rotate = () =>
-    run("Rotating token", async () => {
-      const res = await send({ type: "rotate_remote_token" });
-      setFeedback(
-        res.type === "error" ? res.message : "Token rotated — existing remote clients must update.",
-      );
-    });
-
-  return (
-    <div class="settings-field settings-health-card">
-      <div class="settings-field-title">Background service &amp; remote access</div>
-      <div class="settings-status">{stateText()}</div>
-      <Show when={supported()}>
-        <div class="settings-action-row">
-          <input
-            class="ws-text-input settings-listen-input"
-            value={listen()}
-            title="Port or host:port. A bare port listens on loopback only."
-            onInput={(e) => setListen(e.currentTarget.value)}
-          />
-          <button class="ui-button-secondary" disabled={busy()} onClick={() => void install()}>
-            {status()?.installed ? "Reinstall service" : "Install service"}
-          </button>
-          <Show when={status()?.installed}>
-            <button class="ui-button-secondary" disabled={busy()} onClick={() => void uninstall()}>
-              Remove service
-            </button>
-          </Show>
-        </div>
-      </Show>
-      <Show when={access()}>
-        {(remote) => (
-          <>
-            <div class="settings-status">
-              Remote access token — anyone holding it can drive every workspace on this machine.
-            </div>
-            <div class="settings-action-row">
-              <code class="settings-token">
-                {showToken() ? remote().token : "•".repeat(24)}
-              </code>
-              <button class="ui-button-secondary" onClick={() => setShowToken((shown) => !shown)}>
-                {showToken() ? "Hide" : "Reveal"}
-              </button>
-              <button class="ui-button-secondary" disabled={busy()} onClick={() => void rotate()}>
-                Rotate
-              </button>
-            </div>
-            <div class="settings-status settings-hint">
-              On the other machine set ARCHDUCTOR_ARCHCAR_REMOTE=&lt;host&gt;:&lt;port&gt; and
-              ARCHDUCTOR_ARCHCAR_TOKEN=&lt;token&gt;. MCP clients run `archductor mcp serve`.
-            </div>
-          </>
-        )}
-      </Show>
-      <Show when={feedback()}>
-        <div class="settings-status">{feedback()}</div>
-      </Show>
-    </div>
-  );
-}
 
 export function SettingsPage() {
   const [activeSection, setActiveSection] = createSignal<SettingsSection>("general");
@@ -589,7 +70,7 @@ export function SettingsPage() {
         const res = await send({
           type: "get_settings_source",
           repository: repo(),
-          layer: repo() ? layer() : undefined,
+          layer: repo() ? layer() : undefined
         });
         return res.type === "settings_source" ? res.toml : "";
       } catch (err) {
@@ -650,7 +131,7 @@ export function SettingsPage() {
         type: "save_settings",
         repository: repo(),
         layer: repo() ? layer() : undefined,
-        toml,
+        toml
       });
       if (res.type === "settings_saved") {
         setStatus("Saved");
@@ -676,7 +157,7 @@ export function SettingsPage() {
               currentVersion: result.currentVersion,
               latestVersion: result.latestVersion,
               updateAvailable: result.updateAvailable,
-              releaseUrl: result.releaseUrl,
+              releaseUrl: result.releaseUrl
             }
           : { currentVersion: result.currentVersion, error: result.error },
       );
@@ -886,6 +367,7 @@ export function SettingsPage() {
             </SettingsSectionBlock>
             <SettingsSectionBlock title="Host Access">
               <BackgroundServiceCard />
+              <McpRegistrationCard />
               <SettingsRow
                 title="Multiple clients"
                 description="Hosted web, Perceo mobile, CLI, and MCP clients can all connect to the same listening archcar."
