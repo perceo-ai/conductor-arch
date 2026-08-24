@@ -118,6 +118,12 @@ describe("layout", () => {
     expect(collapseRegion(current, "center", true)).toBe(current);
   });
 
+  it("normalizes a persisted collapsed centre to visible", () => {
+    const current = layout();
+    current.regions.center.collapsed = true;
+    expect(sanitizeLayout(current).regions.center.collapsed).toBe(false);
+  });
+
   it("sanitizes unknown, duplicate, and wrong-kind panel ids", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const current = layout();

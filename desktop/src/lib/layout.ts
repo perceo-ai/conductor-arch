@@ -204,6 +204,7 @@ export function collapseRegion(layout: Layout, region: Region, collapsed: boolea
 export function sanitizeLayout(layout: unknown): Layout {
   if (!isLayout(layout)) return codeFallback();
   const next = cloneLayout(layout);
+  next.regions.center.collapsed = false;
   const seen = new Set<PanelId>();
   for (const region of REGIONS) {
     const stack = next.regions[region];
