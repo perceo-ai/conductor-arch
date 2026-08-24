@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-08-14.
+Current as of 2026-08-24.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -48,10 +48,13 @@ paths and known rough edges.
 - **PR handoff**: `draft_pull_request` builds a title/body from the summary,
   tasks, agent contributions, check evidence, and risks; `create_pull_request`
   is now reachable over archcar/CLI (previously core-only).
-- **Right panel tabs** are the strategy set: Tasks, Summary, Files, Changes,
-  Checks, Context, Review, PR. Nothing was dropped — Todos live under Tasks,
-  Timeline under Summary, Checkpoints under Changes, Processes moved into the
-  terminal dock. The dock is now a draggable, persisted vertical split.
+- **Modular workspace layouts** replace the fixed right-panel shell. Code is
+  the immutable compatibility layout; Wide, Review, and Watch are opt-in
+  built-ins. Chat, Summary, Files, Changes, Checks, Todos, Checkpoints,
+  Processes, Timeline, Context, the PR strip, and Terminal are registered
+  panels that can move only to valid regions. Editing a built-in forks it once.
+  Custom preset definitions live in archcar; active choice and region geometry
+  remain device-local.
 - **Left rail indicators**: active agent count, blocked-task and open-task
   chips, and PR state per workspace row; `blocked` is a new status kind that
   outranks running/review in the status dot.
@@ -225,6 +228,18 @@ in-process `core` access), so every state change must flow through an
 `desktop/src/lib/log.ts`; the Electron main process appends them plus every IPC
 request/response/event to `~/.local/state/archductor/desktop.log`. The archcar
 sidecar logs every RPC on its side (`log_archcar_rpc`).
+
+Workspace layout is now a first-class desktop/core/CLI path. The renderer builds
+the shell from a versioned layout model and panel registry instead of a fixed
+centre/right template. The top-bar Layout menu switches Code/Wide/Review/Watch,
+saves and renames user presets, confirms user-preset deletion, and writes a
+project default. Pointer drag uses a 4px threshold, valid-region targets, tab
+insertion carets, pointer capture, and Escape cancellation; panel menus provide
+the keyboard path. Region resize/collapse state remains local and responsive
+auto-collapse protects the centre at narrow widths. Archcar persists only user
+presets in `layout_presets`; built-ins are compiled in and cannot be overwritten
+or deleted. CLI parity is under `archductor layout` and `archductor archcar
+layout-presets`.
 
 State-changing archcar parity with the retired GTK flows (protocol + server
 handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
@@ -544,6 +559,31 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Modular workspace layouts on 2026-08-24:
+
+- Written verification passed: `cargo fmt --all -- --check`, clippy with
+  warnings denied for core/CLI/archcar, core library tests (886 passed, one
+  ignored), all CLI tests, desktop type-check/build, and 353 desktop tests.
+  The desktop total includes a real DOM regression proving that changing the
+  selected panel remounts its component instead of leaving the previous panel
+  body under new tab metadata.
+- Live CLI/archcar smoke used isolated `XDG_*` directories and a temporary Git
+  repository. It registered the repository, listed all four built-ins, saved a
+  custom preset through the raw RPC envelope, showed it through the CLI, marked
+  it as project default, listed it through the direct archcar command, restored
+  Code as default, deleted the custom preset, and confirmed it was absent. Only
+  the daemon started by the smoke was stopped.
+- Real production Electron smoke used an isolated daemon and seeded workspace.
+  It verified Code geometry; instant Wide/Review switching; a right-to-bottom
+  Changes drag surviving renderer reload; immutable built-in forking; PR strip
+  and Terminal dock kind preservation; keyboard menu movement; Escape drag
+  cancellation; restoration of Todos, Checkpoints, Processes, Timeline, and
+  Context; command-palette restoration of hidden Changes; 900px auto-collapse;
+  and reduced-motion computed styles. The visual pass found and fixed the stale
+  panel-body lifecycle bug described above.
+- Evidence: `.context/modular-layout-smoke/electron-review-layout.png` and
+  `.context/modular-layout-smoke/electron.log`.
 
 Client switcher on 2026-08-20:
 

@@ -143,6 +143,31 @@ Normal work happens in the desktop app; the CLI mirrors the same backend for aut
 5. **Ship.** Create, refresh, merge, and archive GitHub PRs through your local `gh` auth. Merge blockers (open todos, unresolved comments, failed or pending checks) are configurable.
 6. **Repeat or archive.** Archive the workspace, restore it later, or move on to the next task.
 
+### Workspace layouts
+
+The workspace top bar includes a Layout menu. **Code** preserves the original
+chat-centre/right-inspector arrangement; **Wide**, **Review**, and **Watch** are
+alternate built-ins. Built-ins are immutable: dragging, moving, hiding, or
+restoring a panel while one is active creates one editable `(<name> edited)`
+copy, leaving Code available as a recovery baseline.
+
+Panels can move by dragging their tab or through the keyboard-accessible panel
+menu. Regions can be resized or collapsed, and hidden panels can be restored
+from Layout or the command palette. Preset definitions sync through `archcar`;
+the active preset, region sizes, and collapsed regions stay local to each
+device. “Set as project default” writes
+`customization.view.default_layout_preset` to the repository-committed
+`.archductor/settings.toml` while preserving other keys.
+
+The same lifecycle is available from the CLI:
+
+```bash
+archductor layout presets --repository my-app
+archductor layout show wide
+archductor layout set-default wide --repository my-app
+archductor layout delete custom-my-layout
+```
+
 ## Configuration
 
 Shared project settings live at `.archductor/settings.toml` in the repository root; machine-local overrides go in `.archductor/settings.local.toml` (never commit secrets). Settings cover scripts, prompts, prompt-pack metadata, environment, Git behavior, naming, automation, agent profiles, merge rules, workspace defaults, and view preferences. Use `.worktreeinclude` to copy gitignored local files (like `.env`) into new workspaces.
@@ -163,6 +188,9 @@ Scripts and agent processes receive Archductor context via environment variables
 - File-editable repository settings (scripts, prompts, environment, Git behavior, merge rules, workspace/view defaults)
 - CLI parity with the app backend; export/import of shared and local settings bundles
 - Linked workspace directories (symlinked under `.context/linked-directories`)
+- Modular workspace layouts with four immutable built-ins, synced custom
+  presets, drag/menu movement, hide/restore, region sizing/collapse, and
+  per-project defaults
 
 **In progress 🚧**
 

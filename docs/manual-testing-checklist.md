@@ -311,6 +311,54 @@ Linear checks.
 - [ ] Confirm Repair Spotlight discards root-only edits and reapplies the active
   workspace patch only after explicit user action.
 
+## Workspace Layouts
+
+- [ ] Open a workspace after upgrading and confirm Code matches the previous
+  shell: Chat centre; PR strip plus Summary, Files, Changes, Checks, and
+  Terminal on the right; Changes active.
+- [ ] Switch Code → Wide → Review → Watch from the top-bar Layout menu and
+  confirm each applies immediately without reloading the workspace.
+- [ ] While Code is active, drag Changes from right to bottom. Confirm exactly
+  one `Code (edited)` user preset is created, later edits keep the same preset,
+  and immutable Code remains selectable.
+- [ ] Drag Files right-to-left, the PR strip right-to-left, and Terminal
+  right-to-bottom. Confirm the PR remains a strip, Terminal fills the bottom
+  dock, invalid regions never highlight, and the tab insertion caret matches
+  the final order.
+- [ ] Click a tab without crossing the 4px drag threshold and confirm it only
+  activates. Start a drag and press Escape; confirm the layout is unchanged and
+  subsequent pointer actions do not use stale drag listeners.
+- [ ] Use each panel's keyboard/context menu to move and hide it. Use Shift+F10
+  on a focused panel, Arrow keys/Home/End in the Layout menu, Enter to choose,
+  and Escape to close; confirm focus returns to the invoking control.
+- [ ] Hide Changes, then restore it from both Layout and the command palette.
+  Confirm Chat/file/commit/review commands reveal their required panel even
+  when it is hidden or its region is collapsed.
+- [ ] Restore and open each formerly unreachable panel individually: Todos,
+  Checkpoints, Processes, Timeline, and Context. Confirm each renders real
+  workspace data or its honest empty state.
+- [ ] Resize left, right, and bottom; collapse and reopen each side region;
+  relaunch the app and confirm sizes/collapse/active preset restore on this
+  device.
+- [ ] At a 900px-wide window, confirm the left region auto-collapses before the
+  right and the centre remains usable. Widen the window and confirm explicit
+  user collapse state is not overwritten.
+- [ ] Enable reduced motion in the OS and confirm drag ghost/drop-zone motion
+  and layout opacity/transform transitions are disabled.
+- [ ] Save a custom preset, rename it, relaunch, and confirm it survives. Delete
+  it through the in-app confirmation and confirm it disappears on another
+  client connected to the same daemon.
+- [ ] Set a custom preset as project default. On a client whose saved active id
+  is absent, open a workspace in that project and confirm the project default
+  wins; if that id is also absent, confirm Code is the recovery layout.
+- [ ] Disconnect/reconnect or switch archcar clients and confirm presets reload
+  from the newly active daemon while local region dimensions remain local.
+- [ ] Exercise CLI parity against a live daemon:
+  `archductor layout presets --repository <project>`,
+  `layout show <id>`, `layout set-default <id> --repository <project>`, and
+  `layout delete <user-id>`. Confirm `*` marks the project default and built-ins
+  are labelled `[built-in]`.
+
 ## Review And Merge
 
 - [ ] Make a small change in a workspace.
