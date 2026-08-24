@@ -6,6 +6,9 @@ import { actions } from "./actions";
 import { providersStore } from "./providers";
 import { setupStore } from "./setup";
 import { toastsStore } from "./toasts";
+import { layoutPresetsStore } from "./layoutPresets";
+import { nav } from "./nav";
+import { workspacesStore } from "./workspaces";
 
 // The saved daemons this machine can point at. One of them is active, or none
 // for this machine's local daemon. Main owns the files (clients.json plus the
@@ -53,6 +56,9 @@ async function resync(): Promise<void> {
   // The new daemon may know a different set of agents than the old one, so a
   // stale registry would offer providers this host cannot actually run.
   await providersStore.load().catch(() => undefined);
+  const selected = nav.selectedWorkspace();
+  const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
+  await layoutPresetsStore.load(repository).catch(() => undefined);
 }
 
 async function run(

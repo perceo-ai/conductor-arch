@@ -5939,6 +5939,41 @@ button.ws-tab-shell.ws-chat-new:hover {
   color: #929292;
 }
 
+.layout-preset-item {
+  gap: 6px;
+}
+
+.layout-preset-item.is-active {
+  color: var(--lc-text-strong, #f0f0f0);
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 11%, transparent);
+}
+
+.layout-preset-check {
+  width: 14px;
+  color: var(--lc-accent, #c39b50);
+  font-size: 11px;
+  text-align: center;
+}
+
+.layout-preset-badge {
+  margin-left: auto;
+  padding: 1px 5px;
+  border: 1px solid var(--ui-border, #2d2d2d);
+  border-radius: 999px;
+  color: var(--lc-text-muted, #858585);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+}
+
+.layout-preset-badge + .layout-preset-badge {
+  margin-left: 0;
+}
+
+.layout-menu-item.is-destructive {
+  color: var(--ui-danger, #e86f6f);
+}
+
 .layout-menu-separator {
   height: 1px;
   margin: 5px 4px;

@@ -100,11 +100,22 @@ export function mergePresets(presets: LayoutPreset[]): LayoutPreset[] {
   return [...builtinSources.map(clonePreset), ...users];
 }
 
+export function customPresetId(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return `custom-${crypto.randomUUID()}`;
+    }
+  } catch {
+    // Fall through when the renderer's crypto bridge is unavailable.
+  }
+  return `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function forkBuiltinPreset(id: string): LayoutPreset {
   const builtin = builtinSources.find((candidate) => candidate.id === id);
   if (!builtin) throw new Error(`Unknown built-in layout preset: ${id}`);
   const fork = clonePreset(builtin);
-  return { ...fork, id: `custom-${crypto.randomUUID()}`, name: `${fork.name} (edited)`, builtin: false };
+  return { ...fork, id: customPresetId(), name: `${fork.name} (edited)`, builtin: false };
 }
 
 export function presetAfterEdit(preset: LayoutPreset): LayoutPreset {

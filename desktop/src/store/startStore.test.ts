@@ -76,6 +76,9 @@ describe("startStore", () => {
           chat_threads: {},
         };
       }
+      if (req.type === "list_layout_presets") {
+        return { type: "layout_presets", presets: [] };
+      }
       return { type: "ack" };
     });
     const { startStore } = await import("./index");
@@ -83,6 +86,7 @@ describe("startStore", () => {
     await startStore();
 
     expect(api.request).toHaveBeenCalledWith({ type: "get_inventory_snapshot" });
+    expect(api.request).toHaveBeenCalledWith({ type: "list_layout_presets" });
     expect(api.request).not.toHaveBeenCalledWith({ type: "list_workspaces" });
     expect(api.request).not.toHaveBeenCalledWith({ type: "list_repositories" });
   });

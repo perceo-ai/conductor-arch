@@ -1,6 +1,8 @@
-import { Show, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, on, onCleanup, onMount } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
 import { layoutStore } from "@/store/layout";
+import { layoutPresetsStore } from "@/store/layoutPresets";
+import { toastsStore } from "@/store/toasts";
 import { openExternal, openWorkspaceApp } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
 import { runShellAction } from "@/lib/shellAction";
@@ -88,6 +90,20 @@ function TopBar(props: { workspace: string }) {
 
 export default function CommandCenter() {
   const workspace = () => nav.selectedWorkspace() ?? "";
+
+  createEffect(
+    on(
+      () => workspacesStore.row(workspace())?.repository,
+      (repository) => {
+        if (!repository) return;
+        if (layoutPresetsStore.loaded() && layoutPresetsStore.lastRepository() === repository) return;
+        void layoutPresetsStore
+          .load(repository)
+          .catch((error) => toastsStore.error(`Could not load layouts: ${(error as Error).message}`));
+      },
+    ),
+  );
+  onCleanup(() => layoutPresetsStore.cancelPendingSave());
 
   return (
     <Show when={workspace()} fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}>

@@ -4,6 +4,7 @@ import { nav } from "./nav";
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { threadsStore } from "./threads";
+import { layoutPresetsStore } from "./layoutPresets";
 
 export { nav } from "./nav";
 export { chatStore } from "./chat";
@@ -27,6 +28,7 @@ export type { Toast } from "./toasts";
 export { prefsStore } from "./prefs";
 export type { Prefs } from "./prefs";
 export { layoutStore } from "./layout";
+export { layoutPresetsStore } from "./layoutPresets";
 export { updateMetrics, metricsEnabled } from "./metrics";
 export { uiStore } from "./ui";
 
@@ -85,6 +87,9 @@ export function startStore(): Promise<void> {
     }
     await connectEvents((event) => applyEvent(event));
     await refreshInventory().catch(() => {});
+    const selected = nav.selectedWorkspace();
+    const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
+    await layoutPresetsStore.load(repository).catch(() => {});
   })();
   startPromise = attempt.catch((err) => {
     startPromise = null;

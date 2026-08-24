@@ -49,6 +49,7 @@ const [layout, setLayout] = createSignal<Layout>(deviceLayout(initial.layout));
 const [activePreset, setActivePreset] = createSignal<LayoutPreset>(clone(initial));
 const [hiddenPanels, setHiddenPanels] = createSignal<PanelId[]>([...initial.hidden]);
 const [focusedRegion, setFocusedRegion] = createSignal<Region>("center");
+let onEdited: ((preset: LayoutPreset) => void) | undefined;
 
 export const layoutStore = {
   layout,
@@ -56,6 +57,10 @@ export const layoutStore = {
   hiddenPanels,
   focusedRegion,
   setFocusedRegion,
+
+  onEdited(listener: ((preset: LayoutPreset) => void) | undefined) {
+    onEdited = listener;
+  },
 
   focusPanel(id: PanelId) {
     const escaped = id.replace(/[\\']/g, "\\$&");
@@ -97,7 +102,9 @@ export const layoutStore = {
     const visible = new Set(visiblePanelIds(next));
     const hidden = workspacePanels().map((panel) => panel.id).filter((id) => !visible.has(id));
     setHiddenPanels(hidden);
-    setActivePreset({ ...working, layout: clone(next), hidden: [...hidden] });
+    const edited = { ...working, layout: clone(next), hidden: [...hidden] };
+    setActivePreset(edited);
+    onEdited?.(clone(edited));
     return true;
   },
 
