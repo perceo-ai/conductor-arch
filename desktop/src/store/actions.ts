@@ -12,7 +12,7 @@ import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { nav } from "./nav";
 import { layoutStore } from "./layout";
-import { activatePanel, collapseRegion, showPanel, type PanelId, type Region } from "@/lib/layout";
+import { visiblePanelIds, type PanelId, type Region } from "@/lib/layout";
 import { panelDescriptor } from "@/lib/panelRegistry";
 
 async function refreshInventory(): Promise<void> {
@@ -50,15 +50,13 @@ export const actions = {
   revealPanel(panelId: PanelId, options: { activate?: boolean } = {}) {
     const descriptor = panelDescriptor(panelId);
     if (!descriptor) return;
-    layoutStore.mutate((layout) => {
-      let next = showPanel(layout, panelId);
-      const region = (["left", "center", "right", "bottom"] as Region[]).find((candidate) => {
-        const stack = next.regions[candidate];
+    if (!visiblePanelIds(layoutStore.layout()).includes(panelId)) layoutStore.showPanel(panelId);
+    const region = (["left", "center", "right", "bottom"] as Region[]).find((candidate) => {
+        const stack = layoutStore.layout().regions[candidate];
         return stack.panels.includes(panelId) || stack.strips.includes(panelId) || stack.docks.includes(panelId);
-      });
-      if (region) next = collapseRegion(next, region, false);
-      return options.activate === false ? next : activatePanel(next, panelId);
     });
+    if (region) layoutStore.collapseRegion(region, false);
+    if (options.activate !== false) layoutStore.activatePanel(panelId);
     layoutStore.focusPanel(panelId);
   },
 

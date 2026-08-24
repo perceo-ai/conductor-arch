@@ -1,13 +1,13 @@
 import { Show, onCleanup, onMount } from "solid-js";
 import { nav, workspacesStore, repositoriesStore } from "@/store";
 import { layoutStore } from "@/store/layout";
-import { collapseRegion } from "@/lib/layout";
 import { openExternal, openWorkspaceApp } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
 import { runShellAction } from "@/lib/shellAction";
 import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
 import WorkspaceWorkbench from "@/components/WorkspaceWorkbench";
+import LayoutControls from "@/components/LayoutControls";
 import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
 
 function TopBar(props: { workspace: string }) {
@@ -49,7 +49,7 @@ function TopBar(props: { workspace: string }) {
     openContextMenuAt(rect.left, rect.bottom + 4, openItems());
   }
   function toggleRight() {
-    layoutStore.mutate((layout) => collapseRegion(layout, "right", !rightCollapsed()));
+    layoutStore.collapseRegion("right", !rightCollapsed());
   }
   onMount(() => {
     const onOpen = () => {
@@ -67,6 +67,7 @@ function TopBar(props: { workspace: string }) {
         <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
       </div>
       <div class="ws-topbar-actions">
+        <LayoutControls workspace={props.workspace} />
         <button class="ws-open-menu-button ws-topbar-btn" aria-label="Open workspace" title="Open" ref={openButton} onClick={openMenu}>
           <Icon name="external" />
           <Icon name="chevron-down" class="ws-open-menu-chevron" />

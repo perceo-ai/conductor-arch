@@ -1,6 +1,18 @@
 import { createSignal } from "solid-js";
-import { activatePanel, sanitizeLayout, visiblePanelIds, type Layout, type PanelId, type Region } from "@/lib/layout";
-import { builtinPreset, type LayoutPreset } from "@/lib/layoutPresets";
+import {
+  activatePanel as activateLayoutPanel,
+  collapseRegion as collapseLayoutRegion,
+  hidePanel as hideLayoutPanel,
+  movePanel as moveLayoutPanel,
+  resizeRegion as resizeLayoutRegion,
+  sanitizeLayout,
+  showPanel as showLayoutPanel,
+  visiblePanelIds,
+  type Layout,
+  type PanelId,
+  type Region,
+} from "@/lib/layout";
+import { builtinPreset, presetAfterEdit, type LayoutPreset } from "@/lib/layoutPresets";
 import { workspacePanels } from "@/lib/panelRegistry";
 import { prefsStore } from "./prefs";
 
@@ -63,7 +75,7 @@ export const layoutStore = {
     const id = tabs[(currentIndex + delta + tabs.length) % tabs.length];
     const region = REGIONS.find((candidate) => layout().regions[candidate].panels.includes(id));
     if (!region) return undefined;
-    this.mutate((currentLayout) => activatePanel(currentLayout, id));
+    this.activatePanel(id);
     setFocusedRegion(region);
     this.focusPanel(id);
     return id;
@@ -77,11 +89,50 @@ export const layoutStore = {
   },
 
   mutate(change: (current: Layout) => Layout) {
-    const next = sanitizeLayout(change(clone(layout())));
+    const current = clone(layout());
+    const next = sanitizeLayout(change(current));
+    if (JSON.stringify(next) === JSON.stringify(layout())) return false;
+    const working = presetAfterEdit(clone(activePreset()));
     setLayout(next);
-    setActivePreset((preset) => ({ ...clone(preset), layout: clone(next) }));
     const visible = new Set(visiblePanelIds(next));
-    setHiddenPanels(workspacePanels().map((panel) => panel.id).filter((id) => !visible.has(id)));
+    const hidden = workspacePanels().map((panel) => panel.id).filter((id) => !visible.has(id));
+    setHiddenPanels(hidden);
+    setActivePreset({ ...working, layout: clone(next), hidden: [...hidden] });
+    return true;
+  },
+
+  activatePanel(id: PanelId) {
+    if (!visiblePanelIds(layout()).includes(id)) {
+      this.mutate((current) => activateLayoutPanel(current, id));
+      return;
+    }
+    setLayout(activateLayoutPanel(layout(), id));
+  },
+
+  movePanel(id: PanelId, region: Region, index: number) {
+    this.mutate((current) => moveLayoutPanel(current, id, region, index));
+  },
+
+  hidePanel(id: PanelId) {
+    this.mutate((current) => hideLayoutPanel(current, id));
+  },
+
+  showPanel(id: PanelId, region?: Region) {
+    this.mutate((current) => showLayoutPanel(current, id, region));
+  },
+
+  resizeRegion(region: Region, size: number) {
+    const next = resizeLayoutRegion(layout(), region, size);
+    setLayout(next);
+    prefsStore.setRegionSize(region, next.regions[region].size);
+  },
+
+  collapseRegion(region: Region, collapsed: boolean) {
+    const next = collapseLayoutRegion(layout(), region, collapsed);
+    setLayout(next);
+    if (next.regions[region].collapsed === collapsed) {
+      prefsStore.setRegionCollapsed(region, collapsed);
+    }
   },
 
   resetToCode() {

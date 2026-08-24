@@ -107,4 +107,39 @@ describe("layoutStore", () => {
     expect(layoutStore.cyclePanel(1)).toBe("files");
     expect(layoutStore.cyclePanel(-1)).toBe("checks");
   });
+
+  it("forks an immutable built-in once before arrangement edits", async () => {
+    const { layoutStore } = await import("./layout");
+
+    layoutStore.hidePanel("files");
+    const forkId = layoutStore.activePreset().id;
+    expect(layoutStore.activePreset()).toMatchObject({ builtin: false, name: "Code (edited)" });
+    expect(forkId).toMatch(/^custom-/);
+
+    layoutStore.movePanel("summary", "left", 0);
+    expect(layoutStore.activePreset().id).toBe(forkId);
+  });
+
+  it("keeps the centre usable and picks the nearest tab after hiding the active tab", async () => {
+    const { layoutStore } = await import("./layout");
+    layoutStore.hidePanel("changes");
+    expect(layoutStore.layout().regions.right.panels).toEqual(["summary", "files", "checks"]);
+    expect(layoutStore.layout().regions.right.active).toBe(2);
+
+    layoutStore.hidePanel("chat");
+    layoutStore.collapseRegion("center", true);
+    expect(layoutStore.layout().regions.center).toMatchObject({ panels: ["chat"], collapsed: false });
+  });
+
+  it("persists region sizes and collapses as device preferences", async () => {
+    const { layoutStore } = await import("./layout");
+    const { prefsStore } = await import("./prefs");
+
+    layoutStore.resizeRegion("left", 360);
+    layoutStore.collapseRegion("left", true);
+
+    expect(layoutStore.layout().regions.left).toMatchObject({ size: 360, collapsed: true });
+    expect(prefsStore.state.regionSizes.left).toBe(360);
+    expect(prefsStore.state.collapsedRegions).toContain("left");
+  });
 });

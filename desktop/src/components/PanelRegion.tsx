@@ -1,9 +1,12 @@
 import { For, Show, Suspense, createMemo } from "solid-js";
-import { activatePanel, type PanelId, type Region } from "@/lib/layout";
+import type { PanelId, Region } from "@/lib/layout";
 import { panelDescriptor } from "@/lib/panelRegistry";
 import { layoutStore } from "@/store/layout";
 import { workspacesStore } from "@/store/workspaces";
 import { ReviewPromptButton } from "@/pages/WorkspaceTabs";
+import Icon from "./Icon";
+import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
+import { announceLayout } from "./LayoutControls";
 
 function domId(region: Region, panel: PanelId, suffix: string) {
   return `workbench-${region}-${panel.replace(/[^a-zA-Z0-9_-]/g, "-")}-${suffix}`;
@@ -29,7 +32,7 @@ export default function PanelRegion(props: { workspace: string; region: Region }
   const showTabs = createMemo(() => stack().panels.length > 0);
 
   function activate(id: PanelId) {
-    layoutStore.mutate((layout) => activatePanel(layout, id));
+    layoutStore.activatePanel(id);
   }
 
   function focusTab(index: number) {
@@ -50,6 +53,39 @@ export default function PanelRegion(props: { workspace: string; region: Region }
     if (next === undefined) return;
     event.preventDefault();
     focusTab(next);
+  }
+
+  function canHide(id: PanelId) {
+    const center = layoutStore.layout().regions.center;
+    return !(
+      center.panels.includes(id) && center.panels.length === 1 && center.docks.length === 0
+    ) && !(
+      center.docks.includes(id) && center.docks.length === 1 && center.panels.length === 0
+    );
+  }
+
+  function panelMenu(id: PanelId): ContextMenuItem[] {
+    const descriptor = panelDescriptor(id);
+    if (!descriptor) return [];
+    const items = descriptor.regions.map((region) => ({
+      label: `Move to ${region[0].toUpperCase()}${region.slice(1)}`,
+      run: () => {
+        const stack = layoutStore.layout().regions[region];
+        const length = descriptor.kind === "tab" ? stack.panels.length : descriptor.kind === "strip" ? stack.strips.length : stack.docks.length;
+        layoutStore.movePanel(id, region, length);
+        announceLayout(`${descriptor.title} moved to ${region}.`);
+      },
+    }));
+    if (canHide(id)) {
+      items.push({
+        label: `Hide ${descriptor.title}`,
+        run: () => {
+          layoutStore.hidePanel(id);
+          announceLayout(`${descriptor.title} hidden.`);
+        },
+      });
+    }
+    return items;
   }
 
   return (
@@ -76,7 +112,14 @@ export default function PanelRegion(props: { workspace: string; region: Region }
               class="workbench-strip ws-right-topbar"
               data-panel-id={id}
               data-panel-kind="strip"
-              tabIndex={-1}
+              aria-label={descriptor.title}
+              tabIndex={0}
+              onContextMenu={(event) => openContextMenu(event, panelMenu(id))}
+              onKeyDown={(event) => {
+                if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                  openContextMenuFromKeyboard(event, panelMenu(id));
+                }
+              }}
             >
               <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
             </div>
@@ -97,24 +140,49 @@ export default function PanelRegion(props: { workspace: string; region: Region }
               if (!descriptor) return null;
               const selected = () => activeId() === id;
               return (
-                <button
-                  id={domId(props.region, id, "tab")}
-                  class="nav-button workbench-tab"
-                  classList={{ "nav-button-active": selected() }}
-                  role="tab"
-                  aria-selected={selected()}
-                  aria-controls={domId(props.region, id, "panel")}
-                  tabIndex={selected() ? 0 : -1}
+                <div
+                  class="workbench-tab-shell"
                   data-panel-id={id}
                   data-panel-kind="tab"
-                  onClick={() => activate(id)}
-                  onKeyDown={(event) => navigateTabs(event, index())}
+                  onContextMenu={(event) => openContextMenu(event, panelMenu(id))}
                 >
-                  <span>{descriptor.title}</span>
-                  <Show when={tabCount(id)}>
-                    {(count) => <span class="nav-button-count">{count()}</span>}
+                  <button
+                    id={domId(props.region, id, "tab")}
+                    class="nav-button workbench-tab"
+                    classList={{ "nav-button-active": selected() }}
+                    role="tab"
+                    aria-selected={selected()}
+                    aria-controls={domId(props.region, id, "panel")}
+                    tabIndex={selected() ? 0 : -1}
+                    onClick={() => activate(id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                        openContextMenuFromKeyboard(event, panelMenu(id));
+                      } else {
+                        navigateTabs(event, index());
+                      }
+                    }}
+                  >
+                    <span>{descriptor.title}</span>
+                    <Show when={tabCount(id)}>
+                      {(count) => <span class="nav-button-count">{count()}</span>}
+                    </Show>
+                  </button>
+                  <Show when={canHide(id)}>
+                    <button
+                      class="workbench-tab-close"
+                      aria-label={`Hide ${descriptor.title}`}
+                      title={`Hide ${descriptor.title}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        layoutStore.hidePanel(id);
+                        announceLayout(`${descriptor.title} hidden.`);
+                      }}
+                    >
+                      <Icon name="x" />
+                    </button>
                   </Show>
-                </button>
+                </div>
               );
             }}
           </For>
@@ -152,7 +220,19 @@ export default function PanelRegion(props: { workspace: string; region: Region }
           if (!descriptor) return null;
           const Component = descriptor.component;
           return (
-            <div class="workbench-dock" data-panel-id={id} data-panel-kind="dock" tabIndex={-1}>
+            <div
+              class="workbench-dock"
+              data-panel-id={id}
+              data-panel-kind="dock"
+              aria-label={descriptor.title}
+              tabIndex={0}
+              onContextMenu={(event) => openContextMenu(event, panelMenu(id))}
+              onKeyDown={(event) => {
+                if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                  openContextMenuFromKeyboard(event, panelMenu(id));
+                }
+              }}
+            >
               <Suspense><Component workspace={props.workspace} region={props.region} /></Suspense>
             </div>
           );

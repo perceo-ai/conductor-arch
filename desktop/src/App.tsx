@@ -26,7 +26,6 @@ import {
 } from "./store";
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
-import { collapseRegion } from "./lib/layout";
 import { installExternalLinkHandler } from "./lib/externalLinks";
 import { parseKeybindingOverrides, resolveShortcut, type ShortcutAction } from "./lib/shortcuts";
 
@@ -191,7 +190,7 @@ export default function App() {
           setSidebarCollapsed((c) => !c);
           break;
         case "toggle-right-panel":
-          layoutStore.mutate((layout) => collapseRegion(layout, "right", !layout.regions.right.collapsed));
+          layoutStore.collapseRegion("right", !layoutStore.layout().regions.right.collapsed);
           break;
         case "nav-back":
           nav.back();
