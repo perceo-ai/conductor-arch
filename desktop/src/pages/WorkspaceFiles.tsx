@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
 import { listWorkspaceFiles, send } from "@/bridge/client";
 import { materialFileIcon, materialFolderIcon } from "@/lib/materialFileIcons";
+import { openFileInCenter } from "./openFileBridge";
 
 // Right-panel "Browse" file tree — port of ws_simple_file_list. Core returns a
 // flat, capped file list (list_workspace_files); the tree is built client-side
@@ -102,6 +103,7 @@ function Row(props: {
 }
 
 export default function WorkspaceFiles(props: { workspace: string; rootPath?: string; openFile?: (path: string) => void }) {
+  const openFile = (path: string) => (props.openFile ?? ((file) => openFileInCenter(props.workspace, file)))(path);
   const [files] = createResource(
     () => ({ workspace: props.workspace, rootPath: props.rootPath }),
     async ({ workspace, rootPath }) => {
@@ -149,7 +151,7 @@ export default function WorkspaceFiles(props: { workspace: string; rootPath?: st
               depth={0}
               collapsed={collapsed}
               toggle={toggle}
-              openFile={props.openFile ?? (() => {})}
+              openFile={openFile}
             />
           )}
         </For>

@@ -1,11 +1,12 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // prefs drives the default model new chats start on. Runs in the node env where
 // localStorage is absent, so this also exercises the no-localStorage fallback.
 
 describe("prefsStore", () => {
   beforeEach(() => vi.resetModules());
+  afterEach(() => vi.unstubAllGlobals());
 
   it("defaults to a concrete codex model", async () => {
     const { prefsStore } = await import("./prefs");
@@ -51,6 +52,39 @@ describe("prefsStore", () => {
     expect(prefsStore.state.sidebarCollapsed).toBe(false);
     prefsStore.setSidebarCollapsed(true);
     expect(prefsStore.state.sidebarCollapsed).toBe(true);
+  });
+
+  it("defaults device-local layout preferences", async () => {
+    const { prefsStore } = await import("./prefs");
+    expect(prefsStore.state.activePresetId).toBe("code");
+    expect(prefsStore.state.regionSizes).toEqual({ left: 260, center: 0, right: 300, bottom: 280 });
+    expect(prefsStore.state.collapsedRegions).toEqual([]);
+    prefsStore.setActivePresetId("wide");
+    prefsStore.setRegionSize("bottom", 320);
+    prefsStore.setCollapsedRegions(["left"]);
+    expect(prefsStore.state.activePresetId).toBe("wide");
+    expect(prefsStore.state.regionSizes.bottom).toBe(320);
+    expect(prefsStore.state.collapsedRegions).toEqual(["left"]);
+  });
+
+  it("migrates legacy panel dimensions while retaining sidebar and terminal preferences", async () => {
+    const values = new Map<string, string>([
+      ["archductor.prefs.v1", JSON.stringify({ sidebarCollapsed: true })],
+      ["rightPanel.width", "333"],
+      ["terminalDock.height", "444"],
+    ]);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    });
+    const { prefsStore } = await import("./prefs");
+    expect(prefsStore.state.sidebarCollapsed).toBe(true);
+    expect(prefsStore.state.regionSizes.right).toBe(333);
+    expect(prefsStore.state.regionSizes.bottom).toBe(444);
+    expect(values.has("rightPanel.width")).toBe(false);
+    expect(values.get("terminalDock.height")).toBe("444");
+    expect(JSON.parse(values.get("archductor.prefs.v1")!).regionSizes).toMatchObject({ right: 333, bottom: 444 });
   });
 
   it("tracks custom keyboard bindings", async () => {
