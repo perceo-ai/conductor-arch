@@ -4,6 +4,7 @@ import { ACCENT_HEX } from "@/store/prefs";
 import { checkForUpdates, openExternal, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS, modelLabel, providerLabel } from "@/lib/models";
 import { DEFAULT_SHORTCUTS, parseKeybindingOverrides } from "@/lib/shortcuts";
+import { configuredShortcut } from "@/lib/configuredShortcut";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
 import { SetupReadinessCard } from "@/components/SetupReadiness";
 import Icon, {  } from "@/components/Icon";
@@ -691,7 +692,12 @@ export function SettingsPage() {
                 description="Save the individual settings above."
                 meta={status() || (dirty() ? "Unsaved changes" : "Saved")}
                 control={
-                  <button class="suggested-action" disabled={!dirty()} onClick={() => void save()}>
+                  <button
+                    class="suggested-action"
+                    disabled={!dirty()}
+                    data-shortcut={configuredShortcut("save")}
+                    onClick={() => void save()}
+                  >
                     Save
                   </button>
                 }

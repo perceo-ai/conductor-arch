@@ -7,6 +7,7 @@ import SetupModal from "./components/SetupModal";
 import Toasts from "./components/Toasts";
 import ContextMenu from "./components/ContextMenu";
 import CommandPalette from "./components/CommandPalette";
+import KeyboardHints from "./components/KeyboardHints";
 import ShortcutsHelp from "./components/ShortcutsHelp";
 import Icon from "./components/Icon";
 import { PageStack } from "./pages";
@@ -27,7 +28,12 @@ import {
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
 import { installExternalLinkHandler } from "./lib/externalLinks";
-import { parseKeybindingOverrides, resolveShortcut, type ShortcutAction } from "./lib/shortcuts";
+import {
+  parseKeybindingOverrides,
+  resolveShortcut,
+  shortcutForAction,
+  type ShortcutAction,
+} from "./lib/shortcuts";
 
 const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
   "toggle-sidebar",
@@ -357,7 +363,11 @@ export default function App() {
             onToggle={() => setSidebarCollapsed((c) => !c)}
           />
           <Show when={sidebarCollapsed()}>
-            <button class="ui-button-icon reopen-sidebar" onClick={() => setSidebarCollapsed(false)}>
+            <button
+              class="ui-button-icon reopen-sidebar"
+              data-shortcut={shortcutForAction("toggle-sidebar", activeShortcuts())}
+              onClick={() => setSidebarCollapsed(false)}
+            >
               <Icon name="panel-right" />
             </button>
           </Show>
@@ -369,6 +379,7 @@ export default function App() {
       <Toasts />
       <ContextMenu />
       <CommandPalette />
+      <KeyboardHints />
       <ShortcutsHelp
         open={helpOpen()}
         shortcuts={activeShortcuts()}

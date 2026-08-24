@@ -8,6 +8,16 @@ import Icon from "./Icon";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import { announceLayout } from "./LayoutControls";
 import { usePanelDnd } from "./PanelDnd";
+import { configuredShortcut } from "@/lib/configuredShortcut";
+import type { ShortcutAction } from "@/lib/shortcuts";
+
+const PANEL_SHORTCUTS: Partial<Record<PanelId, ShortcutAction>> = {
+  changes: "show-changes",
+  files: "show-files",
+  checks: "show-checks",
+  summary: "show-summary",
+  terminal: "toggle-terminal",
+};
 
 function domId(region: Region, panel: PanelId, suffix: string) {
   return `workbench-${region}-${panel.replace(/[^a-zA-Z0-9_-]/g, "-")}-${suffix}`;
@@ -167,6 +177,7 @@ export default function PanelRegion(props: { workspace: string; region: Region }
                     aria-selected={selected()}
                     aria-controls={domId(props.region, id, "panel")}
                     tabIndex={selected() ? 0 : -1}
+                    data-shortcut={PANEL_SHORTCUTS[id] ? configuredShortcut(PANEL_SHORTCUTS[id]!) : undefined}
                     onClick={() => activate(id)}
                     onPointerDown={(event) => dnd.begin(event, id)}
                     onKeyDown={(event) => {

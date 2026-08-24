@@ -12,6 +12,7 @@ import WorkspaceWorkbench from "@/components/WorkspaceWorkbench";
 import LayoutControls from "@/components/LayoutControls";
 import PanelDnd from "@/components/PanelDnd";
 import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
+import { configuredShortcut } from "@/lib/configuredShortcut";
 
 function TopBar(props: { workspace: string }) {
   let openButton: HTMLButtonElement | undefined;
@@ -71,7 +72,14 @@ function TopBar(props: { workspace: string }) {
       </div>
       <div class="ws-topbar-actions">
         <LayoutControls workspace={props.workspace} />
-        <button class="ws-open-menu-button ws-topbar-btn" aria-label="Open workspace" title="Open" ref={openButton} onClick={openMenu}>
+        <button
+          class="ws-open-menu-button ws-topbar-btn"
+          aria-label="Open workspace"
+          title="Open"
+          data-shortcut={configuredShortcut("open-menu")}
+          ref={openButton}
+          onClick={openMenu}
+        >
           <Icon name="external" />
           <Icon name="chevron-down" class="ws-open-menu-chevron" />
         </button>
@@ -79,6 +87,7 @@ function TopBar(props: { workspace: string }) {
           class="ui-button-icon ws-topbar-btn"
           aria-label={rightCollapsed() ? "Show right panel" : "Collapse right panel"}
           title={rightCollapsed() ? "Show right panel" : "Collapse right panel"}
+          data-shortcut={configuredShortcut("toggle-right-panel")}
           onClick={toggleRight}
         >
           <Icon name={rightCollapsed() ? "panel-left" : "panel-right"} />

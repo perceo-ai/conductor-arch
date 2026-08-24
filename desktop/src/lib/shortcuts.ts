@@ -260,6 +260,14 @@ export function formatShortcutKeys(keys: string): string {
     .join(" ");
 }
 
+export function shortcutForAction(
+  action: ShortcutAction,
+  shortcuts: ShortcutMap = DEFAULT_SHORTCUTS,
+): string | undefined {
+  const binding = shortcuts.find((candidate) => candidate.action === action && candidate.keys);
+  return binding ? formatShortcutKeys(binding.keys) : undefined;
+}
+
 export function shortcutHelp(shortcuts: ShortcutMap = DEFAULT_SHORTCUTS): { keys: string; label: string }[] {
   return shortcuts
     .filter((binding) => binding.keys)

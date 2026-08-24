@@ -20,6 +20,7 @@ import { Timeline } from "./chat/Timeline";
 import { Composer } from "./chat/Composer";
 import { FileView, CommitView } from "./chat/FileViews";
 import { InteractionBanner, PlanCard } from "./chat/Interactions";
+import { configuredShortcut } from "@/lib/configuredShortcut";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, and a content stack showing either the chat timeline or a file's diff,
@@ -197,7 +198,12 @@ export default function ChatSurface(props: { workspace: string }) {
         </div>
         {/* Pinned outside the scroller: opening a new chat must not require
             scrolling past every tab you already have. */}
-        <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
+        <button
+          class="ui-button-icon ws-chat-new"
+          title="New chat"
+          data-shortcut={configuredShortcut("new-chat")}
+          onClick={() => void newChat()}
+        >
           <Icon name="plus" />
         </button>
       </div>
@@ -246,4 +252,3 @@ export default function ChatSurface(props: { workspace: string }) {
     </div>
   );
 }
-

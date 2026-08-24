@@ -9,6 +9,7 @@ import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
 import type { Region } from "@/lib/layout";
+import { configuredShortcut } from "@/lib/configuredShortcut";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
 // collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
@@ -381,7 +382,12 @@ export default function TerminalDock(props: { workspace: string; region?: Region
           </div>
         </Show>
         <Show when={isRightDock()}>
-          <button class="ws-run-collapse-btn" title={expanded() ? "Collapse" : "Expand"} onClick={toggle}>
+          <button
+            class="ws-run-collapse-btn"
+            title={expanded() ? "Collapse" : "Expand"}
+            data-shortcut={configuredShortcut("toggle-terminal")}
+            onClick={toggle}
+          >
             <Icon name={expanded() ? "chevron-down" : "chevron-up"} />
           </button>
         </Show>

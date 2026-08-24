@@ -641,6 +641,31 @@ If one layer is skipped, say exactly why.
 
 ## Recent Verification
 
+Peek previews and keyboard continuity on 2026-08-24:
+
+- Workspaces, repositories, the active machine, and explanatory Settings rows
+  now expose read-only contextual Peeks after hover intent or immediately on
+  keyboard focus. Peeks never take focus, close on leave/blur/Escape, and flip
+  and clamp inside the viewport; every mutation still requires entering or
+  clicking the underlying surface.
+- The machine switcher now uses the same 30px row and 14px icon alignment as
+  Dashboard and History. Its connection address moved into the Peek. The
+  command palette is a modal combobox/listbox with a focus trap, inert
+  background, arrow navigation, and exact opener-focus restoration. Holding
+  Alt temporarily labels visible enabled controls with their current configured
+  shortcuts without moving focus or inventing bindings.
+- Written verification passed: all 458 desktop tests, desktop type-check, and
+  the production Electron build. A real Electron smoke of the production
+  renderer and preload measured the machine and Dashboard rows at 30px with
+  both icons at x=14, confirmed both machine and Settings Peeks are read-only,
+  confirmed command-palette
+  open/trap/close/focus restoration, and confirmed Alt badges appear and
+  dismiss without changing focus. Evidence:
+  `.context/peek-actions-smoke/settings-peek.png`.
+- CLI smoke was not run because this change has no CLI, daemon, protocol, or
+  persisted-settings behavior; the shortcut bindings it displays remain the
+  existing renderer-local preference map.
+
 Modular workspace layouts on 2026-08-24:
 
 - Written verification passed: `cargo fmt --all -- --check`, clippy with

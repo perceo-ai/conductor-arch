@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SHORTCUTS,
   shortcutHelp,
+  shortcutForAction,
   parseKeybindingOverrides,
   resolveShortcut,
   SHORTCUT_HELP,
@@ -152,5 +153,12 @@ describe("resolveShortcut", () => {
   it("renders help from the active keymap", () => {
     const shortcuts = parseKeybindingOverrides("palette=ctrl+p", DEFAULT_SHORTCUTS);
     expect(shortcutHelp(shortcuts).find((r) => r.label === "Command palette")?.keys).toBe("⌘/Ctrl P");
+  });
+
+  it("returns the formatted active binding for a button action", () => {
+    const shortcuts = parseKeybindingOverrides("settings=ctrl+.; palette=ctrl+p", DEFAULT_SHORTCUTS);
+
+    expect(shortcutForAction("goto-settings", shortcuts)).toBe("⌘/Ctrl .");
+    expect(shortcutForAction("open-palette", shortcuts)).toBe("⌘/Ctrl P");
   });
 });

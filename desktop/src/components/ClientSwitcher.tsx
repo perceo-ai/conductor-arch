@@ -3,6 +3,7 @@ import { onMount, Show } from "solid-js";
 import { clientsStore, dialogs, nav } from "@/store";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import Icon from "./Icon";
+import PeekCard from "./PeekCard";
 
 // Which machine you are working on, above the nav. Archductor can hold any
 // number of saved daemons; this is how you move between them without going
@@ -40,7 +41,7 @@ export default function ClientSwitcher() {
   };
 
   const subtitle = () => {
-    if (clientsStore.pinned()) return "pinned by environment";
+    if (clientsStore.pinned()) return clientsStore.state.envAddress ?? "pinned by environment";
     const state = clientsStore.state;
     const active = state.clients.find((c) => c.id === state.activeId);
     return active?.address ?? "local daemon";
@@ -48,19 +49,48 @@ export default function ClientSwitcher() {
 
   return (
     <div class="client-switcher">
-      <button
-        class="client-switcher-button"
-        disabled={clientsStore.state.busy || clientsStore.pinned()}
-        title={
-          clientsStore.pinned()
-            ? `ARCHDUCTOR_ARCHCAR_REMOTE pins this app to ${clientsStore.state.envAddress}`
-            : "Switch client"
+      <PeekCard
+        content={
+          <div class="peek-content client-switcher-peek">
+            <div class="peek-eyebrow">Current client</div>
+            <div class="peek-title-row"><strong>{clientsStore.activeLabel()}</strong></div>
+            <dl class="peek-facts">
+              <div>
+                <dt>Connection</dt>
+                <dd>{subtitle()}</dd>
+              </div>
+              <div>
+                <dt>Scope</dt>
+                <dd>{clientsStore.state.activeId === null ? "This device" : "Remote machine"}</dd>
+              </div>
+            </dl>
+            <Show when={clientsStore.pinned()}>
+              <div class="peek-meta">Pinned by ARCHDUCTOR_ARCHCAR_REMOTE</div>
+            </Show>
+          </div>
         }
-        onClick={(e) => openContextMenu(e, items())}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") openContextMenuFromKeyboard(e, items());
-        }}
       >
+        {(peek) => (
+          <button
+            {...peek}
+            class="client-switcher-button"
+            disabled={clientsStore.state.busy}
+            aria-disabled={clientsStore.pinned() ? "true" : undefined}
+            aria-label={
+              clientsStore.pinned()
+                ? `ARCHDUCTOR_ARCHCAR_REMOTE pins this app to ${clientsStore.state.envAddress}`
+                : `Switch client; current client is ${clientsStore.activeLabel()}`
+            }
+            onClick={(e) => {
+              if (!clientsStore.pinned()) openContextMenu(e, items());
+            }}
+            onKeyDown={(e) => {
+              if (typeof peek.onKeyDown === "function") peek.onKeyDown(e);
+              if (!clientsStore.pinned() && (e.key === "Enter" || e.key === " ")) {
+                openContextMenuFromKeyboard(e, items());
+              }
+            }}
+          >
         {/* The glyph sits in its own tile so the control reads as "an identity
             you can change" rather than as a labelled icon in a box. The tile
             is tinted by kind, which is the fastest way to tell at a glance
@@ -74,10 +104,9 @@ export default function ClientSwitcher() {
             class="client-switcher-icon"
           />
         </span>
-        <span class="client-switcher-text">
-          <span class="client-switcher-label">{clientsStore.activeLabel()}</span>
-          <span class="client-switcher-address">{subtitle()}</span>
-        </span>
+            <span class="client-switcher-text">
+              <span class="client-switcher-label">{clientsStore.activeLabel()}</span>
+            </span>
         {/* A pinned client cannot be switched, so it gets a lock-ish cue
             instead of the chevron that implies a menu. */}
         <Show when={clientsStore.pinned()}>
@@ -86,7 +115,9 @@ export default function ClientSwitcher() {
         <Show when={!clientsStore.pinned()}>
           <Icon name="chevron-down" class="client-switcher-chevron" />
         </Show>
-      </button>
+          </button>
+        )}
+      </PeekCard>
     </div>
   );
 }

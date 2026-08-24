@@ -9,6 +9,8 @@ import {
   workspacePrActionInput,
 } from "@/lib/workspacePrAction";
 import Icon from "@/components/Icon";
+import { configuredShortcut } from "@/lib/configuredShortcut";
+import type { ShortcutAction } from "@/lib/shortcuts";
 
 // Compact top-nav PR control. This keeps PR management present without making
 // it a peer surface beside chat. Data comes from the workspace summary
@@ -38,6 +40,13 @@ export default function WorkspacePrBar(props: { workspace: string }) {
 
   const row = () => workspacesStore.row(props.workspace);
   const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checks())));
+  const actionShortcut = (): ShortcutAction | undefined => {
+    if (st().action === "create") return "create-pr";
+    if (st().action === "push") return "push-branch";
+    if (st().action === "merge") return "merge-pr";
+    if (st().action === "view") return "open-pr-github";
+    return undefined;
+  };
 
   function providerKind(provider: string): SessionKind {
     const p = provider.toLowerCase();
@@ -129,6 +138,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
         <button
           class="ws-pr-chip"
           title="Open pull request"
+          data-shortcut={configuredShortcut("open-pr-github")}
           onClick={() => {
             const url = row()?.prUrl;
             if (url) void openExternal(url);
@@ -141,6 +151,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
       <button
         class="ws-pr-action-button"
         disabled={st().action === "none" || busy()}
+        data-shortcut={actionShortcut() ? configuredShortcut(actionShortcut()!) : undefined}
         onClick={() => void runAction()}
       >
         {busy() ? "…" : (st().actionLabel ?? "Clean")}

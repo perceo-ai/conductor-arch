@@ -1,0 +1,245 @@
+/* Read-only contextual previews. They are portals, so every visual property
+   lives on the card rather than depending on the trigger's stacking context. */
+.peek-card {
+  position: fixed;
+  z-index: 1200;
+  width: min(300px, calc(100vw - 20px));
+  max-height: min(420px, calc(100vh - 20px));
+  overflow: hidden;
+  padding: 12px;
+  border: 1px solid var(--lc-border-strong, #363636);
+  border-radius: 10px;
+  background: var(--lc-surface-raised, #1a1a1a);
+  color: var(--lc-text, #d4d4d4);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.42);
+  pointer-events: none;
+  animation: mo-scale-in var(--mo-fast) var(--mo-out) both;
+  transform-origin: left top;
+}
+
+.peek-card-left {
+  transform-origin: right top;
+}
+
+.peek-content {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.peek-eyebrow {
+  color: var(--lc-text-muted, #858585);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.065em;
+  text-transform: uppercase;
+}
+
+.peek-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--lc-text-strong, #ededed);
+  font-size: 13px;
+}
+
+.peek-title-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peek-state {
+  flex: 0 0 auto;
+  margin-left: auto;
+  border: 1px solid var(--lc-border, #2b2b2b);
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: var(--lc-text-muted, #969696);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.peek-branch,
+.peek-path,
+.peek-meta {
+  overflow: hidden;
+  color: var(--lc-text-muted, #8c8c8c);
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peek-path {
+  border-top: 1px solid var(--lc-border, #292929);
+  padding-top: 7px;
+}
+
+.peek-description {
+  color: var(--lc-text, #c8c8c8);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.peek-facts {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 2px 0 0;
+}
+
+.peek-facts > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.peek-facts dt,
+.peek-facts dd {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.peek-facts dt {
+  color: var(--lc-text-muted, #858585);
+}
+
+.peek-facts dd {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--lc-text, #cecece);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.peek-diff-add,
+.peek-diff-delete {
+  margin-left: 6px;
+  font-weight: 700;
+}
+
+.peek-diff-add { color: #74d69a; }
+.peek-diff-delete { color: #f17f7f; }
+
+/* The machine selector shares the same horizontal and vertical rhythm as the
+   Dashboard/History rows. Connection detail now belongs to its Peek. */
+.client-switcher {
+  padding: 6px 6px 0;
+}
+
+.client-switcher-button {
+  min-height: 30px;
+  height: 30px;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+}
+
+.client-switcher-badge {
+  flex-basis: 14px;
+  width: 14px;
+  height: 14px;
+  border-radius: 0;
+  background: transparent;
+  color: #9a9a9a;
+}
+
+.client-switcher-badge-remote,
+.client-switcher-button:hover:not(:disabled) .client-switcher-badge,
+.client-switcher-button:hover:not(:disabled) .client-switcher-badge-remote {
+  background: transparent;
+}
+
+.client-switcher-badge-remote { color: #8fb4dc; }
+
+.client-switcher-text {
+  flex-direction: row;
+  align-items: center;
+  line-height: 1;
+}
+
+.client-switcher-label {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Settings explanations remain visible in-row; this quiet help target makes
+   the same context available before entering or changing a setting. */
+.settings-row-title-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.settings-row-peek-trigger {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--lc-text-muted, #858585);
+  opacity: 0;
+  outline: none;
+  transition: color var(--mo-fast) var(--mo-in-out), opacity var(--mo-fast) var(--mo-in-out);
+}
+
+.settings-row-peek-trigger .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.settings-row:hover .settings-row-peek-trigger,
+.settings-row:focus-within .settings-row-peek-trigger,
+.settings-row-peek-trigger:focus-visible {
+  opacity: 1;
+}
+
+.settings-row-peek-trigger:focus-visible {
+  color: var(--lc-accent, #c39b50);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--lc-accent, #c39b50) 38%, transparent);
+}
+
+/* Alt is a temporary visual mode only: the fixed layer cannot receive input. */
+.keyboard-hint-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  pointer-events: none;
+}
+
+.keyboard-hint {
+  position: fixed;
+  transform: translate(-100%, -50%);
+  max-width: 132px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--lc-accent, #c39b50) 58%, #222);
+  border-radius: 5px;
+  padding: 2px 5px;
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 18%, #141414);
+  color: var(--lc-text-strong, #f0f0f0);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.35);
+  font: 600 9.5px/1.25 var(--lc-mono, ui-monospace, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: mo-fade-in var(--mo-fast) var(--mo-out) both;
+}
+
+.cmdk-item-shortcut {
+  flex: 0 0 auto;
+  border: 1px solid var(--lc-border, #303030);
+  border-radius: 5px;
+  padding: 2px 5px;
+  background: var(--lc-surface, #151515);
+  color: var(--lc-text-muted, #929292);
+  font: 500 10px/1.2 var(--lc-mono, ui-monospace, monospace);
+  white-space: nowrap;
+}
