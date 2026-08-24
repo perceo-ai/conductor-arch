@@ -102,8 +102,9 @@ function load(): Prefs {
     if (typeof localStorage !== "undefined") {
       const rightWidth = legacySize("rightPanel.width");
       const terminalHeight = legacySize("terminalDock.height");
+      const hasStoredBottom = Number.isFinite(parsed.regionSizes?.bottom);
       if (rightWidth !== undefined) merged.regionSizes.right = rightWidth;
-      if (terminalHeight !== undefined) merged.regionSizes.bottom = terminalHeight;
+      if (terminalHeight !== undefined && !hasStoredBottom) merged.regionSizes.bottom = terminalHeight;
       if (rightWidth !== undefined) localStorage.removeItem("rightPanel.width");
       localStorage.setItem(KEY, JSON.stringify(persistedPrefs(merged)));
     }

@@ -31,6 +31,7 @@ export interface DropTargetRegion {
 }
 
 const REGIONS: Region[] = ["left", "center", "bottom", "right"];
+const loggedUnknownPanels = new Set<PanelId>();
 
 function cloneStack(stack: Stack): Stack {
   return { ...stack, panels: [...stack.panels], strips: [...stack.strips], docks: [...stack.docks] };
@@ -65,6 +66,61 @@ function normalizeLayout(layout: Layout): Layout {
 function centerHasContent(layout: Layout): boolean {
   const center = layout.regions.center;
   return center.panels.length > 0 || center.docks.length > 0;
+}
+
+function isPanelList(value: unknown): value is PanelId[] {
+  return Array.isArray(value) && value.every((panel) => typeof panel === "string");
+}
+
+function isStack(value: unknown): value is Stack {
+  if (!value || typeof value !== "object") return false;
+  const stack = value as Partial<Stack>;
+  return (
+    isPanelList(stack.panels) &&
+    isPanelList(stack.strips) &&
+    isPanelList(stack.docks) &&
+    typeof stack.active === "number" &&
+    Number.isFinite(stack.active) &&
+    typeof stack.size === "number" &&
+    Number.isFinite(stack.size) &&
+    typeof stack.collapsed === "boolean"
+  );
+}
+
+function isLayout(value: unknown): value is Layout {
+  if (!value || typeof value !== "object") return false;
+  const layout = value as Partial<Layout>;
+  return (
+    layout.version === 1 &&
+    !!layout.regions &&
+    typeof layout.regions === "object" &&
+    REGIONS.every((region) => isStack((layout.regions as Partial<Record<Region, unknown>>)[region]))
+  );
+}
+
+function codeFallback(): Layout {
+  return {
+    version: 1,
+    regions: {
+      left: { panels: [], strips: [], docks: [], active: 0, size: REGION_DEFAULT_SIZES.left, collapsed: false },
+      center: { panels: ["chat"], strips: [], docks: [], active: 0, size: REGION_DEFAULT_SIZES.center, collapsed: false },
+      bottom: { panels: [], strips: [], docks: [], active: 0, size: REGION_DEFAULT_SIZES.bottom, collapsed: false },
+      right: {
+        panels: ["summary", "files", "changes", "checks"],
+        strips: ["pr"],
+        docks: ["terminal"],
+        active: 2,
+        size: REGION_DEFAULT_SIZES.right,
+        collapsed: false,
+      },
+    },
+  };
+}
+
+function logUnknownPanel(id: PanelId) {
+  if (loggedUnknownPanels.has(id)) return;
+  loggedUnknownPanels.add(id);
+  console.warn(`[layout] Dropped unknown panel id: ${id}`);
 }
 
 function removePanel(layout: Layout, id: PanelId) {
@@ -139,12 +195,14 @@ export function resizeRegion(layout: Layout, region: Region, size: number): Layo
 }
 
 export function collapseRegion(layout: Layout, region: Region, collapsed: boolean): Layout {
+  if (region === "center" && collapsed) return layout;
   const next = cloneLayout(layout);
   next.regions[region].collapsed = collapsed;
   return next;
 }
 
-export function sanitizeLayout(layout: Layout): Layout {
+export function sanitizeLayout(layout: unknown): Layout {
+  if (!isLayout(layout)) return codeFallback();
   const next = cloneLayout(layout);
   const seen = new Set<PanelId>();
   for (const region of REGIONS) {
@@ -153,7 +211,11 @@ export function sanitizeLayout(layout: Layout): Layout {
       const list = listFor(stack, kind);
       const kept = list.filter((id) => {
         const descriptor = panelDescriptor(id);
-        if (!descriptor || descriptor.kind !== kind || seen.has(id) || !descriptor.regions.includes(region)) return false;
+        if (!descriptor) {
+          logUnknownPanel(id);
+          return false;
+        }
+        if (descriptor.kind !== kind || seen.has(id) || !descriptor.regions.includes(region)) return false;
         seen.add(id);
         return true;
       });

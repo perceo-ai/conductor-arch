@@ -85,6 +85,10 @@ describe("prefsStore", () => {
     expect(values.has("rightPanel.width")).toBe(false);
     expect(values.get("terminalDock.height")).toBe("444");
     expect(JSON.parse(values.get("archductor.prefs.v1")!).regionSizes).toMatchObject({ right: 333, bottom: 444 });
+    prefsStore.setRegionSize("bottom", 320);
+    vi.resetModules();
+    const { prefsStore: reloadedPrefs } = await import("./prefs");
+    expect(reloadedPrefs.state.regionSizes.bottom).toBe(320);
   });
 
   it("tracks custom keyboard bindings", async () => {

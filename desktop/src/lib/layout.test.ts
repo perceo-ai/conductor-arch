@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   activatePanel,
   collapseRegion,
@@ -113,7 +113,13 @@ describe("layout", () => {
     expect(next.regions.right.panels).toEqual(layout().regions.right.panels);
   });
 
+  it("rejects collapsing the centre region", () => {
+    const current = layout();
+    expect(collapseRegion(current, "center", true)).toBe(current);
+  });
+
   it("sanitizes unknown, duplicate, and wrong-kind panel ids", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const current = layout();
     current.regions.left.panels = ["files", "missing", "pr"];
     current.regions.right.panels = ["files", "terminal", "changes"];
@@ -124,6 +130,32 @@ describe("layout", () => {
     expect(next.regions.right.panels).toEqual(["changes"]);
     expect(next.regions.right.strips).toEqual(["pr"]);
     expect(next.regions.right.docks).toEqual(["terminal"]);
+    expect(warn).toHaveBeenCalledWith("[layout] Dropped unknown panel id: missing");
+    warn.mockRestore();
+  });
+
+  it("logs an unknown panel only once", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const current = layout();
+    current.regions.left.panels = ["future-panel"];
+    sanitizeLayout(current);
+    sanitizeLayout(current);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith("[layout] Dropped unknown panel id: future-panel");
+    warn.mockRestore();
+  });
+
+  it("falls back to a fresh Code layout for corrupt stored input", () => {
+    const fallback = sanitizeLayout({ version: 1, regions: null });
+    expect(fallback).toMatchObject({
+      version: 1,
+      regions: {
+        center: { panels: ["chat"] },
+        right: { strips: ["pr"], panels: ["summary", "files", "changes", "checks"], docks: ["terminal"], active: 2 },
+      },
+    });
+    fallback.regions.center.panels.push("files");
+    expect(sanitizeLayout(null).regions.center.panels).toEqual(["chat"]);
   });
 
   it("calculates tab drop positions at before, between, and after midpoints", () => {

@@ -25,7 +25,14 @@ function presetLayout(regions: Partial<Record<Region, Partial<Stack>>>): Layout 
 
 const deadPanels = ["todos", "checkpoints", "processes", "timeline", "context"];
 
-export const BUILTIN_PRESETS: LayoutPreset[] = [
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  Object.freeze(value);
+  for (const child of Object.values(value)) deepFreeze(child);
+  return value;
+}
+
+const builtinSources = deepFreeze<LayoutPreset[]>([
   {
     id: "code",
     name: "Code",
@@ -71,24 +78,30 @@ export const BUILTIN_PRESETS: LayoutPreset[] = [
     }),
     hidden: ["pr", "files", "changes", ...deadPanels],
   },
-];
+]);
+
+/** Immutable built-in sources. Use builtinPreset for an editable copy. */
+export const BUILTIN_PRESETS: readonly LayoutPreset[] = builtinSources;
 
 function clonePreset(preset: LayoutPreset): LayoutPreset {
   return structuredClone(preset);
 }
 
 export function builtinPreset(id: string): LayoutPreset | undefined {
-  return BUILTIN_PRESETS.find((preset) => preset.id === id);
+  const preset = builtinSources.find((candidate) => candidate.id === id);
+  return preset ? clonePreset(preset) : undefined;
 }
 
 export function mergePresets(presets: LayoutPreset[]): LayoutPreset[] {
-  const builtins = new Set(BUILTIN_PRESETS.map((preset) => preset.id));
-  const users = presets.filter((preset) => !builtins.has(preset.id));
-  return [...BUILTIN_PRESETS, ...users];
+  const builtins = new Set(builtinSources.map((preset) => preset.id.toLowerCase()));
+  const users = presets
+    .filter((preset) => !builtins.has(preset.id.toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id));
+  return [...builtinSources.map(clonePreset), ...users];
 }
 
 export function forkBuiltinPreset(id: string): LayoutPreset {
-  const builtin = builtinPreset(id);
+  const builtin = builtinSources.find((candidate) => candidate.id === id);
   if (!builtin) throw new Error(`Unknown built-in layout preset: ${id}`);
   const fork = clonePreset(builtin);
   return { ...fork, id: `custom-${crypto.randomUUID()}`, name: `${fork.name} (edited)`, builtin: false };

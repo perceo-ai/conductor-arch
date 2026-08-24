@@ -28,9 +28,18 @@ describe("layout presets", () => {
     expect(builtinPreset("watch")?.layout.regions.bottom.panels).toEqual(["chat"]);
   });
 
-  it("merges built-ins before user presets without allowing an override", () => {
-    const user: LayoutPreset = { ...BUILTIN_PRESETS[0], name: "Override", builtin: false };
-    expect(mergePresets([user]).map((preset) => preset.name)).toEqual(["Code", "Wide", "Review", "Watch"]);
+  it("merges built-ins before users, filters reserved ids case-insensitively, and sorts users by name", () => {
+    const reserved: LayoutPreset = { ...BUILTIN_PRESETS[0], id: "Code", name: "Override", builtin: false };
+    const zebra: LayoutPreset = { ...forkBuiltinPreset("code"), id: "custom-zebra", name: "zebra" };
+    const alpha: LayoutPreset = { ...forkBuiltinPreset("code"), id: "custom-alpha", name: "Alpha" };
+    expect(mergePresets([zebra, reserved, alpha]).map((preset) => preset.name)).toEqual(["Code", "Wide", "Review", "Watch", "Alpha", "zebra"]);
+  });
+
+  it("freezes built-in sources and gives callers independent built-in clones", () => {
+    expect(Object.isFrozen(BUILTIN_PRESETS[0].layout.regions.center.panels)).toBe(true);
+    const first = builtinPreset("code")!;
+    first.layout.regions.center.panels.push("files");
+    expect(builtinPreset("code")!.layout.regions.center.panels).toEqual(["chat"]);
   });
 
   it("forks built-ins into independently editable custom presets", () => {
