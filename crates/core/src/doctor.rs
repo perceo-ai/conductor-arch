@@ -820,14 +820,21 @@ fn path_version_probe_succeeds(path: &Path) -> bool {
 
 pub fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|path| {
-                command_candidates(&path, name)
-                    .into_iter()
-                    .any(|candidate| is_executable(&candidate))
-            })
-        })
+        .map(|paths| command_in_path(&paths, name).is_some())
         .unwrap_or(false)
+}
+
+/// Resolve a command against an explicit PATH rather than this process's.
+///
+/// The background service runs with a PATH of its own, so "is `gh` installed?"
+/// has a different answer for the daemon than it does for the shell asking the
+/// question. `service doctor` needs the daemon's answer.
+pub fn command_in_path(search_path: &std::ffi::OsStr, name: &str) -> Option<std::path::PathBuf> {
+    std::env::split_paths(search_path).find_map(|dir| {
+        command_candidates(&dir, name)
+            .into_iter()
+            .find(|candidate| is_executable(candidate))
+    })
 }
 
 fn command_candidates(path: &Path, name: &str) -> Vec<std::path::PathBuf> {

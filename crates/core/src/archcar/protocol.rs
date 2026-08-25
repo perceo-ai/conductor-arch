@@ -9,7 +9,7 @@ use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::doctor::SetupReport;
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
-use crate::service::{InstallService, ServiceStatus};
+use crate::service::{InstallService, ServiceDoctorReport, ServiceStatus};
 use crate::session_state::AgentSessionState;
 use crate::workspace::{
     ChatEventRecord, ChatMessageRecord, Checkpoint, DiffFileSummary, ReviewComment,
@@ -709,6 +709,10 @@ pub enum ArchcarRequest {
         session_profile: bool,
     },
     GetServiceStatus,
+    /// Resolve the tools the daemon needs against the *service's* PATH rather
+    /// than the caller's, which is the difference that makes a service-hosted
+    /// daemon fail where the shell succeeds.
+    ServiceDoctor,
     InstallService {
         input: InstallService,
     },
@@ -1188,6 +1192,9 @@ pub enum ArchcarResponse {
     },
     ServiceStatus {
         status: ServiceStatus,
+    },
+    ServiceDoctorReport {
+        report: ServiceDoctorReport,
     },
     RemoteAccess {
         /// Address the daemon is currently listening on, when it has a remote
@@ -2139,6 +2146,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             }
         ),
         ArchcarRequest::GetServiceStatus => "get_service_status".to_owned(),
+        ArchcarRequest::ServiceDoctor => "service_doctor".to_owned(),
         ArchcarRequest::InstallService { input } => format!(
             "install_service listen={}",
             input.listen.as_deref().unwrap_or("none")
@@ -2638,8 +2646,14 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             body.chars().count()
         ),
         ArchcarResponse::ServiceStatus { status } => format!(
-            "service_status manager={} installed={} running={}",
-            status.manager, status.installed, status.running
+            "service_status manager={} installed={} running={} boot_persistent={}",
+            status.manager, status.installed, status.running, status.boot_persistent
+        ),
+        ArchcarResponse::ServiceDoctorReport { report } => format!(
+            "service_doctor ok={} rows={} missing={}",
+            report.ok,
+            report.rows.len(),
+            report.rows.iter().filter(|row| !row.found()).count()
         ),
         ArchcarResponse::McpRegistration { clients } => format!(
             "mcp_registration {}",

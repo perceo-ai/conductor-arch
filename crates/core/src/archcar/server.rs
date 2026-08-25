@@ -2521,6 +2521,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 message: err.to_string(),
             },
         },
+        ArchcarRequest::ServiceDoctor => match crate::service::doctor(&AppPaths::from_env()) {
+            Ok(report) => ArchcarResponse::ServiceDoctorReport { report },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
         ArchcarRequest::InstallService { input } => {
             match crate::service::install(&AppPaths::from_env(), &input) {
                 Ok(status) => ArchcarResponse::ServiceStatus { status },
@@ -4306,6 +4312,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSetupReadiness { .. }
             | ArchcarRequest::GetPullRequestDraft { .. }
             | ArchcarRequest::GetServiceStatus
+            | ArchcarRequest::ServiceDoctor
             | ArchcarRequest::GetRemoteAccess
             | ArchcarRequest::ListBackgroundTasks { .. }
             | ArchcarRequest::GetBackgroundTask { .. }

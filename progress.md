@@ -1049,3 +1049,114 @@ Not yet manually smoke-verified in this branch:
 - The chat tab strip scrolls (it was `overflow: hidden`, which hid every tab
   past the first when the column narrowed) and the new-chat button is pinned
   outside the scroller.
+
+## Headless and remote deployment (2026-08-24)
+
+The daemon was already headless (no GUI deps) and the remote client/server
+split already worked. Deployment was what did not: the pieces below are the gap
+between "the architecture supports a server" and "an operator can stand one up".
+
+- **Packaging shipped the CLI without the daemon.** `.deb`/`.rpm` (nfpm), the
+  AppImage AppDir, and the Flatpak all installed only `archductor`, so
+  `service install` failed at `archcar is not on PATH` and every command fell
+  back to a sidecar it could not find. The tarball, AUR, Nix, and Homebrew were
+  already correct. `crates/cli/tests/publish_workflow.rs` now asserts every
+  packager ships `archcar`, the same way it already guarded icons and fonts.
+- **The systemd unit died at logout.** `systemctl --user enable --now` gives a
+  unit that stops when the user's last login session ends, which on an
+  SSH-managed server means the daemon exits with the connection. Install now
+  runs `loginctl enable-linger` and reports the outcome as
+  `ServiceStatus.boot_persistent`; a failure comes back as a warning carrying
+  the `sudo` command. macOS has no agent-level equivalent — a LaunchAgent
+  starts at login — so it reports `false` plus a warning rather than implying
+  boot-start it does not have.
+- **launchd only bootstrapped into `gui/<uid>`.** Over SSH with nobody at the
+  console there is no GUI domain and `bootstrap` fails outright. `start`/`stop`
+  now try `gui/<uid>` then `user/<uid>`, and `status` checks both domains.
+- **The units carried no PATH.** launchd hands a job
+  `/usr/bin:/bin:/usr/sbin:/sbin`; a systemd user unit is barely richer. Neither
+  can see Homebrew, a version manager, or `~/.local/bin`, so a service-installed
+  daemon reported "running" and then failed every session at "command not
+  found". Install probes the user's login shell (`-l -c`, POSIX shells only —
+  fish/nu `$PATH` is a list) and unions it with the process PATH and the
+  well-known install dirs, dropping directories that do not exist. The value is
+  recorded as `PATH` in the unit and XML-escaped, since a `&` in a path
+  produces a plist launchd silently refuses.
+- **Restart semantics diverged.** systemd `Restart=on-failure` never restarted a
+  clean `exit(0)` while launchd `KeepAlive` always did. Now `Restart=always`
+  with `StartLimitIntervalSec=60`/`StartLimitBurst=10` in `[Unit]` so a crash
+  loop cannot wedge the unit in `failed`, and `ThrottleInterval` on the plist.
+- **`service doctor`** (core `service::doctor`, archcar `service_doctor`, CLI
+  `archductor service doctor`, a "Check daemon environment" button on the
+  desktop Background service card) resolves `git`, `gh`, and every chat-launchable
+  agent CLI against the PATH recorded in the unit rather than the caller's.
+  `archductor doctor` probes the shell, which is exactly the environment that is
+  not in question.
+- **`archductor service setup`** is the headless bootstrap: install, provision
+  the token, run the environment check, print the client `remote connect` line.
+  `archductor mcp setup` keeps its MCP-client framing over the same shared path.
+- Install refuses a binary inside a temporary mount (`/tmp/.mount_*`), which is
+  what an AppImage would otherwise write into a unit that breaks at next boot.
+- README gained a "Headless and remote setup" section (previously the only
+  recipe lived in `docs/api.md`), and `docs/api.md` documents linger, the
+  recorded PATH, and `service_doctor`.
+
+Three of these came out of the Linux verification rather than the code read,
+and all three only bite the non-interactive case:
+
+- **Linger has to be enabled before `systemctl --user`, not after.** Enabling it
+  is what starts the user manager; without one there is no bus to talk to, so
+  the original ordering worked from an SSH login (PAM had already started a
+  manager) and failed everywhere else.
+- **`systemctl --user` needs `XDG_RUNTIME_DIR`.** PAM sets it for a login
+  session and nothing sets it for a provisioning script, a cron job, or
+  `docker exec`. All `systemctl --user` calls now point at `/run/user/<uid>`
+  when the environment does not, which linger guarantees exists.
+- **"Failed to connect to bus: No medium found" now explains itself.** That is
+  what a caller with no session and no linger gets, and it says nothing about
+  either. Install turns it into the `sudo loginctl enable-linger <user>` command
+  plus why sudo is needed here and not over SSH. `current_user_name` falls back
+  to `id -un` because `USER` is unset in exactly those contexts.
+
+`archductor archcar service-status` / `service-doctor` expose both over the
+protocol, so a client connected to a remote daemon diagnoses *the server*.
+`archductor service doctor` is inherently local — it reads a unit file — and
+would otherwise answer for the laptop.
+
+Verified on macOS: 911 core tests including 17 in `service.rs` (unit rendering,
+restart semantics, PATH merge order, XML escaping, temporary-mount refusal,
+doctor resolution against a supplied PATH and its verdict), the packaging guard,
+458 desktop tests, `tsc --noEmit`, `pnpm build`, clippy and fmt clean, plus a
+live launchd install/status/uninstall smoke in a scratch `HOME` (bootstrapped
+into `gui/501`, PATH baked in, removed with no residue) and a `service doctor`
+run resolving `gh` at `/opt/homebrew/bin/gh` and `claude` at
+`~/.local/bin/claude` — both invisible to launchd's default PATH, which is the
+bug.
+
+Verified on Linux, in a privileged systemd container with a real PID 1 and an
+unprivileged user, driven over `docker exec` so there is no login session:
+
+- linger off → install fails with the actionable `enable-linger arch` message
+  rather than the raw bus error;
+- linger on → install succeeds with `boot_persistent=true`, and the unit carries
+  `Environment=PATH=/home/arch/.local/bin:…`;
+- `/proc/<mainpid>/environ` on the *running* daemon confirms that PATH reached
+  the process, and `service doctor` resolves `gh` and `claude` out of
+  `~/.local/bin` — a directory absent from systemd's default user PATH;
+- stripping the `Environment=PATH=` line reproduces the old unit, and doctor
+  then reports `MISSING gh` against the manager default, which is the
+  before-picture for this whole change;
+- `Restart=always` brings the daemon back from both `SIGKILL` and `SIGTERM`
+  (the clean exit `on-failure` would have left down);
+- `service setup --listen 0.0.0.0:7420` prints the token, the public-bind
+  warning, and the client `remote connect` line; a client then connects over the
+  TCP listener, drives a real RPC, and a wrong token is refused with
+  `archcar authentication failed`;
+- `service uninstall` disables the unit, removes the file, leaves no archcar
+  process, and deliberately leaves linger alone.
+
+Deliberately not built here: a Windows service (`ServiceManager::detect` still
+returns `Unsupported`, so `archcar.exe` ships in the Windows ZIP with nothing to
+keep it alive) and TLS for the remote listener. The transport remains one shared
+bearer token in cleartext with no per-client identity and no handshake rate
+limit; a non-loopback listener still requires a VPN, SSH tunnel, or TLS proxy.

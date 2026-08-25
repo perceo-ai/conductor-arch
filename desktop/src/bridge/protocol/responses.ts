@@ -118,6 +118,7 @@ export type ArchcarResponse =
   | { type: "workspace_removed"; name: string }
   | { type: "review_comment_added"; comment: ReviewComment }
   | { type: "service_status"; status: ServiceStatus }
+  | { type: "service_doctor_report"; report: ServiceDoctorReport }
   | { type: "remote_access"; listen?: string; token: string; token_path: string }
   | { type: "mcp_registration"; clients: McpClientRegistration[] }
   | { type: "background_task_saved"; task: BackgroundTask }
@@ -162,7 +163,31 @@ export interface ServiceStatus {
   running: boolean;
   unit_path?: string | null;
   listen?: string | null;
+  /** Whether the daemon survives this user logging out. */
+  boot_persistent?: boolean;
+  /** The PATH recorded in the unit, when it records one. */
+  path?: string | null;
+  /** Conditions that did not fail the operation but change what it means. */
+  warnings?: string[];
   detail: string;
+}
+
+/** One tool the daemon needs, resolved against the *service's* PATH. */
+export interface ServiceDoctorRow {
+  name: string;
+  command: string;
+  resolved?: string | null;
+  required: boolean;
+  detail: string;
+}
+
+export interface ServiceDoctorReport {
+  status: ServiceStatus;
+  path: string;
+  path_source: string;
+  rows: ServiceDoctorRow[];
+  ok: boolean;
+  feedback: string;
 }
 
 // --- Background development tasks -----------------------------------------

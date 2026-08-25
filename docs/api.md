@@ -33,12 +33,15 @@ listeners only behind infrastructure you trust. `archductor service token
 The daemon is the product primitive owner, so hosting Archductor on a server
 is a deployment choice, not a different architecture:
 
-1. On the server: install the CLI, then
-   `archductor service install --listen 0.0.0.0:7420`. This writes a
+1. On the server: install the CLI and the daemon, then
+   `archductor service setup --listen 0.0.0.0:7420`. This writes a
    launchd/systemd user unit with `ARCHDUCTOR_ARCHCAR_LISTEN` set, provisions
-   the token, and starts archcar. `archductor service token` prints the token.
+   the token, starts archcar, and reports whether the daemon can reach the
+   tools it needs. `archductor service token` prints the token.
    Repositories and worktrees live on the server; add them there
    (`archductor repo add …` over the same remote connection works too).
+   `archductor service install` is the same install step without the
+   token/MCP/diagnostic reporting around it.
 2. On each client machine: `archductor remote connect <server>:7420 --token
    <token>` verifies the daemon responds and saves the profile. From then on
    the CLI, the desktop app (Settings → Remote daemon shows/edits the same
@@ -52,6 +55,29 @@ is a deployment choice, not a different architecture:
 Wrap the listener in a trusted network layer (VPN, SSH tunnel, or reverse
 proxy with TLS) before leaving loopback; the token is the only application-
 level credential.
+
+### What the service install does for a headless host
+
+The two ways a headless deployment silently fails are handled at install time
+rather than left as README steps:
+
+- **Session lifetime.** systemd tears down a user manager when the user's last
+  login session ends, so a unit installed over SSH stops when the connection
+  does. Install runs `loginctl enable-linger`; `ServiceStatus.boot_persistent`
+  reports the result, and a failure comes back as a warning with the `sudo`
+  command to run. macOS has no agent-level equivalent — a LaunchAgent starts at
+  login, which `boot_persistent: false` plus a warning states plainly.
+- **The daemon's PATH.** launchd gives a job `/usr/bin:/bin:/usr/sbin:/sbin`
+  and a systemd user unit little more, so a service-hosted daemon cannot see
+  Homebrew, a version manager, or `~/.local/bin` even though the installing
+  shell can. Install probes the user's login shell and records the result as
+  `PATH` in the unit. `archductor service doctor` (RPC `service_doctor`)
+  resolves `git`, `gh`, and every agent CLI against that PATH rather than the
+  caller's — the only check that distinguishes "running" from "usable".
+
+Install also refuses to write a unit pointing at a binary inside a temporary
+mount (an AppImage's `/tmp/.mount_*`), since that unit works until the next
+restart and then fails with a bare "No such file".
 
 ## Protocol shape
 
@@ -122,8 +148,8 @@ Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
 - Background tasks: `start_background_task` (one or more managed agents via
   `extra_agents`), list/get/cancel/tick; progress is broadcast as
   `background_task_updated` events.
-- Service management: install/uninstall/status, remote access status, token
-  rotation.
+- Service management: install/uninstall/status, `service_doctor` (the tools the
+  daemon can reach through its own PATH), remote access status, token rotation.
 
 UI-only state (panel splits, selected tabs, scroll positions, visual filters)
 has no API on purpose.

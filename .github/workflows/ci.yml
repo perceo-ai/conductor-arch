@@ -530,6 +530,9 @@ jobs:
           set -euxo pipefail
           APPDIR="packaging/appimage/archductor.AppDir"
           install -Dm755 target/release/archductor "$APPDIR/usr/bin/archductor"
+          # The daemon has to sit beside the CLI: archductor resolves archcar as
+          # a sibling of its own executable before falling back to PATH.
+          install -Dm755 target/release/archcar "$APPDIR/usr/bin/archcar"
 
       - name: Build AppImage
         env:

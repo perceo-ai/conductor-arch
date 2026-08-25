@@ -31,6 +31,9 @@ modules:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
       - cargo build --offline --release --locked --workspace
       - install -Dm755 target/release/archductor /app/bin/archductor
+      # The daemon has to sit beside the CLI: archductor resolves archcar as a
+      # sibling of its own executable before falling back to PATH.
+      - install -Dm755 target/release/archcar /app/bin/archcar
       - install -Dm644 README.md /app/share/doc/archductor/README.md
       - install -Dm644 packaging/flatpak/ai.perceo.Archductor.metainfo.xml
           /app/share/metainfo/ai.perceo.Archductor.metainfo.xml

@@ -1,6 +1,6 @@
-import {  Show,  createResource, createSignal } from "solid-js";
+import { For, Show, createResource, createSignal } from "solid-js";
 import {   send } from "@/bridge/client";
-import type { ServiceStatus } from "@/bridge/protocol";
+import type { ServiceDoctorReport, ServiceStatus } from "@/bridge/protocol";
 
 // Background service pane: install, start, and inspect the archcar service.
 // Background service + remote access. The daemon has to be running for the app,
@@ -27,6 +27,7 @@ export function BackgroundServiceCard() {
   const [feedback, setFeedback] = createSignal("");
   const [listen, setListen] = createSignal("7420");
   const [showToken, setShowToken] = createSignal(false);
+  const [doctor, setDoctor] = createSignal<ServiceDoctorReport | null>(null);
 
   const supported = () => (status()?.manager ?? "unsupported") !== "unsupported";
 
@@ -37,8 +38,10 @@ export function BackgroundServiceCard() {
     if (!current.installed) return "Not installed — archductor starts the daemon on demand.";
     return `${current.manager}: ${current.running ? "running" : "installed, not running"}${
       current.listen ? ` · listening on ${current.listen}` : ""
-    }`;
+    } · ${current.boot_persistent ? "survives logout" : "stops when you log out"}`;
   };
+
+  const missingTools = () => doctor()?.rows.filter((row) => !row.resolved) ?? [];
 
   async function run(label: string, action: () => Promise<void>) {
     if (busy()) return;
@@ -77,6 +80,22 @@ export function BackgroundServiceCard() {
       );
     });
 
+  // The service's PATH is narrower than the shell's, so "gh works in my
+  // terminal" says nothing about whether the daemon can reach it. This asks
+  // the daemon's own environment.
+  const checkEnvironment = () =>
+    run("Checking daemon environment", async () => {
+      const res = await send({ type: "service_doctor" });
+      if (res.type === "error") {
+        setDoctor(null);
+        setFeedback(res.message);
+        return;
+      }
+      if (res.type !== "service_doctor_report") return;
+      setDoctor(res.report);
+      setFeedback("");
+    });
+
   return (
     <div class="settings-field settings-health-card">
       <div class="settings-field-title">Background service &amp; remote access</div>
@@ -97,7 +116,28 @@ export function BackgroundServiceCard() {
               Remove service
             </button>
           </Show>
+          <button class="ui-button-secondary" disabled={busy()} onClick={() => void checkEnvironment()}>
+            Check daemon environment
+          </button>
         </div>
+      </Show>
+      <For each={status()?.warnings ?? []}>
+        {(warning) => <div class="settings-status settings-hint">⚠ {warning}</div>}
+      </For>
+      <Show when={doctor()}>
+        {(report) => (
+          <>
+            <div class="settings-status">{report().feedback}</div>
+            <Show when={missingTools().length > 0}>
+              <div class="settings-status settings-hint">
+                Not on the daemon's PATH ({report().path_source}):{" "}
+                {missingTools()
+                  .map((row) => row.command)
+                  .join(", ")}
+              </div>
+            </Show>
+          </>
+        )}
       </Show>
       <Show when={access()}>
         {(remote) => (

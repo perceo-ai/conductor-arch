@@ -267,4 +267,59 @@ fn publish_build_uses_ci_verified_release_packaging() {
             "{name} packaged CLI binary should remain archductor, not archductor-cli"
         );
     }
+
+    // Every packager has to ship the daemon, not just the CLI. `.deb`, `.rpm`,
+    // the AppImage, and the Flatpak all shipped only `archductor` at one point,
+    // which produces an install where every command fails at
+    // `archcar is not on PATH` and `service install` cannot write a unit.
+    for (name, manifest, archcar_tokens) in [
+        (
+            "nfpm",
+            &nfpm,
+            vec!["src: target/release/archcar\n    dst: /usr/bin/archcar"],
+        ),
+        (
+            "flatpak",
+            &flatpak,
+            vec!["install -Dm755 target/release/archcar /app/bin/archcar"],
+        ),
+        (
+            "nix",
+            &nix,
+            vec!["install -Dm755 target/release/archcar \"$out/bin/archcar\""],
+        ),
+        (
+            "aur",
+            &aur,
+            vec!["install -Dm755 target/release/archcar \"$pkgdir/usr/bin/archcar\""],
+        ),
+        (
+            "homebrew",
+            &homebrew,
+            vec!["std_cargo_args(path: \"crates/archcar\")"],
+        ),
+        (
+            "publish",
+            &publish,
+            vec![
+                "target/release/archcar \"$BUNDLE/bin/archcar\"",
+                "install -Dm755 target/release/archcar \"$APPDIR/usr/bin/archcar\"",
+                "Copy-Item target\\x86_64-pc-windows-gnu\\release\\archcar.exe $bundle",
+            ],
+        ),
+        (
+            "ci",
+            &ci,
+            vec![
+                "target/release/archcar \"$BUNDLE/bin/archcar\"",
+                "install -Dm755 target/release/archcar \"$APPDIR/usr/bin/archcar\"",
+            ],
+        ),
+    ] {
+        assert!(
+            archcar_tokens.iter().all(|token| manifest.contains(token)),
+            "{name} should ship the archcar daemon alongside the CLI; without it the install \
+             cannot start a daemon or register a background service"
+        );
+    }
 }

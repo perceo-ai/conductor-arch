@@ -343,6 +343,13 @@ enum ArchcarCommand {
     },
     /// List all workspaces with status counts.
     Workspaces,
+    /// Background service status for the daemon this client is talking to.
+    /// Unlike `archductor service status`, this follows a remote connection,
+    /// so it answers for the server rather than for this machine.
+    ServiceStatus,
+    /// Tools the connected daemon can reach through its own PATH. The remote
+    /// counterpart of `archductor service doctor`.
+    ServiceDoctor,
     /// List repositories, workspaces, and active chat strips in one request.
     InventorySnapshot,
     /// List repositories with workspace counts.
@@ -932,8 +939,10 @@ enum McpCommand {
         #[arg(long)]
         client: Option<String>,
     },
-    /// First-run setup: install the archcar background service, make sure an
-    /// access token exists, and print the MCP client configuration.
+    /// First-run setup for an MCP client: install the archcar background
+    /// service, make sure an access token exists, and print the MCP client
+    /// configuration. For a headless server, `archductor service setup` runs
+    /// the same install and reports the daemon's environment instead.
     Setup {
         /// Address for the token-guarded TCP listener. Defaults to loopback.
         #[arg(long)]
@@ -949,6 +958,19 @@ enum McpCommand {
 
 #[derive(Debug, Subcommand)]
 enum ServiceCommand {
+    /// Headless first-run setup: install the background service, provision the
+    /// access token, and print the client and MCP configuration.
+    Setup {
+        /// Address for the token-guarded TCP listener. Defaults to loopback.
+        #[arg(long)]
+        listen: Option<String>,
+        /// Skip installing the native background service.
+        #[arg(long)]
+        no_service: bool,
+        /// Path to the archcar binary, when it is not beside this one.
+        #[arg(long)]
+        archcar_path: Option<String>,
+    },
     /// Install and start the archcar background service for this user.
     Install {
         /// Address for the token-guarded TCP listener (e.g. `7420`, or
@@ -962,6 +984,10 @@ enum ServiceCommand {
     Uninstall,
     /// Show whether the background service is installed and running.
     Status,
+    /// Check the tools the daemon can reach through the *service's* PATH,
+    /// which is narrower than your shell's and is the usual reason a
+    /// service-hosted daemon fails where the CLI works.
+    Doctor,
     /// Print the remote access token, creating one if needed.
     Token {
         /// Replace the existing token, invalidating current remote clients.
@@ -1677,6 +1703,12 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Workspaces => {
                     print_archcar_response(client.send(ArchcarRequest::ListWorkspaces)?);
+                }
+                ArchcarCommand::ServiceStatus => {
+                    print_archcar_response(client.send(ArchcarRequest::GetServiceStatus)?);
+                }
+                ArchcarCommand::ServiceDoctor => {
+                    print_archcar_response(client.send(ArchcarRequest::ServiceDoctor)?);
                 }
                 ArchcarCommand::InventorySnapshot => {
                     match client.send(ArchcarRequest::GetInventorySnapshot)? {
@@ -3086,6 +3118,11 @@ fn run_cli() -> Result<()> {
             } => run_mcp_setup(&paths, listen, no_service, archcar_path)?,
         },
         Command::Service { command } => match command {
+            ServiceCommand::Setup {
+                listen,
+                no_service,
+                archcar_path,
+            } => run_service_setup(&paths, listen, no_service, archcar_path)?,
             ServiceCommand::Install {
                 listen,
                 archcar_path,
@@ -3101,6 +3138,7 @@ fn run_cli() -> Result<()> {
             }
             ServiceCommand::Uninstall => print_service_status(&service::uninstall(&paths)?),
             ServiceCommand::Status => print_service_status(&service::status(&paths)?),
+            ServiceCommand::Doctor => print_service_doctor(&service::doctor(&paths)?),
             ServiceCommand::Token { rotate } => {
                 let token = if rotate {
                     remote::rotate_token(&paths)?
@@ -4146,6 +4184,7 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("{prompt}");
         }
         ArchcarResponse::ServiceStatus { status } => print_service_status(&status),
+        ArchcarResponse::ServiceDoctorReport { report } => print_service_doctor(&report),
         ArchcarResponse::RemoteAccess {
             listen,
             token,
@@ -4826,8 +4865,8 @@ fn repo_settings_path(repo_path: &Path, layer: SettingsLayer) -> PathBuf {
 
 fn print_service_status(status: &service::ServiceStatus) {
     println!(
-        "service manager={} installed={} running={}",
-        status.manager, status.installed, status.running
+        "service manager={} installed={} running={} boot_persistent={}",
+        status.manager, status.installed, status.running, status.boot_persistent
     );
     if let Some(path) = &status.unit_path {
         println!("unit {path}");
@@ -4838,16 +4877,49 @@ fn print_service_status(status: &service::ServiceStatus) {
     if !status.detail.is_empty() {
         println!("{}", status.detail);
     }
+    // Warnings go to stderr: an un-lingered user manager is the difference
+    // between "works until you log out" and "works", and it should be visible
+    // even when stdout is being parsed.
+    for warning in &status.warnings {
+        eprintln!("warning: {warning}");
+    }
 }
 
-/// First-run MCP setup: make the daemon a managed background service, make sure
-/// a token exists, and hand back the exact client configuration to paste.
-fn run_mcp_setup(
+fn print_service_doctor(report: &service::ServiceDoctorReport) {
+    print_service_status(&report.status);
+    println!();
+    println!("daemon PATH ({}):", report.path_source);
+    for dir in report.path.split(':').filter(|dir| !dir.is_empty()) {
+        println!("  {dir}");
+    }
+    println!();
+    for row in &report.rows {
+        let mark = if row.found() {
+            "ok"
+        } else if row.required {
+            "MISSING"
+        } else {
+            "--"
+        };
+        println!(
+            "{mark:>7}  {:<14} {}",
+            row.command,
+            row.resolved.as_deref().unwrap_or(&row.detail)
+        );
+    }
+    println!();
+    println!("{}", report.feedback);
+}
+
+/// Shared first-run work behind `service setup` and `mcp setup`: put the daemon
+/// under the service manager, make sure the access token exists, and report
+/// what happened. Returns the resolved listen address and the token.
+fn run_first_run_setup(
     paths: &AppPaths,
     listen: Option<String>,
     no_service: bool,
     archcar_path: Option<String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(std::net::SocketAddr, String)> {
     let listen = listen.unwrap_or_else(|| remote::DEFAULT_REMOTE_PORT.to_string());
     let address = remote::parse_listen_addr(&listen)?;
     let token = remote::ensure_token(paths)?;
@@ -4870,6 +4942,73 @@ start archcar yourself, then rerun with --no-service"
             ),
         }
     }
+    Ok((address, token))
+}
+
+/// Headless server bootstrap: one command to go from a fresh box to a daemon
+/// other machines can connect to. Ends with the daemon-environment check,
+/// because a service that starts and then cannot find `gh` looks identical to a
+/// working one until the first session fails.
+fn run_service_setup(
+    paths: &AppPaths,
+    listen: Option<String>,
+    no_service: bool,
+    archcar_path: Option<String>,
+) -> anyhow::Result<()> {
+    let (address, token) = run_first_run_setup(paths, listen, no_service, archcar_path)?;
+
+    println!();
+    match service::doctor(paths) {
+        Ok(report) => {
+            for row in report
+                .rows
+                .iter()
+                .filter(|row| row.required && !row.found())
+            {
+                println!("MISSING  {} — {}", row.command, row.detail);
+            }
+            println!("{}", report.feedback);
+            println!("Full detail: archductor service doctor");
+        }
+        Err(err) => eprintln!("could not check the daemon environment: {err:#}"),
+    }
+
+    println!();
+    print_remote_access_hint(paths, address, &token);
+    println!();
+    println!("On each client machine:");
+    println!(
+        "  archductor remote connect <this-host>:{} --token {token}",
+        address.port()
+    );
+    Ok(())
+}
+
+/// The listener, the token, and the warning that has to go with a public bind.
+fn print_remote_access_hint(paths: &AppPaths, address: std::net::SocketAddr, token: &str) {
+    println!(
+        "archcar listens on {address}; token stored in {}",
+        remote::token_path(paths).display()
+    );
+    if remote::is_public_addr(&address) {
+        println!(
+            "WARNING: {address} is reachable from other machines. The connection is not encrypted \
+             and the token is the only guard — put it behind a VPN, an SSH tunnel, or a TLS \
+             reverse proxy you trust."
+        );
+    }
+    println!("Token: {token}");
+}
+
+/// First-run MCP setup: make the daemon a managed background service, make sure
+/// a token exists, and hand back the exact client configuration to paste.
+fn run_mcp_setup(
+    paths: &AppPaths,
+    listen: Option<String>,
+    no_service: bool,
+    archcar_path: Option<String>,
+) -> anyhow::Result<()> {
+    let (address, token) = run_first_run_setup(paths, listen, no_service, archcar_path)?;
 
     println!();
     println!("Archductor MCP server is `archductor mcp serve` (stdio).");
@@ -4880,23 +5019,13 @@ start archcar yourself, then rerun with --no-service"
         .unwrap_or_else(|_| "archductor".to_owned());
     println!("{}", mcp_client_config_json(&exe));
     println!();
-    println!(
-        "archcar listens on {address}; token stored in {}",
-        remote::token_path(paths).display()
-    );
-    if remote::is_public_addr(&address) {
-        println!(
-            "WARNING: {address} is reachable from other machines. The token is the only guard — \
-             put it behind a firewall or reverse proxy you trust."
-        );
-    }
+    print_remote_access_hint(paths, address, &token);
     println!(
         "To drive this daemon from another machine, set {}=<host>:{} and {}=<token> there.",
         remote::REMOTE_ENV,
         address.port(),
         remote::TOKEN_ENV
     );
-    println!("Token: {token}");
     Ok(())
 }
 
