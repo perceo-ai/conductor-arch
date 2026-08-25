@@ -355,6 +355,14 @@ enum ArchcarCommand {
         #[arg(long)]
         quiet: bool,
     },
+    /// Push a workspace's branch to its remote. `create-pr` needs an upstream
+    /// before `gh` will open a pull request.
+    PushBranch {
+        workspace: String,
+        /// Force push with lease, for a rebased or amended branch.
+        #[arg(long)]
+        force: bool,
+    },
     /// Background service status for the daemon this client is talking to.
     /// Unlike `archductor service status`, this follows a remote connection,
     /// so it answers for the server rather than for this machine.
@@ -1725,6 +1733,11 @@ fn run_cli() -> Result<()> {
                 // Handled above, before the client is built: the proxy has to
                 // reach the local daemon regardless of any remote profile.
                 ArchcarCommand::StdioProxy { .. } => unreachable!("dispatched before this match"),
+                ArchcarCommand::PushBranch { workspace, force } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::PushBranch { workspace, force })?,
+                    );
+                }
                 ArchcarCommand::ServiceStatus => {
                     print_archcar_response(client.send(ArchcarRequest::GetServiceStatus)?);
                 }
