@@ -7,6 +7,17 @@ use crate::workspace::WorkspaceStore;
 
 const MAX_LAYOUT_BYTES: usize = 256 * 1024;
 const MAX_HIDDEN_BYTES: usize = 64 * 1024;
+/// Identifiers are generated slugs and names are typed into a menu field, so
+/// these are far above any real value. They exist because `list_layout_presets`
+/// materializes every row into one response with no pagination: without a bound
+/// a client can grow the table and the response without limit.
+const MAX_PRESET_ID_BYTES: usize = 128;
+const MAX_PRESET_NAME_BYTES: usize = 200;
+/// How many custom presets one machine may keep. `list_layout_presets` returns
+/// every row in a single response with no pagination, so the row count is also
+/// the response size — bounding the metadata alone still lets a client grow the
+/// table without limit. Far above what a layout menu is usable with.
+const MAX_CUSTOM_PRESETS: usize = 200;
 const BUILTIN_IDS: [&str; 4] = ["code", "wide", "review", "watch"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +58,23 @@ impl WorkspaceStore {
 
     pub fn save_layout_preset(&self, preset: &LayoutPreset) -> Result<LayoutPreset> {
         validate_preset(preset)?;
+        // Updating an existing preset is always allowed; only growing the table
+        // past the cap is refused, so a full table stays editable.
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM layout_presets WHERE id = ?1)",
+            [&preset.id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            let count: i64 =
+                self.conn
+                    .query_row("SELECT COUNT(*) FROM layout_presets", [], |row| row.get(0))?;
+            anyhow::ensure!(
+                (count as usize) < MAX_CUSTOM_PRESETS,
+                "this machine already has {MAX_CUSTOM_PRESETS} custom layout presets; \
+                 delete one before saving another"
+            );
+        }
         let now = crate::workspace::timestamp();
         self.conn.execute(
             "INSERT INTO layout_presets
@@ -108,6 +136,14 @@ fn validate_preset(preset: &LayoutPreset) -> Result<()> {
     anyhow::ensure!(
         !is_builtin_id(&preset.id),
         "built-in layout presets cannot be saved"
+    );
+    anyhow::ensure!(
+        preset.id.len() <= MAX_PRESET_ID_BYTES,
+        "layout preset id exceeds {MAX_PRESET_ID_BYTES} bytes"
+    );
+    anyhow::ensure!(
+        preset.name.len() <= MAX_PRESET_NAME_BYTES,
+        "layout preset name exceeds {MAX_PRESET_NAME_BYTES} bytes"
     );
     anyhow::ensure!(
         preset.layout_json.len() <= MAX_LAYOUT_BYTES,
@@ -271,6 +307,57 @@ mod tests {
         assert!(presets[..4]
             .iter()
             .all(|preset| preset.layout_json.contains("\"docks\"")));
+    }
+
+    #[test]
+    fn oversized_ids_and_names_are_refused() {
+        // `list_layout_presets` has no pagination and returns every row in one
+        // response, so unbounded metadata is unbounded response size.
+        let (_temp, store) = store();
+
+        let long_id = preset(&"i".repeat(MAX_PRESET_ID_BYTES + 1), "Fine");
+        let err = store.save_layout_preset(&long_id).unwrap_err();
+        assert!(err.to_string().contains("id exceeds"), "{err}");
+
+        let long_name = preset("fine", &"n".repeat(MAX_PRESET_NAME_BYTES + 1));
+        let err = store.save_layout_preset(&long_name).unwrap_err();
+        assert!(err.to_string().contains("name exceeds"), "{err}");
+
+        // The limits are bounds, not a rejection of ordinary values.
+        store
+            .save_layout_preset(&preset(
+                &"i".repeat(MAX_PRESET_ID_BYTES),
+                &"n".repeat(MAX_PRESET_NAME_BYTES),
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_preset_table_is_capped_but_stays_editable_when_full() {
+        let (_temp, store) = store();
+        for index in 0..MAX_CUSTOM_PRESETS {
+            store
+                .save_layout_preset(&preset(&format!("p{index}"), &format!("P{index}")))
+                .unwrap();
+        }
+
+        let err = store
+            .save_layout_preset(&preset("one-too-many", "One too many"))
+            .unwrap_err();
+        assert!(err.to_string().contains("delete one before"), "{err}");
+
+        // A full table must not become read-only: updating an existing preset
+        // adds no row and has to keep working.
+        store
+            .save_layout_preset(&preset("p0", "Renamed while full"))
+            .unwrap();
+        let renamed = store
+            .list_layout_presets()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == "p0")
+            .unwrap();
+        assert_eq!(renamed.name, "Renamed while full");
     }
 
     #[test]

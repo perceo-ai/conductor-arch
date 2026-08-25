@@ -10,6 +10,7 @@ import {
   type LayoutPreset,
 } from "@/lib/layoutPresets";
 import { REGION_DEFAULT_SIZES } from "@/lib/panelWidths";
+import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
 import { layoutStore } from "./layout";
 import { prefsStore } from "./prefs";
 import { toastsStore } from "./toasts";
@@ -114,13 +115,19 @@ function responseError(response: ArchcarResponse, expected: string): never {
 
 async function persist(preset: LayoutPreset): Promise<boolean> {
   const snapshot = clone(preset);
+  const epoch = daemonEpoch();
   try {
     const response = await send({ type: "save_layout_preset", preset: toRecord(snapshot) });
+    // The write landed on whichever daemon was active when it was sent. Folding
+    // its echo into the list after a switch would add a preset the current
+    // daemon does not have.
+    if (daemonChangedSince(epoch)) return false;
     if (response.type !== "layout_preset_saved") responseError(response, "layout_preset_saved");
     const saved = fromRecord(response.preset).preset;
     replaceUserPreset(saved);
     return true;
   } catch (error) {
+    if (daemonChangedSince(epoch)) return false;
     const retry = () => void persist(snapshot);
     toastsStore.push(
       `Layout kept locally, but could not sync: ${(error as Error).message}`,
@@ -167,10 +174,16 @@ export const layoutPresetsStore = {
   async load(repository?: string): Promise<void> {
     cancelPendingSave();
     lastRepository = repository;
+    // Presets belong to a daemon. If the user switches while this is in
+    // flight, applying the answer would show the old daemon's layouts under
+    // the new one — and persist one of their ids as the new daemon's
+    // selection.
+    const epoch = daemonEpoch();
     const [listResponse, settingsResponse] = await Promise.all([
       send({ type: "list_layout_presets" }),
       repository ? send({ type: "get_settings", repository }) : Promise.resolve(undefined),
     ]);
+    if (daemonChangedSince(epoch)) return;
     if (listResponse.type !== "layout_presets") responseError(listResponse, "layout_presets");
 
     let invalid = false;
@@ -240,8 +253,10 @@ export const layoutPresetsStore = {
     const target = presets().find((preset) => preset.id === id);
     if (!target || target.builtin) return false;
     cancelPendingSave();
+    const epoch = daemonEpoch();
     try {
       const response = await send({ type: "delete_layout_preset", id });
+      if (daemonChangedSince(epoch)) return false;
       if (response.type !== "ack") responseError(response, "ack");
       setPresets(presets().filter((preset) => preset.id !== id));
       if (layoutStore.activePreset().id === id) {
@@ -260,6 +275,7 @@ export const layoutPresetsStore = {
 
   async setProjectDefault(repository: string, presetId: string): Promise<boolean> {
     if (!presets().some((preset) => preset.id === presetId)) return false;
+    const epoch = daemonEpoch();
     try {
       if (!(await flushPendingSave())) return false;
       const response = await send({
@@ -267,10 +283,12 @@ export const layoutPresetsStore = {
         repository,
         preset_id: presetId,
       });
+      if (daemonChangedSince(epoch)) return false;
       if (response.type !== "ack") responseError(response, "ack");
       setProjectDefaultId(presetId);
       return true;
     } catch (error) {
+      if (daemonChangedSince(epoch)) return false;
       toastsStore.error(`Could not set project layout: ${(error as Error).message}`);
       return false;
     }

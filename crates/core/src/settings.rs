@@ -825,13 +825,59 @@ pub fn set_default_layout_preset(repo_path: &Path, preset_id: &str) -> Result<()
     let (conductor_dir, _) = ensure_settings_dir(repo_path)?;
     let path = conductor_dir.join("settings.toml");
     reject_symlink_file(&path)?;
-    let mut value = match fs::read_to_string(&path) {
-        Ok(contents) if contents.trim().is_empty() => toml::Value::Table(toml::map::Map::new()),
+    let mut value = read_settings_value(&path)?;
+    view_table_mut(&mut value)?.insert(
+        "default_layout_preset".to_owned(),
+        toml::Value::String(preset_id.to_owned()),
+    );
+    let contents = toml::to_string_pretty(&value).context("serialize repository settings")?;
+    atomic_write_no_symlink(&path, contents.as_bytes())
+}
+
+/// Drop the repository's default layout when it names `preset_id`, leaving a
+/// different default untouched. Returns whether the file changed.
+///
+/// Deleting a preset has to reach in here: the id lives in the repository's
+/// committed TOML rather than beside the preset row, so removing only the row
+/// leaves the setting pointing at a preset that no longer exists.
+pub fn clear_default_layout_preset(repo_path: &Path, preset_id: &str) -> Result<bool> {
+    let conductor_dir = repo_path.join(".archductor");
+    let path = conductor_dir.join("settings.toml");
+    // Nothing to clear when the repository has no committed settings at all.
+    if !path.exists() {
+        return Ok(false);
+    }
+    reject_symlink_file(&path)?;
+    let mut value = read_settings_value(&path)?;
+    let view = view_table_mut(&mut value)?;
+    let matches = view
+        .get("default_layout_preset")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|current| current == preset_id);
+    if !matches {
+        return Ok(false);
+    }
+    view.remove("default_layout_preset");
+    let contents = toml::to_string_pretty(&value).context("serialize repository settings")?;
+    atomic_write_no_symlink(&path, contents.as_bytes())?;
+    Ok(true)
+}
+
+fn read_settings_value(path: &Path) -> Result<toml::Value> {
+    match fs::read_to_string(path) {
+        Ok(contents) if contents.trim().is_empty() => Ok(toml::Value::Table(toml::map::Map::new())),
         Ok(contents) => toml::from_str::<toml::Value>(&contents)
-            .with_context(|| format!("parse {}", path.display()))?,
-        Err(err) if err.kind() == ErrorKind::NotFound => toml::Value::Table(toml::map::Map::new()),
-        Err(err) => return Err(err).with_context(|| format!("read {}", path.display())),
-    };
+            .with_context(|| format!("parse {}", path.display())),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            Ok(toml::Value::Table(toml::map::Map::new()))
+        }
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// `customization.view`, creating the intermediate tables. Editing in place
+/// keeps future and extension-owned keys that a typed round-trip would drop.
+fn view_table_mut(value: &mut toml::Value) -> Result<&mut toml::map::Map<String, toml::Value>> {
     let root = value
         .as_table_mut()
         .context("repository settings root is not a TOML table")?;
@@ -840,17 +886,11 @@ pub fn set_default_layout_preset(repo_path: &Path, preset_id: &str) -> Result<()
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
         .context("customization is not a TOML table")?;
-    let view = customization
+    customization
         .entry("view".to_owned())
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
-        .context("customization.view is not a TOML table")?;
-    view.insert(
-        "default_layout_preset".to_owned(),
-        toml::Value::String(preset_id.to_owned()),
-    );
-    let contents = toml::to_string_pretty(&value).context("serialize repository settings")?;
-    atomic_write_no_symlink(&path, contents.as_bytes())
+        .context("customization.view is not a TOML table")
 }
 
 pub fn customization_settings_to_toml(settings: &CustomizationSettings) -> Result<String> {
@@ -5308,6 +5348,43 @@ surface = "#102030"
         assert!(contents.contains("theme = \"dark\""));
         assert!(contents.contains("default_layout_preset = \"custom-one\""));
         assert!(!conductor.join("settings.local.toml").exists());
+    }
+
+    #[test]
+    fn clearing_a_default_layout_preset_only_removes_a_matching_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let conductor = temp.path().join(".archductor");
+        fs::create_dir(&conductor).unwrap();
+        fs::write(
+            conductor.join("settings.toml"),
+            "future = \"keep\"\n\n[customization.view]\ntheme = \"dark\"\ndefault_layout_preset = \"custom-one\"\n",
+        )
+        .unwrap();
+
+        // A different preset's deletion must not disturb this repository.
+        assert!(!clear_default_layout_preset(temp.path(), "custom-two").unwrap());
+        let untouched = fs::read_to_string(conductor.join("settings.toml")).unwrap();
+        assert!(untouched.contains("default_layout_preset = \"custom-one\""));
+
+        assert!(clear_default_layout_preset(temp.path(), "custom-one").unwrap());
+
+        let contents = fs::read_to_string(conductor.join("settings.toml")).unwrap();
+        assert!(!contents.contains("default_layout_preset"), "{contents}");
+        // Unrelated and extension-owned keys survive the edit.
+        assert!(contents.contains("future = \"keep\""), "{contents}");
+        assert!(contents.contains("theme = \"dark\""), "{contents}");
+        // Idempotent: a second delete of the same preset is a no-op.
+        assert!(!clear_default_layout_preset(temp.path(), "custom-one").unwrap());
+    }
+
+    #[test]
+    fn clearing_a_default_layout_preset_ignores_a_repository_with_no_settings() {
+        let temp = tempfile::tempdir().unwrap();
+
+        // No .archductor directory at all: nothing to clear, and nothing should
+        // be created just to record an absence.
+        assert!(!clear_default_layout_preset(temp.path(), "custom-one").unwrap());
+        assert!(!temp.path().join(".archductor").exists());
     }
 
     #[test]

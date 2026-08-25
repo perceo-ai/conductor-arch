@@ -3,6 +3,7 @@ import { createStore } from "solid-js/store";
 import { clients as bridge, type ClientSummary, type ClientsResult } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
 import { actions } from "./actions";
+import { bumpDaemonEpoch } from "./daemonEpoch";
 import { providersStore } from "./providers";
 import { setupStore } from "./setup";
 import { toastsStore } from "./toasts";
@@ -51,6 +52,10 @@ function applyResult(res: ClientsResult): boolean {
 
 /** Re-pull everything that belonged to the previous daemon. */
 async function resync(): Promise<void> {
+  // Invalidate anything still in flight to the daemon we just left, before the
+  // re-pull below issues requests to the new one. Without this a slow response
+  // from the old daemon can land afterwards and overwrite the new state.
+  bumpDaemonEpoch();
   await actions.refreshInventory().catch(() => undefined);
   await setupStore.check().catch(() => undefined);
   // The new daemon may know a different set of agents than the old one, so a
