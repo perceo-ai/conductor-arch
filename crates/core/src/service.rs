@@ -646,8 +646,14 @@ fn start_service(manager: ServiceManager, unit_path: &Path) -> Result<String> {
         }
         ServiceManager::Systemd => {
             systemctl_user(&["daemon-reload"])?;
-            systemctl_user(&["enable", "--now", SYSTEMD_UNIT_NAME])
-                .map(|_| format!("enabled and started {SYSTEMD_UNIT_NAME}"))
+            systemctl_user(&["enable", SYSTEMD_UNIT_NAME])?;
+            // `restart`, not `enable --now`: `--now` only *starts* a stopped
+            // unit, so reinstalling over a running daemon rewrote the unit,
+            // reported the new listen address, and left the old process serving
+            // the old one. `restart` also starts a stopped unit, so it covers
+            // the first install too.
+            systemctl_user(&["restart", SYSTEMD_UNIT_NAME])
+                .map(|_| format!("enabled and (re)started {SYSTEMD_UNIT_NAME}"))
         }
         ServiceManager::ScheduledTask => {
             // /F replaces an existing registration, so reinstall is idempotent.
@@ -664,8 +670,13 @@ fn start_service(manager: ServiceManager, unit_path: &Path) -> Result<String> {
                 &xml,
                 "/F",
             ])?;
+            // End any instance still running the previous launcher first:
+            // `MultipleInstancesPolicy=IgnoreNew` would otherwise make `/Run` a
+            // no-op on a reinstall, leaving the old environment in place — the
+            // same hole `systemctl --user enable --now` leaves on Linux.
+            let _ = run(&["schtasks", "/End", "/TN", WINDOWS_TASK_NAME]);
             run(&["schtasks", "/Run", "/TN", WINDOWS_TASK_NAME])
-                .map(|_| format!("registered and started {WINDOWS_TASK_NAME}"))
+                .map(|_| format!("registered and (re)started {WINDOWS_TASK_NAME}"))
         }
         ServiceManager::Unsupported => anyhow::bail!("unsupported platform"),
     }
