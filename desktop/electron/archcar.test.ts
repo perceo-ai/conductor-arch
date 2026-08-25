@@ -11,12 +11,94 @@ import {
   clientIdFrom,
   type ClientsFile,
   resolveRemoteConfig,
+  parseSshAddress,
+  isSshAddress,
+  sshArgs,
 } from "./archcar";
 
 // Resolution order for server-hosted execution: environment variables win,
 // then the remote profile shared with the CLI, then the local daemon (null).
 
 const none = () => null;
+
+// Mirrors the Rust tests in crates/core/src/archcar/remote.rs. The two parsers
+// read the same saved profile, so a disagreement would send the app and the CLI
+// to different daemons.
+describe("ssh addresses", () => {
+  it("parses user, host, port, and an explicit program", () => {
+    expect(parseSshAddress("ssh://deploy@build.internal:2222/opt/bin/archductor")).toEqual({
+      destination: "deploy@build.internal",
+      port: 2222,
+      program: "/opt/bin/archductor",
+    });
+    expect(parseSshAddress("ssh://devbox")).toEqual({
+      destination: "devbox",
+      port: null,
+      program: "archductor",
+    });
+  });
+
+  it("does not mistake an IPv6 literal for a port", () => {
+    expect(parseSshAddress("ssh://[fe80::1]")).toEqual({
+      destination: "[fe80::1]",
+      port: null,
+      program: "archductor",
+    });
+  });
+
+  it("leaves a host:port address to the TCP transport", () => {
+    expect(parseSshAddress("devbox:7420")).toBeNull();
+    expect(isSshAddress("devbox:7420")).toBe(false);
+    expect(isSshAddress("  ssh://devbox  ")).toBe(true);
+  });
+
+  it("throws on a malformed ssh address rather than falling back", () => {
+    // Falling through to TCP would demand a token the user never supplied.
+    expect(() => parseSshAddress("ssh://")).toThrow(/host/);
+    expect(() => parseSshAddress("ssh://host:notaport")).toThrow(/port/);
+  });
+
+  it("builds ssh args that disable the pty and prompts", () => {
+    const args = sshArgs({ destination: "deploy@host", port: 2222, program: "archductor" });
+
+    expect(args).toContain("-T");
+    expect(args).toContain("BatchMode=yes");
+    expect(args).toContain("2222");
+    expect(args.slice(-5)).toEqual([
+      "deploy@host",
+      "archductor",
+      "archcar",
+      "stdio-proxy",
+      "--quiet",
+    ]);
+  });
+});
+
+describe("resolveRemoteConfig", () => {
+  it("resolves an ssh:// profile with no token", () => {
+    // Only the TCP transport needs a token, so a blank one here is complete
+    // rather than half-written.
+    const config = resolveRemoteConfig(
+      {},
+      () => JSON.stringify({ address: "ssh://deploy@host", token: "" }),
+      none,
+    );
+
+    expect(config?.address).toBe("ssh://deploy@host");
+    expect(config?.ssh).toEqual({
+      destination: "deploy@host",
+      port: null,
+      program: "archductor",
+    });
+  });
+
+  it("resolves an ssh:// address from the environment without a token", () => {
+    const config = resolveRemoteConfig({ ARCHDUCTOR_ARCHCAR_REMOTE: "ssh://devbox" }, none, none);
+
+    expect(config?.ssh?.destination).toBe("devbox");
+    expect(config?.token).toBe("");
+  });
+});
 
 describe("resolveRemoteConfig", () => {
   it("returns null with no environment and no profile", () => {

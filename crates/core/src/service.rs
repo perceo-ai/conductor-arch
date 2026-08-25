@@ -4,7 +4,7 @@
 //! to work, so it should be the OS's job to keep it up rather than something a
 //! user restarts by hand. This module writes a per-user service definition in
 //! whatever the platform actually uses — launchd on macOS, a systemd user unit
-//! on Linux — and loads/starts it.
+//! on Linux, a Task Scheduler logon task on Windows — and loads/starts it.
 //!
 //! Per-user, not system-wide, on purpose: the daemon runs as the user, touches
 //! that user's repositories, and needs no root.
@@ -33,6 +33,9 @@ use crate::paths::AppPaths;
 /// Reverse-DNS label for launchd; also the systemd unit stem.
 pub const SERVICE_LABEL: &str = "ai.perceo.archductor.archcar";
 pub const SYSTEMD_UNIT_NAME: &str = "archductor-archcar.service";
+/// Task Scheduler path. The leading folder keeps it out of the root listing.
+pub const WINDOWS_TASK_NAME: &str = "\\Archductor\\archcar";
+const WINDOWS_LAUNCHER_NAME: &str = "archcar-service.cmd";
 
 /// Absolute PATH entries a login shell almost always has and a service manager
 /// almost never does. Used as a backstop when the login-shell probe cannot run.
@@ -72,6 +75,11 @@ const POSIX_LOGIN_SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "mksh"
 pub enum ServiceManager {
     Launchd,
     Systemd,
+    /// Windows Task Scheduler. A per-user logon task, not an SCM service:
+    /// a real service needs an administrator and a service-control handler
+    /// compiled into archcar, and buys nothing a logon task does not already
+    /// give a tool that runs as one user against that user's repositories.
+    ScheduledTask,
     /// No supported per-user service manager on this platform.
     Unsupported,
 }
@@ -81,6 +89,7 @@ impl ServiceManager {
         match self {
             Self::Launchd => "launchd",
             Self::Systemd => "systemd",
+            Self::ScheduledTask => "scheduled-task",
             Self::Unsupported => "unsupported",
         }
     }
@@ -90,6 +99,8 @@ impl ServiceManager {
             Self::Launchd
         } else if cfg!(target_os = "linux") {
             Self::Systemd
+        } else if cfg!(windows) {
+            Self::ScheduledTask
         } else {
             Self::Unsupported
         }
@@ -104,7 +115,19 @@ impl ServiceManager {
             Self::Systemd => {
                 "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin".to_owned()
             }
-            Self::Unsupported => std::env::var("PATH").unwrap_or_default(),
+            // A scheduled task inherits the user's registry environment, which
+            // is close to a login shell's but misses anything a profile script
+            // adds. There is no fixed string to quote, so report the process's.
+            Self::ScheduledTask | Self::Unsupported => std::env::var("PATH").unwrap_or_default(),
+        }
+    }
+
+    /// The path separator for this platform's PATH, for splitting the recorded
+    /// value back apart.
+    pub fn path_separator(self) -> char {
+        match self {
+            Self::ScheduledTask => ';',
+            _ => ':',
         }
     }
 }
@@ -158,8 +181,19 @@ pub fn unit_path(paths: &AppPaths, manager: ServiceManager) -> Option<PathBuf> {
                 .unwrap_or_else(|| paths.config_dir.join("systemd/user"))
                 .join(SYSTEMD_UNIT_NAME),
         ),
+        // The task itself lives in the Task Scheduler store, which is not a
+        // file. The launcher script is the part archductor owns and the part
+        // that carries the environment, so it is what `installed` keys off and
+        // what `status`/`doctor` read the recorded PATH back out of.
+        ServiceManager::ScheduledTask => Some(paths.config_dir.join(WINDOWS_LAUNCHER_NAME)),
         ServiceManager::Unsupported => None,
     }
+}
+
+/// Companion to the launcher: the registered task definition, kept beside it so
+/// a confused install can be inspected rather than only queried.
+fn windows_task_xml_path(paths: &AppPaths) -> PathBuf {
+    paths.config_dir.join("archcar-service.xml")
 }
 
 /// Locate the archcar binary: an explicit path, then a sibling of the running
@@ -202,9 +236,12 @@ fn which_archcar() -> Result<PathBuf> {
 /// with a bare "No such file or directory" nobody can trace back to here.
 fn ensure_durable_binary(binary: &Path) -> Result<()> {
     let text = binary.to_string_lossy();
+    let windows_temp =
+        text.contains("\\AppData\\Local\\Temp\\") || text.contains("\\Windows\\Temp\\");
     let temporary = text.contains("/.mount_")
         || text.starts_with("/tmp/")
-        || text.starts_with("/private/var/folders/");
+        || text.starts_with("/private/var/folders/")
+        || windows_temp;
     anyhow::ensure!(
         !temporary,
         "{} is inside a temporary mount (an AppImage or an extracted archive), so a service unit \
@@ -241,10 +278,19 @@ pub fn install(paths: &AppPaths, input: &InstallService) -> Result<ServiceStatus
             launchd_plist(&binary, listen.as_deref(), &paths.logs_dir, &path_env)
         }
         ServiceManager::Systemd => systemd_unit(&binary, listen.as_deref(), &path_env),
+        ServiceManager::ScheduledTask => {
+            windows_launcher_script(&binary, listen.as_deref(), &path_env)
+        }
         ServiceManager::Unsupported => unreachable!(),
     };
     std::fs::write(&unit_path, contents)
         .with_context(|| format!("write service unit {}", unit_path.display()))?;
+    if manager == ServiceManager::ScheduledTask {
+        let xml_path = windows_task_xml_path(paths);
+        let xml = windows_task_xml(&unit_path, &current_user_name());
+        std::fs::write(&xml_path, utf16le_with_bom(&xml))
+            .with_context(|| format!("write task definition {}", xml_path.display()))?;
+    }
 
     // A listener means a token has to exist before the daemon starts.
     if listen.is_some() {
@@ -339,6 +385,13 @@ pub fn status(paths: &AppPaths) -> Result<ServiceStatus> {
                 let state = systemctl_user_state(SYSTEMD_UNIT_NAME);
                 (state == "active", format!("systemd reports {state}"))
             }
+            ServiceManager::ScheduledTask => {
+                let state = scheduled_task_state();
+                (
+                    state == "Running",
+                    format!("Task Scheduler reports {state}"),
+                )
+            }
             ServiceManager::Unsupported => (false, "unsupported platform".to_owned()),
         }
     };
@@ -401,6 +454,10 @@ fn ensure_boot_persistence(manager: ServiceManager, warnings: &mut Vec<String>) 
             warnings.push(LAUNCHD_LOGIN_SCOPE_WARNING.to_owned());
             false
         }
+        ServiceManager::ScheduledTask => {
+            warnings.push(SCHEDULED_TASK_LOGON_SCOPE_WARNING.to_owned());
+            false
+        }
         ServiceManager::Unsupported => false,
     }
 }
@@ -422,6 +479,10 @@ fn report_boot_persistence(manager: ServiceManager, warnings: &mut Vec<String>) 
         }
         ServiceManager::Launchd => {
             warnings.push(LAUNCHD_LOGIN_SCOPE_WARNING.to_owned());
+            false
+        }
+        ServiceManager::ScheduledTask => {
+            warnings.push(SCHEDULED_TASK_LOGON_SCOPE_WARNING.to_owned());
             false
         }
         ServiceManager::Unsupported => false,
@@ -459,6 +520,11 @@ fn explain_start_failure(
 const LAUNCHD_LOGIN_SCOPE_WARNING: &str =
     "a launchd agent starts when this user logs in, not at boot. On a headless Mac, log in once \
      after a reboot (or install a root-owned LaunchDaemon) before remote clients can connect.";
+
+const SCHEDULED_TASK_LOGON_SCOPE_WARNING: &str =
+    "this task starts when the user logs on, not at boot. Running it while logged off requires \
+     storing the account password in Task Scheduler, which archductor will not do for you — set \
+     \"Run whether user is logged on or not\" by hand if you need it.";
 
 fn linger_enabled() -> bool {
     run(&[
@@ -583,6 +649,24 @@ fn start_service(manager: ServiceManager, unit_path: &Path) -> Result<String> {
             systemctl_user(&["enable", "--now", SYSTEMD_UNIT_NAME])
                 .map(|_| format!("enabled and started {SYSTEMD_UNIT_NAME}"))
         }
+        ServiceManager::ScheduledTask => {
+            // /F replaces an existing registration, so reinstall is idempotent.
+            let xml = unit_path
+                .with_file_name("archcar-service.xml")
+                .display()
+                .to_string();
+            run(&[
+                "schtasks",
+                "/Create",
+                "/TN",
+                WINDOWS_TASK_NAME,
+                "/XML",
+                &xml,
+                "/F",
+            ])?;
+            run(&["schtasks", "/Run", "/TN", WINDOWS_TASK_NAME])
+                .map(|_| format!("registered and started {WINDOWS_TASK_NAME}"))
+        }
         ServiceManager::Unsupported => anyhow::bail!("unsupported platform"),
     }
 }
@@ -645,8 +729,36 @@ fn stop_service(manager: ServiceManager, unit_path: &Path) -> Result<String> {
             let _ = systemctl_user(&["disable", "--now", SYSTEMD_UNIT_NAME]);
             Ok(format!("disabled {SYSTEMD_UNIT_NAME}"))
         }
+        ServiceManager::ScheduledTask => {
+            // /End stops the running instance; /Delete removes the schedule.
+            let _ = run(&["schtasks", "/End", "/TN", WINDOWS_TASK_NAME]);
+            let _ = run(&["schtasks", "/Delete", "/TN", WINDOWS_TASK_NAME, "/F"]);
+            Ok(format!("removed {WINDOWS_TASK_NAME}"))
+        }
         ServiceManager::Unsupported => Ok(String::new()),
     }
+}
+
+/// The task's own view of itself. `schtasks /Query /FO LIST` prints a
+/// `Status:` line — "Running" while the daemon is up, "Ready" when it is
+/// registered but not currently executing.
+fn scheduled_task_state() -> String {
+    let Ok(output) = run(&[
+        "schtasks",
+        "/Query",
+        "/TN",
+        WINDOWS_TASK_NAME,
+        "/FO",
+        "LIST",
+    ]) else {
+        return "not registered".to_owned();
+    };
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Status:"))
+        .map(|state| state.trim().to_owned())
+        .filter(|state| !state.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 /// launchd domains to try, in order.
@@ -776,6 +888,113 @@ fn escape_xml(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// The Windows launcher script.
+///
+/// A scheduled task's action has no environment block, so the environment has
+/// to come from somewhere the task can execute — hence a `.cmd` that sets PATH
+/// and the listen address and then runs archcar in the foreground. Running it
+/// in the foreground (rather than `start /B`) is what keeps the task's own
+/// process alive for as long as the daemon is, so Task Scheduler reports
+/// "Running" and its restart rules apply to the daemon rather than to a
+/// launcher that exited immediately.
+pub fn windows_launcher_script(binary: &Path, listen: Option<&str>, path_env: &str) -> String {
+    let mut script = String::from(
+        "@echo off\r\n\
+         rem Generated by `archductor service install`. Edits are overwritten on reinstall.\r\n",
+    );
+    if !path_env.is_empty() {
+        script.push_str(&format!("set \"PATH={path_env}\"\r\n"));
+    }
+    if let Some(addr) = listen {
+        script.push_str(&format!("set \"{}={}\"\r\n", remote::LISTEN_ENV, addr));
+    }
+    script.push_str(&format!("\"{}\"\r\n", binary.display()));
+    script
+}
+
+/// The Task Scheduler definition.
+///
+/// Two restart mechanisms on purpose. `RestartOnFailure` only fires when the
+/// action exits non-zero, which is the same hole `Restart=on-failure` leaves on
+/// systemd — a clean `exit(0)` would stay down. The repeating logon trigger
+/// closes it: every minute the task tries to start, `IgnoreNew` makes that a
+/// no-op while the daemon is alive, and it becomes the restart when it is not.
+pub fn windows_task_xml(launcher: &Path, user: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Archductor archcar daemon</Description>
+    <URI>{task}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <Duration>P3650D</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>99</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>/c "{launcher}"</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        task = escape_xml(WINDOWS_TASK_NAME),
+        user = escape_xml(user),
+        launcher = escape_xml(&launcher.display().to_string()),
+    )
+}
+
+/// `schtasks /Create /XML` rejects a UTF-8 file: the definition has to be
+/// UTF-16LE with a BOM, and the failure it gives otherwise names the encoding
+/// nowhere.
+fn utf16le_with_bom(text: &str) -> Vec<u8> {
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in text.encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
 pub fn systemd_unit(binary: &Path, listen: Option<&str>, path_env: &str) -> String {
     let mut environment = String::new();
     if !path_env.is_empty() {
@@ -815,6 +1034,10 @@ fn env_from_unit(contents: &str, key: &str) -> Option<String> {
         // systemd: Environment=KEY=value
         if let Some(rest) = line.trim().strip_prefix(&format!("Environment={key}=")) {
             return Some(rest.trim().to_owned());
+        }
+        // Windows launcher: set "KEY=value"
+        if let Some(rest) = line.trim().strip_prefix(&format!("set \"{key}=")) {
+            return Some(rest.trim_end().trim_end_matches('"').to_owned());
         }
         // launchd: <key>KEY</key> followed by <string>value</string>
         if line.contains(&format!("<key>{key}</key>")) {
@@ -1095,6 +1318,110 @@ mod tests {
             env_from_unit(&plist, "PATH").as_deref(),
             Some("/home/u/a&b/bin:/usr/bin")
         );
+    }
+
+    #[test]
+    fn the_windows_launcher_carries_the_environment_a_task_action_cannot() {
+        let script = windows_launcher_script(
+            Path::new(r"C:\Program Files\archductor\archcar.exe"),
+            Some("127.0.0.1:7420"),
+            r"C:\Users\dev\.local\bin;C:\Windows\system32",
+        );
+
+        assert!(
+            script.contains("set \"PATH=C:\\Users\\dev\\.local\\bin;C:\\Windows\\system32\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("set \"ARCHDUCTOR_ARCHCAR_LISTEN=127.0.0.1:7420\""),
+            "{script}"
+        );
+        // Quoted, because Program Files has a space in it.
+        assert!(
+            script.contains("\"C:\\Program Files\\archductor\\archcar.exe\""),
+            "{script}"
+        );
+        // `start /B` would let the launcher exit immediately, and Task
+        // Scheduler would then treat the daemon as finished.
+        assert!(!script.contains("start "), "{script}");
+        assert_eq!(
+            env_from_unit(&script, "PATH").as_deref(),
+            Some(r"C:\Users\dev\.local\bin;C:\Windows\system32")
+        );
+        assert_eq!(
+            env_from_unit(&script, remote::LISTEN_ENV).as_deref(),
+            Some("127.0.0.1:7420")
+        );
+    }
+
+    #[test]
+    fn the_windows_launcher_omits_an_absent_listener() {
+        let script = windows_launcher_script(Path::new(r"C:\bin\archcar.exe"), None, "");
+
+        assert!(!script.contains("ARCHDUCTOR_ARCHCAR_LISTEN"), "{script}");
+        assert!(!script.contains("set \"PATH="), "{script}");
+        assert_eq!(env_from_unit(&script, "PATH"), None);
+    }
+
+    #[test]
+    fn the_windows_task_restarts_after_a_clean_exit_too() {
+        let xml = windows_task_xml(Path::new(r"C:\cfg\archcar-service.cmd"), "DOMAIN\\dev");
+
+        // RestartOnFailure alone leaves the same hole `Restart=on-failure`
+        // does; the repeating trigger plus IgnoreNew is what closes it.
+        assert!(xml.contains("<RestartOnFailure>"), "{xml}");
+        assert!(xml.contains("<Interval>PT1M</Interval>"), "{xml}");
+        assert!(
+            xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"),
+            "{xml}"
+        );
+        assert!(xml.contains("<Repetition>"), "{xml}");
+        // No time limit: a daemon that runs for a week is not a hung task.
+        assert!(
+            xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r"/c &quot;C:\cfg\archcar-service.cmd&quot;") || xml.contains(r"/c "),
+            "{xml}"
+        );
+        assert!(xml.contains("DOMAIN\\dev"), "{xml}");
+    }
+
+    #[test]
+    fn the_windows_task_definition_is_utf16_with_a_bom() {
+        // schtasks /Create /XML rejects UTF-8 and says nothing about encoding.
+        let bytes = utf16le_with_bom("<Task/>");
+
+        assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
+        assert_eq!(&bytes[2..6], &[b'<', 0, b'T', 0]);
+    }
+
+    #[test]
+    fn a_binary_in_the_windows_temp_directory_is_refused() {
+        let err = ensure_durable_binary(Path::new(
+            r"C:\Users\dev\AppData\Local\Temp\archductor\archcar.exe",
+        ))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("temporary mount"), "{err}");
+        ensure_durable_binary(Path::new(r"C:\Program Files\archductor\archcar.exe")).unwrap();
+    }
+
+    #[test]
+    fn every_supported_manager_reports_a_name_and_a_separator() {
+        // Windows is a real manager now; `Unsupported` should be the only
+        // variant that install refuses.
+        for manager in [
+            ServiceManager::Launchd,
+            ServiceManager::Systemd,
+            ServiceManager::ScheduledTask,
+        ] {
+            assert_ne!(manager, ServiceManager::Unsupported);
+            assert!(!manager.as_str().is_empty());
+        }
+        assert_eq!(ServiceManager::ScheduledTask.path_separator(), ';');
+        assert_eq!(ServiceManager::Systemd.path_separator(), ':');
     }
 
     #[test]

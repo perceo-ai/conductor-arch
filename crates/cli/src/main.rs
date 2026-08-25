@@ -176,11 +176,15 @@ enum Command {
 enum RemoteCommand {
     /// Save a remote daemon as a client and switch to it (verifies it responds).
     Connect {
-        /// `host:port` of the remote archcar TCP listener.
+        /// `ssh://[user@]host[:port][/path/to/archductor]` (encrypted, needs no
+        /// token or open port), or `host:port` for the token-guarded TCP
+        /// listener.
         address: String,
-        /// Access token (print it on the server with `archductor service token`).
+        /// Access token for a `host:port` address (print it on the server with
+        /// `archductor service token`). Not used by `ssh://` addresses, which
+        /// authenticate as your SSH identity.
         #[arg(long)]
-        token: String,
+        token: Option<String>,
         /// Name for this client in the switcher; defaults to the address.
         #[arg(long)]
         label: Option<String>,
@@ -343,6 +347,14 @@ enum ArchcarCommand {
     },
     /// List all workspaces with status counts.
     Workspaces,
+    /// Pump the local archcar socket over stdin/stdout. This is what a client
+    /// runs on the far side of `ssh`, not something to invoke by hand.
+    #[command(hide = true)]
+    StdioProxy {
+        /// Suppress the startup banner so the stream carries protocol only.
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Background service status for the daemon this client is talking to.
     /// Unlike `archductor service status`, this follows a remote connection,
     /// so it answers for the server rather than for this machine.
@@ -1486,6 +1498,12 @@ fn run_cli() -> Result<()> {
             }
         }
         Command::Archcar { command } => {
+            // The stdio proxy is the far side of the ssh transport: it must
+            // reach *this* machine's daemon even when this machine also has a
+            // remote profile saved, so it never goes through `from_paths`.
+            if let ArchcarCommand::StdioProxy { quiet } = command {
+                return run_stdio_proxy(&paths, quiet);
+            }
             let client = ArchcarClient::from_paths(&paths);
             match command {
                 ArchcarCommand::Ensure { workspace, kind } => {
@@ -1704,6 +1722,9 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::Workspaces => {
                     print_archcar_response(client.send(ArchcarRequest::ListWorkspaces)?);
                 }
+                // Handled above, before the client is built: the proxy has to
+                // reach the local daemon regardless of any remote profile.
+                ArchcarCommand::StdioProxy { .. } => unreachable!("dispatched before this match"),
                 ArchcarCommand::ServiceStatus => {
                     print_archcar_response(client.send(ArchcarRequest::GetServiceStatus)?);
                 }
@@ -3157,7 +3178,23 @@ fn run_cli() -> Result<()> {
                 no_verify,
             } => {
                 let address = address.trim().to_owned();
-                let token = token.trim().to_owned();
+                let ssh = remote::is_ssh_address(&address);
+                // An ssh:// address carries no token; a TCP one cannot work
+                // without it, so say which is missing rather than failing later
+                // at the handshake.
+                let token = match (ssh, token) {
+                    (true, Some(_)) => anyhow::bail!(
+                        "--token does not apply to an ssh:// address; ssh authenticates you as \
+                         your SSH identity and the daemon needs no shared secret"
+                    ),
+                    (true, None) => String::new(),
+                    (false, Some(token)) => token.trim().to_owned(),
+                    (false, None) => anyhow::bail!(
+                        "a host:port address needs --token (print it on the server with \
+                         `archductor service token`).\nTo connect over SSH instead, which needs \
+                         no token and no open port, use: archductor remote connect ssh://{address}"
+                    ),
+                };
                 if !no_verify {
                     verify_client(&address, &token)?;
                 }
@@ -3166,6 +3203,9 @@ fn run_cli() -> Result<()> {
                 clients.active_id = Some(id);
                 remote::save_clients(&paths, &clients)?;
                 println!("Connected: this machine's Archductor clients now use {address}.");
+                if ssh {
+                    println!("Transport: ssh (encrypted; no listener or token on the server).");
+                }
                 println!("Saved clients: {}", remote::clients_path(&paths).display());
                 println!("Switch with `archductor remote use <client>` or `remote disconnect`.");
             }
@@ -3231,14 +3271,24 @@ fn run_cli() -> Result<()> {
                 let env_remote = std::env::var(remote::REMOTE_ENV)
                     .ok()
                     .filter(|value| !value.trim().is_empty());
+                // Report through `label()`/`is_remote()` rather than matching
+                // one variant, so a new transport cannot silently fall into the
+                // "local daemon" arm and misreport where requests go.
                 match configured_remote_endpoint(&paths)? {
-                    Some(ArchcarEndpoint::Remote { address, .. }) => {
+                    Some(endpoint) if endpoint.is_remote() => {
                         let source = if env_remote.is_some() {
                             "environment"
                         } else {
                             "saved profile"
                         };
-                        println!("remote {address} (from {source})");
+                        let transport = match endpoint {
+                            ArchcarEndpoint::Ssh(_) => "ssh",
+                            _ => "tcp",
+                        };
+                        println!(
+                            "remote {} (from {source}, transport {transport})",
+                            endpoint.label()
+                        );
                     }
                     _ => println!("local daemon ({})", paths.archcar_endpoint_path().display()),
                 }
@@ -3481,7 +3531,11 @@ fn change_scope(commit: Option<String>, default: WorkspaceChangeScope) -> Worksp
 /// Contact a daemon before pointing this machine at it, so a typo or a dead
 /// host fails here instead of leaving every surface talking to nothing.
 fn verify_client(address: &str, token: &str) -> Result<()> {
-    let client = ArchcarClient::remote(address.to_owned(), token.to_owned());
+    let client = if let Some(target) = remote::parse_ssh_address(address) {
+        ArchcarClient::ssh(target?)
+    } else {
+        ArchcarClient::remote(address.to_owned(), token.to_owned())
+    };
     match client.send(ArchcarRequest::GetRemoteAccess)? {
         ArchcarResponse::Error { message } => {
             anyhow::bail!("remote daemon at {address} refused: {message}")
@@ -4889,8 +4943,9 @@ fn print_service_doctor(report: &service::ServiceDoctorReport) {
     print_service_status(&report.status);
     println!();
     println!("daemon PATH ({}):", report.path_source);
-    for dir in report.path.split(':').filter(|dir| !dir.is_empty()) {
-        println!("  {dir}");
+    // Windows separates with `;`; everything else with `:`.
+    for dir in std::env::split_paths(&report.path).filter(|dir| !dir.as_os_str().is_empty()) {
+        println!("  {}", dir.display());
     }
     println!();
     for row in &report.rows {
@@ -4909,6 +4964,56 @@ fn print_service_doctor(report: &service::ServiceDoctorReport) {
     }
     println!();
     println!("{}", report.feedback);
+}
+
+/// The server end of the SSH transport: copy bytes between this process's
+/// stdin/stdout and the local archcar socket.
+///
+/// This exists so a remote client needs no open port and no shared token. sshd
+/// has already authenticated whoever is on the other end of the pipe, and the
+/// socket this connects to is guarded by filesystem permissions, so the proxy
+/// adds no authentication of its own — it must therefore never be reachable by
+/// anything other than a process that already runs as this user.
+fn run_stdio_proxy(paths: &AppPaths, quiet: bool) -> anyhow::Result<()> {
+    use archductor_core::archcar::transport::DuplexStream;
+    use std::io::{Read, Write};
+
+    let socket = archductor_core::archcar::client::connect_local_daemon(paths)
+        .context("connect to the local archcar daemon for the ssh stdio proxy")?;
+    if !quiet {
+        eprintln!("archcar stdio proxy ready");
+    }
+
+    let mut to_daemon = socket.try_clone_stream().context("clone archcar socket")?;
+    // stdin -> daemon on its own thread; daemon -> stdout on this one. Either
+    // side closing ends the session, which is what a client disconnect and a
+    // daemon restart both look like.
+    let pump_in = std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let _ = std::io::copy(&mut stdin, &mut to_daemon);
+        // Tell the daemon no more requests are coming so it releases the
+        // connection instead of waiting on a peer that has gone.
+        let _ = to_daemon.shutdown(std::net::Shutdown::Write);
+    });
+
+    let mut from_daemon = socket;
+    let mut stdout = std::io::stdout().lock();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        match from_daemon.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                stdout.write_all(&buffer[..read])?;
+                // Unbuffered by line would be wrong (payloads are large); flush
+                // every chunk so a reply is never stuck waiting for more input.
+                stdout.flush()?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err).context("read from the archcar socket"),
+        }
+    }
+    let _ = pump_in.join();
+    Ok(())
 }
 
 /// Shared first-run work behind `service setup` and `mcp setup`: put the daemon
@@ -5789,8 +5894,32 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
 
+    /// Parse arguments on a thread with a generous stack.
+    ///
+    /// clap's derive builds every subcommand of this (very large) CLI inside a
+    /// single generated frame, and in a debug build that frame runs to a few
+    /// MiB — more than the ~2 MiB libtest gives a test thread. The binary
+    /// itself parses on the main thread, which has 8 MiB and is unaffected;
+    /// only the tests need the extra room. Without this, adding a subcommand
+    /// aborts the whole test binary with a stack overflow in whichever parse
+    /// test happens to run first.
+    fn try_parse<I, T>(args: I) -> Result<Cli, clap::Error>
+    where
+        I: IntoIterator<Item = T> + Send + 'static,
+        T: Into<OsString> + Clone + Send + 'static,
+    {
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || Cli::try_parse_from(args))
+            .expect("spawn the CLI parse thread")
+            .join()
+            .expect("the CLI parse thread panicked")
+    }
+
     fn command_of(args: &[&str]) -> Command {
-        Cli::try_parse_from(args).unwrap().command
+        // Own the arguments so they can cross into the parse thread.
+        let owned: Vec<OsString> = args.iter().map(OsString::from).collect();
+        try_parse(owned).unwrap().command
     }
 
     #[test]
@@ -5929,7 +6058,7 @@ mod tests {
 
     #[test]
     fn parses_app_shared_settings_export() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse([
             "archductor",
             "settings",
             "export",
@@ -6099,7 +6228,7 @@ mod tests {
 
     #[test]
     fn cli_session_start_and_open_accept_explicit_model() {
-        let start = Cli::try_parse_from([
+        let start = try_parse([
             "archductor",
             "session",
             "start",
@@ -6120,7 +6249,7 @@ mod tests {
         };
         assert_eq!(start_model.as_deref(), Some("gpt-5.6-luna"));
 
-        let open = Cli::try_parse_from([
+        let open = try_parse([
             "archductor",
             "session",
             "open",
@@ -6159,7 +6288,7 @@ mod tests {
 
     #[test]
     fn cli_archcar_send_accepts_automation_input_kinds() {
-        let control = Cli::try_parse_from([
+        let control = try_parse([
             "archductor",
             "archcar",
             "send",
@@ -6189,7 +6318,7 @@ mod tests {
         assert!(!immediate);
         assert_eq!(input, vec!["/model".to_owned(), "gpt-5.6-sol".to_owned()]);
 
-        let review = Cli::try_parse_from([
+        let review = try_parse([
             "archductor",
             "archcar",
             "send",
@@ -6222,7 +6351,7 @@ mod tests {
         assert!(immediate);
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
 
-        let raw = Cli::try_parse_from([
+        let raw = try_parse([
             "archductor",
             "archcar",
             "send",
@@ -6254,8 +6383,7 @@ mod tests {
 
     #[test]
     fn cli_archcar_model_uses_structured_model_request() {
-        let cli =
-            Cli::try_parse_from(["archductor", "archcar", "model", "7", "gpt-5.6-terra"]).unwrap();
+        let cli = try_parse(["archductor", "archcar", "model", "7", "gpt-5.6-terra"]).unwrap();
 
         let Command::Archcar {
             command: ArchcarCommand::Model { session_id, model },
@@ -6269,7 +6397,7 @@ mod tests {
 
     #[test]
     fn cli_archcar_control_parses_effort_and_permission_mode() {
-        let effort = Cli::try_parse_from(["archductor", "archcar", "effort", "7", "high"]).unwrap();
+        let effort = try_parse(["archductor", "archcar", "effort", "7", "high"]).unwrap();
         let Command::Archcar {
             command: ArchcarCommand::Effort { session_id, level },
         } = effort.command
@@ -6279,7 +6407,7 @@ mod tests {
         assert_eq!(session_id, 7);
         assert_eq!(level, "high");
 
-        let fast = Cli::try_parse_from(["archductor", "archcar", "fast", "7"]).unwrap();
+        let fast = try_parse(["archductor", "archcar", "fast", "7"]).unwrap();
         let Command::Archcar {
             command: ArchcarCommand::Fast { session_id, off },
         } = fast.command
@@ -6289,7 +6417,7 @@ mod tests {
         assert_eq!(session_id, 7);
         assert!(!off);
 
-        let slow = Cli::try_parse_from(["archductor", "archcar", "fast", "7", "--off"]).unwrap();
+        let slow = try_parse(["archductor", "archcar", "fast", "7", "--off"]).unwrap();
         let Command::Archcar {
             command: ArchcarCommand::Fast { session_id, off },
         } = slow.command
@@ -6300,8 +6428,7 @@ mod tests {
         assert!(off);
 
         let permission =
-            Cli::try_parse_from(["archductor", "archcar", "permission-mode", "7", "default"])
-                .unwrap();
+            try_parse(["archductor", "archcar", "permission-mode", "7", "default"]).unwrap();
         let Command::Archcar {
             command: ArchcarCommand::PermissionMode { session_id, mode },
         } = permission.command
@@ -6314,7 +6441,7 @@ mod tests {
 
     #[test]
     fn cli_archcar_interrupt_parses_session_id() {
-        let cli = Cli::try_parse_from(["archductor", "archcar", "interrupt", "7"]).unwrap();
+        let cli = try_parse(["archductor", "archcar", "interrupt", "7"]).unwrap();
 
         let Command::Archcar {
             command: ArchcarCommand::Interrupt { session_id },
@@ -6328,7 +6455,7 @@ mod tests {
 
     #[test]
     fn cli_archcar_messages_reads_thread_messages() {
-        let cli = Cli::try_parse_from(["archductor", "archcar", "messages", "42"]).unwrap();
+        let cli = try_parse(["archductor", "archcar", "messages", "42"]).unwrap();
 
         let Command::Archcar {
             command: ArchcarCommand::Messages { thread_id },
@@ -6342,7 +6469,7 @@ mod tests {
 
     #[test]
     fn cli_archcar_queue_parses_shared_archcar_queue_commands() {
-        let add = Cli::try_parse_from([
+        let add = try_parse([
             "archductor",
             "archcar",
             "queue",
@@ -6380,7 +6507,7 @@ mod tests {
         assert_eq!(visible_input.as_deref(), Some("Review staged comments"));
         assert_eq!(input, vec!["address".to_owned(), "comments".to_owned()]);
 
-        let list = Cli::try_parse_from(["archductor", "archcar", "queue", "list", "42"]).unwrap();
+        let list = try_parse(["archductor", "archcar", "queue", "list", "42"]).unwrap();
         let Command::Archcar {
             command:
                 ArchcarCommand::Queue {
@@ -6392,8 +6519,7 @@ mod tests {
         };
         assert_eq!(thread_id, 42);
 
-        let remove =
-            Cli::try_parse_from(["archductor", "archcar", "queue", "remove", "99"]).unwrap();
+        let remove = try_parse(["archductor", "archcar", "queue", "remove", "99"]).unwrap();
         let Command::Archcar {
             command:
                 ArchcarCommand::Queue {
@@ -6408,7 +6534,7 @@ mod tests {
 
     #[test]
     fn cli_archcar_provider_interactions_parse_commands() {
-        let list = Cli::try_parse_from([
+        let list = try_parse([
             "archductor",
             "archcar",
             "interactions",
@@ -6430,7 +6556,7 @@ mod tests {
         assert_eq!(thread_id, Some(42));
         assert!(all);
 
-        let answer = Cli::try_parse_from([
+        let answer = try_parse([
             "archductor",
             "archcar",
             "interactions",
@@ -6462,7 +6588,7 @@ mod tests {
             }]
         );
 
-        let always = Cli::try_parse_from([
+        let always = try_parse([
             "archductor",
             "archcar",
             "interactions",
@@ -6504,7 +6630,7 @@ mod tests {
 
     #[test]
     fn cli_session_send_accepts_provider_thread_and_message() {
-        let cli = Cli::try_parse_from([
+        let cli = try_parse([
             "archductor",
             "session",
             "send",
@@ -6558,7 +6684,7 @@ mod tests {
 
     #[test]
     fn cli_session_send_keeps_distinct_claude_thread_targets() {
-        let first = Cli::try_parse_from([
+        let first = try_parse([
             "archductor",
             "session",
             "send",
@@ -6570,7 +6696,7 @@ mod tests {
             "first",
         ])
         .unwrap();
-        let second = Cli::try_parse_from([
+        let second = try_parse([
             "archductor",
             "session",
             "send",
@@ -6737,7 +6863,7 @@ mod tests {
 
     #[test]
     fn cli_rejects_removed_internal_run_codex_session_command() {
-        let parse = Cli::try_parse_from(["archductor", "internal", "run-codex-session", "demo"]);
+        let parse = try_parse(["archductor", "internal", "run-codex-session", "demo"]);
 
         assert!(parse.is_err());
     }
@@ -6757,7 +6883,7 @@ mod tests {
 
     #[test]
     fn cli_parses_workspace_delete_cleanup_flags() {
-        let parse = Cli::try_parse_from([
+        let parse = try_parse([
             "archductor",
             "workspace",
             "delete",
@@ -6786,7 +6912,7 @@ mod tests {
 
     #[test]
     fn cli_parses_workspace_branch_actions() {
-        let parse = Cli::try_parse_from([
+        let parse = try_parse([
             "archductor",
             "workspace",
             "branch",
@@ -6813,7 +6939,7 @@ mod tests {
 
     #[test]
     fn cli_parses_workspace_duplicate_branch() {
-        let parse = Cli::try_parse_from([
+        let parse = try_parse([
             "archductor",
             "workspace",
             "duplicate",
@@ -6843,7 +6969,7 @@ mod tests {
 
     #[test]
     fn cli_parses_workspace_timeline_filter() {
-        let parse = Cli::try_parse_from([
+        let parse = try_parse([
             "archductor",
             "workspace",
             "timeline",

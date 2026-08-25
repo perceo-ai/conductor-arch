@@ -1160,3 +1160,86 @@ returns `Unsupported`, so `archcar.exe` ships in the Windows ZIP with nothing to
 keep it alive) and TLS for the remote listener. The transport remains one shared
 bearer token in cleartext with no per-client identity and no handshake rate
 limit; a non-loopback listener still requires a VPN, SSH tunnel, or TLS proxy.
+
+## Windows service and the SSH transport (2026-08-24)
+
+The two items the headless pass deliberately left open.
+
+### Windows background service
+
+`ServiceManager::detect` returned `Unsupported` on Windows, so `archcar.exe`
+shipped in the release ZIP with nothing to keep it alive. There is now a
+`ScheduledTask` variant backed by a per-user Task Scheduler logon task.
+
+- **Not an SCM service** on purpose: that needs an administrator and a
+  service-control handler compiled into archcar, and buys nothing for a tool
+  that runs as one user against that user's repositories.
+- **A launcher script carries the environment.** A scheduled task's action has
+  no environment block, so install writes
+  `%APPDATA%\archductor\archcar-service.cmd` with `set "PATH=…"` and the listen
+  address, and the task runs `cmd /c` on it. The launcher runs archcar in the
+  foreground rather than `start /B`, so the task's own process stays alive as
+  long as the daemon and Task Scheduler's restart rules apply to the daemon
+  instead of to a launcher that exited immediately.
+- **Two restart mechanisms.** `RestartOnFailure` only fires on a non-zero exit —
+  the same hole `Restart=on-failure` leaves on systemd. A one-minute repeating
+  logon trigger plus `MultipleInstancesPolicy=IgnoreNew` closes it: the retry is
+  a no-op while the daemon is alive and becomes the restart when it is not.
+- The task definition is written as **UTF-16LE with a BOM**, because
+  `schtasks /Create /XML` rejects UTF-8 and says nothing about encoding.
+- `boot_persistent` is false with a warning: running while logged off means
+  storing the account password in Task Scheduler, which install will not do.
+
+### SSH transport
+
+The remote transport was a shared bearer token in cleartext. `ssh://` is now a
+first-class alternative: the client runs
+`archductor archcar stdio-proxy` on the far side over ssh, the proxy connects to
+the server's own local socket, and the two pump bytes at each other — the shape
+`git` over ssh and `docker -H ssh://` use.
+
+**TLS was considered and not built.** It would have encrypted the channel while
+leaving the single shared credential and the open port in place. SSH removes all
+three problems using authentication the server already runs: encryption from
+sshd, a distinct identity per client, revocation by editing `authorized_keys`,
+and no listener at all. It also avoids adding a crypto stack and its C build
+dependencies to a workspace that has to build on MSYS2 windows-gnu, musl, and
+several distro families. The TCP listener stays for loopback and trusted
+networks, with its warning unchanged.
+
+- `ssh://[user@]host[:port][/path/to/archductor]`. The destination goes to `ssh`
+  verbatim, so `~/.ssh/config` aliases, jump hosts, and per-host keys work. The
+  program path is settable because `ssh host <command>` runs a non-interactive
+  shell that often skips the profile adding `~/.local/bin` to PATH.
+- `ArchcarEndpoint::Ssh` / `ArchcarStream::Ssh` alongside the existing variants;
+  `is_remote()` replaces the variant matches that used to mean "not local", so a
+  new transport cannot silently fall into a local-only branch. `remote status`
+  had exactly that bug during the smoke and now reports the transport.
+- Profiles: an `ssh://` entry saves and loads with a blank token; the TCP
+  transport still refuses one.
+- The proxy always talks to the *local* daemon, bypassing any remote profile the
+  server itself may have saved from being used as a client, and spawns the
+  sidecar if it is not already up.
+- ssh's stderr is drained on a thread and reported when the stream ends early,
+  after a bounded wait for the child — reading it immediately raced the drain and
+  surfaced the "Permanently added … to the list of known hosts" warning instead
+  of "Permission denied (publickey)".
+- The Electron main process speaks the same transport (`Duplex` in place of
+  `net.Socket`, `parseSshAddress`/`sshArgs` mirroring the Rust), so the app
+  follows an `ssh://` profile like the CLI does.
+
+Verified: 917 core tests, 465 desktop tests, `tsc --noEmit`, clippy, fmt, a
+Windows cross-check (`cargo check --target x86_64-pc-windows-gnu` under mingw),
+and a two-container SSH smoke on a Docker network — a client holding only the
+`archductor` CLI (no `archcar` binary, no repo) connected over `ssh://` to a
+server running sshd, then added a repository, created a workspace, and read back
+`service doctor` describing the *server's* PATH (`gh` at `/home/arch/.local/bin`,
+which exists only there). `ss -ltnp` on the server showed port 22 and no archcar
+listener. Revoking `authorized_keys` produced
+`ssh transport failed: Permission denied (publickey)`, and restoring it worked
+again immediately.
+
+Not verified: the Windows service on a real Windows host — it is unit-covered
+(launcher contents, task XML, UTF-16 encoding, temp-path refusal) and
+cross-compiles, but no `schtasks` call has been executed. CI's Windows job builds
+and smokes the CLI; it does not install the task.

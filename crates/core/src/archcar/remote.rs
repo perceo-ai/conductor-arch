@@ -9,6 +9,7 @@
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -44,6 +45,272 @@ pub fn token_path(paths: &AppPaths) -> PathBuf {
     paths.state_dir.join("archcar.token")
 }
 
+// --- SSH transport -------------------------------------------------------
+//
+// The TCP listener sends a shared bearer token in cleartext and gives every
+// client the same identity, so it is only safe on loopback or a network you
+// already trust. SSH is the alternative that needs no new credential: the
+// client runs `ssh <host> archductor archcar stdio-proxy`, the server end
+// connects to its own local socket, and the two pump bytes at each other. The
+// connection is encrypted by sshd, the identity is the SSH key, revocation is
+// `authorized_keys`, and no port is open on the daemon at all.
+//
+// This is the same shape as `git` over ssh and `docker -H ssh://`.
+
+pub const SSH_SCHEME: &str = "ssh://";
+/// What the client runs on the far side. Kept here so the client and the docs
+/// cannot drift from the subcommand that implements it.
+pub const SSH_PROXY_ARGS: [&str; 3] = ["archcar", "stdio-proxy", "--quiet"];
+
+/// A daemon reached by running the stdio proxy over SSH.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshTarget {
+    /// `[user@]host` — handed to `ssh` verbatim, so `~/.ssh/config` aliases,
+    /// jump hosts, and per-host identities all keep working.
+    pub destination: String,
+    pub port: Option<u16>,
+    /// The `archductor` executable on the far side. `ssh host <command>` runs a
+    /// non-interactive shell, which on many systems skips the profile that adds
+    /// `~/.local/bin` to PATH — so an explicit path is worth allowing.
+    pub program: String,
+}
+
+impl SshTarget {
+    /// The full argument list for `ssh`.
+    pub fn ssh_args(&self) -> Vec<String> {
+        let mut args = vec![
+            // No pty: this is a byte pipe, and a pty would mangle it with echo
+            // and CR translation.
+            "-T".to_owned(),
+            // Notice a dead peer instead of blocking forever on a read; the
+            // pipe cannot carry a socket read timeout.
+            "-o".to_owned(),
+            "ServerAliveInterval=15".to_owned(),
+            "-o".to_owned(),
+            "ServerAliveCountMax=3".to_owned(),
+            // A prompt would hang a background client with no terminal.
+            "-o".to_owned(),
+            "BatchMode=yes".to_owned(),
+        ];
+        if let Some(port) = self.port {
+            args.push("-p".to_owned());
+            args.push(port.to_string());
+        }
+        args.push(self.destination.clone());
+        args.push(self.program.clone());
+        args.extend(SSH_PROXY_ARGS.iter().map(|arg| (*arg).to_owned()));
+        args
+    }
+
+    pub fn to_address(&self) -> String {
+        let mut address = format!("{SSH_SCHEME}{}", self.destination);
+        if let Some(port) = self.port {
+            address.push_str(&format!(":{port}"));
+        }
+        if self.program != DEFAULT_SSH_PROGRAM {
+            address.push('/');
+            address.push_str(self.program.trim_start_matches('/'));
+        }
+        address
+    }
+}
+
+const DEFAULT_SSH_PROGRAM: &str = "archductor";
+
+/// Parse `ssh://[user@]host[:port][/path/to/archductor]`.
+///
+/// Returns `None` for anything that is not an `ssh://` address, so callers can
+/// use it to tell the two transports apart.
+pub fn parse_ssh_address(value: &str) -> Option<Result<SshTarget>> {
+    let rest = value.trim().strip_prefix(SSH_SCHEME)?;
+    Some(parse_ssh_rest(rest))
+}
+
+fn parse_ssh_rest(rest: &str) -> Result<SshTarget> {
+    anyhow::ensure!(!rest.is_empty(), "ssh address needs a host");
+    // The first `/` after the authority starts the program path. An IPv6
+    // literal is bracketed, so it cannot contain a bare `/`.
+    let (authority, program) = match rest.find('/') {
+        Some(index) => (&rest[..index], Some(&rest[index..])),
+        None => (rest, None),
+    };
+    anyhow::ensure!(!authority.is_empty(), "ssh address needs a host");
+
+    let (destination, port) = split_ssh_port(authority)?;
+    anyhow::ensure!(
+        !destination.is_empty(),
+        "ssh address `{rest}` has no host part"
+    );
+    let program = program
+        .map(str::trim)
+        .filter(|program| !program.is_empty() && *program != "/")
+        .unwrap_or(DEFAULT_SSH_PROGRAM)
+        .to_owned();
+    Ok(SshTarget {
+        destination: destination.to_owned(),
+        port,
+        program,
+    })
+}
+
+/// Split a trailing `:port`, leaving bracketed IPv6 literals alone.
+fn split_ssh_port(authority: &str) -> Result<(&str, Option<u16>)> {
+    if authority.ends_with(']') {
+        return Ok((authority, None));
+    }
+    let Some(index) = authority.rfind(':') else {
+        return Ok((authority, None));
+    };
+    let port = authority[index + 1..].parse::<u16>().with_context(|| {
+        format!(
+            "ssh address port `{}` is not a port",
+            &authority[index + 1..]
+        )
+    })?;
+    Ok((&authority[..index], Some(port)))
+}
+
+/// True when a saved address names the SSH transport rather than the TCP one.
+pub fn is_ssh_address(value: &str) -> bool {
+    value.trim().starts_with(SSH_SCHEME)
+}
+
+/// A byte pipe to a remote archcar, carried by an `ssh` child process.
+pub struct SshStream {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+    /// ssh writes its own failures here — "Could not resolve hostname",
+    /// "Permission denied (publickey)", "command not found". Drained on a
+    /// thread so a full pipe cannot deadlock the transfer, and reported when
+    /// the stream ends early so the caller sees the reason instead of EOF.
+    stderr: Arc<Mutex<String>>,
+}
+
+impl SshStream {
+    fn failure(&mut self) -> io::Error {
+        // Wait for ssh before reading its stderr. The drain thread is still
+        // running at the moment stdout hits EOF, so reading immediately races
+        // it and tends to catch only the "Permanently added ... to the list of
+        // known hosts" warning — hiding the "Permission denied (publickey)"
+        // that is the actual reason.
+        let status = wait_briefly(&mut self.child);
+        let detail = self
+            .stderr
+            .lock()
+            .map(|text| ssh_failure_reason(&text))
+            .unwrap_or_default();
+        let message = match (detail.is_empty(), status) {
+            (false, _) => format!("ssh transport failed: {detail}"),
+            (true, Some(status)) => format!("ssh exited with {status} before the daemon answered"),
+            (true, None) => "ssh transport closed unexpectedly".to_owned(),
+        };
+        io::Error::new(io::ErrorKind::BrokenPipe, message)
+    }
+}
+
+/// Reap the child, but never block the error path forever. `wait()` would hang
+/// if ssh somehow closed stdout while still running, and this only exists to
+/// let the stderr drain finish.
+fn wait_briefly(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // The drain thread may still be flushing the last of stderr.
+                std::thread::sleep(Duration::from_millis(20));
+                return Some(status);
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Pick the line worth showing out of ssh's stderr.
+///
+/// ssh prefixes routine noise — host-key warnings, banners — ahead of the real
+/// failure, and showing the first line reliably shows the wrong one.
+fn ssh_failure_reason(stderr: &str) -> String {
+    let interesting: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.starts_with("Warning: Permanently added"))
+        .collect();
+    if interesting.is_empty() {
+        return stderr.trim().to_owned();
+    }
+    interesting.join("; ")
+}
+
+impl Drop for SshStream {
+    fn drop(&mut self) {
+        // The proxy exits when its stdin closes; kill only if it does not.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Read for SshStream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.stdout.read(buf) {
+            // A clean EOF here means ssh went away mid-conversation, which is
+            // an error for a request/response transport, not an end of input.
+            Ok(0) => Err(self.failure()),
+            other => other,
+        }
+    }
+}
+
+impl Write for SshStream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stdin.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stdin.flush()
+    }
+}
+
+/// Start `ssh <host> archductor archcar stdio-proxy` and hand back its pipes.
+pub fn connect_ssh(target: &SshTarget) -> Result<SshStream> {
+    let mut command = std::process::Command::new("ssh");
+    command
+        .args(target.ssh_args())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().with_context(|| {
+        format!(
+            "run ssh for {} (is the OpenSSH client installed?)",
+            target.destination
+        )
+    })?;
+    let stdin = child.stdin.take().context("ssh stdin was not captured")?;
+    let stdout = child.stdout.take().context("ssh stdout was not captured")?;
+    let mut child_stderr = child.stderr.take().context("ssh stderr was not captured")?;
+
+    let stderr = Arc::new(Mutex::new(String::new()));
+    let sink = Arc::clone(&stderr);
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = child_stderr.read_to_end(&mut buffer);
+        if let Ok(mut text) = sink.lock() {
+            text.push_str(&String::from_utf8_lossy(&buffer));
+        }
+    });
+
+    Ok(SshStream {
+        child,
+        stdin,
+        stdout,
+        stderr,
+    })
+}
+
 /// Client-side connection profile for a server-hosted daemon, persisted so the
 /// CLI and the desktop app can stay pointed at a remote archcar across
 /// restarts without environment variables. Environment overrides still win.
@@ -65,7 +332,11 @@ pub fn save_profile(paths: &AppPaths, profile: &RemoteProfile) -> Result<()> {
         !profile.address.trim().is_empty(),
         "remote address is required"
     );
-    anyhow::ensure!(!profile.token.trim().is_empty(), "remote token is required");
+    // An ssh:// address has no token by design; sshd is the authentication.
+    anyhow::ensure!(
+        is_ssh_address(&profile.address) || !profile.token.trim().is_empty(),
+        "remote token is required"
+    );
     std::fs::create_dir_all(&paths.state_dir)
         .with_context(|| format!("create archcar state dir {}", paths.state_dir.display()))?;
     let path = profile_path(paths);
@@ -76,13 +347,20 @@ pub fn save_profile(paths: &AppPaths, profile: &RemoteProfile) -> Result<()> {
     Ok(())
 }
 
+/// A saved connection is usable when it names a host, and — for the TCP
+/// transport only — carries the token that transport needs. An `ssh://` entry
+/// with a blank token is complete, not half-written.
+fn profile_is_usable(address: &str, token: &str) -> bool {
+    !address.trim().is_empty() && (is_ssh_address(address) || !token.trim().is_empty())
+}
+
 pub fn load_profile(paths: &AppPaths) -> Result<Option<RemoteProfile>> {
     let path = profile_path(paths);
     match std::fs::read_to_string(&path) {
         Ok(contents) => {
             let profile: RemoteProfile = serde_json::from_str(&contents)
                 .with_context(|| format!("parse remote profile {}", path.display()))?;
-            if profile.address.trim().is_empty() || profile.token.trim().is_empty() {
+            if !profile_is_usable(&profile.address, &profile.token) {
                 return Ok(None);
             }
             Ok(Some(profile))
@@ -238,7 +516,7 @@ pub fn load_clients(paths: &AppPaths) -> Result<ClientsFile> {
         }
     };
     file.clients
-        .retain(|c| !c.address.trim().is_empty() && !c.token.trim().is_empty());
+        .retain(|c| profile_is_usable(&c.address, &c.token));
     if file.active().is_none() {
         file.active_id = None;
     }
@@ -436,6 +714,154 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    fn ssh(address: &str) -> SshTarget {
+        parse_ssh_address(address)
+            .expect("an ssh:// address")
+            .expect("a valid ssh:// address")
+    }
+
+    #[test]
+    fn an_ssh_address_parses_user_host_port_and_program() {
+        assert_eq!(
+            ssh("ssh://deploy@build.internal:2222/opt/archductor/bin/archductor"),
+            SshTarget {
+                destination: "deploy@build.internal".to_owned(),
+                port: Some(2222),
+                program: "/opt/archductor/bin/archductor".to_owned(),
+            }
+        );
+        // Bare host: the program defaults, and `ssh` resolves the name through
+        // ~/.ssh/config like any other destination.
+        assert_eq!(
+            ssh("ssh://devbox"),
+            SshTarget {
+                destination: "devbox".to_owned(),
+                port: None,
+                program: "archductor".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_ipv6_literal_is_not_mistaken_for_a_port() {
+        let target = ssh("ssh://[fe80::1]");
+
+        assert_eq!(target.destination, "[fe80::1]");
+        assert_eq!(target.port, None);
+    }
+
+    #[test]
+    fn a_non_ssh_address_is_left_to_the_tcp_transport() {
+        assert!(parse_ssh_address("devbox:7420").is_none());
+        assert!(!is_ssh_address("devbox:7420"));
+        assert!(is_ssh_address("  ssh://devbox  "));
+    }
+
+    #[test]
+    fn a_broken_ssh_address_is_an_error_not_a_silent_fallback() {
+        // Falling through to the TCP transport here would ask for a token the
+        // user never intended to supply.
+        assert!(parse_ssh_address("ssh://").unwrap().is_err());
+        assert!(parse_ssh_address("ssh://host:notaport").unwrap().is_err());
+    }
+
+    #[test]
+    fn ssh_args_disable_the_pty_and_prompts_and_end_with_the_proxy() {
+        let args = ssh("ssh://deploy@host:2222").ssh_args();
+
+        assert!(args.contains(&"-T".to_owned()), "{args:?}");
+        // A password prompt would hang a client with no terminal.
+        assert!(args.contains(&"BatchMode=yes".to_owned()), "{args:?}");
+        assert!(
+            args.contains(&"ServerAliveInterval=15".to_owned()),
+            "{args:?}"
+        );
+        // Destination, then the program, then the proxy subcommand — in that
+        // order, or ssh treats the arguments as part of the host expression.
+        assert_eq!(
+            args[args.len() - 5..],
+            [
+                "deploy@host".to_owned(),
+                "archductor".to_owned(),
+                "archcar".to_owned(),
+                "stdio-proxy".to_owned(),
+                "--quiet".to_owned(),
+            ]
+        );
+        assert!(args.contains(&"2222".to_owned()), "{args:?}");
+    }
+
+    #[test]
+    fn an_ssh_address_round_trips_through_the_saved_form() {
+        for address in [
+            "ssh://devbox",
+            "ssh://deploy@build.internal:2222",
+            "ssh://deploy@host/opt/bin/archductor",
+        ] {
+            assert_eq!(ssh(address).to_address(), address);
+        }
+    }
+
+    #[test]
+    fn the_ssh_failure_reason_skips_the_host_key_warning() {
+        // ssh prints the known-hosts warning first, so reporting the first line
+        // hides the reason the connection actually failed.
+        let stderr = "Warning: Permanently added 'server' (ED25519) to the list of known hosts.\n\
+                      arch@server: Permission denied (publickey).\n";
+
+        assert_eq!(
+            ssh_failure_reason(stderr),
+            "arch@server: Permission denied (publickey)."
+        );
+    }
+
+    #[test]
+    fn the_ssh_failure_reason_falls_back_to_whatever_there_is() {
+        assert_eq!(
+            ssh_failure_reason("Warning: Permanently added 'x' (ED25519).\n"),
+            "Warning: Permanently added 'x' (ED25519)."
+        );
+        assert_eq!(ssh_failure_reason("   \n  "), "");
+    }
+
+    #[test]
+    fn an_ssh_profile_saves_and_loads_without_a_token() {
+        // The TCP transport cannot work without a token, so a blank one used to
+        // mean "half written". ssh:// has no token by design.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+
+        save_profile(
+            &paths,
+            &RemoteProfile {
+                address: "ssh://deploy@host".to_owned(),
+                token: String::new(),
+            },
+        )
+        .unwrap();
+
+        let loaded = load_profile(&paths).unwrap().unwrap();
+        assert_eq!(loaded.address, "ssh://deploy@host");
+        assert!(loaded.token.is_empty());
+    }
+
+    #[test]
+    fn a_tcp_profile_still_requires_a_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+
+        let err = save_profile(
+            &paths,
+            &RemoteProfile {
+                address: "devbox:7420".to_owned(),
+                token: String::new(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("token"), "{err}");
+    }
 
     fn paths_in(dir: &Path) -> AppPaths {
         AppPaths {

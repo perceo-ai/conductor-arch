@@ -22,6 +22,8 @@ use crate::paths::AppPaths;
 pub enum ArchcarStream {
     Local(LocalStream),
     Remote(std::net::TcpStream),
+    /// An `ssh` child running the stdio proxy on the far side.
+    Ssh(Box<remote::SshStream>),
 }
 
 impl ArchcarStream {
@@ -29,6 +31,9 @@ impl ArchcarStream {
         match self {
             Self::Local(stream) => stream.set_read_timeout(timeout),
             Self::Remote(stream) => stream.set_read_timeout(timeout),
+            // A pipe carries no timeout. ssh's ServerAliveInterval is what
+            // notices a dead peer here; see `SshTarget::ssh_args`.
+            Self::Ssh(_) => Ok(()),
         }
     }
 
@@ -36,6 +41,7 @@ impl ArchcarStream {
         match self {
             Self::Local(stream) => stream.set_write_timeout(timeout),
             Self::Remote(stream) => stream.set_write_timeout(timeout),
+            Self::Ssh(_) => Ok(()),
         }
     }
 }
@@ -45,6 +51,7 @@ impl std::io::Read for ArchcarStream {
         match self {
             Self::Local(stream) => stream.read(buf),
             Self::Remote(stream) => stream.read(buf),
+            Self::Ssh(stream) => stream.read(buf),
         }
     }
 }
@@ -54,6 +61,7 @@ impl Write for ArchcarStream {
         match self {
             Self::Local(stream) => stream.write(buf),
             Self::Remote(stream) => stream.write(buf),
+            Self::Ssh(stream) => stream.write(buf),
         }
     }
 
@@ -61,6 +69,7 @@ impl Write for ArchcarStream {
         match self {
             Self::Local(stream) => stream.flush(),
             Self::Remote(stream) => stream.flush(),
+            Self::Ssh(stream) => stream.flush(),
         }
     }
 }
@@ -72,6 +81,10 @@ pub enum ArchcarEndpoint {
     Local(PathBuf),
     /// A daemon reachable over TCP, addressed as `host:port` with a token.
     Remote { address: String, token: String },
+    /// A daemon reached by running the stdio proxy over SSH. No token: sshd has
+    /// already authenticated the caller, and the far side talks to its own
+    /// local socket, which filesystem permissions already guard.
+    Ssh(remote::SshTarget),
 }
 
 impl ArchcarEndpoint {
@@ -79,7 +92,29 @@ impl ArchcarEndpoint {
         match self {
             Self::Local(path) => path.display().to_string(),
             Self::Remote { address, .. } => format!("tcp://{address}"),
+            Self::Ssh(target) => target.to_address(),
         }
+    }
+
+    /// Whether this endpoint is somebody else's process. A remote daemon must
+    /// never be spawned locally, whichever transport reaches it.
+    pub fn is_remote(&self) -> bool {
+        !matches!(self, Self::Local(_))
+    }
+}
+
+/// Bring up this machine's daemon if needed and hand back a raw connection to
+/// it, bypassing any saved remote profile.
+///
+/// The ssh stdio proxy needs the byte stream rather than the request/response
+/// API, and it needs the *local* daemon specifically: it runs on the server, and
+/// the server may itself have a remote profile saved from when someone used it
+/// as a client.
+pub fn connect_local_daemon(paths: &AppPaths) -> Result<LocalStream> {
+    let client = ArchcarClient::new(paths.archcar_endpoint_path());
+    match client.connect_or_spawn()? {
+        ArchcarStream::Local(stream) => Ok(stream),
+        _ => anyhow::bail!("expected a local archcar connection"),
     }
 }
 
@@ -93,6 +128,9 @@ pub fn remote_endpoint_from_env(paths: &AppPaths) -> Result<Option<ArchcarEndpoi
     else {
         return Ok(None);
     };
+    if let Some(target) = remote::parse_ssh_address(&address) {
+        return Ok(Some(ArchcarEndpoint::Ssh(target?)));
+    }
     let token = match std::env::var(remote::TOKEN_ENV) {
         Ok(token) if !token.trim().is_empty() => token.trim().to_owned(),
         // A daemon on this machine shares its token file; a remote one needs
@@ -116,12 +154,16 @@ pub fn configured_remote_endpoint(paths: &AppPaths) -> Result<Option<ArchcarEndp
     if let Some(endpoint) = remote_endpoint_from_env(paths)? {
         return Ok(Some(endpoint));
     }
-    Ok(
-        remote::load_profile(paths)?.map(|profile| ArchcarEndpoint::Remote {
-            address: profile.address,
-            token: profile.token,
-        }),
-    )
+    let Some(profile) = remote::load_profile(paths)? else {
+        return Ok(None);
+    };
+    if let Some(target) = remote::parse_ssh_address(&profile.address) {
+        return Ok(Some(ArchcarEndpoint::Ssh(target?)));
+    }
+    Ok(Some(ArchcarEndpoint::Remote {
+        address: profile.address,
+        token: profile.token,
+    }))
 }
 
 const ARCHCAR_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(750);
@@ -160,6 +202,12 @@ impl ArchcarClient {
             },
             PathBuf::from(format!("tcp://{address}")),
         )
+    }
+
+    /// A daemon reached over SSH. No token: sshd authenticates the caller.
+    pub fn ssh(target: remote::SshTarget) -> Self {
+        let endpoint_path = PathBuf::from(target.to_address());
+        Self::with_endpoint(ArchcarEndpoint::Ssh(target), endpoint_path)
     }
 
     fn with_endpoint(endpoint: ArchcarEndpoint, endpoint_path: PathBuf) -> Self {
@@ -311,8 +359,8 @@ impl ArchcarClient {
 
     fn connect_or_spawn(&self) -> Result<ArchcarStream> {
         // A remote daemon is somebody else's process; never try to spawn it.
-        if let ArchcarEndpoint::Remote { address, token } = &self.endpoint {
-            return remote::connect(address, token).map(ArchcarStream::Remote);
+        if self.endpoint.is_remote() {
+            return self.connect_remote();
         }
         match self.connect_validated() {
             Ok(stream) => Ok(stream),
@@ -336,9 +384,22 @@ impl ArchcarClient {
         }
     }
 
+    /// Open the transport for a non-local endpoint.
+    fn connect_remote(&self) -> Result<ArchcarStream> {
+        match &self.endpoint {
+            ArchcarEndpoint::Remote { address, token } => {
+                remote::connect(address, token).map(ArchcarStream::Remote)
+            }
+            ArchcarEndpoint::Ssh(target) => {
+                remote::connect_ssh(target).map(|stream| ArchcarStream::Ssh(Box::new(stream)))
+            }
+            ArchcarEndpoint::Local(_) => unreachable!("caller checked is_remote"),
+        }
+    }
+
     fn connect_validated(&self) -> Result<ArchcarStream> {
-        if let ArchcarEndpoint::Remote { address, token } = &self.endpoint {
-            return remote::connect(address, token).map(ArchcarStream::Remote);
+        if self.endpoint.is_remote() {
+            return self.connect_remote();
         }
         let stream = match transport::connect(&self.endpoint_path).map(ArchcarStream::Local) {
             Ok(stream) => stream,

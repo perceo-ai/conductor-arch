@@ -146,29 +146,53 @@ Everything above works without a GUI. The `archcar` daemon owns all state; the d
 
 # One command: install the background service, provision the access token,
 # and check that the daemon can reach the tools it needs.
+#
+# Omit --listen when clients will connect over SSH (the recommended path
+# below) — SSH needs no open port at all.
 archductor service setup --listen 0.0.0.0:7420
 ```
 
-`service setup` writes a launchd agent (macOS) or a systemd user unit (Linux), starts it, and prints the token. Manage it afterwards with `archductor service install|uninstall|status|doctor|token`.
+`service setup` writes a launchd agent (macOS), a systemd user unit (Linux), or a Task Scheduler logon task (Windows), starts it, and prints the token. Manage it afterwards with `archductor service install|uninstall|status|doctor|token`.
 
 Two things it handles that are easy to get wrong by hand:
 
 - **Surviving logout.** systemd stops a user manager when the user's last session ends, so an SSH-installed unit would die the moment you disconnect. Install runs `loginctl enable-linger` for you and tells you if it could not. `archductor service status` reports `boot_persistent`.
 - **The daemon's PATH.** launchd gives a job `/usr/bin:/bin:/usr/sbin:/sbin`, and a systemd user unit is barely richer — neither can see Homebrew, a version manager, or `~/.local/bin`. Install probes your login shell and bakes the resulting PATH into the unit. `archductor service doctor` resolves `git`, `gh`, and every agent CLI against *that* PATH, which is the check that catches "the service is running but every session fails".
 
-On macOS a launchd **agent** starts at login, not at boot. On a headless Mac, log in once after a reboot, or install a root-owned LaunchDaemon.
+On macOS a launchd **agent** starts at login, not at boot. On a headless Mac, log in once after a reboot, or install a root-owned LaunchDaemon. Windows logon tasks have the same scope: running while logged off means storing the account password in Task Scheduler, which archductor will not do for you.
 
 ### On each client machine
 
+Two transports. **Prefer SSH** unless you have a reason not to:
+
 ```bash
-archductor remote connect <server>:7420 --token <token>
-archductor remote status      # where requests go
+# SSH (recommended): encrypted, no open port, no shared secret.
+archductor remote connect ssh://you@server
+
+# Token over TCP: only on loopback or a network you already trust.
+archductor remote connect server:7420 --token <token>
+
+archductor remote status      # where requests go, and over which transport
 archductor remote disconnect  # back to the local daemon
 ```
 
 The CLI, the desktop app (Settings → Remote daemon), and `archductor mcp serve` all follow the saved profile, so one `remote connect` moves the whole machine. Sessions, terminals, checks, and PR operations then run **on the server**, which is where the agent CLIs and `gh` auth have to be installed.
 
-> **Security.** The remote transport is a shared bearer token over plain TCP: no TLS, no per-client identity, and rotating the token revokes every client at once. A non-loopback listener must sit behind a VPN, an SSH tunnel, or a TLS reverse proxy. A bare port (`--listen 7420`) binds loopback only.
+#### Why SSH is the better default
+
+`ssh://` runs `archductor archcar stdio-proxy` on the far side and pipes the protocol through the SSH connection. That means:
+
+| | SSH | Token over TCP |
+| --- | --- | --- |
+| Encryption | yes, by sshd | **none** |
+| Identity | your SSH key, per user | one shared token for everyone |
+| Revoke one user | remove their `authorized_keys` line | impossible — rotating cuts off everybody |
+| Open port on the daemon | none | yes |
+| Server setup | sshd, which a headless box already runs | `--listen`, plus a firewall you trust |
+
+The server needs no `--listen` at all for SSH; `archductor service install` with no listener is enough. If `archductor` is not on the non-interactive PATH over SSH, give the path explicitly: `ssh://you@server/opt/archductor/bin/archductor`. Host aliases, jump hosts, and per-host keys work because the destination is handed to `ssh` verbatim — so `~/.ssh/config` applies.
+
+> **Security.** The TCP transport is a shared bearer token in cleartext: no TLS, no per-client identity, and rotating the token revokes every client at once. A bare port (`--listen 7420`) binds loopback only; anything else must sit behind a VPN, an SSH tunnel, or a TLS reverse proxy. Use `ssh://` and none of that applies.
 
 `docs/api.md` documents the protocol itself.
 

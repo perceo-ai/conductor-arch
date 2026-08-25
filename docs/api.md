@@ -16,17 +16,32 @@ goal.
 | Transport | How | Auth |
 |-----------|-----|------|
 | Local socket | `$XDG_STATE_HOME/archductor/archcar.sock` (platform-specific; loopback TCP on Windows) | filesystem permissions |
+| Remote SSH | `ssh://[user@]host[:port][/path/to/archductor]` — runs `archductor archcar stdio-proxy` on the far side and pipes the protocol through it | sshd: the client's SSH key |
 | Remote TCP | daemon started with `ARCHDUCTOR_ARCHCAR_LISTEN=host:port` (bare port = loopback) | shared token, sent as the first line of every connection |
 | MCP (stdio) | `archductor mcp serve` (optionally `--read-only`) | inherits the archcar transport it points at |
+
+SSH is the default recommendation for anything crossing a network. It opens no
+port on the daemon, adds no credential, encrypts the stream, gives each client
+its own identity, and revokes one client by editing `authorized_keys` — none of
+which the token transport can do. The proxy is a byte pump between the SSH
+session and the daemon's own local socket, so it adds no authentication of its
+own and relies on sshd having already established who is on the other end.
 
 Remote clients resolve their connection in this order: the
 `ARCHDUCTOR_ARCHCAR_REMOTE`/`ARCHDUCTOR_ARCHCAR_TOKEN` environment, then the
 saved remote profile (`$XDG_STATE_HOME/archductor/remote.json`, owner-only),
 then the local daemon. The profile is shared by the CLI and the desktop app,
 so one `archductor remote connect` moves every client on the machine.
-Token-only security: no TLS, no per-client identity; expose non-loopback
-listeners only behind infrastructure you trust. `archductor service token
---rotate` (RPC `rotate_remote_token`) is the revocation story.
+An `ssh://` profile carries no token, and the stores treat a blank token as
+complete for that transport only — the TCP transport still refuses one.
+
+For the TCP transport specifically: token-only security, no TLS, no per-client
+identity; expose non-loopback listeners only behind infrastructure you trust.
+`archductor service token --rotate` (RPC `rotate_remote_token`) is its whole
+revocation story, and it revokes every client at once. TLS was considered and
+not built: it would encrypt the channel but leave the single shared credential
+and the open port in place, where SSH removes all three problems using the
+authentication the server already runs.
 
 ## Server-hosted execution
 
@@ -35,15 +50,19 @@ is a deployment choice, not a different architecture:
 
 1. On the server: install the CLI and the daemon, then
    `archductor service setup --listen 0.0.0.0:7420`. This writes a
-   launchd/systemd user unit with `ARCHDUCTOR_ARCHCAR_LISTEN` set, provisions
+   launchd agent / systemd user unit / Windows logon task with
+   `ARCHDUCTOR_ARCHCAR_LISTEN` set, provisions
    the token, starts archcar, and reports whether the daemon can reach the
    tools it needs. `archductor service token` prints the token.
    Repositories and worktrees live on the server; add them there
    (`archductor repo add …` over the same remote connection works too).
    `archductor service install` is the same install step without the
    token/MCP/diagnostic reporting around it.
-2. On each client machine: `archductor remote connect <server>:7420 --token
-   <token>` verifies the daemon responds and saves the profile. From then on
+2. On each client machine: `archductor remote connect ssh://<user>@<server>`
+   (no token, and the server then needs no listener at all), or
+   `archductor remote connect <server>:7420 --token <token>` for the TCP
+   transport. Either verifies the daemon responds and saves the profile.
+   From then on
    the CLI, the desktop app (Settings → Remote daemon shows/edits the same
    connection), and `archductor mcp serve` all drive the server-hosted daemon.
    `archductor remote status` shows where requests go; `archductor remote
@@ -66,7 +85,14 @@ rather than left as README steps:
   does. Install runs `loginctl enable-linger`; `ServiceStatus.boot_persistent`
   reports the result, and a failure comes back as a warning with the `sudo`
   command to run. macOS has no agent-level equivalent — a LaunchAgent starts at
-  login, which `boot_persistent: false` plus a warning states plainly.
+  login, which `boot_persistent: false` plus a warning states plainly. A
+  Windows logon task has the same scope, and running one while logged off means
+  storing the account password in Task Scheduler, which install will not do.
+- **Windows restart semantics.** Task Scheduler's `RestartOnFailure` only fires
+  on a non-zero exit — the same hole `Restart=on-failure` leaves. The registered
+  task pairs it with a one-minute repeating logon trigger and
+  `MultipleInstancesPolicy=IgnoreNew`, so a clean exit is also restarted while a
+  live daemon is left alone.
 - **The daemon's PATH.** launchd gives a job `/usr/bin:/bin:/usr/sbin:/sbin`
   and a systemd user unit little more, so a service-hosted daemon cannot see
   Homebrew, a version manager, or `~/.local/bin` even though the installing
