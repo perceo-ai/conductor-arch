@@ -24,6 +24,8 @@ const [loaded, setLoaded] = createSignal(false);
 const [projectDefaultId, setProjectDefaultId] = createSignal<string>();
 let pendingSave: ReturnType<typeof setTimeout> | undefined;
 let pendingPreset: LayoutPreset | undefined;
+/** Which daemon the queued edit was made against. See `scheduleSave`. */
+let pendingEpoch = 0;
 let lastRepository: string | undefined;
 
 function clone<T>(value: T): T {
@@ -106,6 +108,7 @@ function cancelPendingSave() {
   if (pendingSave !== undefined) clearTimeout(pendingSave);
   pendingSave = undefined;
   pendingPreset = undefined;
+  pendingEpoch = 0;
 }
 
 function responseError(response: ArchcarResponse, expected: string): never {
@@ -113,9 +116,19 @@ function responseError(response: ArchcarResponse, expected: string): never {
   throw new Error(`Expected ${expected}, received ${response.type}`);
 }
 
-async function persist(preset: LayoutPreset): Promise<boolean> {
+/**
+ * Save a preset to the daemon it belongs to.
+ *
+ * `epoch` is the connection the edit was made against. It defaults to the
+ * current one for an immediate save, but a debounced save has to pass the epoch
+ * captured when the edit was queued — otherwise a switch inside the debounce
+ * window sends the old daemon's layout to the new one.
+ */
+async function persist(preset: LayoutPreset, epoch: number = daemonEpoch()): Promise<boolean> {
   const snapshot = clone(preset);
-  const epoch = daemonEpoch();
+  // Refuse before sending, not just when the reply lands: the write itself
+  // would otherwise be addressed to the wrong daemon.
+  if (daemonChangedSince(epoch)) return false;
   try {
     const response = await send({ type: "save_layout_preset", preset: toRecord(snapshot) });
     // The write landed on whichever daemon was active when it was sent. Folding
@@ -128,7 +141,9 @@ async function persist(preset: LayoutPreset): Promise<boolean> {
     return true;
   } catch (error) {
     if (daemonChangedSince(epoch)) return false;
-    const retry = () => void persist(snapshot);
+    // Retry against the same daemon the edit was for. After a switch this is a
+    // no-op rather than a write of the old daemon's layout to the new one.
+    const retry = () => void persist(snapshot, epoch);
     toastsStore.push(
       `Layout kept locally, but could not sync: ${(error as Error).message}`,
       "error",
@@ -144,11 +159,17 @@ function scheduleSave(preset: LayoutPreset) {
   replaceUserPreset(preset);
   prefsStore.setActivePresetId(preset.id);
   pendingPreset = clone(preset);
+  // The epoch of the daemon this edit was made against, captured now rather
+  // than when the timer fires. Switching within the debounce window would
+  // otherwise send daemon A's layout to daemon B: `persist` would capture B's
+  // epoch at fire time and see nothing stale about it.
+  pendingEpoch = daemonEpoch();
   pendingSave = setTimeout(() => {
     pendingSave = undefined;
     const queued = pendingPreset;
+    const epoch = pendingEpoch;
     pendingPreset = undefined;
-    if (queued) void persist(queued);
+    if (queued) void persist(queued, epoch);
   }, SAVE_DELAY_MS);
 }
 
@@ -157,8 +178,9 @@ async function flushPendingSave(): Promise<boolean> {
   if (pendingSave !== undefined) clearTimeout(pendingSave);
   pendingSave = undefined;
   const queued = pendingPreset;
+  const epoch = pendingEpoch;
   pendingPreset = undefined;
-  return persist(queued);
+  return persist(queued, epoch);
 }
 
 layoutStore.onEdited(scheduleSave);

@@ -168,6 +168,41 @@ describe("layoutPresetsStore", () => {
     expect(layoutPresetsStore.projectDefaultId()).toBe("wide");
   });
 
+  it("drops a debounced save when the daemon changed inside the debounce window", async () => {
+    // Edit on daemon A, switch to B before the 250ms timer fires. The queued
+    // write must not land on B: it carries A's layout.
+    vi.useFakeTimers();
+    responses([]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    const { layoutStore } = await import("./layout");
+    const { bumpDaemonEpoch } = await import("./daemonEpoch");
+    await layoutPresetsStore.load();
+    send.mockClear();
+
+    // Queue an edit against daemon A, then switch before the timer fires.
+    layoutStore.hidePanel("files");
+    bumpDaemonEpoch();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("still saves a debounced edit when the daemon has not changed", async () => {
+    vi.useFakeTimers();
+    responses([]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    const { layoutStore } = await import("./layout");
+    await layoutPresetsStore.load();
+    send.mockClear();
+
+    layoutStore.hidePanel("files");
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "save_layout_preset" }),
+    );
+  });
+
   it("saves a named working copy and renames user presets", async () => {
     responses([]);
     const { layoutPresetsStore } = await import("./layoutPresets");
