@@ -281,6 +281,19 @@ export function clientIdFrom(label: string): string {
  * id with no matching client, and adopts a pre-existing single profile so a
  * machine that only ever ran `remote connect` keeps its connection.
  */
+/**
+ * Mirrors `profile_is_usable` in crates/core/src/archcar/remote.rs. Only the
+ * TCP transport needs a token; an `ssh://` entry with a blank one is complete,
+ * not half-written. Requiring a token here dropped ssh clients from the list,
+ * so the switcher showed "This machine" while every request went to the remote
+ * daemon.
+ */
+function clientIsUsable(address: string | undefined, token: string | undefined): boolean {
+  const trimmed = address?.trim();
+  if (!trimmed) return false;
+  return isSshAddress(trimmed) || !!token?.trim();
+}
+
 export function parseClients(raw: string | null, profileRaw: string | null): ClientsFile {
   let file: ClientsFile = { clients: [] };
   if (raw) {
@@ -296,16 +309,14 @@ export function parseClients(raw: string | null, profileRaw: string | null): Cli
       file = { clients: [] };
     }
   }
-  file.clients = file.clients.filter(
-    (c) => c && c.id && c.address?.trim() && c.token?.trim(),
-  );
+  file.clients = file.clients.filter((c) => c && c.id && clientIsUsable(c.address, c.token));
   if (!file.clients.some((c) => c.id === file.active_id)) delete file.active_id;
   if (file.clients.length === 0 && profileRaw) {
     try {
       const profile = JSON.parse(profileRaw) as { address?: string; token?: string };
       const address = profile.address?.trim();
-      const token = profile.token?.trim();
-      if (address && token) {
+      const token = profile.token?.trim() ?? "";
+      if (address && clientIsUsable(address, token)) {
         const id = clientIdFrom(address);
         file = { active_id: id, clients: [{ id, label: address, address, token }] };
       }

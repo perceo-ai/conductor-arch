@@ -92,6 +92,33 @@ describe("resolveRemoteConfig", () => {
     });
   });
 
+  it("keeps ssh clients in the saved list even though they have no token", () => {
+    // Requiring a token here dropped ssh clients, so the switcher showed
+    // "This machine" while every request went to the remote daemon.
+    const file = parseClients(
+      JSON.stringify({
+        active_id: "ssh-root-192-168-68-110",
+        clients: [
+          { id: "ssh-root-192-168-68-110", label: "perceo-control", address: "ssh://root@192.168.68.110", token: "" },
+          { id: "tcp-box", label: "tcp box", address: "box:7420", token: "tok" },
+          { id: "broken", label: "broken", address: "other:7420", token: "" },
+        ],
+      }),
+      null,
+    );
+
+    expect(file.clients.map((c) => c.id)).toEqual(["ssh-root-192-168-68-110", "tcp-box"]);
+    expect(file.active_id).toBe("ssh-root-192-168-68-110");
+  });
+
+  it("adopts a tokenless ssh profile when no client list exists", () => {
+    const file = parseClients(null, JSON.stringify({ address: "ssh://deploy@host", token: "" }));
+
+    expect(file.clients).toHaveLength(1);
+    expect(file.clients[0]?.address).toBe("ssh://deploy@host");
+    expect(file.active_id).toBe(file.clients[0]?.id);
+  });
+
   it("resolves an ssh:// address from the environment without a token", () => {
     const config = resolveRemoteConfig({ ARCHDUCTOR_ARCHCAR_REMOTE: "ssh://devbox" }, none, none);
 
