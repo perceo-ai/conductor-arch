@@ -49,11 +49,9 @@
 .workspace-row-shell.selected {
   box-shadow: inset 2px 0 0 var(--lc-accent, #c39b50);
 }
-/* Active tab underline picks up the accent too. */
-.project-tabs .ws-tab-active,
-.ws-chat-tabs .ws-tab-active {
-  border-bottom: 2px solid var(--lc-accent, #c39b50);
-}
+/* The active tab's accent underline is drawn once, by the scaling `::after`
+   bar in `motion/04-surfaces.css`. Adding a border here as well stacks a
+   full-width line under an inset bar and reads as a double underline. */
 .projects-header {
   display: flex;
   align-items: center;

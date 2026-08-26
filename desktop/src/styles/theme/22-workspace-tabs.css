@@ -153,9 +153,9 @@ button.ws-tab-shell {
     color: #d7d7d7;
     font-weight: 500;
 }
+/* Underline comes from the `::after` bar in `motion/04-surfaces.css`. */
 .ws-tab-shell.ws-tab-active {
     background-color: transparent;
-    border-bottom-color: #f0c36a;
 }
 .ws-tab-shell.ws-tab-active .ws-tab-label,
 .ws-tab-shell.ws-tab-active .ws-tab-close-icon {

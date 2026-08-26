@@ -39,10 +39,9 @@
   gap: 5px;
 }
 
+/* Underline comes from the `::after` bar in `motion/04-surfaces.css`. */
 .ws-chat-tabs .ws-tab-shell.ws-tab-active {
   background: transparent;
-  border-bottom-color: var(--lc-accent);
-  box-shadow: inset 0 -1px 0 var(--lc-accent);
 }
 
 .ws-chat-tabs .ws-tab-shell:hover {
