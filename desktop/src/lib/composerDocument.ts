@@ -1,3 +1,5 @@
+import { fileNameFromPath } from "./chatAttachments";
+
 /**
  * The composer's document is a flat list: the input has no block structure, so
  * a tree would be a nesting level nothing ever reads.
@@ -88,4 +90,116 @@ export function normalize(nodes: ComposerNode[]): ComposerNode[] {
     out.push(node);
   }
   return out;
+}
+
+/** Marks a chip element. Also the hook the CSS and the tests select on. */
+export const CHIP_ATTR = "data-chip";
+
+function chipNode(el: Element): ComposerNode | null {
+  const kind = el.getAttribute(CHIP_ATTR);
+  if (kind === "file") {
+    const path = el.getAttribute("data-path") ?? "";
+    return { kind: "file", path, label: el.getAttribute("data-label") ?? fileNameFromPath(path) };
+  }
+  if (kind === "command") return { kind: "command", name: el.getAttribute("data-name") ?? "" };
+  return null;
+}
+
+/** The visible width of a whole subtree, measured the way `nodeText` measures. */
+function widthOf(node: Node): number {
+  if (node.nodeType === Node.TEXT_NODE) return (node.textContent ?? "").length;
+  if (node.nodeType !== Node.ELEMENT_NODE) return 0;
+  const el = node as Element;
+  if (el.tagName === "BR") return 1;
+  const chip = chipNode(el);
+  if (chip) return nodeText(chip).length;
+  let total = 0;
+  for (const child of el.childNodes) total += widthOf(child);
+  return total;
+}
+
+/**
+ * Read the live DOM back into nodes.
+ *
+ * The user's typing is applied by the browser, not by us — repainting the
+ * document on every keystroke is what makes `contenteditable` inputs jump the
+ * caret — so between repaints the DOM is the source of truth and this is how
+ * the signal catches up with it. Elements the browser invented on its own (a
+ * `<div>` wrapping a pasted line, say) contribute their text and are dropped:
+ * the document stays flat no matter what the engine does.
+ */
+export function nodesFromDom(root: Node): ComposerNode[] {
+  const out: ComposerNode[] = [];
+  const visit = (node: Node) => {
+    for (const child of node.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        out.push({ kind: "text", text: child.textContent ?? "" });
+        continue;
+      }
+      if (child.nodeType !== Node.ELEMENT_NODE) continue;
+      const el = child as Element;
+      if (el.tagName === "BR") {
+        out.push({ kind: "text", text: "\n" });
+        continue;
+      }
+      const chip = chipNode(el);
+      if (chip) {
+        out.push(chip);
+        continue;
+      }
+      visit(el);
+    }
+  };
+  visit(root);
+  return normalize(out);
+}
+
+/**
+ * Index into `toVisible(nodesFromDom(root))` for a DOM selection point.
+ *
+ * This is the whole reason `inlineFileMentionAt` and `skillMentionAt` survive
+ * the rewrite untouched: they take `(value, cursor)` against a flat string, and
+ * this produces the cursor. A chip counts as the width of the token it stands
+ * for, so `@`-detection sees the same text the user would have typed.
+ */
+export function caretOffset(root: Node, container: Node, offset: number): number {
+  let total = 0;
+  let found = false;
+
+  const walk = (node: Node) => {
+    if (found) return;
+    if (node === container) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        total += offset;
+      } else {
+        // On an element the offset counts child nodes, not characters.
+        for (let i = 0; i < offset && i < node.childNodes.length; i += 1) {
+          total += widthOf(node.childNodes[i]);
+        }
+      }
+      found = true;
+      return;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      total += (node.textContent ?? "").length;
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node as Element;
+    if (el.tagName === "BR") {
+      total += 1;
+      return;
+    }
+    if (chipNode(el)) {
+      total += widthOf(el);
+      return;
+    }
+    for (const child of el.childNodes) {
+      walk(child);
+      if (found) return;
+    }
+  };
+
+  walk(root);
+  return total;
 }
