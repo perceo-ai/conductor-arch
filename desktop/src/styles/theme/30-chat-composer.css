@@ -72,8 +72,7 @@
     border: none;
     box-shadow: none;
 }
-.chat-input-view,
-.chat-input-view text {
+.chat-input-view {
     background-color: transparent;
     color: #e4e4e4;
     border: none;

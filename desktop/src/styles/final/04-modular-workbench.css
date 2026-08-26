@@ -114,43 +114,76 @@
   outline-offset: -2px;
 }
 
+/* The tab strip has to stay legible in a 220px-wide left region holding four
+   panels, so the label gets the pixels and the chrome gives them up: tabs are
+   sized to their own text rather than splitting the strip into equal columns,
+   the strip's side inset is halved, and hiding a panel — a rare, undoable
+   action already offered by the tab context menu — overlays the label on hover
+   instead of reserving a lane in every tab forever. */
+.workbench-tablist {
+  gap: 2px;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
 .workbench-tab-shell {
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
   position: relative;
 }
 
-.workbench-tab-shell > .workbench-tab {
+.workbench-tablist .workbench-tab {
   flex: 1 1 auto;
   min-width: 0;
-  padding-right: 24px;
+  gap: 3px;
+  padding: 0 6px;
+}
+
+.workbench-tablist .nav-button-count {
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
 }
 
 .workbench-tab-close {
   position: absolute;
   right: 1px;
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  min-height: 28px;
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  min-height: 20px;
   padding: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  border-radius: 4px;
+  background: var(--ui-panel-hover, #202020);
   color: var(--lc-text-muted, #858585);
   opacity: 0;
+  /* Invisible but still laid out — without this it swallows clicks meant for
+     the label now that it no longer sits in its own padding lane. */
+  pointer-events: none;
 }
 
 .workbench-tab-close .ui-icon {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
 }
 
 .workbench-tab-shell:hover .workbench-tab-close,
 .workbench-tab-shell:focus-within .workbench-tab-close {
   opacity: 1;
+  pointer-events: auto;
+}
+
+/* The close button lands on top of the count badge. Drop the badge while it is
+   showing so the two do not overlap — the count is back the moment the pointer
+   leaves, and its box still holds the tab's width steady in the meantime. */
+.workbench-tab-shell:hover .nav-button-count,
+.workbench-tab-shell:focus-within .nav-button-count {
+  opacity: 0;
 }
 
 .layout-controls {

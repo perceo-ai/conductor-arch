@@ -16,8 +16,7 @@ input.text,
 }
 
 .chat-composer-box .chat-input-scroll,
-.chat-composer-box .chat-input-view,
-.chat-composer-box .chat-input-view text {
+.chat-composer-box .chat-input-view {
     background-color: transparent;
     border: none;
     box-shadow: none;
@@ -69,8 +68,7 @@ textarea:focus {
 }
 
 .chat-composer-box .chat-input-scroll:focus-within,
-.chat-composer-box .chat-input-view:focus,
-.chat-composer-box .chat-input-view text:focus {
+.chat-composer-box .chat-input-view:focus {
     border: none;
     box-shadow: none;
 }
