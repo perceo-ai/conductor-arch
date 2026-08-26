@@ -8,7 +8,6 @@ import {
 } from "@/store";
 import { EFFORTS, agentModelOptions, agentModelValue, firstModel, providerForModel } from "@/lib/models";
 import {
-  insertSkillMention,
   rankSkills,
   skillMentionAt,
   skillsForProvider,
@@ -17,7 +16,14 @@ import {
 import { send } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
 import CompactSelect from "@/components/CompactSelect";
-import { renderMarkdownWithInlineFileChips } from "@/lib/markdown";
+import RichInput, { type RichInputApi } from "@/components/RichInput";
+import {
+  fromVisible,
+  normalize,
+  toInput,
+  toVisible,
+  type ComposerNode,
+} from "@/lib/composerDocument";
 import { composerPrimaryAction } from "@/lib/composerPrimaryAction";
 import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
 import {
@@ -29,14 +35,7 @@ import {
   showsGenerationLoader,
   type ChatGenerationState
 } from "@/lib/chatGeneration";
-import {
-  attachmentMarker,
-  inlineFileMentionAt,
-  insertInlineAttachmentMarker,
-  promptTextWithAttachmentRefs,
-  removeAdjacentAttachmentMarker,
-  type ComposerAttachment
-} from "@/lib/chatAttachments";
+import { inlineFileMentionAt } from "@/lib/chatAttachments";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { providerToKind } from "./providerKind";
 import {
@@ -75,11 +74,13 @@ export function Composer(props: {
   seedModel?: string;
   onSeeded?: () => void;
 }) {
-  const [text, setText] = createSignal("");
-  // Pasted blobs saved to the workspace as files; sent as path references so the
-  // agent reads them instead of us inlining a huge string.
-  const [attachments, setAttachments] = createSignal<ComposerAttachment[]>([]);
-  let inputRef: HTMLTextAreaElement | undefined;
+  // The composer's document. `text()` is its visible form — the same string the
+  // composer used to hold directly — so everything downstream of it is
+  // unchanged; what a string cannot hold is a chip, which is why the document
+  // is the source of truth now and the string is derived from it.
+  const [nodes, setNodes] = createSignal<ComposerNode[]>([]);
+  const text = () => toVisible(nodes());
+  let input: RichInputApi | undefined;
   const [fileMention, setFileMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
   const [fileMentionCursor, setFileMentionCursor] = createSignal(0);
   const [skillMention, setSkillMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
@@ -148,10 +149,6 @@ export function Composer(props: {
     const provider = props.provider || null;
     return rankSkills(skillsForProvider(skills() ?? [], provider), mention.query);
   });
-
-  const composerPreviewHtml = createMemo(() =>
-    text().trim().length > 0 ? renderMarkdownWithInlineFileChips(text()) : "",
-  );
 
   // Readiness watchdog: a session that never reports ready (e.g. the agent CLI
   // hangs on a first-run prompt) shouldn't read as an infinite "starting…" dead
@@ -242,44 +239,53 @@ export function Composer(props: {
 
   const PASTE_TO_FILE_CHARS = 2000;
 
-  function syncFileMention(value = text()) {
-    const cursor = inputRef?.selectionStart ?? value.length;
+  // The mention parsers take `(value, cursor)` against a flat string and are
+  // already tested against it, so the caret is converted to an index into
+  // `text()` rather than the parsers being rewritten against the DOM.
+  function syncFileMention(value = text(), cursor = input?.caret() ?? value.length) {
     setFileMention(inlineFileMentionAt(value, cursor));
     setFileMentionCursor(0);
     setSkillMention(skillMentionAt(value, cursor));
     setSkillMentionCursor(0);
   }
 
-  function setEditorText(value: string, cursor?: number) {
-    setText(value);
+  function setEditorNodes(next: ComposerNode[], cursor?: number) {
+    const document_ = normalize(next);
+    setNodes(document_);
     queueMicrotask(() => {
-      inputRef?.focus();
-      if (cursor != null) inputRef?.setSelectionRange(cursor, cursor);
-      syncFileMention(value);
+      input?.setNodes(document_, cursor);
+      syncFileMention(toVisible(document_), cursor);
     });
+  }
+
+  /**
+   * Replace the typed `@query` (or `/query`) with a chip.
+   *
+   * The chip goes in as a node rather than as marker text that something later
+   * re-reads as a chip: it is the thing itself from the moment it is picked.
+   */
+  function insertChip(range: { start: number; end: number }, chip: ComposerNode, trailing = " ") {
+    const value = text();
+    const before = value.slice(0, range.start);
+    const after = value.slice(range.end);
+    const head = fromVisible(before);
+    const tail = fromVisible(after.startsWith(" ") ? after.slice(1) : after);
+    const next = normalize([...head, chip, { kind: "text", text: trailing }, ...tail]);
+    setEditorNodes(next, toVisible([...head, chip]).length + trailing.length);
   }
 
   function insertFileAttachment(path: string, range = fileMention()) {
     if (!range) return;
-    const marker = attachmentMarker(path);
-    const before = text().slice(0, range.start);
-    const after = text().slice(range.end);
-    const inserted = insertInlineAttachmentMarker(before + after, marker, before.length, before.length);
-    setAttachments((list) => {
-      if (list.some((attachment) => attachment.path === path && attachment.marker === marker)) return list;
-      return [...list, { path, label: fileNameFromMention(path), marker }];
-    });
     setFileMention(null);
-    setEditorText(inserted.value, inserted.cursor);
+    insertChip(range, { kind: "file", path, label: fileNameFromMention(path) });
   }
 
-  /** Insert `/name ` — the agent CLI is what actually runs the command. */
+  /** Insert `/name` — the agent CLI is what actually runs the command. */
   function insertSkill(name: string) {
     const mention = skillMention();
     if (!mention) return;
-    const next = insertSkillMention(text(), mention, name);
     setSkillMention(null);
-    setEditorText(next.value, next.cursor);
+    insertChip(mention, { kind: "command", name });
   }
 
   function fileNameFromMention(path: string): string {
@@ -291,10 +297,9 @@ export function Composer(props: {
   // markers for @path references; `visible` keeps the compact inline markers.
   function buildPayload(): { input: string; visible: string } | null {
     const value = text().trim();
-    const atts = attachments().filter((a) => value.includes(a.marker));
     if (!value) return null;
     const picks = newChatContextStore.picks(props.threadId);
-    const inputText = promptTextWithAttachmentRefs(value, atts);
+    const inputText = toInput(nodes()).trim();
     const input = [contextPreamble(picks), inputText].filter(Boolean).join("\n\n");
     const visible = [
       value,
@@ -306,40 +311,36 @@ export function Composer(props: {
   }
 
   function clearComposer() {
-    setText("");
-    setAttachments([]);
+    setEditorNodes([]);
     setFileMention(null);
     setSkillMention(null);
     // Picked context rides on one message only; a follow-up shouldn't resend it.
     newChatContextStore.clear(props.threadId);
   }
 
-  // Large paste → save to a workspace file and insert an inline marker instead
-  // of dumping thousands of characters into the textarea.
-  async function onPaste(e: ClipboardEvent) {
+  // Large paste → save to a workspace file and insert a chip for it, instead of
+  // dumping thousands of characters into the input. `insert` is RichInput's
+  // plain-text insertion, used for everything that is not a big paste.
+  async function onPaste(e: ClipboardEvent, insert: (value: string) => void) {
     const pasted = e.clipboardData?.getData("text") ?? "";
-    if (pasted.length <= PASTE_TO_FILE_CHARS) return; // small paste: default behaviour
-    e.preventDefault();
-    const target = e.currentTarget as HTMLTextAreaElement;
-    const selectionStart = target.selectionStart ?? text().length;
-    const selectionEnd = target.selectionEnd ?? text().length;
+    if (pasted.length <= PASTE_TO_FILE_CHARS) {
+      insert(pasted);
+      return;
+    }
+    const caret = input?.caret() ?? text().length;
     try {
       const res = await send({ type: "save_chat_paste", thread_id: props.threadId, text: pasted });
       if (res.type === "chat_paste_saved") {
-        const marker = attachmentMarker(res.relative_path);
-        const inserted = insertInlineAttachmentMarker(
-          text(),
-          marker,
-          selectionStart,
-          selectionEnd,
-        );
-        setEditorText(inserted.value, inserted.cursor);
-        setAttachments((a) => [...a, { path: res.relative_path, label: res.label, marker }]);
+        insertChip({ start: caret, end: caret }, {
+          kind: "file",
+          path: res.relative_path,
+          label: res.label,
+        });
       } else {
-        setText((t) => t + pasted);
+        insert(pasted);
       }
     } catch {
-      setText((t) => t + pasted);
+      insert(pasted);
     }
   }
 
@@ -352,8 +353,7 @@ export function Composer(props: {
     if (!payload) return;
     // Snapshot composer state so a send failure restores the chips too, not just
     // the raw text (payload.input inlines file-reference paths).
-    const prevText = text();
-    const prevAtts = attachments();
+    const prevNodes = nodes();
     const prevPicks = newChatContextStore.picks(props.threadId);
     clearComposer();
     // Say "starting" before the daemon's first event arrives: spawning the
@@ -373,8 +373,7 @@ export function Composer(props: {
       if (res.type === "error") throw new Error(res.message);
     } catch (err) {
       chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
-      setText(prevText);
-      setAttachments(prevAtts);
+      setEditorNodes(prevNodes);
       newChatContextStore.set(props.threadId, prevPicks);
     }
   }
@@ -389,8 +388,7 @@ export function Composer(props: {
     }
     const payload = buildPayload();
     if (!payload) return;
-    const prevText = text();
-    const prevAtts = attachments();
+    const prevNodes = nodes();
     const prevPicks = newChatContextStore.picks(props.threadId);
     const pendingId = addOptimisticMessage(payload.visible);
     clearComposer();
@@ -407,8 +405,7 @@ export function Composer(props: {
     } catch (err) {
       chatStore.removeOptimistic(props.threadId, pendingId);
       chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
-      setText(prevText);
-      setAttachments(prevAtts);
+      setEditorNodes(prevNodes);
       newChatContextStore.set(props.threadId, prevPicks);
     }
   }
@@ -522,18 +519,8 @@ export function Composer(props: {
         return;
       }
     }
-    if ((e.key === "Backspace" || e.key === "Delete") && inputRef && inputRef.selectionStart === inputRef.selectionEnd) {
-      const removed = removeAdjacentAttachmentMarker(
-        text(),
-        inputRef.selectionStart,
-        e.key === "Backspace" ? "backward" : "forward",
-      );
-      if (removed) {
-        e.preventDefault();
-        setEditorText(removed.value, removed.cursor);
-        return;
-      }
-    }
+    // Deleting a chip whole used to be hand-rolled here against the string.
+    // A chip is a `contenteditable="false"` element now, so the browser does it.
     const shortcut = resolveShortcut(e, parseKeybindingOverrides(prefsStore.state.keybindings));
     if (shortcut === "toggle-plan-mode") {
       e.preventDefault();
@@ -600,12 +587,12 @@ export function Composer(props: {
     const plan = pendingPlan();
     const feedback = text().trim();
     if (!plan || !feedback) return;
-    const prevText = text();
+    const prevNodes = nodes();
     clearComposer();
     await actions
       .resolveInteraction(plan.id, { type: "deny", reason: feedback })
       .catch((err) => {
-        setText(prevText);
+        setEditorNodes(prevNodes);
         chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
       });
   }
@@ -635,16 +622,9 @@ export function Composer(props: {
       </Show>
       <div class="chat-composer-box">
         <div class="chat-input-shell">
-          <div
-            class="chat-input-render markdown-body"
-            aria-hidden="true"
-            innerHTML={composerPreviewHtml()}
-          />
-          <textarea
-            ref={inputRef}
-            class="chat-input-view"
-            classList={{ "chat-input-view-has-preview": text().trim().length > 0 }}
-            data-focus-target="chat-composer"
+          <RichInput
+            ref={(api) => (input = api)}
+            nodes={nodes}
             placeholder={
               pendingPlan()
                 ? "What should change in the plan?"
@@ -652,18 +632,12 @@ export function Composer(props: {
                   ? "Describe what to plan — the agent researches, then proposes"
                   : "Ask to make changes, @mention files, run /commands"
             }
-            value={text()}
-            onInput={(e) => {
-              setText(e.currentTarget.value);
-              syncFileMention(e.currentTarget.value);
-            }}
-            onClick={() => syncFileMention()}
-            onKeyUp={(e) => {
-              if (!["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) syncFileMention();
+            onInput={(next, caret) => {
+              setNodes(next);
+              syncFileMention(toVisible(next), caret);
             }}
             onKeyDown={onKeyDown}
-            onPaste={(e) => void onPaste(e)}
-            rows={1}
+            onPaste={(e, insert) => void onPaste(e, insert)}
           />
           <Show when={skillMention() && skillMentionOptions().length > 0}>
             <MentionMenu
