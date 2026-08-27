@@ -7,12 +7,12 @@
   min-height: 0;
   overflow: hidden;
 }
-/* Vertical order of the chat column: the timeline absorbs the slack, an agent
-   ask (permission / question / plan) is capped and scrolls, and the composer
-   keeps its height no matter what. Without the cap a long plan card pushed the
-   composer clean off the bottom of a short window. */
-.chat-surface > .chat-interaction,
-.chat-surface > .chat-plan-card {
+/* Vertical order of the chat column: the timeline absorbs the slack, a pinned
+   agent ask is capped and scrolls, and the composer keeps its height no matter
+   what. Without the cap a long ask pushed the composer clean off the bottom of
+   a short window. A plan is not in this list any more — it scrolls with the
+   timeline, so it cannot crowd the composer in the first place. */
+.chat-surface > .chat-interaction {
   flex: 0 1 auto;
   min-height: 0;
   max-height: 45%;

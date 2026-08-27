@@ -36,23 +36,6 @@ export function ComposerErrorBanner(props: {
   );
 }
 
-/** A plan is waiting on review. Shown above the input because approving it (or
- *  saying what to change) is what the composer is for until it is resolved. */
-export function ComposerPlanReview(props: { onApprove: () => void }) {
-  return (
-    <div class="chat-plan-review">
-      <span class="chat-plan-review-label">Plan ready — approve it, or say what to change.</span>
-      <button
-        class="ui-button-primary chat-plan-approve"
-        data-shortcut={configuredShortcut("approve-plan")}
-        onClick={() => props.onApprove()}
-      >
-        Approve &amp; build
-      </button>
-    </div>
-  );
-}
-
 /** Inputs typed while the agent was busy, in the order they will be delivered. */
 export function ComposerQueue(props: {
   queue: QueuedArchcarInput[];

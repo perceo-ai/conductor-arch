@@ -18,6 +18,7 @@ import {
 } from "@/lib/chatGeneration";
 import { NewChatIntro } from "./NewChatIntro";
 import { TimelineItem } from "./TimelineItem";
+import { PlanCard } from "./Interactions";
 
 // The scrolling message column, including follow-the-bottom behaviour and the
 // generation loader that trails the last message.
@@ -38,9 +39,15 @@ export function Timeline(props: { threadId: number; workspace: string }) {
       blockedOnUser: interactionsStore.pending(props.threadId) != null
     }),
   );
+  const pendingPlan = () => {
+    const pending = interactionsStore.pending(props.threadId);
+    return pending?.kind === "plan_approval" ? pending : null;
+  };
+  // The plan card is part of the scrolled content, so its arrival has to move
+  // the view the same way a new message does.
   const scrollSignal = createMemo(
     () =>
-      `${generation()}|` +
+      `${generation()}|${pendingPlan()?.id ?? ""}|` +
       items()
         .map((item) => `${item.id}:${item.status}:${item.stream_state}:${item.body.length}`)
         .join("|"),
@@ -84,6 +91,12 @@ export function Timeline(props: { threadId: number; workspace: string }) {
           fallback={<NewChatIntro workspace={props.workspace} threadId={props.threadId} />}
         >
           <For each={items()}>{(item) => <TimelineItem item={item} agentIdle={agentIdle()} />}</For>
+        </Show>
+        {/* A proposed plan is a message in the conversation, not chrome bolted
+            above the composer: it belongs in the scrollback where it can be
+            read back later, and it carries its own actions. */}
+        <Show when={pendingPlan()}>
+          {(rec) => <PlanCard rec={rec()} workspace={props.workspace} />}
         </Show>
         {/* Last child of the message column, so it always trails the newest
             message rather than floating in fixed chrome. Inside the scroller,

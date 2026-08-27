@@ -40,7 +40,6 @@ import { fuzzyScore } from "@/lib/fuzzy";
 import { providerToKind } from "./providerKind";
 import {
   ComposerErrorBanner,
-  ComposerPlanReview,
   ComposerQueue,
   ComposerSendButton,
   ComposerStatus,
@@ -607,9 +606,6 @@ export function Composer(props: {
             onDismiss={() => chatStore.setPhase(props.threadId, { kind: "ready" })}
           />
         )}
-      </Show>
-      <Show when={pendingPlan()}>
-        <ComposerPlanReview onApprove={() => void approvePlan()} />
       </Show>
       <Show when={slice().queue.length > 0}>
         <ComposerQueue
