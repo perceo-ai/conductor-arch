@@ -61,6 +61,30 @@ describe("RichInput", () => {
     expect(chip.title).toBe("src/a.ts");
   });
 
+  it("puts the file's type icon on the left of its chip", () => {
+    const { el } = mount({ nodes: () => [{ kind: "file", path: "src/a.ts", label: "a.ts" }] });
+    const chip = el.querySelector(`[${CHIP_ATTR}="file"]`) as HTMLElement;
+    const icon = chip.firstElementChild as HTMLImageElement;
+    expect(icon?.tagName).toBe("IMG");
+    expect(icon.getAttribute("src")).toBeTruthy();
+    // Decorative: the label beside it already names the file.
+    expect(icon.getAttribute("alt")).toBe("");
+    // The icon must not become part of the chip's text, which is what
+    // `nodesFromDom` and the caret arithmetic read.
+    expect(chip.textContent).toBe("a.ts");
+  });
+
+  it("picks the icon from the file's own extension", () => {
+    const { el } = mount({
+      nodes: () => [
+        { kind: "file", path: "a.ts", label: "a.ts" },
+        { kind: "file", path: "b.rs", label: "b.rs" },
+      ],
+    });
+    const [ts, rs] = [...el.querySelectorAll(`[${CHIP_ATTR}="file"] img`)] as HTMLImageElement[];
+    expect(ts.getAttribute("src")).not.toBe(rs.getAttribute("src"));
+  });
+
   it("renders a command node as a chip", () => {
     const { el } = mount({ nodes: () => [{ kind: "command", name: "review" }] });
     expect(el.querySelector(`[${CHIP_ATTR}="command"]`)?.textContent).toBe("/review");

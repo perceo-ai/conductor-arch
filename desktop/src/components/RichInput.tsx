@@ -6,6 +6,7 @@ import {
   nodesFromDom,
   type ComposerNode,
 } from "@/lib/composerDocument";
+import { materialFileIcon } from "@/lib/materialFileIcons";
 
 export interface RichInputApi {
   focus(): void;
@@ -56,7 +57,14 @@ export default function RichInput(props: {
       chip.setAttribute("data-path", node.path);
       chip.setAttribute("data-label", node.label);
       chip.title = node.path;
-      chip.textContent = node.label;
+      // The file's own type icon, so a chip says what kind of file it is before
+      // the name is read. An <img> contributes no text, which matters: the
+      // chip's textContent is what `nodesFromDom` and the caret arithmetic see.
+      const icon = document.createElement("img");
+      icon.className = "chat-chip-icon";
+      icon.src = materialFileIcon(node.path).src;
+      icon.alt = "";
+      chip.append(icon, document.createTextNode(node.label));
     } else {
       chip.setAttribute("data-name", node.name);
       chip.textContent = nodeText(node);

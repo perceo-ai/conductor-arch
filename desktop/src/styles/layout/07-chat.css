@@ -245,27 +245,36 @@
   pointer-events: none;
 }
 /* Chips are `contenteditable="false"`, which is what makes them atomic; this
-   only has to make them look like the single objects they already are. */
+   only has to make them look like the single objects they already are.
+
+   Both kinds carry the accent because both are first-class references, not
+   decorated text. What tells them apart is the mark on the left: a file leads
+   with its own type icon, a command with its slash. */
 .chat-input-view [data-chip] {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   max-width: 24ch;
   margin: 0 1px;
   padding: 0 5px;
   overflow: hidden;
-  border: 1px solid var(--lc-border, #2f2f2f);
+  border: 1px solid var(--lc-accent, #c39b50);
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--lc-text, #e6e6e6);
+  background: rgba(195, 155, 80, 0.12);
+  color: var(--lc-accent, #c39b50);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.92em;
   white-space: nowrap;
   user-select: none;
 }
-.chat-input-view [data-chip="command"] {
-  border-color: var(--lc-accent, #c39b50);
-  color: var(--lc-accent, #c39b50);
-  background: rgba(195, 155, 80, 0.12);
+.chat-input-view [data-chip] .chat-chip-icon {
+  width: 1em;
+  height: 1em;
+  flex: 0 0 auto;
+  /* The icon is the one part of a chip that keeps its own colours — a material
+     file icon is identifiable by its colour, so tinting it to the accent would
+     throw away the thing that makes it readable at 1em. */
+  object-fit: contain;
 }
 .chat-file-mention-menu {
   position: absolute;
