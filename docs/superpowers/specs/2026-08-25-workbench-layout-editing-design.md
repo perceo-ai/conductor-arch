@@ -105,6 +105,24 @@ contains. `panelWidths.ts` keeps `LEFT_MIN` and friends as *panel* minimums
 rather than region minimums, and `clampRegionSize` is replaced by
 `clampSplitRatio(direction, ratio, availablePx, minPx)`.
 
+### Device-local sizes are retired
+
+`prefs.regionSizes` and `prefs.collapsedRegions` are device-local overrides keyed
+by region name — `Record<Region, number>` and `Region[]`. They exist so one
+machine's window width does not push its pane sizes onto another.
+
+They do not survive the change and are removed. Keying them by `NodeId` instead
+would be worse than useless: ids are regenerated whenever a preset is applied, so
+the overrides would silently stop matching after any preset switch and leave
+behind an unbounded pile of dead keys. Ratios are resolution-independent in a way
+pixel widths are not, which is most of what the per-device override was
+compensating for.
+
+The cost is real and should be stated plainly: pane sizes become part of the
+saved layout, so resizing a pane on one machine changes it on every machine
+sharing that preset. `prefs.ts` keeps `activePresetId` and drops the other two,
+along with the legacy `rightWidth`/`terminalHeight` migration that feeds them.
+
 ### What is deleted
 
 - `Region`, `Record<Region, Stack>`, `Stack`, `REGION_DEFAULT_SIZES`,
