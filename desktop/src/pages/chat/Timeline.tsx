@@ -7,7 +7,7 @@ import { timelineItemsForSlice } from "@/store/chat";
 import type {
   ArchcarProjectionItem,
 } from "@/bridge/protocol";
-import { isDisplayableTimelineItem } from "@/lib/timeline";
+import { isDisplayableTimelineItem, showsNewChatIntro, withoutPlanSource } from "@/lib/timeline";
 import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
 import DotGridLoader from "@/components/DotGridLoader";
 import {
@@ -26,8 +26,17 @@ export function Timeline(props: { threadId: number; workspace: string }) {
   let scrollRef: HTMLDivElement | undefined;
   let followBottom = true;
   const slice = () => chatStore.slice(props.threadId);
+  const pendingPlan = () => {
+    const pending = interactionsStore.pending(props.threadId);
+    return pending?.kind === "plan_approval" ? pending : null;
+  };
   const items = createMemo<ArchcarProjectionItem[]>(() =>
-    timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
+    // The plan card renders the plan, so the assistant message it was lifted
+    // from must not render it a second time.
+    withoutPlanSource(
+      timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
+      pendingPlan()?.detail,
+    ),
   );
   // The loader sits inside the scrolled content, so its appearance and
   // disappearance change the content height — it belongs in the scroll signal
@@ -39,10 +48,6 @@ export function Timeline(props: { threadId: number; workspace: string }) {
       blockedOnUser: interactionsStore.pending(props.threadId) != null
     }),
   );
-  const pendingPlan = () => {
-    const pending = interactionsStore.pending(props.threadId);
-    return pending?.kind === "plan_approval" ? pending : null;
-  };
   // The plan card is part of the scrolled content, so its arrival has to move
   // the view the same way a new message does.
   const scrollSignal = createMemo(
@@ -87,7 +92,7 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     <div class="chat-timeline-scroll" ref={scrollRef} onScroll={updateFollowBottom}>
       <div class="chat-messages">
         <Show
-          when={items().length > 0}
+          when={!showsNewChatIntro(items().length, pendingPlan() != null)}
           fallback={<NewChatIntro workspace={props.workspace} threadId={props.threadId} />}
         >
           <For each={items()}>{(item) => <TimelineItem item={item} agentIdle={agentIdle()} />}</For>
