@@ -66,6 +66,7 @@ afterEach(() => {
   unregisterPanel(FIRST_ID);
   unregisterPanel(SECOND_ID);
   layoutStore.resetToCode();
+  layoutStore.setEditing(false);
 });
 
 /**
@@ -74,8 +75,13 @@ afterEach(() => {
  * (and so `resolveDrop`/`dropCaretRect`) reads. jsdom lays nothing out, so
  * every measured element's `getBoundingClientRect` is overridden directly,
  * the same technique `LayoutNodeView.test.tsx` and `panelDnd.test.ts` use.
+ *
+ * Dragging only exists in edit mode (Task 9): the tab bar itself is now the
+ * drag surface, not each tab button, so this puts the store in edit mode
+ * before mounting and returns the bar rather than a specific tab.
  */
 function mount() {
+  layoutStore.setEditing(true);
   const node: LayoutLeaf = leaf([FIRST_ID, SECOND_ID], { id: "panel-dnd-render-leaf" });
   const host = document.createElement("div");
   document.body.append(host);
@@ -96,8 +102,7 @@ function mount() {
   tabs[0]!.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 30 }) as DOMRect;
   tabs[1]!.getBoundingClientRect = () => ({ left: 100, top: 0, width: 100, height: 30 }) as DOMRect;
 
-  const button = tabs[0]!.querySelector("button")!;
-  return button;
+  return bar;
 }
 
 function pointerEvent(type: string, x: number, y: number) {
@@ -121,8 +126,8 @@ function ghost() {
 
 describe("PanelDnd rendered feedback", () => {
   it("shows the filled preview AND the caret for a tab-bar drop", async () => {
-    const button = mount();
-    button.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+    const bar = mount();
+    bar.dispatchEvent(pointerEvent("pointerdown", 10, 10));
     // Past the 4px threshold; y=10 is inside the 30px tab bar.
     window.dispatchEvent(pointerEvent("pointermove", 250, 10));
     await nextFrame();
@@ -138,8 +143,8 @@ describe("PanelDnd rendered feedback", () => {
   });
 
   it("shows only the preview for an edge/split drop, never the caret", async () => {
-    const button = mount();
-    button.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+    const bar = mount();
+    bar.dispatchEvent(pointerEvent("pointerdown", 10, 10));
     // Past the 4px threshold; (20, 200) is the leftmost 25% of the content
     // area below the bar — resolveDrop's split zone, not its tab zone.
     window.dispatchEvent(pointerEvent("pointermove", 20, 200));
@@ -153,8 +158,8 @@ describe("PanelDnd rendered feedback", () => {
   });
 
   it("shows neither when no drop resolves, and nothing lingers after the drag ends", async () => {
-    const button = mount();
-    button.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+    const bar = mount();
+    bar.dispatchEvent(pointerEvent("pointerdown", 10, 10));
     // Past the 4px threshold; far outside the only leaf on screen.
     window.dispatchEvent(pointerEvent("pointermove", 9000, 9000));
     await nextFrame();

@@ -87,6 +87,13 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   background: var(--lc-accent, #c39b50);
 }
 
+/* Edit mode makes every split handle read as interactive rather than as a
+   plain 1px divider, so the tree's resize points are discoverable without
+   first hovering each one. */
+.workbench-editing .workbench-split > .resize-handle-split {
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 55%, transparent);
+}
+
 /* ---- Leaves ---- */
 .workbench-leaf {
   flex: 1 1 auto;
@@ -168,6 +175,44 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 
 .workbench-editing .workbench-leaf > .workbench-tablist-single {
   display: flex;
+}
+
+/* A dashed outline per leaf so the split boundaries — otherwise a bare 1px
+   line — read as "this is the thing you are rearranging" while editing. */
+.workbench-editing .workbench-leaf {
+  outline: 1px dashed var(--ui-border-strong, #3a3a3a);
+  outline-offset: -1px;
+}
+
+.workbench-leaf-collapse-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 4px;
+  border-radius: 4px;
+  color: var(--lc-text-muted, #858585);
+}
+
+.workbench-leaf-collapse-btn:hover,
+.workbench-leaf-collapse-btn:focus-visible {
+  background: var(--ui-panel-hover, #202020);
+  color: var(--lc-text-strong, #f0f0f0);
+}
+
+.workbench-leaf-collapse-btn .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* Outside edit mode the close button only appears on hover/focus (see the
+   opacity rules at the tab strip below); in edit mode it — and the collapse
+   button above — are the only way to reach these actions, so they stay put. */
+.workbench-editing .workbench-tab-close {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 /* The filled rectangle a panel will actually occupy on drop — this replaces
@@ -342,6 +387,99 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 .workbench-tab-shell:hover .nav-button-count,
 .workbench-tab-shell:focus-within .nav-button-count {
   opacity: 0;
+}
+
+.layout-edit-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ui-border, #262626);
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 10%, var(--ui-panel, #191919));
+  color: var(--lc-text-strong, #f0f0f0);
+  font-size: 11px;
+}
+
+.layout-edit-bar .ui-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--lc-accent, #c39b50);
+}
+
+.layout-edit-bar-label {
+  font-weight: 650;
+}
+
+.layout-edit-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.layout-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border, #2d2d2d);
+  border-radius: 6px;
+  background: var(--ui-panel-2, #202020);
+  color: var(--lc-text, #d0d0d0);
+  font-size: 11px;
+}
+
+.layout-edit-btn .ui-icon {
+  color: inherit;
+}
+
+.layout-edit-btn:hover,
+.layout-edit-btn:focus-visible {
+  background: var(--ui-panel-hover, #262626);
+}
+
+.layout-edit-done {
+  border-color: var(--lc-accent, #c39b50);
+  color: var(--lc-accent, #c39b50);
+}
+
+.layout-edit-add {
+  position: relative;
+}
+
+.layout-edit-add-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 80;
+  margin-top: 4px;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--ui-border-strong, #363636);
+  border-radius: 8px;
+  background: var(--ui-panel-3, #1a1a1a);
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.layout-edit-add-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: #d0d0d0;
+  text-align: left;
+  font-size: 12px;
+}
+
+.layout-edit-add-item:hover,
+.layout-edit-add-item:focus-visible {
+  background: var(--ui-panel-hover, #202020);
+  outline: none;
 }
 
 .layout-controls {

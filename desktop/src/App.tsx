@@ -64,6 +64,7 @@ const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
   "push-branch",
   "open-pr-github",
   "start-review",
+  "edit-layout",
   "show-uncommitted",
   "show-files",
   "show-checks",
@@ -182,6 +183,11 @@ export default function App() {
         setHelpOpen(false);
         return;
       }
+      if (e.key === "Escape" && layoutStore.editing()) {
+        e.preventDefault();
+        layoutStore.setEditing(false);
+        return;
+      }
       if (isTypingTarget(e.target)) return;
       const action = resolveShortcut(e, activeShortcuts());
       if (!action || action === "open-palette") return;
@@ -259,6 +265,9 @@ export default function App() {
         }
         case "start-review":
           window.dispatchEvent(new CustomEvent("archductor:start-review"));
+          break;
+        case "edit-layout":
+          layoutStore.setEditing(true);
           break;
         case "focus-composer":
           focusFirst(["[data-focus-target='chat-composer']", ".chat-input-view"]);

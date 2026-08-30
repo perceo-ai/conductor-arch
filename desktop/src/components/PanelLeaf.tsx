@@ -52,9 +52,12 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
   };
   // A compact leaf holding a single panel is chrome-free; anything else needs a
   // strip to choose between its tabs. A collapsed leaf is nothing *but* the
-  // strip, so it always renders one.
+  // strip, so it always renders one. Edit mode renders it too, even for a
+  // compact single-panel leaf — the strip is that leaf's only drag handle
+  // (`.workbench-tablist-single`'s display is then toggled back on by the
+  // `.workbench-editing` CSS override, not by this condition).
   const showTabs = createMemo(() => props.leaf.display === "tabs" || panels().length > 1);
-  const showTabBar = () => showTabs() || props.leaf.collapsed;
+  const showTabBar = () => showTabs() || props.leaf.collapsed || layoutStore.editing();
 
   function activate(id: PanelId) {
     layoutStore.activatePanel(id);
@@ -117,6 +120,10 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
           data-tab-bar=""
           role="tablist"
           aria-label="Workbench panels"
+          // The whole bar is the drag surface, but only in edit mode — outside
+          // it there is deliberately no pointerdown handler at all, so a plain
+          // click can never accidentally start a drag.
+          onPointerDown={layoutStore.editing() ? (event) => dnd.begin(event, activeId()) : undefined}
         >
           <For each={panels()}>
             {(id, index) => {
@@ -140,7 +147,6 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
                     tabIndex={selected() ? 0 : -1}
                     data-shortcut={PANEL_SHORTCUTS[id] ? configuredShortcut(PANEL_SHORTCUTS[id]!) : undefined}
                     onClick={() => activate(id)}
-                    onPointerDown={(event) => dnd.begin(event, id)}
                     onKeyDown={(event) => {
                       if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
                         openContextMenuFromKeyboard(event, panelMenu(id));
@@ -154,7 +160,7 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
                       {(count) => <span class="nav-button-count">{count()}</span>}
                     </Show>
                   </button>
-                  <Show when={canHide(id)}>
+                  <Show when={layoutStore.editing() && canHide(id)}>
                     <button
                       class="workbench-tab-close"
                       aria-label={`Hide ${descriptor.title}`}
@@ -174,6 +180,19 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
           </For>
           <Show when={panels().includes("changes")}>
             <ReviewPromptButton workspace={props.workspace} />
+          </Show>
+          <Show when={layoutStore.editing()}>
+            <button
+              class="workbench-leaf-collapse-btn"
+              aria-label={props.leaf.collapsed ? "Expand panel" : "Collapse panel"}
+              title={props.leaf.collapsed ? "Expand panel" : "Collapse panel"}
+              onClick={(event) => {
+                event.stopPropagation();
+                layoutStore.setCollapsed(props.leaf.id, !props.leaf.collapsed);
+              }}
+            >
+              <Icon name={props.leaf.collapsed ? "chevron-down" : "chevron-up"} />
+            </button>
           </Show>
         </div>
       </Show>

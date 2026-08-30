@@ -1,5 +1,6 @@
 import type { JSX } from "solid-js";
 import { layoutStore } from "@/store/layout";
+import LayoutEditBar from "./LayoutEditBar";
 import LayoutNodeView from "./LayoutNodeView";
 
 /**
@@ -11,6 +12,7 @@ export default function WorkspaceWorkbench(props: { workspace: string; topbar: J
   return (
     <div class="ws-workbench" classList={{ "workbench-editing": layoutStore.editing() }}>
       {props.topbar}
+      <LayoutEditBar />
       <div class="ws-workbench-main">
         <LayoutNodeView node={layoutStore.layout().root} workspace={props.workspace} />
       </div>

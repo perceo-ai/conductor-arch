@@ -166,6 +166,18 @@ export default function LayoutControls(props: { workspace: string }) {
             onPointerDown={(event) => event.stopPropagation()}
           >
             <div class="layout-menu-heading">{layoutStore.activePreset().name}</div>
+            <button
+              class="layout-menu-item"
+              role="menuitem"
+              onClick={() => {
+                layoutStore.setEditing(true);
+                close(true);
+              }}
+            >
+              <Icon name="wrench" />
+              <span>Edit layout</span>
+            </button>
+            <div class="layout-menu-separator" />
             <div class="layout-menu-section-label">Presets</div>
             <For each={presetControls()}>
               {(preset) => (
