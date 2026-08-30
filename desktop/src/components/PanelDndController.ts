@@ -10,6 +10,19 @@ import {
 
 const THRESHOLD = 4;
 
+// Shared across whatever controller instance is live, so callers with no
+// reference to it — App.tsx's global keydown handler, in particular — can
+// tell a real drag gesture (pointer down and captured, even pre-threshold)
+// from nothing happening, without reading DOM classes or state. A count
+// rather than a bare flag so it stays correct if more than one controller
+// instance is ever alive at once (tests routinely construct several).
+let activeDragSessions = 0;
+
+/** True from `begin()` until the session ends via `end()`, `cancel()`, or `dispose()`. */
+export function isPanelDragActive(): boolean {
+  return activeDragSessions > 0;
+}
+
 export interface PanelDragState {
   panelId: PanelId;
   dragging: boolean;
@@ -119,6 +132,7 @@ export function createPanelDragController(options: ControllerOptions) {
     window.removeEventListener("keydown", onKeyDown);
     document.body.classList.remove("panel-dragging");
     current = null;
+    activeDragSessions = Math.max(0, activeDragSessions - 1);
     emit();
   }
 
@@ -202,6 +216,7 @@ export function createPanelDragController(options: ControllerOptions) {
         preview: null,
         caret: null,
       };
+      activeDragSessions += 1;
       input.captureTarget.setPointerCapture?.(input.pointerId);
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", onPointerUp);

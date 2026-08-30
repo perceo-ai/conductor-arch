@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createPanelDragController, measureRenderedLeaves } from "./PanelDndController";
+import { createPanelDragController, isPanelDragActive, measureRenderedLeaves } from "./PanelDndController";
 import type { LeafRect } from "@/lib/layout";
 
 function pointer(type: string, x: number, y: number) {
@@ -84,6 +84,31 @@ describe("PanelDnd controller", () => {
 
     controller.dispose();
     outside.dispose();
+  });
+
+  it("reports a drag as active from begin through Escape, so App.tsx can defer to it", () => {
+    // This is the primitive App.tsx's global Escape handler now reads before
+    // deciding whether to exit layout-edit mode (rather than also exiting it
+    // on the same keypress that cancels a drag) — see PanelDndController.ts.
+    const applyDrop = vi.fn();
+    const controller = createPanelDragController({
+      applyDrop,
+      measureLeaves: () => [leafRect("a")],
+      requestFrame: (run) => (run(0), 1),
+    });
+    expect(isPanelDragActive()).toBe(false);
+
+    controller.begin({ panelId: "changes", clientX: 10, clientY: 10, pointerId: 1, captureTarget: document.body });
+    expect(isPanelDragActive()).toBe(true);
+
+    window.dispatchEvent(pointer("pointermove", 200, 200));
+    expect(isPanelDragActive()).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(isPanelDragActive()).toBe(false);
+    expect(applyDrop).not.toHaveBeenCalled();
+
+    controller.dispose();
   });
 
   it("removes every window listener after drop and dispose", () => {

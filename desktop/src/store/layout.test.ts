@@ -118,6 +118,65 @@ describe("layoutStore", () => {
     layoutStore.setEditing(false);
   });
 
+  it("reverts to the tree it had when edit mode was entered, even after the active preset has forked", async () => {
+    const { layoutStore } = await import("./layout");
+    const beforeJSON = JSON.stringify(layoutStore.layout());
+    expect(layoutStore.activePreset().builtin).toBe(true);
+
+    layoutStore.setEditing(true);
+    layoutStore.removePanel("summary");
+    layoutStore.applyDrop({ kind: "split", leafId: layoutStore.leafOf("chat")!, edge: "bottom" }, "checks");
+    expect(JSON.stringify(layoutStore.layout())).not.toBe(beforeJSON);
+
+    // Reproduces the shipped bug this guards against: by the second edit the
+    // active preset has already forked away from the builtin ("Code (edited)"
+    // or similar), so `applyLayout(activePreset())` — the original, wrong
+    // implementation of Reset — would just re-apply what's already on
+    // screen and do nothing.
+    expect(layoutStore.activePreset().builtin).toBe(false);
+
+    const reverted = layoutStore.revertEdits();
+
+    expect(reverted).toBe(true);
+    expect(JSON.stringify(layoutStore.layout())).toBe(beforeJSON);
+    layoutStore.setEditing(false);
+  });
+
+  it("goes through the normal edit path when reverting, so the reverted tree persists like any other change", async () => {
+    const { layoutStore } = await import("./layout");
+    const edits: unknown[] = [];
+    layoutStore.onEdited((preset) => edits.push(preset));
+
+    layoutStore.setEditing(true);
+    layoutStore.removePanel("summary");
+    edits.length = 0;
+
+    layoutStore.revertEdits();
+
+    expect(edits.length).toBeGreaterThan(0);
+    layoutStore.onEdited(undefined);
+    layoutStore.setEditing(false);
+  });
+
+  it("takes no snapshot, and so has nothing to revert, outside an edit session", async () => {
+    const { layoutStore } = await import("./layout");
+    expect(layoutStore.editing()).toBe(false);
+    expect(layoutStore.revertEdits()).toBe(false);
+  });
+
+  it("discards the snapshot on exit, so re-entering edit mode captures fresh state", async () => {
+    const { layoutStore } = await import("./layout");
+    layoutStore.setEditing(true);
+    layoutStore.removePanel("summary");
+    const editedJSON = JSON.stringify(layoutStore.layout());
+    layoutStore.setEditing(false);
+
+    layoutStore.setEditing(true);
+    expect(layoutStore.revertEdits()).toBe(false);
+    expect(JSON.stringify(layoutStore.layout())).toBe(editedJSON);
+    layoutStore.setEditing(false);
+  });
+
   it("adds, removes, collapses, and resizes through the tree transforms", async () => {
     const { layoutStore } = await import("./layout");
     const target = leafHolding(layoutStore.layout(), "chat").id;

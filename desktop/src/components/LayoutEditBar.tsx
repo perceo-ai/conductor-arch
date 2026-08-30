@@ -7,9 +7,10 @@ import Icon from "./Icon";
 /**
  * The chrome for the explicit layout-edit mode: visible only while
  * `layoutStore.editing()` is true. Edits made while this bar is up are live —
- * there is no snapshot/restore buffer. `Done` just leaves the mode; the way
- * back to a known-good layout is `Reset to <preset>`, which re-applies the
- * active preset the same way choosing it from `LayoutControls` does.
+ * there is no undo stack. `Done` just leaves the mode; `Revert changes`
+ * restores the single snapshot `layoutStore.setEditing(true)` took the moment
+ * edit mode was entered (see `store/layout.ts`), so its label stays truthful
+ * regardless of what the active preset gets renamed to mid-session.
  */
 export default function LayoutEditBar() {
   const [addOpen, setAddOpen] = createSignal(false);
@@ -70,12 +71,9 @@ export default function LayoutEditBar() {
               </Show>
             </div>
           </Show>
-          <button
-            class="layout-edit-btn"
-            onClick={() => layoutStore.applyLayout(layoutStore.activePreset())}
-          >
+          <button class="layout-edit-btn" onClick={() => layoutStore.revertEdits()}>
             <Icon name="refresh" />
-            <span>Reset to {layoutStore.activePreset().name}</span>
+            <span>Revert changes</span>
           </button>
           <button class="layout-edit-btn layout-edit-done" onClick={() => layoutStore.setEditing(false)}>
             Done

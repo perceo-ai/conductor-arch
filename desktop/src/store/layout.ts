@@ -48,8 +48,13 @@ const [hiddenPanels, setHiddenPanels] = createSignal<PanelId[]>([...initial.hidd
 const [focusedLeaf, setFocusedLeaf] = createSignal<NodeId | undefined>(undefined);
 // Structural editing is an explicit mode: drag-to-rearrange and the close /
 // collapse affordances are only live while this is true (Task 9 wires the UI).
-const [editing, setEditing] = createSignal(false);
+const [editing, setEditingSignal] = createSignal(false);
 let onEdited: ((preset: LayoutPreset) => void) | undefined;
+// One restore point, captured the instant edit mode is entered — not a
+// transactional buffer. Edits still apply and persist live; this only gives
+// "Revert changes" something truthful to go back to. Cleared on exit so a
+// later edit session starts from its own snapshot rather than a stale one.
+let editSnapshot: Layout | undefined;
 
 export const layoutStore = {
   layout,
@@ -58,7 +63,35 @@ export const layoutStore = {
   focusedLeaf,
   setFocusedLeaf,
   editing,
-  setEditing,
+
+  /**
+   * Wraps the raw signal so every entry point — the layout menu, the
+   * `mod+shift+l` shortcut, and any direct caller — snapshots the
+   * pre-edit tree exactly once, on the false→true transition. There is no
+   * way to reach edit mode without going through this.
+   */
+  setEditing(value: boolean) {
+    if (value && !editing()) {
+      editSnapshot = clone(layout());
+    } else if (!value) {
+      editSnapshot = undefined;
+    }
+    setEditingSignal(value);
+  },
+
+  /**
+   * Restores the snapshot taken when edit mode was entered, through the same
+   * `mutate` path a normal edit takes — so, like any other edit, it forks a
+   * builtin preset and persists via `onEdited` rather than silently
+   * discarding the session. A no-op if nothing has changed since entry, or
+   * if edit mode was never properly entered (defensive; `setEditing` above
+   * is the only way in).
+   */
+  revertEdits() {
+    const snapshot = editSnapshot;
+    if (!snapshot) return false;
+    return this.mutate(() => clone(snapshot));
+  },
 
   onEdited(listener: ((preset: LayoutPreset) => void) | undefined) {
     onEdited = listener;

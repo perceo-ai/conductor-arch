@@ -78,10 +78,17 @@ afterEach(() => {
  *
  * Dragging only exists in edit mode (Task 9): the tab bar itself is now the
  * drag surface, not each tab button, so this puts the store in edit mode
- * before mounting and returns the bar rather than a specific tab.
+ * before mounting (unless told not to — see the negative-path test below)
+ * and returns the bar rather than a specific tab.
+ *
+ * The leaf handed to `<PanelLeaf>` here is a plain object, deliberately not
+ * wired to `layoutStore` — a real drop (the edge/split case below) restructures
+ * the store's tree into something that is no longer a bare `LayoutLeaf` at its
+ * root, which a live binding cannot render as one. `mountActivatable` below is
+ * the store-backed variant, used only where a click's effect must be observed.
  */
-function mount() {
-  layoutStore.setEditing(true);
+function mount({ editing = true }: { editing?: boolean } = {}) {
+  layoutStore.setEditing(editing);
   const node: LayoutLeaf = leaf([FIRST_ID, SECOND_ID], { id: "panel-dnd-render-leaf" });
   const host = document.createElement("div");
   document.body.append(host);
@@ -89,6 +96,47 @@ function mount() {
     () => (
       <PanelDnd>
         <PanelLeaf leaf={node} workspace="demo" />
+      </PanelDnd>
+    ),
+    host,
+  );
+
+  const leafEl = host.querySelector<HTMLElement>("[data-leaf-id]")!;
+  const bar = leafEl.querySelector<HTMLElement>("[data-tab-bar]")!;
+  const tabs = [...bar.querySelectorAll<HTMLElement>("[data-tab-index]")];
+  leafEl.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+  bar.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 30 }) as DOMRect;
+  tabs[0]!.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 30 }) as DOMRect;
+  tabs[1]!.getBoundingClientRect = () => ({ left: 100, top: 0, width: 100, height: 30 }) as DOMRect;
+
+  return bar;
+}
+
+/**
+ * Store-backed variant of `mount()`: the leaf is routed through
+ * `layoutStore.applyLayout` and re-read via a `live()` accessor (the same
+ * technique `PanelLeaf.test.tsx` uses), so `activatePanel` — which acts on
+ * the store's tree — actually shows up in what's rendered. Only used by the
+ * negative-path test below, which never drives a real drop, so the store's
+ * root stays a plain leaf throughout.
+ */
+function mountActivatable({ editing }: { editing: boolean }) {
+  const node: LayoutLeaf = leaf([FIRST_ID, SECOND_ID], { id: "panel-dnd-render-leaf" });
+  layoutStore.applyLayout({
+    id: "panel-dnd-render-test",
+    name: "Panel dnd render test",
+    builtin: false,
+    layout: { version: 2, root: node },
+    hidden: [],
+  });
+  layoutStore.setEditing(editing);
+  const host = document.createElement("div");
+  document.body.append(host);
+  const live = () => layoutStore.layout().root as LayoutLeaf;
+  dispose = render(
+    () => (
+      <PanelDnd>
+        <PanelLeaf leaf={live()} workspace="demo" />
       </PanelDnd>
     ),
     host,
@@ -171,5 +219,32 @@ describe("PanelDnd rendered feedback", () => {
     expect(preview()).toBeNull();
     expect(caret()).toBeNull();
     expect(ghost()).toBeNull();
+  });
+
+  it("never starts a drag outside edit mode, but a plain tab click still activates it", async () => {
+    const bar = mountActivatable({ editing: false });
+    const tabs = [...bar.querySelectorAll<HTMLElement>("[data-tab-index]")];
+    const secondTab = tabs[1]!.querySelector<HTMLButtonElement>("button")!;
+
+    // Same gesture that starts a drag in every test above — well past the 4px
+    // threshold — but with no `onPointerDown` attached at all outside edit
+    // mode, there is nothing to catch it.
+    bar.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+    window.dispatchEvent(pointerEvent("pointermove", 250, 10));
+    await nextFrame();
+
+    expect(ghost()).toBeNull();
+    expect(preview()).toBeNull();
+    expect(caret()).toBeNull();
+
+    window.dispatchEvent(pointerEvent("pointerup", 250, 10));
+    expect(document.body.classList.contains("panel-dragging")).toBe(false);
+
+    // The gating must not have swallowed ordinary interaction: a real click
+    // still switches tabs.
+    expect(secondTab.getAttribute("aria-selected")).toBe("false");
+    secondTab.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+    expect(secondTab.getAttribute("aria-selected")).toBe("true");
   });
 });

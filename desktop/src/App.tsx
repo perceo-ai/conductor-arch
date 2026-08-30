@@ -10,6 +10,7 @@ import CommandPalette from "./components/CommandPalette";
 import KeyboardHints from "./components/KeyboardHints";
 import ShortcutsHelp from "./components/ShortcutsHelp";
 import Icon from "./components/Icon";
+import { isPanelDragActive } from "./components/PanelDndController";
 import { PageStack } from "./pages";
 import { runShellAction } from "./lib/shellAction";
 import { providersStore } from "./store/providers";
@@ -184,6 +185,11 @@ export default function App() {
         return;
       }
       if (e.key === "Escape" && layoutStore.editing()) {
+        // A drag in flight owns Escape: the drag controller's own keydown
+        // listener cancels it. Falling through here as well would exit edit
+        // mode on the same keypress, leaving no way to abort a drag and keep
+        // editing — so this defers entirely rather than also acting.
+        if (isPanelDragActive()) return;
         e.preventDefault();
         layoutStore.setEditing(false);
         return;
