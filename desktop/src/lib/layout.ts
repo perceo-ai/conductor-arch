@@ -343,9 +343,16 @@ function containsPointer(rect: Rect, pointer: { x: number; y: number }): boolean
   );
 }
 
-/** The tab whose box holds x, or the end of the strip when x is past every tab. */
+/**
+ * The splice index a drop at x would insert at: the first tab whose
+ * midpoint sits to the right of the pointer, or the end of the strip when
+ * the pointer is past every tab's midpoint. This is an insertion index
+ * (as `applyDrop` splices with), not "which tab is under the cursor" — the
+ * two differ in the right half of the last tab, which must still resolve
+ * to "insert after it".
+ */
 function tabIndexAt(tabs: Array<{ left: number; width: number }>, x: number): number {
-  const index = tabs.findIndex((tab) => x >= tab.left && x <= tab.left + tab.width);
+  const index = tabs.findIndex((tab) => x < tab.left + tab.width / 2);
   return index === -1 ? tabs.length : index;
 }
 

@@ -243,8 +243,19 @@ describe("resolveDrop", () => {
   it("insert-as-tab when the pointer is over the tab bar", () => {
     const leafRect = rect("a", { tabs: [{ left: 0, width: 100 }, { left: 100, width: 100 }] });
     expect(resolveDrop([leafRect], { x: 40, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 0 });
-    expect(resolveDrop([leafRect], { x: 160, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 1 });
     expect(resolveDrop([leafRect], { x: 380, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 2 });
+  });
+
+  it("distinguishes insert-before from insert-after within the same tab", () => {
+    // Same two tabs as above: [0,100) and [100,200). The index is a splice
+    // point, not "which tab is under the cursor" — the left and right
+    // halves of tab 1 must resolve to different indices, or there would be
+    // no pointer position that inserts after the last tab.
+    const leafRect = rect("a", { tabs: [{ left: 0, width: 100 }, { left: 100, width: 100 }] });
+    // x: 140 is the left half of tab 1 (midpoint 150) -> insert before it.
+    expect(resolveDrop([leafRect], { x: 140, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 1 });
+    // x: 160 is the right half of tab 1 -> insert after it.
+    expect(resolveDrop([leafRect], { x: 160, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 2 });
   });
 
   it("appends as a tab in the centre zone", () => {
