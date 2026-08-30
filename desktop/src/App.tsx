@@ -196,7 +196,7 @@ export default function App() {
           setSidebarCollapsed((c) => !c);
           break;
         case "toggle-right-panel":
-          layoutStore.collapseRegion("right", !layoutStore.layout().regions.right.collapsed);
+          layoutStore.toggleSidePanel();
           break;
         case "nav-back":
           nav.back();

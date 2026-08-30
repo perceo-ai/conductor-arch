@@ -1,5 +1,4 @@
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
-import type { Region } from "@/lib/layout";
 import { hiddenPanelControls, layoutPresetControls } from "@/lib/layoutControls";
 import { layoutStore } from "@/store/layout";
 import { layoutPresetsStore } from "@/store/layoutPresets";
@@ -9,7 +8,6 @@ import { workspacesStore } from "@/store/workspaces";
 import Icon from "./Icon";
 
 const [layoutMessage, setLayoutMessage] = createSignal("");
-const REGIONS: Region[] = ["left", "right", "bottom"];
 
 export function announceLayout(message: string) {
   setLayoutMessage("");
@@ -28,10 +26,6 @@ export default function LayoutControls(props: { workspace: string }) {
       layoutPresetsStore.projectDefaultId(),
     );
   const repository = () => workspacesStore.row(props.workspace)?.repository;
-  const hasContent = (region: Region) => {
-    const stack = layoutStore.layout().regions[region];
-    return stack.panels.length + stack.strips.length + stack.docks.length > 0;
-  };
 
   function close(returnFocus = false) {
     setOpen(false);
@@ -135,13 +129,6 @@ export default function LayoutControls(props: { workspace: string }) {
     close(true);
   }
 
-  function toggleRegion(region: Region) {
-    const collapsed = layoutStore.layout().regions[region].collapsed;
-    layoutStore.collapseRegion(region, !collapsed);
-    announceLayout(`${region[0].toUpperCase()}${region.slice(1)} region ${collapsed ? "shown" : "collapsed"}.`);
-    close(true);
-  }
-
   onMount(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && open()) {
@@ -237,24 +224,6 @@ export default function LayoutControls(props: { workspace: string }) {
                 )}
               </For>
             </Show>
-            <div class="layout-menu-section-label">Regions</div>
-            <For each={REGIONS.filter(hasContent)}>
-              {(region) => {
-                const collapsed = () => layoutStore.layout().regions[region].collapsed;
-                const title = () => `${region[0].toUpperCase()}${region.slice(1)}`;
-                return (
-                  <button
-                    class="layout-menu-item"
-                    role="menuitem"
-                    aria-label={`${collapsed() ? "Show" : "Collapse"} ${region} region`}
-                    onClick={() => toggleRegion(region)}
-                  >
-                    <Icon name={region === "right" ? "panel-right" : region === "left" ? "panel-left" : "square"} />
-                    <span>{collapsed() ? "Show" : "Collapse"} {title()}</span>
-                  </button>
-                );
-              }}
-            </For>
             <div class="layout-menu-separator" />
             <button
               class="layout-menu-item"

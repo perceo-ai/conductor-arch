@@ -1,6 +1,22 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ArchcarRequest, ArchcarResponse, LayoutPresetRecord } from "@/bridge/protocol";
+import type { Layout, LayoutLeaf, LayoutNode } from "@/lib/layout";
+
+function leafHolding(layout: Layout, panelId: string): LayoutLeaf {
+  const found: LayoutLeaf[] = [];
+  const walk = (node: LayoutNode) => {
+    if (node.type === "leaf") {
+      if (node.panels.includes(panelId)) found.push(node);
+      return;
+    }
+    walk(node.children[0]);
+    walk(node.children[1]);
+  };
+  walk(layout.root);
+  if (found.length === 0) throw new Error(`no leaf holds ${panelId}`);
+  return found[0];
+}
 
 const send = vi.fn<(request: ArchcarRequest) => Promise<ArchcarResponse>>();
 vi.mock("@/bridge/client", () => ({ send }));
@@ -54,7 +70,7 @@ describe("layoutPresetsStore", () => {
   it("loads built-ins first, sanitizes remote users, and restores the local active id", async () => {
     const unknown = vi.spyOn(console, "warn").mockImplementation(() => {});
     const layout = await codeLayout();
-    layout.regions.right.panels.push("future-panel");
+    leafHolding(layout, "summary").panels.push("future-panel");
     responses([record("custom-two", "Zeta", layout), record("code", "Server Code", layout)]);
     const { prefsStore } = await import("./prefs");
     prefsStore.setActivePresetId("custom-two");
@@ -70,7 +86,7 @@ describe("layoutPresetsStore", () => {
       "Zeta",
     ]);
     expect(layoutPresetsStore.activeId()).toBe("custom-two");
-    expect(layoutPresetsStore.activePreset()?.layout.regions.right.panels).not.toContain("future-panel");
+    expect(leafHolding(layoutPresetsStore.activePreset()!.layout, "summary").panels).not.toContain("future-panel");
     expect(unknown).toHaveBeenCalledOnce();
   });
 
@@ -103,11 +119,11 @@ describe("layoutPresetsStore", () => {
     await layoutPresetsStore.load();
     send.mockClear();
 
-    layoutStore.resizeRegion("right", 410);
-    layoutStore.collapseRegion("left", true);
-    layoutStore.hidePanel("files");
+    layoutStore.setRatio((layoutStore.layout().root as { id: string }).id, 0.4);
+    layoutStore.setCollapsed(leafHolding(layoutStore.layout(), "chat").id, true);
+    layoutStore.removePanel("files");
     const fork = layoutStore.activePreset().id;
-    layoutStore.movePanel("summary", "left", 0);
+    layoutStore.removePanel("summary");
     expect(fork).toMatch(/^custom-/);
     expect(layoutStore.activePreset().id).toBe(fork);
     await vi.advanceTimersByTimeAsync(249);
@@ -121,9 +137,12 @@ describe("layoutPresetsStore", () => {
     });
     const request = send.mock.calls[0][0];
     if (request.type !== "save_layout_preset") throw new Error("expected save request");
-    const savedLayout = JSON.parse(request.preset.layout_json);
-    expect(savedLayout.regions.right.size).toBe(300);
-    expect(savedLayout.regions.left.collapsed).toBe(false);
+    const savedLayout = JSON.parse(request.preset.layout_json) as Layout;
+    // Ratios are proportions, so they travel with the preset; the tree that
+    // ships is exactly the tree on screen.
+    expect(savedLayout.version).toBe(2);
+    expect((savedLayout.root as { ratio: number }).ratio).toBeCloseTo(0.4);
+    expect(leafHolding(savedLayout, "chat").collapsed).toBe(true);
   });
 
   it("keeps local edits when sync fails and offers one retry toast", async () => {
@@ -136,7 +155,7 @@ describe("layoutPresetsStore", () => {
     const push = vi.spyOn(toastsStore, "push");
     send.mockRejectedValueOnce(new Error("offline"));
 
-    layoutStore.hidePanel("files");
+    layoutStore.removePanel("files");
     const local = structuredClone(layoutStore.layout());
     await vi.advanceTimersByTimeAsync(250);
 
@@ -180,7 +199,7 @@ describe("layoutPresetsStore", () => {
     send.mockClear();
 
     // Queue an edit against daemon A, then switch before the timer fires.
-    layoutStore.hidePanel("files");
+    layoutStore.removePanel("files");
     bumpDaemonEpoch();
     await vi.advanceTimersByTimeAsync(500);
 
@@ -195,7 +214,7 @@ describe("layoutPresetsStore", () => {
     await layoutPresetsStore.load();
     send.mockClear();
 
-    layoutStore.hidePanel("files");
+    layoutStore.removePanel("files");
     await vi.advanceTimersByTimeAsync(500);
 
     expect(send).toHaveBeenCalledWith(

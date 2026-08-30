@@ -1,35 +1,32 @@
 import { createSignal } from "solid-js";
 import {
   activatePanel as activateLayoutPanel,
-  collapseRegion as collapseLayoutRegion,
-  hidePanel as hideLayoutPanel,
-  movePanel as moveLayoutPanel,
-  resizeRegion as resizeLayoutRegion,
+  addPanel as addLayoutPanel,
+  applyDrop as applyLayoutDrop,
+  eachLeaf,
+  removePanel as removeLayoutPanel,
   sanitizeLayout,
-  showPanel as showLayoutPanel,
+  setCollapsed as setLayoutCollapsed,
+  setRatio as setLayoutRatio,
   visiblePanelIds,
+  type Drop,
   type Layout,
+  type LayoutLeaf,
+  type NodeId,
   type PanelId,
-  type Region,
 } from "@/lib/layout";
 import { builtinPreset, presetAfterEdit, type LayoutPreset } from "@/lib/layoutPresets";
 import { workspacePanels } from "@/lib/panelRegistry";
-import { prefsStore } from "./prefs";
-
-const REGIONS: Region[] = ["left", "center", "right", "bottom"];
 
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-function deviceLayout(source: Layout): Layout {
-  const layout = sanitizeLayout(clone(source));
-  for (const region of REGIONS) {
-    layout.regions[region].size = prefsStore.state.regionSizes[region];
-    layout.regions[region].collapsed =
-      region !== "center" && prefsStore.state.collapsedRegions.includes(region);
-  }
-  return layout;
+/** Every leaf in tree order. Tab cycling and focus both walk this order. */
+function leavesOf(source: Layout): LayoutLeaf[] {
+  const list: LayoutLeaf[] = [];
+  eachLeaf(source.root, (node) => list.push(node));
+  return list;
 }
 
 function normalizedPreset(source: LayoutPreset): LayoutPreset {
@@ -45,21 +42,50 @@ function normalizedPreset(source: LayoutPreset): LayoutPreset {
 }
 
 const initial = normalizedPreset(builtinPreset("code")!);
-const [layout, setLayout] = createSignal<Layout>(deviceLayout(initial.layout));
+const [layout, setLayout] = createSignal<Layout>(clone(initial.layout));
 const [activePreset, setActivePreset] = createSignal<LayoutPreset>(clone(initial));
 const [hiddenPanels, setHiddenPanels] = createSignal<PanelId[]>([...initial.hidden]);
-const [focusedRegion, setFocusedRegion] = createSignal<Region>("center");
+const [focusedLeaf, setFocusedLeaf] = createSignal<NodeId | undefined>(undefined);
+// Structural editing is an explicit mode: drag-to-rearrange and the close /
+// collapse affordances are only live while this is true (Task 9 wires the UI).
+const [editing, setEditing] = createSignal(false);
 let onEdited: ((preset: LayoutPreset) => void) | undefined;
 
 export const layoutStore = {
   layout,
   activePreset,
   hiddenPanels,
-  focusedRegion,
-  setFocusedRegion,
+  focusedLeaf,
+  setFocusedLeaf,
+  editing,
+  setEditing,
 
   onEdited(listener: ((preset: LayoutPreset) => void) | undefined) {
     onEdited = listener;
+  },
+
+  /** The leaf currently holding a panel, if any. */
+  leafOf(panelId: PanelId): NodeId | undefined {
+    return leavesOf(layout()).find((node) => node.panels.includes(panelId))?.id;
+  },
+
+  /**
+   * The leaf a "collapse the side panel" affordance acts on. With regions gone
+   * there is no named right column any more, so this is the last leaf that does
+   * not hold chat — the inspector column in every built-in preset.
+   */
+  sidePanelLeafId(): NodeId | undefined {
+    return leavesOf(layout()).filter((node) => !node.panels.includes("chat")).at(-1)?.id;
+  },
+
+  sidePanelCollapsed(): boolean {
+    const id = this.sidePanelLeafId();
+    return !!id && !!leavesOf(layout()).find((node) => node.id === id)?.collapsed;
+  },
+
+  toggleSidePanel() {
+    const id = this.sidePanelLeafId();
+    if (id) this.setCollapsed(id, !this.sidePanelCollapsed());
   },
 
   focusPanel(id: PanelId) {
@@ -72,16 +98,15 @@ export const layoutStore = {
   },
 
   cyclePanel(delta: 1 | -1): PanelId | undefined {
-    const tabs = REGIONS.flatMap((region) => layout().regions[region].panels);
+    const tabs = visiblePanelIds(layout());
     if (tabs.length === 0) return undefined;
-    const currentStack = layout().regions[focusedRegion()];
-    const current = currentStack.panels[currentStack.active];
-    const currentIndex = Math.max(0, tabs.indexOf(current));
+    const focused = leavesOf(layout()).find((node) => node.id === focusedLeaf());
+    const current = focused?.panels[focused.active];
+    const currentIndex = Math.max(0, tabs.indexOf(current ?? tabs[0]));
     const id = tabs[(currentIndex + delta + tabs.length) % tabs.length];
-    const region = REGIONS.find((candidate) => layout().regions[candidate].panels.includes(id));
-    if (!region) return undefined;
     this.activatePanel(id);
-    setFocusedRegion(region);
+    const owner = this.leafOf(id);
+    if (owner) setFocusedLeaf(owner);
     this.focusPanel(id);
     return id;
   },
@@ -90,7 +115,7 @@ export const layoutStore = {
     const preset = normalizedPreset(source);
     setActivePreset(clone(preset));
     setHiddenPanels([...preset.hidden]);
-    setLayout(deviceLayout(preset.layout));
+    setLayout(clone(preset.layout));
   },
 
   mutate(change: (current: Layout) => Layout) {
@@ -108,6 +133,11 @@ export const layoutStore = {
     return true;
   },
 
+  /**
+   * Switching tabs is not a structural edit, so it does not fork a built-in
+   * preset — unless the panel is not on screen at all, in which case placing it
+   * genuinely changes the tree.
+   */
   activatePanel(id: PanelId) {
     if (!visiblePanelIds(layout()).includes(id)) {
       this.mutate((current) => activateLayoutPanel(current, id));
@@ -116,30 +146,28 @@ export const layoutStore = {
     setLayout(activateLayoutPanel(layout(), id));
   },
 
-  movePanel(id: PanelId, region: Region, index: number) {
-    this.mutate((current) => moveLayoutPanel(current, id, region, index));
+  /**
+   * The store supplies the layout, so this takes `(drop, panelId)` where the
+   * pure transform in `lib/layout.ts` takes `(layout, drop, panelId)`.
+   */
+  applyDrop(drop: Drop, panelId: PanelId) {
+    this.mutate((current) => applyLayoutDrop(current, drop, panelId));
   },
 
-  hidePanel(id: PanelId) {
-    this.mutate((current) => hideLayoutPanel(current, id));
+  addPanel(id: PanelId, leafId?: NodeId) {
+    this.mutate((current) => addLayoutPanel(current, id, leafId));
   },
 
-  showPanel(id: PanelId, region?: Region) {
-    this.mutate((current) => showLayoutPanel(current, id, region));
+  removePanel(id: PanelId) {
+    this.mutate((current) => removeLayoutPanel(current, id));
   },
 
-  resizeRegion(region: Region, size: number) {
-    const next = resizeLayoutRegion(layout(), region, size);
-    setLayout(next);
-    prefsStore.setRegionSize(region, next.regions[region].size);
+  setCollapsed(leafId: NodeId, collapsed: boolean) {
+    this.mutate((current) => setLayoutCollapsed(current, leafId, collapsed));
   },
 
-  collapseRegion(region: Region, collapsed: boolean) {
-    const next = collapseLayoutRegion(layout(), region, collapsed);
-    setLayout(next);
-    if (next.regions[region].collapsed === collapsed) {
-      prefsStore.setRegionCollapsed(region, collapsed);
-    }
+  setRatio(splitId: NodeId, ratio: number) {
+    this.mutate((current) => setLayoutRatio(current, splitId, ratio));
   },
 
   resetToCode() {

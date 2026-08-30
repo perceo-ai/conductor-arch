@@ -2,24 +2,139 @@
 .ws-command-center,
 .ws-workbench,
 .ws-workbench-main,
-.ws-workbench-region-shell,
-.workbench-region,
-.workbench-panel-body,
-.workbench-dock {
+.workbench-split,
+.workbench-split-child,
+.workbench-leaf,
+.workbench-panel-body {
   min-width: 0;
   min-height: 0;
 }
 
 .ws-workbench {
   flex: 1 1 auto;
-  display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
 .ws-workbench-main {
+  flex: 1 1 auto;
   display: flex;
   overflow: hidden;
+}
+
+/* ---- Split tree ----
+   A split lays its two children along `data-direction` with a drag handle
+   between them; the flex basis of each child comes from the node's ratio,
+   which LayoutNodeView clamps in pixels against each child's minimum. */
+.workbench-split {
+  flex: 1 1 auto;
+  display: flex;
+  overflow: hidden;
+}
+
+.workbench-split[data-direction="row"] {
+  flex-direction: row;
+}
+
+.workbench-split[data-direction="column"] {
+  flex-direction: column;
+}
+
+.workbench-split-child {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.workbench-split > .resize-handle-split {
+  position: relative;
+  flex: 0 0 1px;
+  width: 1px;
+  height: auto;
+  background: var(--ui-border, #262626);
+}
+
+.workbench-split[data-direction="column"] > .resize-handle-split {
+  width: auto;
+  height: 1px;
+  cursor: row-resize;
+}
+
+/* The grab area is wider than the 1px rule, the way the old edge handles were,
+   without the divider itself claiming layout space. The base .resize-handle
+   pseudo-element is a 2px centred bar; a split handle needs a plain overlay. */
+.workbench-split > .resize-handle-split::after {
+  inset: -3px;
+  top: -3px;
+  bottom: -3px;
+  left: -3px;
+  right: -3px;
+  width: auto;
+  height: auto;
+  transform: none;
+  background: transparent;
+}
+
+.workbench-split > .resize-handle-split:hover::after,
+body.resizing-col .workbench-split > .resize-handle-split::after {
+  background: transparent;
+}
+
+.workbench-split > .resize-handle-split:hover,
+.workbench-split > .resize-handle-split:focus-visible {
+  background: var(--lc-accent, #c39b50);
+}
+
+/* ---- Leaves ---- */
+.workbench-leaf {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  contain: layout paint;
+  overflow: hidden;
+  background: var(--ui-panel, #191919);
+}
+
+/* Collapsed: the strip and nothing else. The parent split gives the space it
+   gives up to its sibling. */
+.workbench-leaf-collapsed {
+  flex: 0 0 auto;
+}
+
+.workbench-leaf > .workbench-panel-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+/* Panels that scroll their own content must not also scroll here, or the
+   window gets two nested scrollbars. */
+.workbench-leaf > .workbench-panel-body[data-panel-id="chat"],
+.workbench-leaf > .workbench-panel-body[data-panel-kind="strip"],
+.workbench-leaf > .workbench-panel-body[data-panel-kind="dock"] {
+  overflow: hidden;
+}
+
+.workbench-leaf > .workbench-panel-body[data-panel-kind="strip"] {
+  flex: 0 0 auto;
+  min-height: 40px;
+}
+
+.workbench-leaf .ws-run-section {
+  flex: 1 1 auto;
+  height: 100%;
+}
+
+.panel-drop-preview {
+  position: fixed;
+  z-index: 101;
+  border: 2px solid var(--lc-accent, #c39b50);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 14%, transparent);
+  pointer-events: none;
 }
 
 .ws-workbench-region-shell {

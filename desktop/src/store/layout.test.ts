@@ -1,5 +1,26 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Layout, LayoutLeaf, LayoutNode, LayoutSplit } from "@/lib/layout";
+
+function leaves(layout: Layout): LayoutLeaf[] {
+  const list: LayoutLeaf[] = [];
+  const walk = (node: LayoutNode) => {
+    if (node.type === "leaf") {
+      list.push(node);
+      return;
+    }
+    walk(node.children[0]);
+    walk(node.children[1]);
+  };
+  walk(layout.root);
+  return list;
+}
+
+function leafHolding(layout: Layout, panelId: string): LayoutLeaf {
+  const hit = leaves(layout).find((node) => node.panels.includes(panelId));
+  if (!hit) throw new Error(`no leaf holds ${panelId}`);
+  return hit;
+}
 
 describe("layoutStore", () => {
   beforeEach(() => vi.resetModules());
@@ -10,23 +31,12 @@ describe("layoutStore", () => {
     const { layoutStore } = await import("./layout");
 
     expect(layoutStore.activePreset().id).toBe("code");
-    expect(layoutStore.layout().regions.center.panels).toEqual(["chat"]);
+    expect(layoutStore.layout().version).toBe(2);
+    expect(leafHolding(layoutStore.layout(), "chat").panels).toEqual(["chat"]);
     expect(layoutStore.layout()).not.toBe(BUILTIN_PRESETS[0].layout);
 
-    layoutStore.layout().regions.center.panels.push("files");
-    expect(BUILTIN_PRESETS[0].layout.regions.center.panels).toEqual(["chat"]);
-  });
-
-  it("overlays device-local region sizes and collapsed regions", async () => {
-    const { prefsStore } = await import("./prefs");
-    prefsStore.setRegionSize("left", 340);
-    prefsStore.setRegionSize("right", 410);
-    prefsStore.setRegionCollapsed("left", true);
-
-    const { layoutStore } = await import("./layout");
-    expect(layoutStore.layout().regions.left).toMatchObject({ size: 340, collapsed: true });
-    expect(layoutStore.layout().regions.right).toMatchObject({ size: 410, collapsed: false });
-    expect(layoutStore.layout().regions.center.collapsed).toBe(false);
+    leafHolding(layoutStore.layout(), "chat").panels.push("files");
+    expect(leafHolding(BUILTIN_PRESETS[0].layout, "chat").panels).toEqual(["chat"]);
   });
 
   it("sanitizes unknown panels whenever a layout is applied", async () => {
@@ -34,15 +44,20 @@ describe("layoutStore", () => {
     const { builtinPreset } = await import("@/lib/layoutPresets");
     const { layoutStore } = await import("./layout");
     const preset = builtinPreset("wide")!;
-    preset.layout.regions.right.panels.push("removed-by-future-build");
+    leafHolding(preset.layout, "summary").panels.push("removed-by-future-build");
 
     layoutStore.applyLayout(preset);
 
     expect(layoutStore.activePreset().id).toBe("wide");
-    expect(layoutStore.layout().regions.right.panels).toEqual(["summary", "changes", "checks"]);
+    expect(leafHolding(layoutStore.layout(), "summary").panels).toEqual([
+      "summary",
+      "files",
+      "changes",
+      "checks",
+    ]);
     expect(
-      warn.mock.calls.filter(
-        ([message]) => message === "[layout] Dropped unknown panel id: removed-by-future-build",
+      warn.mock.calls.filter(([message]) =>
+        String(message).includes("removed-by-future-build"),
       ),
     ).toHaveLength(1);
   });
@@ -53,97 +68,125 @@ describe("layoutStore", () => {
     const preset = builtinPreset("review")!;
 
     layoutStore.applyLayout(preset);
-    preset.layout.regions.center.panels[0] = "chat";
-    layoutStore.activePreset().layout.regions.center.panels[0] = "files";
+    leafHolding(preset.layout, "changes").panels[0] = "chat";
+    leafHolding(layoutStore.activePreset().layout, "changes").panels[0] = "files";
 
-    expect(layoutStore.layout().regions.center.panels).toEqual(["changes"]);
-    expect(BUILTIN_PRESETS[2].layout.regions.center.panels).toEqual(["changes"]);
+    expect(leafHolding(layoutStore.layout(), "changes").panels[0]).toBe("changes");
+    expect(leafHolding(BUILTIN_PRESETS[2].layout, "changes").panels[0]).toBe("changes");
   });
 
-  it("reveals a hidden panel, opens its region, activates tabs, and schedules focus", async () => {
+  it("reveals a hidden panel, opens its leaf, activates it, and schedules focus", async () => {
     const focus = vi.fn();
     const querySelector = vi.fn(() => ({ focus }));
     vi.stubGlobal("document", { querySelector });
-    const { collapseRegion, hidePanel } = await import("@/lib/layout");
     const { layoutStore } = await import("./layout");
     const { actions } = await import("./actions");
-    layoutStore.mutate((layout) => collapseRegion(hidePanel(layout, "changes"), "right", true));
+    const host = leafHolding(layoutStore.layout(), "changes").id;
+    layoutStore.removePanel("changes");
+    layoutStore.setCollapsed(host, true);
+    expect(layoutStore.hiddenPanels()).toContain("changes");
 
     actions.revealPanel("changes");
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
-    expect(layoutStore.layout().regions.right).toMatchObject({
-      panels: ["summary", "files", "checks", "changes"],
-      active: 3,
-      collapsed: false,
-    });
+    const leaf = leafHolding(layoutStore.layout(), "changes");
+    expect(leaf.collapsed).toBe(false);
+    expect(leaf.panels[leaf.active]).toBe("changes");
     expect(querySelector).toHaveBeenCalledWith("[data-panel-id='changes']");
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it("reveals strips and docks without changing the active tab", async () => {
-    const { hidePanel } = await import("@/lib/layout");
+  it("applies a drop through the store and marks the preset edited", async () => {
     const { layoutStore } = await import("./layout");
-    const { actions } = await import("./actions");
-    layoutStore.mutate((layout) => hidePanel(hidePanel(layout, "pr"), "terminal"));
+    const edits: unknown[] = [];
+    layoutStore.onEdited((preset) => edits.push(preset));
+    const before = layoutStore.layout();
+    const firstLeaf = (before.root.type === "leaf" ? before.root : before.root.children[0]) as { id: string };
 
-    actions.revealPanel("pr");
-    actions.revealPanel("terminal");
+    layoutStore.applyDrop({ kind: "split", leafId: firstLeaf.id, edge: "bottom" }, "checks");
 
-    expect(layoutStore.layout().regions.right.strips).toEqual(["pr"]);
-    expect(layoutStore.layout().regions.right.docks).toEqual(["terminal"]);
-    expect(layoutStore.layout().regions.right.active).toBe(2);
+    expect(edits.length).toBeGreaterThan(0);
+    expect(layoutStore.layout()).not.toEqual(before);
+    layoutStore.onEdited(undefined);
   });
 
-  it("cycles only visible tabs in region order and wraps both directions", async () => {
-    vi.stubGlobal("document", { querySelector: vi.fn(() => null) });
-    const { movePanel } = await import("@/lib/layout");
+  it("tracks edit mode", async () => {
     const { layoutStore } = await import("./layout");
-    layoutStore.mutate((layout) => {
-      let next = movePanel(layout, "files", "left", 0);
-      next = movePanel(next, "checks", "bottom", 0);
-      return next;
-    });
-    layoutStore.setFocusedRegion("right");
+    expect(layoutStore.editing()).toBe(false);
+    layoutStore.setEditing(true);
+    expect(layoutStore.editing()).toBe(true);
+    layoutStore.setEditing(false);
+  });
 
-    expect(layoutStore.cyclePanel(1)).toBe("checks");
-    expect(layoutStore.focusedRegion()).toBe("bottom");
-    expect(layoutStore.cyclePanel(1)).toBe("files");
-    expect(layoutStore.cyclePanel(-1)).toBe("checks");
+  it("adds, removes, collapses, and resizes through the tree transforms", async () => {
+    const { layoutStore } = await import("./layout");
+    const target = leafHolding(layoutStore.layout(), "chat").id;
+
+    layoutStore.addPanel("todos", target);
+    expect(leafHolding(layoutStore.layout(), "chat").panels).toEqual(["chat", "todos"]);
+
+    layoutStore.removePanel("todos");
+    expect(layoutStore.hiddenPanels()).toContain("todos");
+
+    layoutStore.setCollapsed(target, true);
+    expect(leafHolding(layoutStore.layout(), "chat").collapsed).toBe(true);
+
+    const split = layoutStore.layout().root as LayoutSplit;
+    layoutStore.setRatio(split.id, 0.4);
+    expect((layoutStore.layout().root as LayoutSplit).ratio).toBeCloseTo(0.4);
+  });
+
+  it("refuses to collapse the last open leaf", async () => {
+    const { layoutStore } = await import("./layout");
+    for (const leaf of leaves(layoutStore.layout())) layoutStore.setCollapsed(leaf.id, true);
+
+    expect(leaves(layoutStore.layout()).filter((leaf) => !leaf.collapsed)).toHaveLength(1);
+  });
+
+  it("cycles visible tabs in tree order and wraps both directions", async () => {
+    vi.stubGlobal("document", { querySelector: vi.fn(() => null) });
+    const { layoutStore } = await import("./layout");
+    const { visiblePanelIds } = await import("@/lib/layout");
+    const order = visiblePanelIds(layoutStore.layout());
+    layoutStore.setFocusedLeaf(leafHolding(layoutStore.layout(), order[0]).id);
+
+    expect(layoutStore.cyclePanel(1)).toBe(order[1]);
+    expect(layoutStore.cyclePanel(1)).toBe(order[2]);
+    expect(layoutStore.cyclePanel(-1)).toBe(order[1]);
   });
 
   it("forks an immutable built-in once before arrangement edits", async () => {
     const { layoutStore } = await import("./layout");
 
-    layoutStore.hidePanel("files");
+    layoutStore.removePanel("files");
     const forkId = layoutStore.activePreset().id;
     expect(layoutStore.activePreset()).toMatchObject({ builtin: false, name: "Code (edited)" });
     expect(forkId).toMatch(/^custom-/);
 
-    layoutStore.movePanel("summary", "left", 0);
+    layoutStore.removePanel("summary");
     expect(layoutStore.activePreset().id).toBe(forkId);
   });
 
-  it("keeps the centre usable and picks the nearest tab after hiding the active tab", async () => {
+  it("keeps the active tab inside the leaf after hiding the active panel", async () => {
     const { layoutStore } = await import("./layout");
-    layoutStore.hidePanel("changes");
-    expect(layoutStore.layout().regions.right.panels).toEqual(["summary", "files", "checks"]);
-    expect(layoutStore.layout().regions.right.active).toBe(2);
+    const before = leafHolding(layoutStore.layout(), "changes");
+    expect(before.panels[before.active]).toBe("changes");
 
-    layoutStore.hidePanel("chat");
-    layoutStore.collapseRegion("center", true);
-    expect(layoutStore.layout().regions.center).toMatchObject({ panels: ["chat"], collapsed: false });
+    layoutStore.removePanel("changes");
+
+    const after = leafHolding(layoutStore.layout(), "checks");
+    expect(after.panels).toEqual(["summary", "files", "checks"]);
+    expect(after.active).toBe(2);
   });
 
-  it("persists region sizes and collapses as device preferences", async () => {
+  it("toggles the side panel leaf rather than a named region", async () => {
     const { layoutStore } = await import("./layout");
-    const { prefsStore } = await import("./prefs");
+    expect(layoutStore.sidePanelCollapsed()).toBe(false);
 
-    layoutStore.resizeRegion("left", 360);
-    layoutStore.collapseRegion("left", true);
+    layoutStore.toggleSidePanel();
+    expect(layoutStore.sidePanelCollapsed()).toBe(true);
 
-    expect(layoutStore.layout().regions.left).toMatchObject({ size: 360, collapsed: true });
-    expect(prefsStore.state.regionSizes.left).toBe(360);
-    expect(prefsStore.state.collapsedRegions).toContain("left");
+    layoutStore.toggleSidePanel();
+    expect(layoutStore.sidePanelCollapsed()).toBe(false);
   });
 });

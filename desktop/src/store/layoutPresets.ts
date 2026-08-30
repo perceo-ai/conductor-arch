@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { send } from "@/bridge/client";
 import type { ArchcarResponse, LayoutPresetRecord } from "@/bridge/protocol";
-import { sanitizeLayout, type Layout, type Region } from "@/lib/layout";
+import { sanitizeLayout, type Layout } from "@/lib/layout";
 import {
   BUILTIN_PRESETS,
   builtinPreset,
@@ -9,13 +9,11 @@ import {
   mergePresets,
   type LayoutPreset,
 } from "@/lib/layoutPresets";
-import { REGION_DEFAULT_SIZES } from "@/lib/panelWidths";
 import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
 import { layoutStore } from "./layout";
 import { prefsStore } from "./prefs";
 import { toastsStore } from "./toasts";
 
-const REGIONS: Region[] = ["left", "center", "bottom", "right"];
 const BUILTIN_IDS = new Set(BUILTIN_PRESETS.map((preset) => preset.id));
 const SAVE_DELAY_MS = 250;
 
@@ -32,13 +30,13 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+/**
+ * A preset is shared across clients, so it carries the tree and nothing
+ * device-local. Ratios travel with it — they are proportions, not pixels — and
+ * sanitising is the only normalisation left now that region sizes are gone.
+ */
 function portableLayout(source: Layout): Layout {
-  const layout = sanitizeLayout(clone(source));
-  for (const region of REGIONS) {
-    layout.regions[region].size = REGION_DEFAULT_SIZES[region];
-    layout.regions[region].collapsed = false;
-  }
-  return layout;
+  return sanitizeLayout(clone(source));
 }
 
 function toRecord(preset: LayoutPreset): LayoutPresetRecord {

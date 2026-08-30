@@ -8,7 +8,6 @@ import { ansiToHtml } from "@/lib/ansi";
 import ResizeHandle from "@/components/ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
-import type { Region } from "@/lib/layout";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
@@ -240,7 +239,7 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
   );
 }
 
-export default function TerminalDock(props: { workspace: string; region?: Region }) {
+export default function TerminalDock(props: { workspace: string }) {
   // Open by default. It was collapsed on the theory that chat is primary and
   // the dock is a drawer, but the terminal and the setup/run consoles are part
   // of the normal loop, and a collapsed dock hides that they exist at all. An
@@ -257,8 +256,7 @@ export default function TerminalDock(props: { workspace: string; region?: Region
   const [tab, setTab] = createSignal<RunTab>("setup");
   // Right-panel density is high, so the dock split is draggable and persisted.
   const [height, setHeight] = createPersistedWidth("terminalDock.height", 280, DOCK_MIN, DOCK_MAX);
-  const isRightDock = () => (props.region ?? "right") === "right";
-  const isExpanded = () => !isRightDock() || expanded();
+  const isExpanded = () => expanded();
   const terms = () => terminalStore.terminals(props.workspace);
   const activeTermId = () => {
     const t = tab();
@@ -302,11 +300,10 @@ export default function TerminalDock(props: { workspace: string; region?: Region
       tabIndex={-1}
       classList={{
         "ws-run-section-expanded": isExpanded(),
-        [`ws-run-section-${props.region ?? "right"}`]: true,
       }}
-      style={isExpanded() && isRightDock() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
+      style={isExpanded() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
     >
-      <Show when={isExpanded() && isRightDock()}>
+      <Show when={isExpanded()}>
         <ResizeHandle edge="top" width={height} min={DOCK_MIN} max={DOCK_MAX} onChange={setHeight} />
       </Show>
       <div class="ws-run-tab-bar">
@@ -381,16 +378,14 @@ export default function TerminalDock(props: { workspace: string; region?: Region
             </button>
           </div>
         </Show>
-        <Show when={isRightDock()}>
-          <button
-            class="ws-run-collapse-btn"
-            title={expanded() ? "Collapse" : "Expand"}
-            data-shortcut={configuredShortcut("toggle-terminal")}
-            onClick={toggle}
-          >
-            <Icon name={expanded() ? "chevron-down" : "chevron-up"} />
-          </button>
-        </Show>
+        <button
+          class="ws-run-collapse-btn"
+          title={expanded() ? "Collapse" : "Expand"}
+          data-shortcut={configuredShortcut("toggle-terminal")}
+          onClick={toggle}
+        >
+          <Icon name={expanded() ? "chevron-down" : "chevron-up"} />
+        </button>
       </div>
       <Show when={isExpanded()}>
         <div class="ws-run-body">

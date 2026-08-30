@@ -17,7 +17,7 @@ import { configuredShortcut } from "@/lib/configuredShortcut";
 function TopBar(props: { workspace: string }) {
   let openButton: HTMLButtonElement | undefined;
   const row = () => workspacesStore.row(props.workspace);
-  const rightCollapsed = () => layoutStore.layout().regions.right.collapsed;
+  const rightCollapsed = () => layoutStore.sidePanelCollapsed();
   const repoRoot = () => {
     const repo = row()?.repository;
     return repo ? repositoriesStore.row(repo)?.rootPath : undefined;
@@ -53,7 +53,7 @@ function TopBar(props: { workspace: string }) {
     openContextMenuAt(rect.left, rect.bottom + 4, openItems());
   }
   function toggleRight() {
-    layoutStore.collapseRegion("right", !rightCollapsed());
+    layoutStore.toggleSidePanel();
   }
   onMount(() => {
     const onOpen = () => {

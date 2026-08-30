@@ -12,7 +12,7 @@ import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { nav } from "./nav";
 import { layoutStore } from "./layout";
-import { visiblePanelIds, type PanelId, type Region } from "@/lib/layout";
+import { visiblePanelIds, type PanelId } from "@/lib/layout";
 import { panelDescriptor } from "@/lib/panelRegistry";
 
 async function refreshInventory(): Promise<void> {
@@ -50,12 +50,9 @@ export const actions = {
   revealPanel(panelId: PanelId, options: { activate?: boolean } = {}) {
     const descriptor = panelDescriptor(panelId);
     if (!descriptor) return;
-    if (!visiblePanelIds(layoutStore.layout()).includes(panelId)) layoutStore.showPanel(panelId);
-    const region = (["left", "center", "right", "bottom"] as Region[]).find((candidate) => {
-        const stack = layoutStore.layout().regions[candidate];
-        return stack.panels.includes(panelId) || stack.strips.includes(panelId) || stack.docks.includes(panelId);
-    });
-    if (region) layoutStore.collapseRegion(region, false);
+    if (!visiblePanelIds(layoutStore.layout()).includes(panelId)) layoutStore.addPanel(panelId);
+    const leafId = layoutStore.leafOf(panelId);
+    if (leafId) layoutStore.setCollapsed(leafId, false);
     if (options.activate !== false) layoutStore.activatePanel(panelId);
     layoutStore.focusPanel(panelId);
   },

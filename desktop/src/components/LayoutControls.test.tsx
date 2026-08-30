@@ -11,7 +11,10 @@ describe("LayoutControls", () => {
 
   it("offers every hidden panel through accessible restore controls", () => {
     const labels = hiddenPanelControls(layoutStore.hiddenPanels()).map((control) => control.ariaLabel);
+    // The Code tree no longer carries a terminal dock — with regions gone the
+    // terminal is an ordinary panel, hidden until it is added to a leaf.
     expect(labels).toEqual([
+      "Restore Terminal",
       "Restore Todos",
       "Restore Checkpoints",
       "Restore Processes",

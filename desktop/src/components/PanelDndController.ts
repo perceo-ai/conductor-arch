@@ -1,17 +1,21 @@
-import { dropTarget, type DropTarget, type PanelId, type PanelKind, type Region } from "@/lib/layout";
-import { panelDescriptor } from "@/lib/panelRegistry";
+import {
+  dropPreviewRect,
+  resolveDrop,
+  type Drop,
+  type LeafRect,
+  type PanelId,
+  type Rect,
+} from "@/lib/layout";
 
 const THRESHOLD = 4;
-const REGIONS: Region[] = ["left", "center", "right", "bottom"];
 
 export interface PanelDragState {
   panelId: PanelId;
   dragging: boolean;
   x: number;
   y: number;
-  target: DropTarget | null;
-  allowedRegions: Region[];
-  caret?: { x: number; y: number; height: number };
+  drop: Drop | null;
+  preview: Rect | null;
 }
 
 export interface BeginPanelDrag {
@@ -26,60 +30,64 @@ export interface BeginPanelDrag {
 }
 
 interface ControllerOptions {
-  movePanel: (panelId: PanelId, region: Region, index: number) => void;
+  /** Commits the drag. The store supplies the layout, hence `(drop, panelId)`. */
+  applyDrop: (drop: Drop, panelId: PanelId) => void;
+  /** Overridable so the geometry can be tested without a rendered workbench. */
+  measureLeaves?: () => LeafRect[];
   onState?: (state: PanelDragState | null) => void;
   requestFrame?: (run: FrameRequestCallback) => number;
 }
 
+function boxOf(element: Element): Rect {
+  const rect = element.getBoundingClientRect();
+  return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+}
+
+/**
+ * Read every rendered leaf out of the DOM. The contract is PanelLeaf's:
+ * `[data-leaf-id]` roots, a `[data-tab-bar]` child whose measured height is the
+ * strike zone for a tab drop, and `[data-tab-index]` shells inside it.
+ */
+export function measureRenderedLeaves(): LeafRect[] {
+  if (typeof document === "undefined") return [];
+  return [...document.querySelectorAll<HTMLElement>("[data-leaf-id]")].map((element) => {
+    const bar = element.querySelector<HTMLElement>("[data-tab-bar]");
+    const tabs = bar ? [...bar.querySelectorAll<HTMLElement>("[data-tab-index]")] : [];
+    return {
+      leafId: element.dataset.leafId ?? "",
+      rect: boxOf(element),
+      tabBarHeight: bar ? boxOf(bar).height : 0,
+      tabs: tabs.map((tab) => {
+        const box = boxOf(tab);
+        return { left: box.left, width: box.width };
+      }),
+    };
+  });
+}
+
 export function createPanelDragController(options: ControllerOptions) {
-  const elements = new Map<Region, HTMLElement>();
+  const measureLeaves = options.measureLeaves ?? measureRenderedLeaves;
   const requestFrame = options.requestFrame ?? ((run) => window.requestAnimationFrame(run));
-  let current: (PanelDragState & { startX: number; startY: number; pointerId: number; captureTarget: BeginPanelDrag["captureTarget"] }) | null = null;
+  let current:
+    | (PanelDragState & {
+        startX: number;
+        startY: number;
+        pointerId: number;
+        captureTarget: BeginPanelDrag["captureTarget"];
+      })
+    | null = null;
   let framePending = false;
   let disposed = false;
 
   const emit = () => options.onState?.(current ? { ...current } : null);
 
-  function kindElements(element: HTMLElement, kind: PanelKind, panelId: PanelId): HTMLElement[] {
-    return [...element.querySelectorAll<HTMLElement>(`[data-panel-kind='${kind}']`)]
-      .filter((candidate) => candidate.dataset.panelId !== panelId);
-  }
-
   function measure() {
     if (!current?.dragging || disposed) return;
-    const descriptor = panelDescriptor(current.panelId);
-    if (!descriptor) return;
-    const regions = REGIONS.flatMap((region) => {
-      const element = elements.get(region);
-      if (!element) return [];
-      const box = element.getBoundingClientRect();
-      return [{
-        region,
-        allowed: descriptor.regions.includes(region),
-        rect: { left: box.left, top: box.top, width: box.width, height: box.height },
-        tabs: kindElements(element, descriptor.kind, current!.panelId).map((tab) => {
-          const rect = tab.getBoundingClientRect();
-          return { left: rect.left, width: rect.width };
-        }),
-      }];
-    });
-    current.target = dropTarget(regions, { x: current.x, y: current.y });
-    current.allowedRegions = [...descriptor.regions];
-    current.caret = undefined;
-    if (current.target) {
-      const regionElement = elements.get(current.target.region);
-      if (regionElement) {
-        const items = kindElements(regionElement, descriptor.kind, current.panelId);
-        const regionRect = regionElement.getBoundingClientRect();
-        const before = items[current.target.index]?.getBoundingClientRect();
-        const last = items.at(-1)?.getBoundingClientRect();
-        current.caret = {
-          x: before?.left ?? last?.right ?? regionRect.left + 10,
-          y: before?.top ?? last?.top ?? regionRect.top + 10,
-          height: Math.max(22, before?.height ?? last?.height ?? 28),
-        };
-      }
-    }
+    const leaves = measureLeaves();
+    const drop = resolveDrop(leaves, { x: current.x, y: current.y });
+    const target = drop ? leaves.find((candidate) => candidate.leafId === drop.leafId) : undefined;
+    current.drop = drop;
+    current.preview = drop && target ? dropPreviewRect(target, drop) : null;
     emit();
   }
 
@@ -127,11 +135,11 @@ export function createPanelDragController(options: ControllerOptions) {
     current.x = pointer.clientX;
     current.y = pointer.clientY;
     if (current.dragging) measure();
-    const commit = current.dragging && current.target
-      ? { panelId: current.panelId, ...current.target }
+    const commit = current.dragging && current.drop
+      ? { panelId: current.panelId, drop: current.drop }
       : null;
     cleanup();
-    if (commit) options.movePanel(commit.panelId, commit.region, commit.index);
+    if (commit) options.applyDrop(commit.drop, commit.panelId);
   }
 
   function onPointerCancel() {
@@ -145,10 +153,7 @@ export function createPanelDragController(options: ControllerOptions) {
   }
 
   return {
-    state: () => current ? ({ ...current } as PanelDragState) : null,
-    registerRegion(region: Region, element: HTMLElement) {
-      elements.set(region, element);
-    },
+    state: () => (current ? ({ ...current } as PanelDragState) : null),
     begin(input: BeginPanelDrag) {
       cleanup();
       current = {
@@ -160,8 +165,8 @@ export function createPanelDragController(options: ControllerOptions) {
         startY: input.clientY,
         pointerId: input.pointerId,
         captureTarget: input.captureTarget,
-        target: null,
-        allowedRegions: [],
+        drop: null,
+        preview: null,
       };
       input.captureTarget.setPointerCapture?.(input.pointerId);
       window.addEventListener("pointermove", onPointerMove);
@@ -173,7 +178,6 @@ export function createPanelDragController(options: ControllerOptions) {
     dispose() {
       disposed = true;
       cleanup();
-      elements.clear();
     },
   };
 }

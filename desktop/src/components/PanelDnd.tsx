@@ -1,5 +1,5 @@
 import { Show, createContext, createSignal, onCleanup, useContext, type JSX } from "solid-js";
-import type { PanelId, Region } from "@/lib/layout";
+import type { PanelId } from "@/lib/layout";
 import { panelDescriptor } from "@/lib/panelRegistry";
 import { layoutStore } from "@/store/layout";
 import Icon from "./Icon";
@@ -8,13 +8,11 @@ import { createPanelDragController, type PanelDragState } from "./PanelDndContro
 interface PanelDndContextValue {
   state: () => PanelDragState | null;
   begin: (event: PointerEvent, panelId: PanelId) => void;
-  registerRegion: (region: Region, element: HTMLElement) => void;
 }
 
 const PanelDndContext = createContext<PanelDndContextValue>({
   state: () => null,
   begin: () => {},
-  registerRegion: () => {},
 });
 
 export function usePanelDnd() {
@@ -24,7 +22,7 @@ export function usePanelDnd() {
 export default function PanelDnd(props: { children: JSX.Element }) {
   const [state, setState] = createSignal<PanelDragState | null>(null);
   const controller = createPanelDragController({
-    movePanel: (panelId, region, index) => layoutStore.movePanel(panelId, region, index),
+    applyDrop: (drop, panelId) => layoutStore.applyDrop(drop, panelId),
     onState: setState,
   });
   onCleanup(() => controller.dispose());
@@ -40,9 +38,8 @@ export default function PanelDnd(props: { children: JSX.Element }) {
         captureTarget: event.currentTarget as HTMLElement,
       });
     },
-    registerRegion: controller.registerRegion,
   };
-  const descriptor = () => state() ? panelDescriptor(state()!.panelId) : undefined;
+  const descriptor = () => (state() ? panelDescriptor(state()!.panelId) : undefined);
   return (
     <PanelDndContext.Provider value={value}>
       {props.children}
@@ -54,11 +51,18 @@ export default function PanelDnd(props: { children: JSX.Element }) {
           </div>
         )}
       </Show>
-      <Show when={state()?.dragging && state()?.caret}>
-        <div
-          class="panel-drop-caret"
-          style={{ left: `${state()!.caret!.x}px`, top: `${state()!.caret!.y}px`, height: `${state()!.caret!.height}px` }}
-        />
+      <Show when={state()?.dragging && state()?.preview}>
+        {(preview) => (
+          <div
+            class="panel-drop-preview"
+            style={{
+              left: `${preview().left}px`,
+              top: `${preview().top}px`,
+              width: `${preview().width}px`,
+              height: `${preview().height}px`,
+            }}
+          />
+        )}
       </Show>
     </PanelDndContext.Provider>
   );
