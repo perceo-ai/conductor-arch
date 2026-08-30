@@ -1348,3 +1348,70 @@ handles are not edit-mode chrome — `LayoutNodeView` renders them whenever a
 split has no collapsed child, and `.workbench-split`'s children are
 `[child, resize-handle, child]` identically in both modes. There is nothing
 about handles that changes on entering edit mode.
+
+### Re-verification after the pointer-capture and Add-panel fixes (2026-08-29)
+
+The two bugs above are fixed: `PanelDndController.move` now defers
+`setPointerCapture` until the 4px drag threshold is actually crossed
+(`PanelDndController.ts`), and `LayoutEditBar`'s outside-click dismiss checks
+containment instead of firing unconditionally on the opening `pointerdown`.
+Split resize handles also changed since the note above — `LayoutNodeView` now
+gates `SplitHandle` behind `layoutStore.editing()` as well as
+`!anyCollapsed()`, so outside edit mode there is no handle in the DOM at all.
+
+Regression risk this run was built to close: the unit test for the
+pointer-capture fix stubs `setPointerCapture` as a no-op in jsdom, so it would
+pass even if the bug came back. Re-verified live in the real Electron window,
+same recipe as before (fresh scratch `XDG_DATA_HOME`/`XDG_STATE_HOME` under
+`/tmp`, seeded via the CLI, no real data touched), with the added constraint
+that every check below used only real mouse input — `locator.click()` or
+`mouse.move`/`down`/`up` — never a synthetic `element.click()`. Screenshots in
+`/tmp/wbverify/shots/` (not durable).
+
+All nine checks passed:
+
+1. **Real click switches tabs.** Clicking `Files` in a 4-tab leaf made it the
+   sole active tab.
+2. **Real click on a tab's `Hide <panel>` button removes it.** Hiding `Checks`
+   left the leaf's panel list `[summary, files, changes]`.
+3. **Real click on `Collapse panel` collapses the leaf.** The chat leaf (a row
+   split child) went from `w=731` to the `36px` rail, `collapsed=true`.
+4. **Real clicks open Add panel and re-add a hidden panel.** `Checks` appeared
+   in the Add-panel list after being hidden, and a real click on it put it back
+   in a leaf's panel list (it landed on the last-focused leaf, not necessarily
+   the one it was hidden from — that's `addPanel` targeting the focused leaf,
+   not a bug).
+5. **A real drag past 4px to a leaf's right edge previews and splits.**
+   Mid-drag state was `ghost=1, preview=1, caret=1, body.panel-dragging=true`;
+   releasing over the target produced a new row split with the dragged panel
+   occupying the new leaf.
+6. **Press-and-release with no movement is a plain click.** Ghost/preview/caret
+   counts were 0 before, during, and after; the tab still activated normally.
+7. **Press, move 2px, release stays below the 4px threshold.** Same all-zero
+   drag state throughout; the tab still activated.
+8. **Split resize handles are edit-mode-only and functional.**
+   `.resize-handle-split` count was 0 outside edit mode, 1 inside. Dragging the
+   handle 100px moved a real boundary: one leaf's rect went from
+   `w=571.5` to `w=471.6` (its neighbor gaining the difference).
+9. **Sidebar resizing (a separate, pre-existing mechanism) still works outside
+   edit mode.** The sidebar started pinned to its `aria-valuemax` (420px, this
+   window's cap), so the drag direction was reversed to demonstrate movement:
+   dragging the handle -100px took the sidebar from `420px` to `320px`.
+
+One test-construction wrinkle worth recording, not a product bug: at a 448px
+leaf width a tab's `Hide` close button visually overlaps the right two-thirds
+of its own tab's hit box (the squeezed-label issue already noted above as
+cosmetic). A `locator.click()` aimed at a tab's bounding-box center lands on
+the close button instead and Playwright's actionability check refuses to
+proceed. Real per-check clicks were aimed at the tab's left edge instead,
+which is where a user aiming at the visible label text would land. This is
+the same cosmetic squeeze already on record, just now observed to have a
+functional edge at this width, and it was not fixed as part of this
+verification-only pass.
+
+Not re-verified: keyboard-only operation, any platform but macOS, the GTK
+client, multi-client propagation, and drag-based ratio changes on the row
+split created mid-run by check 5 (only the pre-existing column split's handle
+in check 8 was drag-tested, and it happened to become a row split's handle
+after check 5 restructured the tree — the check adapted to whichever handle
+survived rather than a specific one).
