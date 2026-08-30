@@ -4,12 +4,14 @@ import {
   addPanel,
   applyDrop,
   cloneLayout,
+  dropPreviewRect,
   eachLeaf,
   findLeaf,
   isLayout,
   leaf,
   leafCount,
   removePanel,
+  resolveDrop,
   setCollapsed,
   setRatio,
   split,
@@ -18,6 +20,7 @@ import {
   type Layout,
   type LayoutLeaf,
   type LayoutSplit,
+  type LeafRect,
 } from "./layout";
 
 describe("layout tree", () => {
@@ -219,5 +222,61 @@ describe("tree transforms", () => {
     expect(destination.panels).toContain("todos");
     expect(destination.collapsed).toBe(false);
     expect(destination.active).toBe(destination.panels.indexOf("todos"));
+  });
+});
+
+function rect(id: string, over: Partial<LeafRect> = {}): LeafRect {
+  return {
+    leafId: id,
+    rect: { left: 0, top: 0, width: 400, height: 400 },
+    tabBarHeight: 30,
+    tabs: [],
+    ...over,
+  };
+}
+
+describe("resolveDrop", () => {
+  it("returns null when the pointer is outside every leaf", () => {
+    expect(resolveDrop([rect("a")], { x: 900, y: 900 })).toBeNull();
+  });
+
+  it("insert-as-tab when the pointer is over the tab bar", () => {
+    const leafRect = rect("a", { tabs: [{ left: 0, width: 100 }, { left: 100, width: 100 }] });
+    expect(resolveDrop([leafRect], { x: 40, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 0 });
+    expect(resolveDrop([leafRect], { x: 160, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 1 });
+    expect(resolveDrop([leafRect], { x: 380, y: 10 })).toEqual({ kind: "tab", leafId: "a", index: 2 });
+  });
+
+  it("appends as a tab in the centre zone", () => {
+    expect(resolveDrop([rect("a")], { x: 200, y: 200 })).toEqual({ kind: "tab", leafId: "a", index: 0 });
+  });
+
+  it("splits on the nearest edge by fraction, not pixels", () => {
+    // 800x200: 20px from the left is 2.5% across; 20px from the top is 10% down.
+    // Left is nearer as a fraction, so a left split wins.
+    const wide = rect("a", { rect: { left: 0, top: 0, width: 800, height: 200 } });
+    expect(resolveDrop([wide], { x: 20, y: 50 })).toEqual({ kind: "split", leafId: "a", edge: "left" });
+    expect(resolveDrop([wide], { x: 400, y: 45 })).toEqual({ kind: "split", leafId: "a", edge: "top" });
+    expect(resolveDrop([wide], { x: 780, y: 100 })).toEqual({ kind: "split", leafId: "a", edge: "right" });
+    expect(resolveDrop([wide], { x: 400, y: 195 })).toEqual({ kind: "split", leafId: "a", edge: "bottom" });
+  });
+
+  it("offers no split on an axis too small to divide", () => {
+    const narrow = rect("a", { rect: { left: 0, top: 0, width: 90, height: 400 } });
+    // Far left, but the leaf is only 90px wide: fall back to a tab.
+    expect(resolveDrop([narrow], { x: 4, y: 200 })).toEqual({ kind: "tab", leafId: "a", index: 0 });
+    // The vertical axis is still wide enough to split.
+    expect(resolveDrop([narrow], { x: 45, y: 390 })).toEqual({ kind: "split", leafId: "a", edge: "bottom" });
+  });
+
+  it("previews the rectangle the panel will occupy", () => {
+    const leafRect = rect("a");
+    expect(dropPreviewRect(leafRect, { kind: "split", leafId: "a", edge: "right" }))
+      .toEqual({ left: 200, top: 0, width: 200, height: 400 });
+    expect(dropPreviewRect(leafRect, { kind: "split", leafId: "a", edge: "top" }))
+      .toEqual({ left: 0, top: 0, width: 400, height: 200 });
+    // A tab drop fills the leaf's content area, below the tab bar.
+    expect(dropPreviewRect(leafRect, { kind: "tab", leafId: "a", index: 0 }))
+      .toEqual({ left: 0, top: 30, width: 400, height: 370 });
   });
 });

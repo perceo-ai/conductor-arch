@@ -314,3 +314,85 @@ export function applyDrop(layout: Layout, drop: Drop, panelId: PanelId): Layout 
   });
   return { version: 2, root };
 }
+
+export interface Rect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface LeafRect {
+  leafId: NodeId;
+  rect: Rect;
+  tabBarHeight: number;
+  tabs: Array<{ left: number; width: number }>;
+}
+
+/** Below this, an axis has no room for two usable panes. */
+const MIN_SPLIT_AXIS_PX = 120;
+/** The centre zone is the middle half of each axis. */
+const CENTRE_FRACTION = 0.25;
+
+function containsPointer(rect: Rect, pointer: { x: number; y: number }): boolean {
+  return (
+    pointer.x >= rect.left &&
+    pointer.x <= rect.left + rect.width &&
+    pointer.y >= rect.top &&
+    pointer.y <= rect.top + rect.height
+  );
+}
+
+/** The tab whose box holds x, or the end of the strip when x is past every tab. */
+function tabIndexAt(tabs: Array<{ left: number; width: number }>, x: number): number {
+  const index = tabs.findIndex((tab) => x >= tab.left && x <= tab.left + tab.width);
+  return index === -1 ? tabs.length : index;
+}
+
+/**
+ * Turn a pointer position into a drop intent against a set of measured leaf
+ * rectangles. Pure geometry: the caller measures the DOM, this only decides.
+ *
+ * The centre zone is the middle 50% of each axis; outside it, the nearer
+ * edge is chosen by fraction of that axis (x/width vs y/height), not raw
+ * pixels, so a wide short leaf isn't all-left-and-right. Ties go horizontal.
+ * An axis under 120px offers no split on that axis.
+ */
+export function resolveDrop(leaves: LeafRect[], pointer: { x: number; y: number }): Drop | null {
+  const hit = leaves.find((candidate) => containsPointer(candidate.rect, pointer));
+  if (!hit) return null;
+
+  if (pointer.y <= hit.rect.top + hit.tabBarHeight) {
+    return { kind: "tab", leafId: hit.leafId, index: tabIndexAt(hit.tabs, pointer.x) };
+  }
+
+  const fx = (pointer.x - hit.rect.left) / hit.rect.width;
+  const fy = (pointer.y - hit.rect.top) / hit.rect.height;
+
+  const canSplitX = hit.rect.width >= MIN_SPLIT_AXIS_PX;
+  const canSplitY = hit.rect.height >= MIN_SPLIT_AXIS_PX;
+  const append: Drop = { kind: "tab", leafId: hit.leafId, index: hit.tabs.length };
+
+  const nearX = Math.min(fx, 1 - fx);
+  const nearY = Math.min(fy, 1 - fy);
+  const outsideX = canSplitX && nearX < CENTRE_FRACTION;
+  const outsideY = canSplitY && nearY < CENTRE_FRACTION;
+  if (!outsideX && !outsideY) return append;
+
+  // Ties go to the horizontal edge.
+  const useX = outsideX && (!outsideY || nearX <= nearY);
+  if (useX) return { kind: "split", leafId: hit.leafId, edge: fx < 0.5 ? "left" : "right" };
+  return { kind: "split", leafId: hit.leafId, edge: fy < 0.5 ? "top" : "bottom" };
+}
+
+/** The rectangle a panel would occupy if dropped at `drop` on `target`. */
+export function dropPreviewRect(target: LeafRect, drop: Drop): Rect {
+  const { left, top, width, height } = target.rect;
+  if (drop.kind === "tab") {
+    return { left, top: top + target.tabBarHeight, width, height: height - target.tabBarHeight };
+  }
+  if (drop.edge === "left") return { left, top, width: width / 2, height };
+  if (drop.edge === "right") return { left: left + width / 2, top, width: width / 2, height };
+  if (drop.edge === "top") return { left, top, width, height: height / 2 };
+  return { left, top: top + height / 2, width, height: height / 2 };
+}
