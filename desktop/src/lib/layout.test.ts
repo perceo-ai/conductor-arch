@@ -4,6 +4,7 @@ import {
   addPanel,
   applyDrop,
   cloneLayout,
+  codeFallback,
   dropPreviewRect,
   eachLeaf,
   findLeaf,
@@ -12,6 +13,7 @@ import {
   leafCount,
   removePanel,
   resolveDrop,
+  sanitizeLayout,
   setCollapsed,
   setRatio,
   split,
@@ -320,5 +322,63 @@ describe("resolveDrop", () => {
     // A tab drop fills the leaf's content area, below the tab bar.
     expect(dropPreviewRect(leafRect, { kind: "tab", leafId: "a", index: 0 }))
       .toEqual({ left: 0, top: 30, width: 400, height: 370 });
+  });
+});
+
+describe("sanitizeLayout v2", () => {
+  it("returns the Code fallback for a v1 layout", () => {
+    const v1 = { version: 1, regions: { left: {}, center: {}, bottom: {}, right: {} } };
+    expect(sanitizeLayout(v1)).toEqual(sanitizeLayout(null));
+    expect(sanitizeLayout(v1).version).toBe(2);
+    expect(visiblePanelIds(sanitizeLayout(v1))).toContain("chat");
+  });
+
+  it("drops unknown panel ids", () => {
+    const layout = { version: 2, root: leaf(["chat", "not-a-panel"]) };
+    expect(visiblePanelIds(sanitizeLayout(layout))).toEqual(["chat"]);
+  });
+
+  it("keeps only the first occurrence of a duplicated panel", () => {
+    const layout: Layout = { version: 2, root: split("row", leaf(["chat"]), leaf(["chat", "files"])) };
+    expect(visiblePanelIds(sanitizeLayout(layout))).toEqual(["chat", "files"]);
+  });
+
+  it("prunes leaves emptied by sanitising and collapses their splits", () => {
+    const layout: Layout = { version: 2, root: split("row", leaf(["ghost"]), leaf(["chat"])) };
+    const next = sanitizeLayout(layout);
+    expect(next.root.type).toBe("leaf");
+    expect(visiblePanelIds(next)).toEqual(["chat"]);
+  });
+
+  it("falls back when sanitising empties the whole tree", () => {
+    expect(visiblePanelIds(sanitizeLayout({ version: 2, root: leaf(["ghost"]) }))).toContain("chat");
+  });
+
+  it("clamps ratios and active indices", () => {
+    const layout: Layout = { version: 2, root: split("row", leaf(["chat"], { active: 9 }), leaf(["files"]), 5) };
+    const next = sanitizeLayout(layout);
+    const root = next.root as LayoutSplit;
+    expect(root.ratio).toBeLessThan(1);
+    expect(root.ratio).toBeGreaterThan(0);
+    expect((root.children[0] as LayoutLeaf).active).toBe(0);
+  });
+
+  it("leaves at least one leaf uncollapsed", () => {
+    const layout: Layout = { version: 2, root: leaf(["chat"], { collapsed: true }) };
+    expect((sanitizeLayout(layout).root as LayoutLeaf).collapsed).toBe(false);
+  });
+
+  it("returns a fresh clone each time, not the shared fallback constant", () => {
+    const first = codeFallback();
+    const second = codeFallback();
+    expect(first).toEqual(second);
+
+    (first.root as LayoutSplit).ratio = 0.99;
+    (first.root as LayoutSplit).children[0] = leaf(["mutated"]);
+
+    expect((second.root as LayoutSplit).ratio).toBe(0.62);
+    expect(visiblePanelIds(second)).not.toContain("mutated");
+    // A third call must also be unaffected by the mutation above.
+    expect(codeFallback()).toEqual(second);
   });
 });

@@ -1,3 +1,5 @@
+import { panelDescriptor } from "./panelRegistry";
+
 export type PanelId = string;
 
 export type NodeId = string;
@@ -405,4 +407,98 @@ export function dropPreviewRect(target: LeafRect, drop: Drop): Rect {
   if (drop.edge === "right") return { left: left + width / 2, top, width: width / 2, height };
   if (drop.edge === "top") return { left, top, width, height: height / 2 };
   return { left, top: top + height / 2, width, height: height / 2 };
+}
+
+function logUnknownPanel(id: PanelId): void {
+  console.warn(`[archductor:layout] dropping unknown panel id "${id}" while sanitising a layout`);
+}
+
+/**
+ * The default layout shown when there is nothing usable to restore. This is
+ * the sole source of the "Code" tree — `layoutPresets.ts` imports it rather
+ * than restating the same literal, so the two can never drift apart.
+ *
+ * Built once at module scope so every `codeFallback()` call yields a
+ * structurally identical tree, ids included: two independent fallback paths
+ * (e.g. a v1 layout and a null layout) must be indistinguishable, which a
+ * fresh `nextNodeId()`-minted tree per call could never satisfy. `leaf`/
+ * `split` are only ever called here to build this constant, not per call.
+ */
+const CODE_FALLBACK: Layout = {
+  version: 2,
+  root: split(
+    "row",
+    leaf(["chat"]),
+    split(
+      "column",
+      leaf(["pr"], { display: "compact" }),
+      leaf(["summary", "files", "changes", "checks"], { active: 2 }),
+      0.12,
+    ),
+    0.62,
+  ),
+};
+
+/** A fresh clone each call — never hand back the shared constant by reference. */
+export function codeFallback(): Layout {
+  return cloneLayout(CODE_FALLBACK);
+}
+
+/**
+ * Validate and repair an untrusted value into a v2 layout. Anything that
+ * isn't a well-formed version-2 tree — including a version-1 layout, since
+ * there is no migration path — falls back to `codeFallback()` outright.
+ *
+ * Repairs applied to an otherwise-valid tree:
+ * - Unknown panel ids are dropped; a panel's first occurrence wins over any
+ *   later duplicate.
+ * - A leaf emptied by the above is removed, and a split left with a single
+ *   surviving child collapses into that child.
+ * - Ratios are clamped into (0, 1); a leaf's `active` is clamped into range.
+ * - If every leaf is emptied, or if sanitising leaves no leaf uncollapsed,
+ *   the whole tree falls back rather than rendering nothing.
+ */
+export function sanitizeLayout(value: unknown): Layout {
+  if (!isLayout(value)) return codeFallback();
+  const seen = new Set<PanelId>();
+
+  const visit = (node: LayoutNode): LayoutNode | undefined => {
+    if (node.type === "leaf") {
+      const panels = node.panels.filter((id) => {
+        if (!panelDescriptor(id)) {
+          logUnknownPanel(id);
+          return false;
+        }
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      if (panels.length === 0) return undefined;
+      return { ...node, panels, active: Math.max(0, Math.min(node.active, panels.length - 1)) };
+    }
+    const first = visit(node.children[0]);
+    const second = visit(node.children[1]);
+    const ratio = Math.max(MIN_RATIO, Math.min(1 - MIN_RATIO, node.ratio));
+    if (first && second) return { ...node, children: [first, second], ratio };
+    return first ?? second;
+  };
+
+  const root = visit(cloneLayout(value).root);
+  if (!root) return codeFallback();
+
+  // There must always be somewhere to render.
+  let open = 0;
+  eachLeaf(root, (node) => {
+    if (!node.collapsed) open += 1;
+  });
+  if (open === 0) {
+    let first = true;
+    eachLeaf(root, (node) => {
+      if (first) {
+        node.collapsed = false;
+        first = false;
+      }
+    });
+  }
+  return { version: 2, root };
 }
