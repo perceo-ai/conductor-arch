@@ -415,8 +415,11 @@ function logUnknownPanel(id: PanelId): void {
 
 /**
  * The default layout shown when there is nothing usable to restore. This is
- * the sole source of the "Code" tree — `layoutPresets.ts` imports it rather
- * than restating the same literal, so the two can never drift apart.
+ * meant to be the sole source of the "Code" tree: `layoutPresets.ts` is
+ * required to build its `code` preset from this rather than restating the
+ * same literal, so the two cannot drift apart. (As of this task,
+ * `layoutPresets.ts` still defines its own v1-shaped copy; wiring it to
+ * import `codeFallback()` is Task 5's job.)
  *
  * Built once at module scope so every `codeFallback()` call yields a
  * structurally identical tree, ids included: two independent fallback paths
@@ -455,8 +458,10 @@ export function codeFallback(): Layout {
  * - A leaf emptied by the above is removed, and a split left with a single
  *   surviving child collapses into that child.
  * - Ratios are clamped into (0, 1); a leaf's `active` is clamped into range.
- * - If every leaf is emptied, or if sanitising leaves no leaf uncollapsed,
- *   the whole tree falls back rather than rendering nothing.
+ * - If sanitising empties every leaf, the whole tree falls back rather than
+ *   rendering nothing. If leaves survive but sanitising left none of them
+ *   uncollapsed, the tree is kept and repaired in place: the first leaf is
+ *   forced open rather than falling back.
  */
 export function sanitizeLayout(value: unknown): Layout {
   if (!isLayout(value)) return codeFallback();
