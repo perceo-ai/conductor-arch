@@ -1,0 +1,170 @@
+// @vitest-environment jsdom
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { render } from "solid-js/web";
+
+import { leaf, type LayoutLeaf } from "@/lib/layout";
+import { registerPanel, unregisterPanel } from "@/lib/panelRegistry";
+import { layoutStore } from "@/store/layout";
+import PanelDnd from "./PanelDnd";
+import PanelLeaf from "./PanelLeaf";
+
+/**
+ * Render-level coverage for the thing this task actually shipped: what the
+ * user sees while dragging. `panelDnd.test.ts` and `PanelDnd.test.tsx` only
+ * exercise `createPanelDragController` in isolation — nothing in the suite
+ * previously mounted `PanelDnd` itself, so the caret-only-over-the-bar rule
+ * (`PanelDragState.caret`, read verbatim by `PanelDnd.tsx`) was guarded by
+ * code reading alone. This file drives a real drag against a real rendered
+ * leaf and asserts on the DOM the drag layer produces.
+ */
+
+const FIRST_ID = "panel-dnd-render-first";
+const SECOND_ID = "panel-dnd-render-second";
+let dispose: (() => void) | undefined;
+
+const originalCapture = {
+  set: Element.prototype.setPointerCapture,
+  release: Element.prototype.releasePointerCapture,
+};
+
+beforeAll(() => {
+  // jsdom does not implement Pointer Capture; without a stub `begin()`'s
+  // `setPointerCapture` call throws "not implemented" and aborts the drag
+  // before any state is ever set.
+  Element.prototype.setPointerCapture = function () {};
+  Element.prototype.releasePointerCapture = function () {};
+});
+
+afterAll(() => {
+  Element.prototype.setPointerCapture = originalCapture.set;
+  Element.prototype.releasePointerCapture = originalCapture.release;
+});
+
+beforeEach(() => {
+  registerPanel({
+    id: FIRST_ID,
+    title: "First",
+    icon: "file-text",
+    kind: "tab",
+    component: () => <div>First panel body</div>,
+    requiresWorkspace: true,
+  });
+  registerPanel({
+    id: SECOND_ID,
+    title: "Second",
+    icon: "file-text",
+    kind: "tab",
+    component: () => <div>Second panel body</div>,
+    requiresWorkspace: true,
+  });
+});
+
+afterEach(() => {
+  dispose?.();
+  dispose = undefined;
+  document.body.innerHTML = "";
+  unregisterPanel(FIRST_ID);
+  unregisterPanel(SECOND_ID);
+  layoutStore.resetToCode();
+});
+
+/**
+ * A two-tab leaf pinned to a known box: `rect` 400x400 at the origin, a 30px
+ * tab bar, and two 100px-wide tabs — everything `measureRenderedLeaves()`
+ * (and so `resolveDrop`/`dropCaretRect`) reads. jsdom lays nothing out, so
+ * every measured element's `getBoundingClientRect` is overridden directly,
+ * the same technique `LayoutNodeView.test.tsx` and `panelDnd.test.ts` use.
+ */
+function mount() {
+  const node: LayoutLeaf = leaf([FIRST_ID, SECOND_ID], { id: "panel-dnd-render-leaf" });
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(
+    () => (
+      <PanelDnd>
+        <PanelLeaf leaf={node} workspace="demo" />
+      </PanelDnd>
+    ),
+    host,
+  );
+
+  const leafEl = host.querySelector<HTMLElement>("[data-leaf-id]")!;
+  const bar = leafEl.querySelector<HTMLElement>("[data-tab-bar]")!;
+  const tabs = [...bar.querySelectorAll<HTMLElement>("[data-tab-index]")];
+  leafEl.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+  bar.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 30 }) as DOMRect;
+  tabs[0]!.getBoundingClientRect = () => ({ left: 0, top: 0, width: 100, height: 30 }) as DOMRect;
+  tabs[1]!.getBoundingClientRect = () => ({ left: 100, top: 0, width: 100, height: 30 }) as DOMRect;
+
+  const button = tabs[0]!.querySelector("button")!;
+  return button;
+}
+
+function pointerEvent(type: string, x: number, y: number) {
+  return new MouseEvent(type, { clientX: x, clientY: y, button: 0, bubbles: true });
+}
+
+/** `scheduleMeasure` defers through the real `requestAnimationFrame`. */
+function nextFrame() {
+  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+function preview() {
+  return document.querySelector(".panel-drop-preview");
+}
+function caret() {
+  return document.querySelector(".panel-drop-caret");
+}
+function ghost() {
+  return document.querySelector(".panel-drag-ghost");
+}
+
+describe("PanelDnd rendered feedback", () => {
+  it("shows the filled preview AND the caret for a tab-bar drop", async () => {
+    const button = mount();
+    button.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+    // Past the 4px threshold; y=10 is inside the 30px tab bar.
+    window.dispatchEvent(pointerEvent("pointermove", 250, 10));
+    await nextFrame();
+
+    expect(ghost()).toBeTruthy();
+    expect(preview()).toBeTruthy();
+    expect(caret()).toBeTruthy();
+
+    window.dispatchEvent(pointerEvent("pointerup", 250, 10));
+    expect(preview()).toBeNull();
+    expect(caret()).toBeNull();
+    expect(ghost()).toBeNull();
+  });
+
+  it("shows only the preview for an edge/split drop, never the caret", async () => {
+    const button = mount();
+    button.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+    // Past the 4px threshold; (20, 200) is the leftmost 25% of the content
+    // area below the bar — resolveDrop's split zone, not its tab zone.
+    window.dispatchEvent(pointerEvent("pointermove", 20, 200));
+    await nextFrame();
+
+    expect(preview()).toBeTruthy();
+    expect(caret()).toBeNull();
+
+    window.dispatchEvent(pointerEvent("pointerup", 20, 200));
+    expect(preview()).toBeNull();
+  });
+
+  it("shows neither when no drop resolves, and nothing lingers after the drag ends", async () => {
+    const button = mount();
+    button.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+    // Past the 4px threshold; far outside the only leaf on screen.
+    window.dispatchEvent(pointerEvent("pointermove", 9000, 9000));
+    await nextFrame();
+
+    expect(preview()).toBeNull();
+    expect(caret()).toBeNull();
+
+    window.dispatchEvent(pointerEvent("pointerup", 9000, 9000));
+    expect(preview()).toBeNull();
+    expect(caret()).toBeNull();
+    expect(ghost()).toBeNull();
+  });
+});

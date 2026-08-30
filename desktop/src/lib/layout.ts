@@ -357,6 +357,18 @@ function containsPointer(rect: Rect, pointer: { x: number; y: number }): boolean
 }
 
 /**
+ * `resolveDrop`'s own boundary between "the pointer is over a leaf's tab bar"
+ * and "the pointer is over its content below the bar". This is the single
+ * implementation of that comparison in the codebase — `dropCaretRect` below
+ * calls it rather than re-deriving it, specifically so a UI layer deciding
+ * whether to show a tab-bar insertion indicator can never drift from the
+ * rule that actually produced the `kind: "tab"` drop it is decorating.
+ */
+function overTabBar(rect: Rect, tabBarHeight: number, pointerY: number): boolean {
+  return pointerY <= rect.top + tabBarHeight;
+}
+
+/**
  * The splice index a drop at x would insert at: the first tab whose
  * midpoint sits to the right of the pointer, or the end of the strip when
  * the pointer is past every tab's midpoint. This is an insertion index
@@ -383,7 +395,7 @@ export function resolveDrop(leaves: LeafRect[], pointer: { x: number; y: number 
   const hit = leaves.find((candidate) => containsPointer(candidate.rect, pointer));
   if (!hit) return null;
 
-  if (pointer.y <= hit.rect.top + hit.tabBarHeight) {
+  if (overTabBar(hit.rect, hit.tabBarHeight, pointer.y)) {
     return { kind: "tab", leafId: hit.leafId, index: tabIndexAt(hit.tabs, pointer.x) };
   }
 
@@ -418,6 +430,22 @@ export function dropPreviewRect(target: LeafRect, drop: Drop): Rect {
   if (drop.edge === "right") return { left: left + width / 2, top, width: width / 2, height };
   if (drop.edge === "top") return { left, top, width, height: height / 2 };
   return { left, top: top + height / 2, width, height: height / 2 };
+}
+
+/**
+ * The tab-bar insertion indicator for `drop`, or `null` when there is none to
+ * show: a split drop, or a "tab" drop that resolved by hovering the
+ * content's centre and appending at the end (`dropPreviewRect`'s full-content
+ * rect already conveys that case; there is no slot to point at). Reuses
+ * `resolveDrop`'s own tab/split boundary (`overTabBar`) instead of asking the
+ * caller to re-derive it from `pointer.y` and a preview rect.
+ */
+export function dropCaretRect(target: LeafRect, drop: Drop, pointer: { y: number }): Rect | null {
+  if (drop.kind !== "tab" || !overTabBar(target.rect, target.tabBarHeight, pointer.y)) return null;
+  const left = drop.index < target.tabs.length
+    ? target.tabs[drop.index]!.left
+    : target.rect.left + target.rect.width;
+  return { left, top: target.rect.top, width: 2, height: target.tabBarHeight };
 }
 
 function logUnknownPanel(id: PanelId): void {

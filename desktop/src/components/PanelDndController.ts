@@ -1,4 +1,5 @@
 import {
+  dropCaretRect,
   dropPreviewRect,
   resolveDrop,
   type Drop,
@@ -16,6 +17,14 @@ export interface PanelDragState {
   y: number;
   drop: Drop | null;
   preview: Rect | null;
+  /**
+   * The tab-bar insertion indicator for `drop`, or `null` when the drop is a
+   * split or a content-centre tab append. Computed here (where the leaf rect
+   * `resolveDrop` hit is already in hand) via `dropCaretRect`, so consumers
+   * — `PanelDnd.tsx` included — read the answer instead of re-deriving
+   * `resolveDrop`'s tab/split boundary from `y` and `preview.top` themselves.
+   */
+  caret: Rect | null;
 }
 
 export interface BeginPanelDrag {
@@ -88,6 +97,7 @@ export function createPanelDragController(options: ControllerOptions) {
     const target = drop ? leaves.find((candidate) => candidate.leafId === drop.leafId) : undefined;
     current.drop = drop;
     current.preview = drop && target ? dropPreviewRect(target, drop) : null;
+    current.caret = drop && target ? dropCaretRect(target, drop, { y: current.y }) : null;
     emit();
   }
 
@@ -190,6 +200,7 @@ export function createPanelDragController(options: ControllerOptions) {
         captureTarget: input.captureTarget,
         drop: null,
         preview: null,
+        caret: null,
       };
       input.captureTarget.setPointerCapture?.(input.pointerId);
       window.addEventListener("pointermove", onPointerMove);
