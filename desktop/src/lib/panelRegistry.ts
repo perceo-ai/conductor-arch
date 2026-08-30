@@ -1,10 +1,12 @@
 import { lazy, type Component } from "solid-js";
 import type { IconName } from "@/components/Icon";
-import type { PanelId, PanelKind, Region } from "./layout";
+import type { PanelId } from "./layout";
+
+/** How a panel presents its chrome. Task 7 uses this to seed a leaf's display. */
+export type PanelKind = "tab" | "strip" | "dock";
 
 export interface PanelProps {
   workspace: string;
-  region: Region;
 }
 
 export interface PanelDescriptor {
@@ -13,8 +15,6 @@ export interface PanelDescriptor {
   icon: IconName;
   kind: PanelKind;
   component: Component<PanelProps>;
-  regions: Region[];
-  defaultRegion: Region;
   minWidth?: number;
   minHeight?: number;
   requiresWorkspace: boolean;
@@ -42,8 +42,6 @@ export function workspacePanels(): PanelDescriptor[] {
   return registeredPanels().filter((panel) => panel.requiresWorkspace);
 }
 
-const allRegions: Region[] = ["left", "center", "bottom", "right"];
-
 const ChatSurface = lazy(() => import("@/pages/ChatSurface")) as Component<PanelProps>;
 const WorkspacePrBar = lazy(() => import("@/pages/WorkspacePrBar")) as Component<PanelProps>;
 const WorkspaceFiles = lazy(() => import("@/pages/WorkspaceFiles")) as Component<PanelProps>;
@@ -58,18 +56,18 @@ const TimelinePanel = lazy(async () => ({ default: (await import("@/pages/Worksp
 const ChecksPanel = lazy(async () => ({ default: (await import("@/pages/WorkspaceTabs")).ChecksPanel })) as Component<PanelProps>;
 
 const builtins: PanelDescriptor[] = [
-  { id: "chat", title: "Chat", icon: "send", kind: "tab", component: ChatSurface, regions: allRegions, defaultRegion: "center", requiresWorkspace: true },
-  { id: "pr", title: "Pull request", icon: "git-pull-request", kind: "strip", component: WorkspacePrBar, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "summary", title: "Summary", icon: "file-text", kind: "tab", component: SummaryPanel, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "files", title: "Files", icon: "folder", kind: "tab", component: WorkspaceFiles, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "changes", title: "Changes", icon: "git-compare", kind: "tab", component: WorkspaceChanges, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "checks", title: "Checks", icon: "circle-check", kind: "tab", component: ChecksPanel, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "terminal", title: "Terminal", icon: "terminal", kind: "dock", component: TerminalDock, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "todos", title: "Todos", icon: "circle-check", kind: "tab", component: TodosPanel, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "checkpoints", title: "Checkpoints", icon: "history", kind: "tab", component: CheckpointsPanel, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "processes", title: "Processes", icon: "monitor", kind: "tab", component: ProcessesPanel, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "timeline", title: "Timeline", icon: "history", kind: "tab", component: TimelinePanel, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
-  { id: "context", title: "Context", icon: "paperclip", kind: "tab", component: ContextPanel, regions: allRegions, defaultRegion: "right", requiresWorkspace: true },
+  { id: "chat", title: "Chat", icon: "send", kind: "tab", component: ChatSurface, requiresWorkspace: true },
+  { id: "pr", title: "Pull request", icon: "git-pull-request", kind: "strip", component: WorkspacePrBar, requiresWorkspace: true },
+  { id: "summary", title: "Summary", icon: "file-text", kind: "tab", component: SummaryPanel, requiresWorkspace: true },
+  { id: "files", title: "Files", icon: "folder", kind: "tab", component: WorkspaceFiles, requiresWorkspace: true },
+  { id: "changes", title: "Changes", icon: "git-compare", kind: "tab", component: WorkspaceChanges, requiresWorkspace: true },
+  { id: "checks", title: "Checks", icon: "circle-check", kind: "tab", component: ChecksPanel, requiresWorkspace: true },
+  { id: "terminal", title: "Terminal", icon: "terminal", kind: "dock", component: TerminalDock, requiresWorkspace: true },
+  { id: "todos", title: "Todos", icon: "circle-check", kind: "tab", component: TodosPanel, requiresWorkspace: true },
+  { id: "checkpoints", title: "Checkpoints", icon: "history", kind: "tab", component: CheckpointsPanel, requiresWorkspace: true },
+  { id: "processes", title: "Processes", icon: "monitor", kind: "tab", component: ProcessesPanel, requiresWorkspace: true },
+  { id: "timeline", title: "Timeline", icon: "history", kind: "tab", component: TimelinePanel, requiresWorkspace: true },
+  { id: "context", title: "Context", icon: "paperclip", kind: "tab", component: ContextPanel, requiresWorkspace: true },
 ];
 
 builtins.forEach(registerPanel);

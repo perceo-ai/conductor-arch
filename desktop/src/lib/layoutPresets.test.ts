@@ -1,31 +1,22 @@
 import { describe, expect, it } from "vitest";
+import { sanitizeLayout, visiblePanelIds } from "./layout";
 import { BUILTIN_PRESETS, builtinPreset, forkBuiltinPreset, mergePresets, presetAfterEdit, type LayoutPreset } from "./layoutPresets";
 
 describe("layout presets", () => {
-  it("ships Code as exact current shell layout", () => {
-    expect(builtinPreset("code")).toMatchObject({
-      id: "code",
-      name: "Code",
-      builtin: true,
-      layout: {
-        regions: {
-          center: { panels: ["chat"] },
-          right: { strips: ["pr"], panels: ["summary", "files", "changes", "checks"], docks: ["terminal"], active: 2 },
-          left: { panels: [], strips: [], docks: [] },
-          bottom: { panels: [], strips: [], docks: [] },
-        },
-      },
-      hidden: ["todos", "checkpoints", "processes", "timeline", "context"],
-    });
+  it("ships Code as the same tree as the default fallback layout", () => {
+    const code = builtinPreset("code")!;
+    expect(code.id).toBe("code");
+    expect(code.name).toBe("Code");
+    expect(code.builtin).toBe(true);
+    expect(code.layout.version).toBe(2);
+    expect(visiblePanelIds(code.layout)).toEqual(["chat", "pr", "summary", "files", "changes", "checks"]);
   });
 
   it("ships the approved Wide, Review, and Watch arrangements", () => {
     expect(BUILTIN_PRESETS.map((preset) => preset.id)).toEqual(["code", "wide", "review", "watch"]);
-    expect(builtinPreset("wide")?.layout.regions.left.panels).toEqual(["files"]);
-    expect(builtinPreset("wide")?.layout.regions.bottom.docks).toEqual(["terminal"]);
-    expect(builtinPreset("review")?.layout.regions.center.panels).toEqual(["changes"]);
-    expect(builtinPreset("watch")?.layout.regions.center.docks).toEqual(["terminal"]);
-    expect(builtinPreset("watch")?.layout.regions.bottom.panels).toEqual(["chat"]);
+    expect(visiblePanelIds(builtinPreset("wide")!.layout)).toEqual(["chat", "summary", "files", "changes", "checks"]);
+    expect(visiblePanelIds(builtinPreset("review")!.layout)).toEqual(["changes", "files", "pr", "chat", "checks"]);
+    expect(visiblePanelIds(builtinPreset("watch")!.layout)).toEqual(["chat", "checks", "processes", "terminal"]);
   });
 
   it("merges built-ins before users, filters reserved ids case-insensitively, and sorts users by name", () => {
@@ -36,23 +27,40 @@ describe("layout presets", () => {
   });
 
   it("freezes built-in sources and gives callers independent built-in clones", () => {
-    expect(Object.isFrozen(BUILTIN_PRESETS[0].layout.regions.center.panels)).toBe(true);
+    expect(Object.isFrozen(BUILTIN_PRESETS[0].layout.root)).toBe(true);
     const first = builtinPreset("code")!;
-    first.layout.regions.center.panels.push("files");
-    expect(builtinPreset("code")!.layout.regions.center.panels).toEqual(["chat"]);
+    if (first.layout.root.type === "split") first.layout.root.ratio = 0.99;
+    expect((builtinPreset("code")!.layout.root as { ratio?: number }).ratio).not.toBe(0.99);
   });
 
   it("forks built-ins into independently editable custom presets", () => {
     const fork = forkBuiltinPreset("code");
     expect(fork).toMatchObject({ name: "Code (edited)", builtin: false });
     expect(fork.id).toMatch(/^custom-/);
-    fork.layout.regions.right.panels.pop();
-    expect(builtinPreset("code")?.layout.regions.right.panels).toHaveLength(4);
+    if (fork.layout.root.type === "split") fork.layout.root.ratio = 0.99;
+    expect((builtinPreset("code")!.layout.root as { ratio?: number }).ratio).not.toBe(0.99);
   });
 
   it("edits a built-in by forking and leaves a custom preset in place", () => {
     expect(presetAfterEdit(BUILTIN_PRESETS[0]).id).toMatch(/^custom-/);
     const custom = forkBuiltinPreset("wide");
     expect(presetAfterEdit(custom)).toBe(custom);
+  });
+});
+
+describe("built-in presets", () => {
+  it("are all valid v2 trees that survive sanitising unchanged", () => {
+    for (const preset of BUILTIN_PRESETS) {
+      expect(preset.layout.version).toBe(2);
+      expect(sanitizeLayout(structuredClone(preset.layout))).toEqual(preset.layout);
+    }
+  });
+
+  it("every preset shows chat and hides nothing it also shows", () => {
+    for (const preset of BUILTIN_PRESETS) {
+      const visible = visiblePanelIds(preset.layout);
+      expect(visible).toContain("chat");
+      for (const hidden of preset.hidden) expect(visible).not.toContain(hidden);
+    }
   });
 });

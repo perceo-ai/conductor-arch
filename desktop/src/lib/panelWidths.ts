@@ -14,7 +14,6 @@ export const RIGHT_MIN = 260;
 export const RIGHT_MAX = 440;
 export const BOTTOM_MIN = 160;
 export const BOTTOM_MAX = 560;
-export const REGION_DEFAULT_SIZES: Record<Region, number> = { left: 260, center: 0, right: 300, bottom: 280 };
 /** Chat stops being usable narrower than this, so no drag may go past it. */
 export const CENTER_MIN = 360;
 
@@ -36,17 +35,37 @@ export function panelDragMax(opts: {
   return Math.max(opts.panelMin, Math.min(opts.hardMax, available));
 }
 
-export function clampRegionSize(region: Region, size: number): number {
-  if (region === "left") return Math.max(LEFT_MIN, Math.min(LEFT_MAX, size));
-  if (region === "right") return Math.max(RIGHT_MIN, Math.min(RIGHT_MAX, size));
-  if (region === "bottom") return Math.max(BOTTOM_MIN, Math.min(BOTTOM_MAX, size));
-  return 0;
-}
-
 /** Width of a laid-out element, or 0 when it is collapsed or absent. */
 export function measuredWidth(selector: string): number {
   if (typeof document === "undefined") return 0;
   const el = document.querySelector(selector);
   return el instanceof HTMLElement ? el.offsetWidth : 0;
 }
-import type { Region } from "./layout";
+
+/** Per-panel minimum widths. Panels absent here take DEFAULT_PANEL_MIN. */
+const DEFAULT_PANEL_MIN = 220;
+export const PANEL_MIN_PX: Record<string, number> = {
+  chat: CENTER_MIN,
+  terminal: BOTTOM_MIN,
+};
+
+export function panelMinPx(panelId: string): number {
+  return PANEL_MIN_PX[panelId] ?? DEFAULT_PANEL_MIN;
+}
+
+/**
+ * Clamp a split ratio so neither child falls below its minimum. When the space
+ * cannot satisfy both, share it evenly rather than starving one child.
+ */
+export function clampSplitRatio(
+  availablePx: number,
+  ratio: number,
+  firstMinPx: number,
+  secondMinPx: number,
+): number {
+  if (availablePx <= 0) return 0.5;
+  if (firstMinPx + secondMinPx >= availablePx) return 0.5;
+  const min = firstMinPx / availablePx;
+  const max = 1 - secondMinPx / availablePx;
+  return Math.max(min, Math.min(max, ratio));
+}

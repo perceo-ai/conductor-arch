@@ -1,17 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  BOTTOM_MAX,
-  BOTTOM_MIN,
   CENTER_MIN,
-  LEFT_MAX,
-  LEFT_MIN,
-  REGION_DEFAULT_SIZES,
   RIGHT_MAX,
   RIGHT_MIN,
   SIDEBAR_MAX,
   SIDEBAR_MIN,
-  clampRegionSize,
+  clampSplitRatio,
   panelDragMax,
+  panelMinPx,
 } from "./panelWidths";
 
 describe("panelDragMax", () => {
@@ -55,15 +51,20 @@ describe("panelDragMax", () => {
   });
 });
 
-describe("region sizes", () => {
-  it("defines defaults and clamps each resizable workbench region", () => {
-    expect(REGION_DEFAULT_SIZES).toEqual({ left: 260, center: 0, right: 300, bottom: 280 });
-    expect(clampRegionSize("left", 0)).toBe(LEFT_MIN);
-    expect(clampRegionSize("left", 999)).toBe(LEFT_MAX);
-    expect(clampRegionSize("right", 0)).toBe(RIGHT_MIN);
-    expect(clampRegionSize("right", 999)).toBe(RIGHT_MAX);
-    expect(clampRegionSize("bottom", 0)).toBe(BOTTOM_MIN);
-    expect(clampRegionSize("bottom", 999)).toBe(BOTTOM_MAX);
-    expect(clampRegionSize("center", 123)).toBe(0);
+describe("split sizing", () => {
+  it("keeps both children above their minimums", () => {
+    // 1000px wide, both sides need 260px: ratio is free between .26 and .74.
+    expect(clampSplitRatio(1000, 0.5, 260, 260)).toBeCloseTo(0.5);
+    expect(clampSplitRatio(1000, 0.05, 260, 260)).toBeCloseTo(0.26);
+    expect(clampSplitRatio(1000, 0.99, 260, 260)).toBeCloseTo(0.74);
+  });
+
+  it("splits the difference when the space cannot satisfy both", () => {
+    expect(clampSplitRatio(300, 0.9, 260, 260)).toBeCloseTo(0.5);
+  });
+
+  it("reports a per-panel minimum with a default", () => {
+    expect(panelMinPx("chat")).toBeGreaterThan(0);
+    expect(panelMinPx("unknown-panel")).toBeGreaterThan(0);
   });
 });

@@ -10,8 +10,6 @@ describe("panel registry", () => {
       icon: "terminal",
       kind: "tab",
       component: () => null,
-      regions: ["left"],
-      defaultRegion: "left",
       requiresWorkspace: false,
     };
     registerPanel(descriptor);

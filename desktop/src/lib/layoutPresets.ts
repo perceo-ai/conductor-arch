@@ -1,5 +1,5 @@
-import { REGION_DEFAULT_SIZES } from "./panelWidths";
-import type { Layout, PanelId, Region, Stack } from "./layout";
+import { codeFallback, leaf, split, visiblePanelIds, type Layout, type PanelId } from "./layout";
+import { workspacePanels } from "./panelRegistry";
 
 export interface LayoutPreset {
   id: string;
@@ -9,21 +9,30 @@ export interface LayoutPreset {
   hidden: PanelId[];
 }
 
-const emptyStack = (region: Region): Stack => ({
-  panels: [],
-  strips: [],
-  docks: [],
-  active: 0,
-  size: REGION_DEFAULT_SIZES[region],
-  collapsed: false,
+const wideLayout = (): Layout => ({
+  version: 2,
+  root: split("row", leaf(["chat"]), leaf(["summary", "files", "changes", "checks"], { active: 1 }), 0.72),
 });
 
-function presetLayout(regions: Partial<Record<Region, Partial<Stack>>>): Layout {
-  const stack = (region: Region): Stack => ({ ...emptyStack(region), ...regions[region], panels: [...(regions[region]?.panels ?? [])], strips: [...(regions[region]?.strips ?? [])], docks: [...(regions[region]?.docks ?? [])] });
-  return { version: 1, regions: { left: stack("left"), center: stack("center"), bottom: stack("bottom"), right: stack("right") } };
-}
+const reviewLayout = (): Layout => ({
+  version: 2,
+  root: split(
+    "row",
+    leaf(["changes", "files"]),
+    split("column", leaf(["pr"], { display: "compact" }), leaf(["chat", "checks"]), 0.12),
+    0.55,
+  ),
+});
 
-const deadPanels = ["todos", "checkpoints", "processes", "timeline", "context"];
+const watchLayout = (): Layout => ({
+  version: 2,
+  root: split(
+    "column",
+    split("row", leaf(["chat"]), leaf(["checks", "processes"]), 0.6),
+    leaf(["terminal"], { display: "compact" }),
+    0.7,
+  ),
+});
 
 function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
@@ -32,52 +41,25 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+/** Every registered workspace panel not visible in `layout`'s tree. */
+function hiddenPanels(layout: Layout): PanelId[] {
+  const visible = new Set(visiblePanelIds(layout));
+  return workspacePanels()
+    .map((panel) => panel.id)
+    .filter((id) => !visible.has(id));
+}
+
+function builtinPresetOf(id: string, name: string, layout: Layout): LayoutPreset {
+  return { id, name, builtin: true, layout, hidden: hiddenPanels(layout) };
+}
+
 const builtinSources = deepFreeze<LayoutPreset[]>([
-  {
-    id: "code",
-    name: "Code",
-    builtin: true,
-    layout: presetLayout({
-      center: { panels: ["chat"] },
-      right: { strips: ["pr"], panels: ["summary", "files", "changes", "checks"], docks: ["terminal"], active: 2 },
-    }),
-    hidden: deadPanels,
-  },
-  {
-    id: "wide",
-    name: "Wide",
-    builtin: true,
-    layout: presetLayout({
-      left: { panels: ["files"] },
-      center: { panels: ["chat"] },
-      bottom: { docks: ["terminal"] },
-      right: { strips: ["pr"], panels: ["summary", "changes", "checks"] },
-    }),
-    hidden: deadPanels,
-  },
-  {
-    id: "review",
-    name: "Review",
-    builtin: true,
-    layout: presetLayout({
-      left: { panels: ["files"] },
-      center: { panels: ["changes"] },
-      bottom: { docks: ["terminal"] },
-      right: { strips: ["pr"], panels: ["checks", "summary", "chat"] },
-    }),
-    hidden: deadPanels,
-  },
-  {
-    id: "watch",
-    name: "Watch",
-    builtin: true,
-    layout: presetLayout({
-      center: { docks: ["terminal"] },
-      bottom: { panels: ["chat"] },
-      right: { panels: ["summary", "checks"] },
-    }),
-    hidden: ["pr", "files", "changes", ...deadPanels],
-  },
+  // The Code tree is owned by layout.ts's CODE_FALLBACK so the default
+  // layout and the "Code" preset can never drift apart.
+  builtinPresetOf("code", "Code", codeFallback()),
+  builtinPresetOf("wide", "Wide", wideLayout()),
+  builtinPresetOf("review", "Review", reviewLayout()),
+  builtinPresetOf("watch", "Watch", watchLayout()),
 ]);
 
 /** Immutable built-in sources. Use builtinPreset for an editable copy. */
