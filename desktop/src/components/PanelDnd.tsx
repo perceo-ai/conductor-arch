@@ -1,9 +1,9 @@
-import { Show, createContext, createSignal, onCleanup, useContext, type JSX } from "solid-js";
-import type { PanelId } from "@/lib/layout";
+import { Show, createContext, createMemo, createSignal, onCleanup, useContext, type JSX } from "solid-js";
+import type { PanelId, Rect } from "@/lib/layout";
 import { panelDescriptor } from "@/lib/panelRegistry";
 import { layoutStore } from "@/store/layout";
 import Icon from "./Icon";
-import { createPanelDragController, type PanelDragState } from "./PanelDndController";
+import { createPanelDragController, measureRenderedLeaves, type PanelDragState } from "./PanelDndController";
 
 interface PanelDndContextValue {
   state: () => PanelDragState | null;
@@ -40,6 +40,31 @@ export default function PanelDnd(props: { children: JSX.Element }) {
     },
   };
   const descriptor = () => (state() ? panelDescriptor(state()!.panelId) : undefined);
+
+  /**
+   * The filled preview always shows the whole rectangle a "tab" drop would
+   * occupy (dropPreviewRect doesn't distinguish "over the bar" from "over
+   * the content, append at the end" — both yield the same content rect). The
+   * caret adds the one thing the preview can't: *which* slot among the tabs
+   * the panel would land in. Only worth drawing while the pointer is
+   * actually over the bar — `y <= preview.top` is exactly resolveDrop's own
+   * boundary between "tab" and "split", re-derived here rather than plumbed
+   * through PanelDragState.
+   */
+  const caret = createMemo<Rect | null>(() => {
+    const current = state();
+    const drop = current?.drop;
+    const preview = current?.preview;
+    if (!current?.dragging || !drop || !preview || drop.kind !== "tab") return null;
+    if (current.y > preview.top) return null;
+    const target = measureRenderedLeaves().find((leaf) => leaf.leafId === drop.leafId);
+    if (!target) return null;
+    const left = drop.index < target.tabs.length
+      ? target.tabs[drop.index]!.left
+      : target.rect.left + target.rect.width;
+    return { left, top: target.rect.top, width: 2, height: target.tabBarHeight };
+  });
+
   return (
     <PanelDndContext.Provider value={value}>
       {props.children}
@@ -60,6 +85,19 @@ export default function PanelDnd(props: { children: JSX.Element }) {
               top: `${preview().top}px`,
               width: `${preview().width}px`,
               height: `${preview().height}px`,
+            }}
+          />
+        )}
+      </Show>
+      <Show when={caret()}>
+        {(rect) => (
+          <div
+            class="panel-drop-caret"
+            style={{
+              left: `${rect().left}px`,
+              top: `${rect().top}px`,
+              width: `${rect().width}px`,
+              height: `${rect().height}px`,
             }}
           />
         )}

@@ -112,13 +112,20 @@ export function createPanelDragController(options: ControllerOptions) {
     emit();
   }
 
-  function onPointerMove(event: Event) {
+  /**
+   * Update the tracked pointer position and, below the 4px threshold, do
+   * nothing else — a drag has not started yet. Once past it, latch
+   * `dragging` and schedule a measure/resolve pass. Exposed as `move()` so
+   * tests can drive the state machine without synthesizing DOM events; the
+   * window `pointermove` listener below is just this same call wired to the
+   * real pointer.
+   */
+  function move(input: { clientX: number; clientY: number }) {
     if (!current) return;
-    const pointer = event as PointerEvent;
-    current.x = pointer.clientX;
-    current.y = pointer.clientY;
+    current.x = input.clientX;
+    current.y = input.clientY;
     if (!current.dragging) {
-      const distance = Math.hypot(pointer.clientX - current.startX, pointer.clientY - current.startY);
+      const distance = Math.hypot(input.clientX - current.startX, input.clientY - current.startY);
       if (distance < THRESHOLD) {
         emit();
         return;
@@ -129,11 +136,9 @@ export function createPanelDragController(options: ControllerOptions) {
     scheduleMeasure();
   }
 
-  function onPointerUp(event: Event) {
+  /** Commit the resolved drop (if any) and clear state. Mirrors `pointerup`. */
+  function end() {
     if (!current) return;
-    const pointer = event as PointerEvent;
-    current.x = pointer.clientX;
-    current.y = pointer.clientY;
     if (current.dragging) measure();
     const commit = current.dragging && current.drop
       ? { panelId: current.panelId, drop: current.drop }
@@ -142,14 +147,32 @@ export function createPanelDragController(options: ControllerOptions) {
     if (commit) options.applyDrop(commit.drop, commit.panelId);
   }
 
-  function onPointerCancel() {
+  /** Abandon the drag without applying anything. Mirrors Escape/`pointercancel`. */
+  function cancel() {
     cleanup();
+  }
+
+  function onPointerMove(event: Event) {
+    const pointer = event as PointerEvent;
+    move({ clientX: pointer.clientX, clientY: pointer.clientY });
+  }
+
+  function onPointerUp(event: Event) {
+    if (!current) return;
+    const pointer = event as PointerEvent;
+    current.x = pointer.clientX;
+    current.y = pointer.clientY;
+    end();
+  }
+
+  function onPointerCancel() {
+    cancel();
   }
 
   function onKeyDown(event: KeyboardEvent) {
     if (event.key !== "Escape" || !current) return;
     event.preventDefault();
-    cleanup();
+    cancel();
   }
 
   return {
@@ -175,6 +198,9 @@ export function createPanelDragController(options: ControllerOptions) {
       window.addEventListener("keydown", onKeyDown);
       emit();
     },
+    move,
+    end,
+    cancel,
     dispose() {
       disposed = true;
       cleanup();

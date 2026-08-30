@@ -105,7 +105,6 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
       classList={{
         "workbench-leaf-collapsed": props.leaf.collapsed,
         "workbench-leaf-compact": !showTabs(),
-        "workbench-drop-hover": dnd.state()?.drop?.leafId === props.leaf.id,
       }}
       data-leaf-id={props.leaf.id}
       tabIndex={-1}

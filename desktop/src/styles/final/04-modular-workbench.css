@@ -170,6 +170,11 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   display: flex;
 }
 
+/* The filled rectangle a panel will actually occupy on drop — this replaces
+   the old thin outline-on-the-whole-leaf feedback, which told you "somewhere
+   in here" but never "here, this shape". `.panel-drop-caret` (below,
+   alongside the rest of the drag layer) adds the one thing this can't show:
+   which slot among a tab bar's tabs a "tab" drop would land in. */
 .panel-drop-preview {
   position: fixed;
   z-index: 101;
@@ -483,15 +488,6 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   transition: box-shadow 90ms ease, background-color 90ms ease;
 }
 
-.workbench-drop-allowed {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--lc-accent, #c39b50) 55%, transparent);
-}
-
-.workbench-drop-hover {
-  background: color-mix(in srgb, var(--lc-accent, #c39b50) 7%, var(--lc-bg, #0f0f0f));
-  box-shadow: inset 0 0 0 2px var(--lc-accent, #c39b50);
-}
-
 .panel-drag-ghost {
   position: fixed;
   top: 0;
@@ -525,43 +521,15 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   white-space: nowrap;
 }
 
-.workbench-strip,
-.workbench-dock {
-  position: relative;
-}
-
-.workbench-panel-grip {
-  flex: 0 0 26px;
-  width: 26px;
-  min-width: 26px;
-  height: 26px;
-  min-height: 26px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--lc-text-muted, #858585);
-  cursor: grab;
-  opacity: 0;
-}
-
-.workbench-strip:hover > .workbench-panel-grip,
-.workbench-strip:focus-within > .workbench-panel-grip,
-.workbench-dock:hover > .workbench-panel-grip,
-.workbench-dock:focus-within > .workbench-panel-grip {
-  opacity: 1;
-}
-
-.workbench-panel-grip .ui-icon {
-  width: 12px;
-  height: 12px;
-}
-
-.workbench-dock-grip {
-  position: absolute;
-  top: 4px;
-  right: 38px;
-  z-index: 12;
+/* The exact tab slot a "tab" drop would insert at, shown only while the
+   pointer is over the bar itself — `.panel-drop-preview` already covers the
+   content-append case, where there is no slot to point at. */
+.panel-drop-caret {
+  position: fixed;
+  z-index: 102;
+  border-radius: 1px;
+  background: var(--lc-accent, #c39b50);
+  pointer-events: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
