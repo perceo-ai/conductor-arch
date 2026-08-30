@@ -158,6 +158,42 @@ describe("layoutStore", () => {
     layoutStore.setEditing(false);
   });
 
+  it("re-baselines the revert snapshot when a preset is switched mid-session", async () => {
+    // The shipped bug: `editSnapshot` was taken on entering edit mode and
+    // cleared only on exit, while the topbar's preset switcher stayed live
+    // throughout. Enter on Code, switch to Wide, edit once (Wide forks), hit
+    // Revert — and Code's tree was restored into the Wide fork, and persisted.
+    const { builtinPreset } = await import("@/lib/layoutPresets");
+    const { layoutStore } = await import("./layout");
+    expect(layoutStore.activePreset().id).toBe("code");
+
+    layoutStore.setEditing(true);
+    layoutStore.applyLayout(builtinPreset("wide")!);
+    const wideJSON = JSON.stringify(layoutStore.layout());
+    expect(layoutStore.activePreset().id).toBe("wide");
+
+    layoutStore.removePanel("summary");
+    expect(JSON.stringify(layoutStore.layout())).not.toBe(wideJSON);
+    expect(layoutStore.activePreset().builtin).toBe(false);
+
+    expect(layoutStore.revertEdits()).toBe(true);
+
+    // Wide's tree, not Code's: chat beside one four-tab inspector leaf.
+    expect(JSON.stringify(layoutStore.layout())).toBe(wideJSON);
+    expect(leaves(layoutStore.layout())).toHaveLength(2);
+    layoutStore.setEditing(false);
+  });
+
+  it("takes no snapshot outside edit mode even when the layout is replaced", async () => {
+    // `applyLayout` re-baselines rather than captures: a preset switch with no
+    // edit session open must not arm a revert that was never requested.
+    const { builtinPreset } = await import("@/lib/layoutPresets");
+    const { layoutStore } = await import("./layout");
+
+    layoutStore.applyLayout(builtinPreset("review")!);
+    expect(layoutStore.revertEdits()).toBe(false);
+  });
+
   it("takes no snapshot, and so has nothing to revert, outside an edit session", async () => {
     const { layoutStore } = await import("./layout");
     expect(layoutStore.editing()).toBe(false);

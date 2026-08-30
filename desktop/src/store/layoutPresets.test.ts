@@ -111,6 +111,42 @@ describe("layoutPresetsStore", () => {
     expect(layoutPresetsStore.activeId()).toBe("code");
   });
 
+  it("warns when a stored layout was silently replaced, not just when its JSON is unparseable", async () => {
+    // The exact case the spec says will happen — a version-1 record, for which
+    // there is no migration path — parses fine, so the old `try/catch` around
+    // `JSON.parse` never fired: the record came back as Code with no toast,
+    // and the first subsequent edit persisted the Code tree over it.
+    responses([record("legacy", "Legacy", { version: 1, regions: { left: {}, center: {} } })]);
+    const { toastsStore } = await import("./toasts");
+    const error = vi.spyOn(toastsStore, "error");
+    const { layoutPresetsStore } = await import("./layoutPresets");
+
+    await layoutPresetsStore.load("demo");
+
+    expect(error).toHaveBeenCalledOnce();
+    expect(String(error.mock.calls[0][0])).toContain("restored with Code");
+    expect(layoutPresetsStore.presets().find((preset) => preset.id === "legacy")?.layout)
+      .toEqual((await import("@/lib/layoutPresets")).builtinPreset("code")!.layout);
+  });
+
+  it("does not warn for a stored layout that only needed repairing", async () => {
+    // A tree that survives sanitising — a clamped ratio, a dropped duplicate —
+    // is still the user's layout, so the "we replaced it" toast must not fire.
+    const layout = await codeLayout();
+    (layout.root as { ratio: number }).ratio = 42;
+    responses([record("repairable", "Repairable", layout)]);
+    const { toastsStore } = await import("./toasts");
+    const error = vi.spyOn(toastsStore, "error");
+    const { layoutPresetsStore } = await import("./layoutPresets");
+
+    await layoutPresetsStore.load("demo");
+
+    expect(error).not.toHaveBeenCalled();
+    const stored = layoutPresetsStore.presets().find((preset) => preset.id === "repairable")!;
+    expect((stored.layout.root as { ratio: number }).ratio).toBeLessThan(1);
+    expect(leafHolding(stored.layout, "chat").panels).toEqual(["chat"]);
+  });
+
   it("forks a built-in once and debounces exactly one remote save for 250ms", async () => {
     vi.useFakeTimers();
     responses([]);

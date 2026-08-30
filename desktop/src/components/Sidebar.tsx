@@ -4,7 +4,7 @@ import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
-import { SIDEBAR_MAX, SIDEBAR_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
+import { SIDEBAR_MAX, SIDEBAR_MIN, panelDragMax } from "@/lib/panelWidths";
 import Icon from "./Icon";
 import { workspaceRowActivity } from "@/lib/workspaceStatus";
 import {
@@ -442,10 +442,17 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           edge="right"
           width={width}
           min={SIDEBAR_MIN}
+          // There is no second fixed-width column left to measure: the region
+          // model's right panel is gone and everything to the right of the
+          // sidebar is one workbench that divides itself by ratio, each split
+          // clamped in pixels against its children's minimums. So the only
+          // reservation this drag owes is the workbench's own floor, which is
+          // `panelDragMax`'s `centerMin` default. (It used to measure
+          // `.ws-right-panel`, a selector nothing has emitted since the region
+          // model was deleted — it always returned 0.)
           max={() =>
             panelDragMax({
               viewportWidth: window.innerWidth,
-              otherPanelWidth: measuredWidth(".ws-right-panel"),
               hardMax: SIDEBAR_MAX,
               panelMin: SIDEBAR_MIN,
             })

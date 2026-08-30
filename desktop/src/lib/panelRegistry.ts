@@ -19,8 +19,9 @@ export interface PanelDescriptor {
   icon: IconName;
   kind: PanelKind;
   component: Component<PanelProps>;
-  minWidth?: number;
-  minHeight?: number;
+  // No per-panel minimums here: `panelWidths.ts`'s PANEL_MIN_PX /
+  // PANEL_MIN_HEIGHT_PX tables are the single place a panel's minimum is
+  // expressed, and the only place `LayoutNodeView` reads one from.
   requiresWorkspace: boolean;
 }
 

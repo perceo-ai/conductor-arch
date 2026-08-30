@@ -221,6 +221,60 @@ describe("PanelDnd rendered feedback", () => {
     expect(ghost()).toBeNull();
   });
 
+  it("drags the tab that was pressed, not the leaf's active panel", async () => {
+    // The bar is one drag surface, so it used to pass `activeId()` for every
+    // press on it: grabbing any tab moved the leaf's *active* panel instead,
+    // so dragging an inactive tab silently rearranged a different one.
+    const bar = mount();
+    const tabs = [...bar.querySelectorAll<HTMLElement>("[data-tab-index]")];
+    expect(tabs[1]!.dataset.panelId).toBe(SECOND_ID);
+
+    // The active panel is the first; press the second tab.
+    tabs[1]!.dispatchEvent(pointerEvent("pointerdown", 150, 10));
+    window.dispatchEvent(pointerEvent("pointermove", 300, 200));
+    await nextFrame();
+
+    expect(ghost()?.textContent).toContain("Second");
+    expect(ghost()?.textContent).not.toContain("First");
+    window.dispatchEvent(pointerEvent("pointerup", 300, 200));
+
+    // A press on the bar's own empty area names no tab, and still falls back
+    // to the active panel — that is what makes the whole bar a drag handle for
+    // a single-panel leaf.
+    bar.dispatchEvent(pointerEvent("pointerdown", 380, 10));
+    window.dispatchEvent(pointerEvent("pointermove", 300, 200));
+    await nextFrame();
+
+    expect(ghost()?.textContent).toContain("First");
+    window.dispatchEvent(pointerEvent("pointerup", 300, 200));
+  });
+
+  it("never starts a drag from the bar's action buttons, even well past the threshold", async () => {
+    // Hide, Collapse and Review only `stopPropagation` on *click*, so with the
+    // whole tablist armed on pointerdown a press-jitter-release on any of them
+    // committed a panel move instead of the button's own action. 5px of jitter
+    // is past the 4px threshold — the existing pointer-capture test only
+    // exercises 1px, which never reaches this code path at all.
+    const bar = mount();
+    const controls: Array<[string, HTMLElement]> = [
+      ["collapse", bar.querySelector<HTMLElement>(".workbench-leaf-collapse-btn")!],
+      ["hide", bar.querySelector<HTMLElement>(".workbench-tab-close")!],
+    ];
+
+    for (const [label, control] of controls) {
+      expect(control, label).toBeTruthy();
+      control.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+      window.dispatchEvent(pointerEvent("pointermove", 16, 12));
+      await nextFrame();
+
+      expect(ghost(), label).toBeNull();
+      expect(preview(), label).toBeNull();
+      expect(document.body.classList.contains("panel-dragging"), label).toBe(false);
+
+      window.dispatchEvent(pointerEvent("pointerup", 16, 12));
+    }
+  });
+
   it("never starts a drag outside edit mode, but a plain tab click still activates it", async () => {
     const bar = mountActivatable({ editing: false });
     const tabs = [...bar.querySelectorAll<HTMLElement>("[data-tab-index]")];

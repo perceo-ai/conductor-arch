@@ -137,6 +137,13 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   white-space: nowrap;
 }
 
+/* A collapsed rail is COLLAPSED_RAIL_PX (36px) wide. A 20px Hide button beside
+   the tab leaves nothing of the tab to click, and there is nothing to hide
+   from in a pane that is already shut — expand the leaf first. */
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tab-close {
+  display: none;
+}
+
 .workbench-leaf > .workbench-panel-body {
   flex: 1 1 auto;
   display: flex;
@@ -206,8 +213,17 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 
 /* Outside edit mode the close button only appears on hover/focus (see the
    opacity rules at the tab strip below); in edit mode it — and the collapse
-   button above — are the only way to reach these actions, so they stay put. */
+   button above — are the only way to reach these actions, so they stay put.
+
+   `position: static` is the load-bearing half. The base rule parks the button
+   absolutely over the right 20px of its own tab and keeps it out of the hit
+   test with `pointer-events: none`; making it permanently clickable without
+   also taking it out of that overlay turned the right 21px of every tab in
+   edit mode into Hide, so clicking a tab usually deleted its panel. Laid out
+   statically it takes its own slot in the shell's flex row beside the tab,
+   and a click on a tab's visible label selects that tab. */
 .workbench-editing .workbench-tab-close {
+  position: static;
   opacity: 1;
   pointer-events: auto;
 }
@@ -226,53 +242,6 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   pointer-events: none;
 }
 
-.ws-workbench-region-shell {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.ws-workbench-region-shell-center {
-  flex: 1 1 0;
-  min-width: 360px;
-}
-
-.ws-workbench-region-shell-left,
-.ws-workbench-region-shell-right {
-  flex: 0 0 auto;
-}
-
-.ws-workbench-region-shell-bottom {
-  width: 100%;
-  max-height: 60vh;
-  border-top: 1px solid var(--ui-border, #262626);
-}
-
-.workbench-region {
-  flex: 1 1 auto;
-  display: flex;
-  flex-direction: column;
-  contain: layout paint;
-  overflow: hidden;
-}
-
-.workbench-region.ws-right-panel {
-  display: flex;
-  flex: 1 1 auto;
-  width: auto;
-  min-width: 0;
-  max-width: none;
-}
-
-.workbench-region-left {
-  border-right: 1px solid var(--ui-border, #262626);
-}
-
-.workbench-region-bottom {
-  height: 100%;
-}
-
 .workbench-panel-body {
   flex: 1 1 auto;
   display: flex;
@@ -280,35 +249,7 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   overflow: auto;
 }
 
-.workbench-dock {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.workbench-region-center > .workbench-panel-body {
-  overflow: hidden;
-}
-
-.workbench-region-left .ws-right-topbar,
-.workbench-region-bottom .ws-right-topbar,
-.workbench-region-center .ws-right-topbar {
-  min-height: 40px;
-}
-
-.workbench-region-left .ws-run-section,
-.workbench-region-center .ws-run-section,
-.workbench-region-bottom .ws-run-section,
-.ws-run-section-left,
-.ws-run-section-center,
-.ws-run-section-bottom {
-  flex: 1 1 auto;
-  height: 100%;
-}
-
 .workbench-tab:focus-visible,
-.workbench-region:focus-visible,
 .resize-handle:focus-visible {
   outline: 2px solid var(--lc-accent, #c39b50);
   outline-offset: -2px;
@@ -609,7 +550,11 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   background: var(--ui-border, #262626);
 }
 
-.workbench-tab {
+/* Dragging is deliberately impossible outside edit mode — PanelLeaf attaches
+   no pointerdown handler at all there — so the grab cursor is scoped to the
+   mode that can act on it rather than advertising on every tab in the mode
+   users spend all their time in. */
+.workbench-editing .workbench-tab {
   cursor: grab;
 }
 
@@ -617,10 +562,6 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 .panel-dragging * {
   cursor: grabbing !important;
   user-select: none !important;
-}
-
-.workbench-region {
-  transition: box-shadow 90ms ease, background-color 90ms ease;
 }
 
 .panel-drag-ghost {
@@ -668,8 +609,7 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .panel-drag-ghost,
-  .workbench-region {
+  .panel-drag-ghost {
     transition: none !important;
   }
 }

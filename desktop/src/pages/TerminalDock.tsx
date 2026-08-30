@@ -5,8 +5,6 @@ import TerminalPanel from "./TerminalPanel";
 import type { ArchcarRunScript } from "@/bridge/protocol";
 import { runScriptAvailabilityLabel, runScriptStatusText, scriptConsoleActions } from "@/lib/runScripts";
 import { ansiToHtml } from "@/lib/ansi";
-import ResizeHandle from "@/components/ResizeHandle";
-import { createPersistedWidth } from "@/lib/persistedWidth";
 import Icon from "@/components/Icon";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 
@@ -17,8 +15,6 @@ import { configuredShortcut } from "@/lib/configuredShortcut";
 // so an unopened workspace never starts a process.
 
 const MAX_TERMINALS = 6;
-const DOCK_MIN = 120;
-const DOCK_MAX = 700;
 const DOCK_EXPANDED_KEY = "archductor.terminalDock.expanded";
 
 // Active tab is either a prompt tab or a specific terminal id.
@@ -254,8 +250,6 @@ export default function TerminalDock(props: { workspace: string }) {
     });
   };
   const [tab, setTab] = createSignal<RunTab>("setup");
-  // Right-panel density is high, so the dock split is draggable and persisted.
-  const [height, setHeight] = createPersistedWidth("terminalDock.height", 280, DOCK_MIN, DOCK_MAX);
   const isExpanded = () => expanded();
   const terms = () => terminalStore.terminals(props.workspace);
   const activeTermId = () => {
@@ -301,11 +295,12 @@ export default function TerminalDock(props: { workspace: string }) {
       classList={{
         "ws-run-section-expanded": isExpanded(),
       }}
-      style={isExpanded() ? { height: `${height()}px`, "flex-basis": `${height()}px` } : undefined}
     >
-      <Show when={isExpanded()}>
-        <ResizeHandle edge="top" width={height} min={DOCK_MIN} max={DOCK_MAX} onChange={setHeight} />
-      </Show>
+      {/* No resize handle here. The dock now lives inside a leaf of the split
+          tree, where `.workbench-leaf .ws-run-section { flex: 1 1 auto }` makes
+          flex-grow win over any height this set inline: the handle moved
+          nothing. Its own leaf's split handle — in edit mode — is the divider
+          that actually resizes the terminal. */}
       <div class="ws-run-tab-bar">
         <Show
           when={isExpanded()}

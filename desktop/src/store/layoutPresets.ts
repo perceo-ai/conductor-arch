@@ -1,7 +1,7 @@
 import { createSignal } from "solid-js";
 import { send } from "@/bridge/client";
 import type { ArchcarResponse, LayoutPresetRecord } from "@/bridge/protocol";
-import { sanitizeLayout, type Layout } from "@/lib/layout";
+import { sanitizeLayout, sanitizeLayoutResult, type Layout } from "@/lib/layout";
 import {
   BUILTIN_PRESETS,
   builtinPreset,
@@ -56,7 +56,15 @@ function fromRecord(record: LayoutPresetRecord): { preset: LayoutPreset; invalid
   let layout: Layout;
   let hidden: string[];
   try {
-    layout = sanitizeLayout(JSON.parse(record.layout_json));
+    // `sanitizeLayout` never throws — it substitutes the Code tree — so the
+    // catch below only covers a `JSON.parse` failure. The case the spec
+    // actually predicts (a v1 record, or a v2 record too broken to repair)
+    // came back looking like a clean load: no toast, and the first subsequent
+    // edit persisted the Code tree over the stored record. `replaced` is the
+    // sanitiser reporting that substitution.
+    const result = sanitizeLayoutResult(JSON.parse(record.layout_json));
+    layout = result.layout;
+    invalid = result.replaced;
   } catch {
     invalid = true;
     layout = builtinPreset("code")!.layout;

@@ -19,20 +19,6 @@ import PanelLeaf from "./PanelLeaf";
 import { SplitHandle } from "./ResizeHandle";
 
 /**
- * The largest minimum any panel under `node` demands *along the split's axis*.
- * A row divides width, a column divides height, and the two have separate
- * tables — see `panelWidths.ts`.
- */
-function minPxOf(node: LayoutNode, direction: SplitDirection): number {
-  const minOf = direction === "row" ? panelMinPx : panelMinHeightPx;
-  let min = 0;
-  eachLeaf(node, (candidate) => {
-    for (const panel of candidate.panels) min = Math.max(min, minOf(panel));
-  });
-  return min;
-}
-
-/**
  * A subtree that is entirely collapsed takes header height only, and its
  * sibling takes the rest — the stored ratio is ignored until it reopens.
  */
@@ -42,6 +28,42 @@ function allCollapsed(node: LayoutNode): boolean {
     if (!candidate.collapsed) open = true;
   });
   return !open;
+}
+
+/**
+ * How many pixels `node` needs *along the split's axis*. A row divides width,
+ * a column divides height, and the two have separate tables — see
+ * `panelWidths.ts`.
+ *
+ * This recurses rather than taking a flat max over the subtree's leaves,
+ * because the two combine differently:
+ * - A leaf's panels share one box, so the leaf needs the LARGEST of them.
+ * - A split ACROSS the axis (a column inside a row) also stacks its children
+ *   in the other direction, so it too needs the largest of the two.
+ * - A split ALONG the axis (a row inside a row) lays its children side by side
+ *   in the very dimension being divided, so it needs their SUM.
+ *
+ * The flat max got the third case wrong, and the third case is the happy path:
+ * `row(a, row(b, c))` is the spec's canonical three-column layout. With two
+ * 220px columns nested on the right, a flat max claimed the right-hand subtree
+ * needed 220px, so in 920px available the outer ratio could reach 0.76 and
+ * leave 220px for two columns — 110px each, with no clamp having "failed".
+ *
+ * A fully-collapsed subtree needs only its rail or header: that is exactly the
+ * extent `childStyle` pins it to, and counting the panels inside a collapsed
+ * pane would reserve space the layout never gives them.
+ */
+function minPxOf(node: LayoutNode, direction: SplitDirection): number {
+  if (allCollapsed(node)) {
+    return direction === "row" ? COLLAPSED_RAIL_PX : COLLAPSED_HEADER_PX;
+  }
+  if (node.type === "leaf") {
+    const minOf = direction === "row" ? panelMinPx : panelMinHeightPx;
+    return node.panels.reduce((min, panel) => Math.max(min, minOf(panel)), 0);
+  }
+  const first = minPxOf(node.children[0], direction);
+  const second = minPxOf(node.children[1], direction);
+  return node.direction === direction ? first + second : Math.max(first, second);
 }
 
 const EMPTY_RECT: Rect = { left: 0, top: 0, width: 0, height: 0 };

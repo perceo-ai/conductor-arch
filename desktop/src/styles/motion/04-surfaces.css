@@ -292,7 +292,6 @@ select {
     transform: translateY(-1px);
 }
 
-.ws-right-panel,
 .chat-timeline-scroll {
     scroll-behavior: smooth;
 }

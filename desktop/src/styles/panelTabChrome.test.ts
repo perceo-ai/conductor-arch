@@ -4,21 +4,28 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * Guards for two bugs the panel tab strip already shipped.
+ * Guards for bugs the panel tab strip has already shipped.
  *
- * The strip lives in the left region, which drags down to 220px and holds four
- * panels at once. Every tab reserved a permanent 24px lane on its right for a
- * close button it only ever showed on hover, and the tabs split the strip into
- * equal columns rather than sizing to their labels. Together that left roughly
- * 20px for the text: every label rendered as an ellipsis.
+ * A tab strip can hold four panels in a 220px column. Every tab used to
+ * reserve a permanent 24px lane on its right for a close button it only ever
+ * showed on hover, and the tabs split the strip into equal columns rather than
+ * sizing to their labels. Together that left roughly 20px for the text: every
+ * label rendered as an ellipsis.
  *
- * Reclaiming the lane exposed the second bug. The close button is hidden with
- * `opacity: 0`, which paints nothing but still hit-tests — parked over padding
- * it was harmless, parked over the label it swallowed clicks meant for the tab.
+ * Reclaiming the lane made the close button an absolute overlay on the right
+ * edge of its own tab, which brought two more bugs, in opposite directions:
  *
- * Neither is visible to `tsc` and no repo test lays out CSS, so the invariants
- * are asserted against the source: the tab may not reserve a close lane, and a
- * close button that cannot be seen may not be clicked.
+ * 1. Hidden with `opacity: 0`, it painted nothing but still hit-tested, so it
+ *    swallowed clicks meant for the label underneath it.
+ * 2. Edit mode then made it permanently `opacity: 1; pointer-events: auto`
+ *    without taking it out of that overlay, so the right ~21px of every tab
+ *    became Hide — in a collapsed 36px rail, nearly every click on a tab
+ *    deleted its panel.
+ *
+ * The invariant that covers both is one rule: a close button is clickable
+ * exactly when it is visible, and a *permanently* visible one must not sit on
+ * top of its own tab. None of this is visible to `tsc` and no repo test lays
+ * out CSS, so it is asserted against the source.
  */
 
 const STYLES = __dirname;
@@ -82,18 +89,52 @@ describe("panel tab chrome", () => {
     expect(reserved).toEqual([]);
   });
 
-  it("keeps the hidden close button out of the hit test", () => {
+  it("keeps the hidden close button out of the hit test, and the shown one in it", () => {
     const rules = rulesFor(".workbench-tab-close");
     const hidden = rules.filter((rule) => declaration(rule.body, "opacity") === "0");
     const shown = rules.filter((rule) => declaration(rule.body, "opacity") === "1");
     expect(hidden.length).toBeGreaterThan(0);
     expect(shown.length).toBeGreaterThan(0);
+    // Invisible: unclickable, or it eats the label's clicks.
     expect(hidden.map((rule) => declaration(rule.body, "pointer-events"))).toEqual(
       hidden.map(() => "none"),
     );
-    expect(shown.map((rule) => declaration(rule.body, "pointer-events"))).toEqual(
-      shown.map(() => "auto"),
-    );
+    // Visible: clickable. Not "must say `auto`" — only "must not say `none`",
+    // so a rule may inherit the hit test from a lower-specificity one instead
+    // of restating it.
+    expect(
+      shown
+        .filter((rule) => declaration(rule.body, "pointer-events") === "none")
+        .map((rule) => `${rule.file}: ${rule.selector}`),
+    ).toEqual([]);
+  });
+
+  it("never leaves a permanently visible close button overlaying its own tab", () => {
+    // The base rule parks the button absolutely over the right edge of the tab
+    // it belongs to. Revealing it on hover is fine — the pointer is already
+    // there and the tab is already the thing being aimed at. Revealing it for
+    // a whole mode is not: it silently converts the last 21px of every tab
+    // into Hide. Such a rule has to leave the overlay as well as light it up.
+    const permanent = rulesFor(".workbench-tab-close")
+      .filter((rule) => declaration(rule.body, "opacity") === "1")
+      .filter((rule) => !/:(hover|focus-within|focus-visible|active)/.test(rule.selector));
+    expect(permanent.length).toBeGreaterThan(0);
+    expect(
+      permanent
+        .filter((rule) => declaration(rule.body, "position") !== "static")
+        .map((rule) => `${rule.file}: ${rule.selector} { …not position: static }`),
+    ).toEqual([]);
+  });
+
+  it("advertises the grab cursor only where dragging is possible", () => {
+    // Dragging a tab exists only in edit mode — outside it `PanelLeaf` attaches
+    // no pointerdown handler at all — so an unscoped `cursor: grab` promises a
+    // gesture that does nothing in the mode users spend all their time in.
+    const grabbable = rulesFor(".workbench-tab")
+      .filter((rule) => declaration(rule.body, "cursor") === "grab")
+      .map((rule) => `${rule.file}: ${rule.selector}`);
+    expect(grabbable.length).toBeGreaterThan(0);
+    expect(grabbable.filter((selector) => !selector.includes(".workbench-editing"))).toEqual([]);
   });
 
   it("sizes tabs to their labels instead of splitting the strip evenly", () => {

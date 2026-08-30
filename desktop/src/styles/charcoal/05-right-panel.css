@@ -1,9 +1,4 @@
 
-.ws-right-panel {
-  background: #151515;
-  border-left-color: var(--ui-border);
-}
-
 .ws-right-topbar {
   min-height: 50px;
   display: flex;

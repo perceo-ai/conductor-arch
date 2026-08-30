@@ -208,20 +208,65 @@ export function removePanel(layout: Layout, panelId: PanelId): Layout {
   return { version: 2, root: next };
 }
 
+/**
+ * Where a panel with no stated destination goes.
+ *
+ * The region model gave every restorable panel a `defaultRegion` — "right" for
+ * all of them — and deleting it left `addPanel` falling back to the *first*
+ * leaf in tree order. That is the primary content pane in every built-in
+ * preset, so "Show Todos" and ⌘⇧T dropped their panel straight into the chat
+ * column. The replacement is structural rather than a new per-panel field:
+ * the best host for one more tab is the leaf that is already a tab group.
+ *
+ * Rank by "shows tabs" first — a `compact` leaf is chrome that is already its
+ * own bar or console (the PR strip, the terminal dock) and gains a one-tab
+ * strip it was built to avoid — then by how many panels it already holds, and
+ * let a later leaf win a tie, because the inspector column sits after the
+ * content pane in every preset. On Code/Wide that is `summary|files|changes|
+ * checks`; on Review the `chat|checks` right column; on Watch `checks|
+ * processes`. A single-leaf tree still resolves to that leaf.
+ */
+function defaultHostLeaf(root: LayoutNode): LayoutLeaf | undefined {
+  let best: LayoutLeaf | undefined;
+  const groupRank = (node: LayoutLeaf) => (node.display === "tabs" ? 1 : 0);
+  eachLeaf(root, (candidate) => {
+    if (!best) {
+      best = candidate;
+      return;
+    }
+    const rank = groupRank(candidate);
+    const bestRank = groupRank(best);
+    if (rank > bestRank || (rank === bestRank && candidate.panels.length >= best.panels.length)) {
+      best = candidate;
+    }
+  });
+  return best;
+}
+
+/**
+ * Append a panel to a leaf — the named one, or `defaultHostLeaf`'s pick.
+ *
+ * Two deliberate properties:
+ * - The destination is left uncollapsed. A collapsed leaf renders nothing but
+ *   its rail, so a panel added into one is simultaneously "visible" to
+ *   `visiblePanelIds` (and so absent from `hiddenPanels()`) and on screen
+ *   nowhere. Every path that places a panel into a leaf enforces this.
+ * - The leaf's active tab is left alone. Adding is structural; whether the new
+ *   panel is also *shown* is the caller's call, and `activatePanel` /
+ *   `actions.revealPanel` make it explicitly. That keeps "Add panel" in edit
+ *   mode from yanking the pane the user is looking at out from under them.
+ */
 export function addPanel(layout: Layout, panelId: PanelId, leafId?: NodeId): Layout {
   if (visiblePanelIds(layout).includes(panelId)) return layout;
-  let targetId = leafId;
-  if (!targetId) {
-    eachLeaf(layout.root, (node) => {
-      if (!targetId) targetId = node.id;
-    });
-  }
+  const targetId = leafId ?? defaultHostLeaf(layout.root)?.id;
   if (!targetId) return layout;
   // mapNode returns layout.root by reference, unchanged, when targetId
   // names no node (or names a node that isn't a leaf) — that's how an
   // explicit-but-wrong leaf id is treated as a no-op rather than cloned.
   const root = mapNode(layout.root, targetId, (node) =>
-    node.type === "leaf" ? { ...node, panels: [...node.panels, panelId], active: node.panels.length } : node,
+    node.type === "leaf"
+      ? { ...node, panels: [...node.panels, panelId], collapsed: false }
+      : node,
   );
   if (root === layout.root) return layout;
   return { version: 2, root };
@@ -287,15 +332,20 @@ export function applyDrop(layout: Layout, drop: Drop, panelId: PanelId): Layout 
 
   // Dropping a panel back onto the leaf that already holds it, at a spot
   // that reproduces the existing order, changes nothing: return the same
-  // layout so callers can compare identity to skip persisting a no-op.
+  // layout so callers can compare identity to skip persisting a no-op. A
+  // collapsed target is never "unchanged" — the drop still has to open it,
+  // or the panel the user just placed renders nowhere.
   if (drop.kind === "tab" && target.panels.includes(panelId)) {
     const without = target.panels.filter((id) => id !== panelId);
     const index = Math.max(0, Math.min(drop.index, without.length));
     const panels = [...without.slice(0, index), panelId, ...without.slice(index)];
-    const unchanged = panels.length === target.panels.length && panels.every((id, i) => id === target.panels[i]);
+    const unchanged =
+      !target.collapsed &&
+      panels.length === target.panels.length &&
+      panels.every((id, i) => id === target.panels[i]);
     if (unchanged) return layout;
     const root = mapNode(layout.root, target.id, (node) =>
-      node.type === "leaf" ? { ...node, panels, active: index } : node,
+      node.type === "leaf" ? { ...node, panels, active: index, collapsed: false } : node,
     );
     return { version: 2, root };
   }
@@ -314,6 +364,11 @@ export function applyDrop(layout: Layout, drop: Drop, panelId: PanelId): Layout 
         ...node,
         panels: [...node.panels.slice(0, index), panelId, ...node.panels.slice(index)],
         active: index,
+        // A collapsed leaf is all rail and no body, and `overTabBar` is true
+        // across the whole of one — so dragging onto a collapsed leaf always
+        // resolves to a tab drop. Opening it is what keeps the dropped panel
+        // from vanishing on release.
+        collapsed: false,
       };
     });
     return { version: 2, root };
@@ -486,6 +541,23 @@ export function codeFallback(): Layout {
   return cloneLayout(CODE_FALLBACK);
 }
 
+export interface SanitizedLayout {
+  layout: Layout;
+  /**
+   * True only when the input could not be repaired at all and `codeFallback()`
+   * was substituted wholesale: a malformed value, a v1 layout, or a tree whose
+   * every panel id is unknown. Repairs that preserve the stored tree — dropped
+   * duplicates, clamped ratios, a forced-open leaf — leave this false.
+   *
+   * `sanitizeLayout` never throws, so this is the only way a caller reading
+   * stored JSON can tell "your layout was replaced" from "your layout loaded".
+   * `store/layoutPresets.ts` uses it to fire the toast the spec promises, and
+   * without it the substitution was silent right up until the next edit
+   * persisted the Code tree over the record.
+   */
+  replaced: boolean;
+}
+
 /**
  * Validate and repair an untrusted value into a v2 layout. Anything that
  * isn't a well-formed version-2 tree — including a version-1 layout, since
@@ -503,7 +575,12 @@ export function codeFallback(): Layout {
  *   forced open rather than falling back.
  */
 export function sanitizeLayout(value: unknown): Layout {
-  if (!isLayout(value)) return codeFallback();
+  return sanitizeLayoutResult(value).layout;
+}
+
+/** `sanitizeLayout`, plus whether the fallback had to stand in. */
+export function sanitizeLayoutResult(value: unknown): SanitizedLayout {
+  if (!isLayout(value)) return { layout: codeFallback(), replaced: true };
   const seen = new Set<PanelId>();
 
   const visit = (node: LayoutNode): LayoutNode | undefined => {
@@ -528,7 +605,7 @@ export function sanitizeLayout(value: unknown): Layout {
   };
 
   const root = visit(cloneLayout(value).root);
-  if (!root) return codeFallback();
+  if (!root) return { layout: codeFallback(), replaced: true };
 
   // There must always be somewhere to render.
   let open = 0;
@@ -544,5 +621,5 @@ export function sanitizeLayout(value: unknown): Layout {
       }
     });
   }
-  return { version: 2, root };
+  return { layout: { version: 2, root }, replaced: false };
 }

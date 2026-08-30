@@ -14,6 +14,7 @@ import {
   removePanel,
   resolveDrop,
   sanitizeLayout,
+  sanitizeLayoutResult,
   setCollapsed,
   setRatio,
   split,
@@ -141,6 +142,35 @@ describe("tree transforms", () => {
     expect((moved as LayoutLeaf).display).toBe("compact");
   });
 
+  it("opens a collapsed leaf a panel is dropped into as a tab", () => {
+    // `overTabBar` is true across the whole of a collapsed leaf — it is all
+    // rail — so every drag onto one resolves to a tab drop. Without this the
+    // dropped panel simply disappeared on release.
+    const { left, right, layout } = twoPane();
+    const collapsedLayout = setCollapsed(layout, right.id, true);
+
+    const next = applyDrop(collapsedLayout, { kind: "tab", leafId: right.id, index: 0 }, "chat");
+
+    const destination = findLeaf(next.root, right.id)!;
+    expect(destination.panels).toEqual(["chat", "files", "changes"]);
+    expect(destination.collapsed).toBe(false);
+    // chat's own leaf held only chat, so it was pruned away.
+    expect(findLeaf(next.root, left.id)).toBeUndefined();
+  });
+
+  it("opens a collapsed leaf even when the drop reproduces its existing order", () => {
+    // The identity-equality shortcut treats an order-preserving drop as a
+    // no-op. That is right for an open leaf and wrong for a collapsed one:
+    // the drop still has to make the panel visible.
+    const { right, layout } = twoPane();
+    const collapsedLayout = setCollapsed(layout, right.id, true);
+
+    const next = applyDrop(collapsedLayout, { kind: "tab", leafId: right.id, index: 0 }, "files");
+
+    expect(next).not.toBe(collapsedLayout);
+    expect(findLeaf(next.root, right.id)!.collapsed).toBe(false);
+  });
+
   it("is a no-op when a panel is dropped on the leaf it already occupies", () => {
     const { right, layout } = twoPane();
 
@@ -173,13 +203,64 @@ describe("tree transforms", () => {
     expect(findLeaf(next.root, right.id)!.active).toBe(0);
   });
 
-  it("adds a hidden panel to a named leaf, or the first leaf by default", () => {
+  it("adds a hidden panel to a named leaf", () => {
     const { left, layout } = twoPane();
 
     expect(visiblePanelIds(addPanel(layout, "todos", left.id))).toEqual(["chat", "todos", "files", "changes"]);
-    expect(visiblePanelIds(addPanel(layout, "todos"))).toEqual(["chat", "todos", "files", "changes"]);
     // Already present: unchanged.
     expect(addPanel(layout, "chat")).toBe(layout);
+  });
+
+  it("defaults to the biggest tab group, not the first leaf", () => {
+    // The regression this guards: with `defaultRegion` deleted, addPanel fell
+    // back to the first leaf in tree order — the primary content pane in every
+    // preset — so ⌘⇧T dropped the terminal into the chat column.
+    const { layout } = twoPane();
+    expect(visiblePanelIds(addPanel(layout, "todos"))).toEqual(["chat", "files", "changes", "todos"]);
+  });
+
+  it("skips a compact leaf when choosing a default destination", () => {
+    // A `compact` leaf is a bare strip or console (the PR bar, the terminal
+    // dock). It is not a tab group and must not become one by default, even
+    // when it is the last leaf in tree order.
+    const inspector = leaf(["files", "changes"]);
+    const strip = leaf(["pr"], { display: "compact" });
+    const layout: Layout = { version: 2, root: split("row", leaf(["chat"]), split("column", inspector, strip)) };
+
+    expect(findLeaf(addPanel(layout, "todos").root, inspector.id)!.panels).toEqual([
+      "files",
+      "changes",
+      "todos",
+    ]);
+    expect(findLeaf(addPanel(layout, "todos").root, strip.id)!.panels).toEqual(["pr"]);
+  });
+
+  it("does not steal the destination leaf's active tab", () => {
+    // Adding is structural; showing the panel is `activatePanel`'s job. In
+    // edit mode "Add panel" must not swap out the pane the user is looking at.
+    const { right, layout } = twoPane();
+    expect(right.active).toBe(1);
+
+    const next = addPanel(layout, "todos");
+
+    const destination = findLeaf(next.root, right.id)!;
+    expect(destination.panels).toEqual(["files", "changes", "todos"]);
+    expect(destination.active).toBe(1);
+  });
+
+  it("opens the destination leaf, so an added panel is never placed out of sight", () => {
+    // A collapsed leaf renders its rail and nothing else, so a panel added
+    // into one counted as visible (and so left `hiddenPanels()`) while
+    // appearing nowhere at all.
+    const { right, layout } = twoPane();
+    const collapsedLayout = setCollapsed(layout, right.id, true);
+    expect(findLeaf(collapsedLayout.root, right.id)!.collapsed).toBe(true);
+
+    const next = addPanel(collapsedLayout, "todos");
+
+    const destination = findLeaf(next.root, right.id)!;
+    expect(destination.panels).toContain("todos");
+    expect(destination.collapsed).toBe(false);
   });
 
   it("is a no-op when addPanel targets a leaf id that does not exist", () => {
@@ -229,15 +310,20 @@ describe("tree transforms", () => {
   });
 
   it("activatePanel places an absent panel and uncollapses its destination leaf", () => {
-    const { left, layout } = twoPane();
-    const collapsedLayout = setCollapsed(layout, left.id, true);
+    // The destination is `addPanel`'s default: the biggest tab group, which is
+    // the two-panel right-hand leaf, not the chat pane the tree starts with.
+    const { left, right, layout } = twoPane();
+    const collapsedLayout = setCollapsed(layout, right.id, true);
 
     const next = activatePanel(collapsedLayout, "todos");
 
-    const destination = findLeaf(next.root, left.id)!;
+    const destination = findLeaf(next.root, right.id)!;
     expect(destination.panels).toContain("todos");
     expect(destination.collapsed).toBe(false);
     expect(destination.active).toBe(destination.panels.indexOf("todos"));
+    // Unlike `addPanel`, `activatePanel` is an explicit "show me this" and
+    // does select the panel — but only in its own leaf, never the chat pane.
+    expect(findLeaf(next.root, left.id)!.panels).toEqual(["chat"]);
   });
 });
 
@@ -380,6 +466,30 @@ describe("sanitizeLayout v2", () => {
   it("leaves at least one leaf uncollapsed", () => {
     const layout: Layout = { version: 2, root: leaf(["chat"], { collapsed: true }) };
     expect((sanitizeLayout(layout).root as LayoutLeaf).collapsed).toBe(false);
+  });
+
+  it("reports whether the fallback had to stand in for the stored tree", () => {
+    // `sanitizeLayout` never throws, so a caller reading stored JSON cannot
+    // tell "your layout was replaced" from "your layout loaded" without this.
+    // The v1 case is the one the spec promises a toast for.
+    expect(sanitizeLayoutResult({ version: 1, regions: {} }).replaced).toBe(true);
+    expect(sanitizeLayoutResult(null).replaced).toBe(true);
+    expect(sanitizeLayoutResult("not a layout").replaced).toBe(true);
+    // Every panel unknown: nothing of the tree survives, so it is replaced.
+    expect(sanitizeLayoutResult({ version: 2, root: leaf(["ghost"]) }).replaced).toBe(true);
+
+    // Repairs that keep the stored tree are not replacements.
+    const repairable: Layout = {
+      version: 2,
+      root: split("row", leaf(["chat", "ghost"], { active: 9 }), leaf(["files"], { collapsed: true }), 5),
+    };
+    const repaired = sanitizeLayoutResult(repairable);
+    expect(repaired.replaced).toBe(false);
+    expect(visiblePanelIds(repaired.layout)).toEqual(["chat", "files"]);
+    expect(sanitizeLayoutResult(codeFallback()).replaced).toBe(false);
+
+    // The plain wrapper stays the only path callers need for the layout itself.
+    expect(sanitizeLayout(repairable)).toEqual(repaired.layout);
   });
 
   it("returns a fresh clone each time, not the shared fallback constant", () => {

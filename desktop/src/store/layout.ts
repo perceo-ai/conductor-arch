@@ -53,7 +53,9 @@ let onEdited: ((preset: LayoutPreset) => void) | undefined;
 // One restore point, captured the instant edit mode is entered — not a
 // transactional buffer. Edits still apply and persist live; this only gives
 // "Revert changes" something truthful to go back to. Cleared on exit so a
-// later edit session starts from its own snapshot rather than a stale one.
+// later edit session starts from its own snapshot rather than a stale one,
+// and re-baselined by `applyLayout` so a preset switch mid-session cannot
+// leave it describing a tree from a different preset.
 let editSnapshot: Layout | undefined;
 
 export const layoutStore = {
@@ -144,11 +146,23 @@ export const layoutStore = {
     return id;
   },
 
+  /**
+   * Replace the tree wholesale: a preset switch, Reset to Code, or the
+   * fallback applied after deleting the active preset.
+   *
+   * This is not an edit, so it does not fork or persist — but it does
+   * invalidate the revert snapshot. The snapshot describes a tree that is no
+   * longer on screen and, after a switch, no longer even belongs to the active
+   * preset: reverting would write (and persist) one preset's layout into
+   * another. Re-baseline while editing so "Revert changes" keeps meaning "undo
+   * what I have done", measured from the layout that was just applied.
+   */
   applyLayout(source: LayoutPreset) {
     const preset = normalizedPreset(source);
     setActivePreset(clone(preset));
     setHiddenPanels([...preset.hidden]);
     setLayout(clone(preset.layout));
+    if (editing()) editSnapshot = clone(preset.layout);
   },
 
   mutate(change: (current: Layout) => Layout) {

@@ -88,6 +88,32 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
     return visiblePanelIds(layoutStore.layout()).filter((candidate) => candidate !== id).length > 0;
   }
 
+  /**
+   * Start a drag from a press on the tab bar — but only where a drag is what
+   * the press means, and for the tab actually under the pointer.
+   *
+   * The bar is the drag surface, so the naive "whole tablist" handler also
+   * armed a drag on Hide, Collapse and Review. Those only `stopPropagation` on
+   * *click*, so a press-jitter-release on any of them (5px is enough, the
+   * threshold is 4) committed a panel move instead of the button's action.
+   * Anything that is not a tab shell, and is not the bar's own empty area,
+   * starts nothing; `[data-no-drag]` covers the controls that live inside a
+   * tab shell, where the empty-area rule cannot see them.
+   *
+   * The panel dragged is the one whose shell was pressed, read off the DOM
+   * rather than assumed: passing `activeId()` meant grabbing any tab always
+   * moved the leaf's *active* panel, so dragging an inactive tab silently
+   * moved a different one. A press on the bar's empty area has no tab to name,
+   * and falls back to the active panel.
+   */
+  function beginDrag(event: PointerEvent) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target || target.closest("[data-no-drag]")) return;
+    const shell = target.closest<HTMLElement>("[data-tab-index]");
+    if (!shell && target !== event.currentTarget) return;
+    dnd.begin(event, shell?.dataset.panelId ?? activeId());
+  }
+
   function panelMenu(id: PanelId): ContextMenuItem[] {
     const descriptor = panelDescriptor(id);
     if (!descriptor || !canHide(id)) return [];
@@ -120,10 +146,11 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
           data-tab-bar=""
           role="tablist"
           aria-label="Workbench panels"
-          // The whole bar is the drag surface, but only in edit mode — outside
-          // it there is deliberately no pointerdown handler at all, so a plain
-          // click can never accidentally start a drag.
-          onPointerDown={layoutStore.editing() ? (event) => dnd.begin(event, activeId()) : undefined}
+          // The bar is the drag surface, but only in edit mode — outside it
+          // there is deliberately no pointerdown handler at all, so a plain
+          // click can never accidentally start a drag. `beginDrag` decides
+          // which presses on the bar actually mean "drag", and which panel.
+          onPointerDown={layoutStore.editing() ? beginDrag : undefined}
         >
           <For each={panels()}>
             {(id, index) => {
@@ -163,6 +190,9 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
                   <Show when={layoutStore.editing() && canHide(id)}>
                     <button
                       class="workbench-tab-close"
+                      // Inside the tab shell, so the "not a tab shell" rule in
+                      // beginDrag cannot exclude it: say so explicitly.
+                      data-no-drag=""
                       aria-label={`Hide ${descriptor.title}`}
                       title={`Hide ${descriptor.title}`}
                       onClick={(event) => {
@@ -184,6 +214,7 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
           <Show when={layoutStore.editing()}>
             <button
               class="workbench-leaf-collapse-btn"
+              data-no-drag=""
               aria-label={props.leaf.collapsed ? "Expand panel" : "Collapse panel"}
               title={props.leaf.collapsed ? "Expand panel" : "Collapse panel"}
               onClick={(event) => {
