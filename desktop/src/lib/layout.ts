@@ -204,9 +204,13 @@ export function addPanel(layout: Layout, panelId: PanelId, leafId?: NodeId): Lay
     });
   }
   if (!targetId) return layout;
-  const root = mapNode(cloneLayout(layout).root, targetId, (node) =>
+  // mapNode returns layout.root by reference, unchanged, when targetId
+  // names no node (or names a node that isn't a leaf) — that's how an
+  // explicit-but-wrong leaf id is treated as a no-op rather than cloned.
+  const root = mapNode(layout.root, targetId, (node) =>
     node.type === "leaf" ? { ...node, panels: [...node.panels, panelId], active: node.panels.length } : node,
   );
+  if (root === layout.root) return layout;
   return { version: 2, root };
 }
 
@@ -215,24 +219,39 @@ export function activatePanel(layout: Layout, panelId: PanelId): Layout {
   eachLeaf(layout.root, (node) => {
     if (!hit && node.panels.includes(panelId)) hit = node.id;
   });
-  if (!hit) return addPanel(layout, panelId);
-  const root = mapNode(cloneLayout(layout).root, hit, (node) =>
-    node.type === "leaf" ? { ...node, active: node.panels.indexOf(panelId), collapsed: false } : node,
-  );
+  // Placing the panel first (when absent) means the uncollapse-and-focus
+  // step below always has a real destination leaf to act on.
+  const base = hit ? layout : addPanel(layout, panelId);
+  let destId = hit;
+  if (!destId) {
+    eachLeaf(base.root, (node) => {
+      if (!destId && node.panels.includes(panelId)) destId = node.id;
+    });
+  }
+  if (!destId) return base;
+  const root = mapNode(base.root, destId, (node) => {
+    if (node.type !== "leaf") return node;
+    const active = node.panels.indexOf(panelId);
+    if (node.active === active && !node.collapsed) return node;
+    return { ...node, active, collapsed: false };
+  });
+  if (root === base.root) return base;
   return { version: 2, root };
 }
 
 export function setCollapsed(layout: Layout, leafId: NodeId, collapsed: boolean): Layout {
+  const target = findLeaf(layout.root, leafId);
+  if (!target) return layout;
   if (collapsed) {
     let open = 0;
     eachLeaf(layout.root, (node) => {
       if (!node.collapsed) open += 1;
     });
-    const target = findLeaf(layout.root, leafId);
     // The last open leaf stays open; otherwise nothing would render.
-    if (!target || (open <= 1 && !target.collapsed)) return layout;
+    if (open <= 1 && !target.collapsed) return layout;
   }
-  const root = mapNode(cloneLayout(layout).root, leafId, (node) =>
+  if (target.collapsed === collapsed) return layout;
+  const root = mapNode(layout.root, leafId, (node) =>
     node.type === "leaf" ? { ...node, collapsed } : node,
   );
   return { version: 2, root };
@@ -240,9 +259,12 @@ export function setCollapsed(layout: Layout, leafId: NodeId, collapsed: boolean)
 
 export function setRatio(layout: Layout, splitId: NodeId, ratio: number): Layout {
   const clamped = Math.max(MIN_RATIO, Math.min(1 - MIN_RATIO, ratio));
-  const root = mapNode(cloneLayout(layout).root, splitId, (node) =>
+  // mapNode returns layout.root by reference, unchanged, when splitId
+  // names no node (or names a leaf rather than a split).
+  const root = mapNode(layout.root, splitId, (node) =>
     node.type === "split" ? { ...node, ratio: clamped } : node,
   );
+  if (root === layout.root) return layout;
   return { version: 2, root };
 }
 

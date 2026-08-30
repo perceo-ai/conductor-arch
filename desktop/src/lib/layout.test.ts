@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  activatePanel,
   addPanel,
   applyDrop,
   cloneLayout,
@@ -162,6 +163,11 @@ describe("tree transforms", () => {
     expect(addPanel(layout, "chat")).toBe(layout);
   });
 
+  it("is a no-op when addPanel targets a leaf id that does not exist", () => {
+    const { layout } = twoPane();
+    expect(addPanel(layout, "todos", "bogus-leaf-id")).toBe(layout);
+  });
+
   it("collapses a leaf but never the last uncollapsed one", () => {
     const { left, right, layout } = twoPane();
 
@@ -172,6 +178,12 @@ describe("tree transforms", () => {
     expect(two).toBe(one);
   });
 
+  it("is a no-op when setCollapsed targets a leaf id that does not exist", () => {
+    const { layout } = twoPane();
+    expect(setCollapsed(layout, "bogus-leaf-id", true)).toBe(layout);
+    expect(setCollapsed(layout, "bogus-leaf-id", false)).toBe(layout);
+  });
+
   it("clamps a split ratio away from the edges", () => {
     const { layout } = twoPane();
     const id = (layout.root as LayoutSplit).id;
@@ -179,5 +191,33 @@ describe("tree transforms", () => {
     expect((setRatio(layout, id, 0.42).root as LayoutSplit).ratio).toBeCloseTo(0.42);
     expect((setRatio(layout, id, 0).root as LayoutSplit).ratio).toBeGreaterThan(0);
     expect((setRatio(layout, id, 1).root as LayoutSplit).ratio).toBeLessThan(1);
+  });
+
+  it("is a no-op when setRatio targets a split id that does not exist", () => {
+    const { layout } = twoPane();
+    expect(setRatio(layout, "bogus-split-id", 0.3)).toBe(layout);
+  });
+
+  it("activatePanel focuses an already-placed panel and uncollapses its leaf", () => {
+    const { right, layout } = twoPane();
+    const collapsedLayout = setCollapsed(layout, right.id, true);
+
+    const next = activatePanel(collapsedLayout, "files");
+
+    const focused = findLeaf(next.root, right.id)!;
+    expect(focused.collapsed).toBe(false);
+    expect(focused.active).toBe(0);
+  });
+
+  it("activatePanel places an absent panel and uncollapses its destination leaf", () => {
+    const { left, layout } = twoPane();
+    const collapsedLayout = setCollapsed(layout, left.id, true);
+
+    const next = activatePanel(collapsedLayout, "todos");
+
+    const destination = findLeaf(next.root, left.id)!;
+    expect(destination.panels).toContain("todos");
+    expect(destination.collapsed).toBe(false);
+    expect(destination.active).toBe(destination.panels.indexOf("todos"));
   });
 });
