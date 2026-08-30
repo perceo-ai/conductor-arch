@@ -143,16 +143,23 @@ describe("layoutStore", () => {
     expect(leaves(layoutStore.layout()).filter((leaf) => !leaf.collapsed)).toHaveLength(1);
   });
 
-  it("cycles visible tabs in tree order and wraps both directions", async () => {
+  it("cycles visible tabs in tree order and wraps past both ends", async () => {
     vi.stubGlobal("document", { querySelector: vi.fn(() => null) });
     const { layoutStore } = await import("./layout");
-    const { visiblePanelIds } = await import("@/lib/layout");
-    const order = visiblePanelIds(layoutStore.layout());
-    layoutStore.setFocusedLeaf(leafHolding(layoutStore.layout(), order[0]).id);
+    // Hardcoded, not derived from visiblePanelIds(), which is the function
+    // cyclePanel walks internally — deriving the expectation from it would
+    // only restate the implementation. This is the Code tree's leaf order:
+    // chat | pr | summary, files, changes, checks.
+    layoutStore.setFocusedLeaf(leafHolding(layoutStore.layout(), "chat").id);
 
-    expect(layoutStore.cyclePanel(1)).toBe(order[1]);
-    expect(layoutStore.cyclePanel(1)).toBe(order[2]);
-    expect(layoutStore.cyclePanel(-1)).toBe(order[1]);
+    // Seven forward steps from "chat" walk all six tabs and wrap onto a second
+    // lap, so the end-of-list boundary is actually crossed.
+    const forward = Array.from({ length: 7 }, () => layoutStore.cyclePanel(1));
+    expect(forward).toEqual(["pr", "summary", "files", "changes", "checks", "chat", "pr"]);
+
+    // Backward off the front of the list wraps to the last tab.
+    const backward = Array.from({ length: 3 }, () => layoutStore.cyclePanel(-1));
+    expect(backward).toEqual(["chat", "checks", "changes"]);
   });
 
   it("forks an immutable built-in once before arrangement edits", async () => {

@@ -2,7 +2,11 @@ import { lazy, type Component } from "solid-js";
 import type { IconName } from "@/components/Icon";
 import type { PanelId } from "./layout";
 
-/** How a panel presents its chrome. Task 7 uses this to seed a leaf's display. */
+/**
+ * How a panel presents its chrome. `layout.ts`'s `displayFor` reads this to seed
+ * a newly split-out leaf's `display`: a `strip` or `dock` lands `compact` (no
+ * one-tab strip above chrome that is already a bar), a `tab` lands `tabs`.
+ */
 export type PanelKind = "tab" | "strip" | "dock";
 
 export interface PanelProps {

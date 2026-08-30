@@ -54,6 +54,35 @@ export function panelMinPx(panelId: string): number {
 }
 
 /**
+ * Per-panel minimum *heights*, for clamping a column split.
+ *
+ * These are a separate table rather than a direction argument to `panelMinPx`
+ * because the two axes disagree about almost everything: the default is much
+ * smaller (a panel needs a usable column, but only a few rows), and the panels
+ * that are exceptions differ — chat's 360px width floor says nothing about how
+ * short it may be, while `pr` is a one-line strip that is exactly as tall as
+ * its own chrome and must not be padded out to a width-shaped minimum.
+ *
+ * Using the width table on a column is what silently overrode the Code and
+ * Review presets' 0.12 PR strip: 220/860 clamps the ratio up to 0.256.
+ */
+const DEFAULT_PANEL_MIN_HEIGHT = 80;
+export const PANEL_MIN_HEIGHT_PX: Record<string, number> = {
+  chat: 240,
+  terminal: BOTTOM_MIN,
+  // The PR bar is a single row of chrome; 40px is the strip's own min-height.
+  pr: 40,
+};
+
+export function panelMinHeightPx(panelId: string): number {
+  return PANEL_MIN_HEIGHT_PX[panelId] ?? DEFAULT_PANEL_MIN_HEIGHT;
+}
+
+/** The extent a collapsed subtree keeps: a header in a column, a rail in a row. */
+export const COLLAPSED_HEADER_PX = 40;
+export const COLLAPSED_RAIL_PX = 36;
+
+/**
  * Clamp a split ratio so neither child falls below its minimum. When the space
  * cannot satisfy both, share it evenly rather than starving one child.
  */

@@ -97,10 +97,40 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   background: var(--ui-panel, #191919);
 }
 
-/* Collapsed: the strip and nothing else. The parent split gives the space it
-   gives up to its sibling. */
+/* Collapsed: the strip and nothing else, filling the fixed extent its parent
+   split assigned (COLLAPSED_HEADER_PX in a column, COLLAPSED_RAIL_PX in a row).
+   The leaf itself still flexes — it is the *wrapper* that is pinned. */
 .workbench-leaf-collapsed {
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+/* A compact leaf is chrome-free: the panel inside is its own bar or console,
+   so the leaf must not paint a second surface behind it. */
+.workbench-leaf-compact {
+  background: transparent;
+}
+
+/* A leaf collapsed inside a row has rail width, not label width: stack what is
+   left vertically and clip it rather than letting the strip demand its
+   max-content width back. */
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tablist {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 3px;
+  overflow: hidden;
+}
+
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tab {
+  justify-content: center;
+  padding: 0 2px;
+  overflow: hidden;
+}
+
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tab > span {
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .workbench-leaf > .workbench-panel-body {
@@ -126,6 +156,18 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 .workbench-leaf .ws-run-section {
   flex: 1 1 auto;
   height: 100%;
+}
+
+/* One tab is not a choice. A single-panel leaf shows its body only — the way
+   the centre region did before the tree — but the strip comes back in edit
+   mode, where it is the leaf's drag handle and tab drop target. A collapsed
+   leaf is exempt: the strip is all it has left to render. */
+.workbench-leaf:not(.workbench-leaf-collapsed) > .workbench-tablist-single {
+  display: none;
+}
+
+.workbench-editing .workbench-leaf > .workbench-tablist-single {
+  display: flex;
 }
 
 .panel-drop-preview {
@@ -196,10 +238,6 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-
-.workbench-region-center > .workbench-tablist-single {
-  display: none;
 }
 
 .workbench-region-center > .workbench-panel-body {
@@ -485,15 +523,6 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.panel-drop-caret {
-  position: fixed;
-  z-index: 101;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--lc-accent, #c39b50);
-  pointer-events: none;
 }
 
 .workbench-strip,

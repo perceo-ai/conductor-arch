@@ -57,6 +57,17 @@ export function split(
   return { type: "split", id: id ?? nextNodeId(), direction, children: [first, second], ratio };
 }
 
+/**
+ * How a leaf built around a single panel should present itself. This is the one
+ * thing `PanelDescriptor.kind` still decides: a strip (the PR bar) or a dock
+ * (the terminal) is its own chrome and gains nothing from a one-tab strip above
+ * it, so a new leaf holding one starts `compact` and keeps looking like itself
+ * after a drag. Ordinary tab panels start `tabs`.
+ */
+export function displayFor(panelId: PanelId): LeafDisplay {
+  return panelDescriptor(panelId)?.kind === "tab" ? "tabs" : "compact";
+}
+
 export function eachLeaf(node: LayoutNode, visit: (node: LayoutLeaf) => void): void {
   if (node.type === "leaf") {
     visit(node);
@@ -311,7 +322,7 @@ export function applyDrop(layout: Layout, drop: Drop, panelId: PanelId): Layout 
   const direction: SplitDirection = drop.edge === "left" || drop.edge === "right" ? "row" : "column";
   const before = drop.edge === "left" || drop.edge === "top";
   const root = mapNode(detached, target.id, (node) => {
-    const moved = leaf([panelId]);
+    const moved = leaf([panelId], { display: displayFor(panelId) });
     return before ? split(direction, moved, node) : split(direction, node, moved);
   });
   return { version: 2, root };

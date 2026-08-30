@@ -127,6 +127,20 @@ describe("tree transforms", () => {
     expect((root.children[0] as LayoutLeaf).panels).toEqual(["chat"]);
   });
 
+  it("seeds a split-out leaf's display from the panel's registered kind", () => {
+    // A strip or dock is already its own chrome; a one-tab strip above it is
+    // noise. This is the only thing PanelDescriptor.kind still decides.
+    const { right, layout } = twoPane();
+
+    const tab = applyDrop(layout, { kind: "split", leafId: right.id, edge: "bottom" }, "chat");
+    expect(((tab.root as LayoutSplit).children[1] as LayoutLeaf).display).toBe("tabs");
+
+    const strip = applyDrop(layout, { kind: "split", leafId: right.id, edge: "bottom" }, "pr");
+    const moved = ((strip.root as LayoutSplit).children[1] as LayoutSplit).children[1];
+    expect((moved as LayoutLeaf).panels).toEqual(["pr"]);
+    expect((moved as LayoutLeaf).display).toBe("compact");
+  });
+
   it("is a no-op when a panel is dropped on the leaf it already occupies", () => {
     const { right, layout } = twoPane();
 
