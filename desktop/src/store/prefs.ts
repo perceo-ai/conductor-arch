@@ -1,7 +1,5 @@
 import { createStore } from "solid-js/store";
 import { CHAT_PROVIDERS, MODELS, firstModel, providerForModel } from "@/lib/models";
-import { REGION_DEFAULT_SIZES, clampRegionSize } from "@/lib/panelWidths";
-import type { Region } from "@/lib/layout";
 
 // Renderer-local user preferences, persisted to localStorage. Kept out of the
 // archcar TOML settings on purpose: these are per-machine UI defaults (which
@@ -34,8 +32,6 @@ export interface Prefs {
   // Persisted layout state so the app restores where you left off.
   sidebarCollapsed: boolean;
   activePresetId: string;
-  regionSizes: Record<Region, number>;
-  collapsedRegions: Region[];
   // Machine-local keyboard overrides, e.g. "palette=ctrl+p; focus=ctrl+j".
   keybindings: string;
   /**
@@ -54,8 +50,6 @@ const DEFAULTS: Prefs = {
   density: "cozy",
   sidebarCollapsed: false,
   activePresetId: "code",
-  regionSizes: { ...REGION_DEFAULT_SIZES },
-  collapsedRegions: [],
   keybindings: "",
   pinnedWorkspaces: [],
 };
@@ -69,18 +63,9 @@ function persistedPrefs(prefs: Prefs) {
     density: prefs.density,
     sidebarCollapsed: prefs.sidebarCollapsed,
     activePresetId: prefs.activePresetId,
-    regionSizes: prefs.regionSizes,
-    collapsedRegions: prefs.collapsedRegions,
     keybindings: prefs.keybindings,
     pinnedWorkspaces: prefs.pinnedWorkspaces,
   };
-}
-
-function legacySize(key: string): number | undefined {
-  const raw = localStorage.getItem(key);
-  if (raw === null) return undefined;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : undefined;
 }
 
 function load(): Prefs {
@@ -90,8 +75,6 @@ function load(): Prefs {
     const merged: Prefs = {
       ...DEFAULTS,
       ...parsed,
-      regionSizes: { ...DEFAULTS.regionSizes, ...parsed.regionSizes },
-      collapsedRegions: parsed.collapsedRegions ?? DEFAULTS.collapsedRegions,
     };
     // Drop only the stale model/provider if the model list changed between
     // versions; keep appearance prefs intact.
@@ -100,12 +83,6 @@ function load(): Prefs {
       merged.defaultModel = DEFAULTS.defaultModel;
     }
     if (typeof localStorage !== "undefined") {
-      const rightWidth = legacySize("rightPanel.width");
-      const terminalHeight = legacySize("terminalDock.height");
-      const hasStoredBottom = Number.isFinite(parsed.regionSizes?.bottom);
-      if (rightWidth !== undefined) merged.regionSizes.right = rightWidth;
-      if (terminalHeight !== undefined && !hasStoredBottom) merged.regionSizes.bottom = terminalHeight;
-      if (rightWidth !== undefined) localStorage.removeItem("rightPanel.width");
       localStorage.setItem(KEY, JSON.stringify(persistedPrefs(merged)));
     }
     return merged;
@@ -172,23 +149,6 @@ export const prefsStore = {
 
   setActivePresetId(activePresetId: string) {
     setState("activePresetId", activePresetId);
-    persist();
-  },
-
-  setRegionSize(region: Region, size: number) {
-    setState("regionSizes", region, clampRegionSize(region, size));
-    persist();
-  },
-
-  setCollapsedRegions(collapsedRegions: Region[]) {
-    setState("collapsedRegions", [...new Set(collapsedRegions)]);
-    persist();
-  },
-
-  setRegionCollapsed(region: Region, collapsed: boolean) {
-    const regions = new Set(state.collapsedRegions);
-    collapsed ? regions.add(region) : regions.delete(region);
-    setState("collapsedRegions", [...regions]);
     persist();
   },
 

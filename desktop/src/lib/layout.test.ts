@@ -381,4 +381,16 @@ describe("sanitizeLayout v2", () => {
     // A third call must also be unaffected by the mutation above.
     expect(codeFallback()).toEqual(second);
   });
+
+  // Region/Stack are type-only exports; TypeScript erases them at runtime, so
+  // they never appear as properties on the module object and asserting on
+  // them here would pass vacuously no matter what. tsc is what enforces those
+  // deletions. This only checks the runtime exports the region model used to
+  // have.
+  it("no longer exports the region model", async () => {
+    const module = await import("./layout");
+    for (const gone of ["dropTarget", "movePanel", "resizeRegion", "collapseRegion", "showPanel", "hidePanel"]) {
+      expect(gone in module).toBe(false);
+    }
+  });
 });

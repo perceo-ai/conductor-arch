@@ -57,38 +57,15 @@ describe("prefsStore", () => {
   it("defaults device-local layout preferences", async () => {
     const { prefsStore } = await import("./prefs");
     expect(prefsStore.state.activePresetId).toBe("code");
-    expect(prefsStore.state.regionSizes).toEqual({ left: 260, center: 0, right: 300, bottom: 280 });
-    expect(prefsStore.state.collapsedRegions).toEqual([]);
     prefsStore.setActivePresetId("wide");
-    prefsStore.setRegionSize("bottom", 320);
-    prefsStore.setCollapsedRegions(["left"]);
     expect(prefsStore.state.activePresetId).toBe("wide");
-    expect(prefsStore.state.regionSizes.bottom).toBe(320);
-    expect(prefsStore.state.collapsedRegions).toEqual(["left"]);
   });
 
-  it("migrates legacy panel dimensions while retaining sidebar and terminal preferences", async () => {
-    const values = new Map<string, string>([
-      ["archductor.prefs.v1", JSON.stringify({ sidebarCollapsed: true })],
-      ["rightPanel.width", "333"],
-      ["terminalDock.height", "444"],
-    ]);
-    vi.stubGlobal("localStorage", {
-      getItem: (key: string) => values.get(key) ?? null,
-      setItem: (key: string, value: string) => values.set(key, value),
-      removeItem: (key: string) => values.delete(key),
-    });
+  it("drops the retired region prefs", async () => {
     const { prefsStore } = await import("./prefs");
-    expect(prefsStore.state.sidebarCollapsed).toBe(true);
-    expect(prefsStore.state.regionSizes.right).toBe(333);
-    expect(prefsStore.state.regionSizes.bottom).toBe(444);
-    expect(values.has("rightPanel.width")).toBe(false);
-    expect(values.get("terminalDock.height")).toBe("444");
-    expect(JSON.parse(values.get("archductor.prefs.v1")!).regionSizes).toMatchObject({ right: 333, bottom: 444 });
-    prefsStore.setRegionSize("bottom", 320);
-    vi.resetModules();
-    const { prefsStore: reloadedPrefs } = await import("./prefs");
-    expect(reloadedPrefs.state.regionSizes.bottom).toBe(320);
+    expect("regionSizes" in prefsStore.state).toBe(false);
+    expect("collapsedRegions" in prefsStore.state).toBe(false);
+    expect(typeof prefsStore.state.activePresetId).toBe("string");
   });
 
   it("tracks custom keyboard bindings", async () => {
