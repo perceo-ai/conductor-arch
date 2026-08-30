@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { cloneLayout, eachLeaf, findLeaf, isLayout, leaf, split, visiblePanelIds, type Layout } from "./layout";
+import {
+  addPanel,
+  applyDrop,
+  cloneLayout,
+  eachLeaf,
+  findLeaf,
+  isLayout,
+  leaf,
+  leafCount,
+  removePanel,
+  setCollapsed,
+  setRatio,
+  split,
+  visiblePanelIds,
+  type Drop,
+  type Layout,
+  type LayoutLeaf,
+  type LayoutSplit,
+} from "./layout";
 
 describe("layout tree", () => {
   it("builds leaves and splits with stable ids and defaults", () => {
@@ -59,5 +77,107 @@ describe("layout tree", () => {
   it("lists visible panels in tree order", () => {
     const layout: Layout = { version: 2, root: split("row", leaf(["chat"]), split("column", leaf(["pr"]), leaf(["files", "changes"]))) };
     expect(visiblePanelIds(layout)).toEqual(["chat", "pr", "files", "changes"]);
+  });
+});
+
+function twoPane() {
+  const left = leaf(["chat"]);
+  const right = leaf(["files", "changes"], { active: 1 });
+  return { left, right, layout: { version: 2, root: split("row", left, right, 0.6) } as Layout };
+}
+
+describe("tree transforms", () => {
+  it("moves a panel into another leaf as a tab at an index", () => {
+    const { left, layout } = twoPane();
+    const drop: Drop = { kind: "tab", leafId: left.id, index: 0 };
+
+    const next = applyDrop(layout, drop, "changes");
+
+    expect(visiblePanelIds(next)).toEqual(["changes", "chat", "files"]);
+    expect(leafCount(next)).toBe(2);
+  });
+
+  it("splits a leaf on an edge, placing the panel on that side", () => {
+    const { right, layout } = twoPane();
+
+    const next = applyDrop(layout, { kind: "split", leafId: right.id, edge: "bottom" }, "chat");
+
+    // chat left its leaf; that leaf held only chat, so it collapsed away.
+    expect(leafCount(next)).toBe(2);
+    expect(visiblePanelIds(next)).toEqual(["files", "changes", "chat"]);
+    const root = next.root as LayoutSplit;
+    expect(root.type).toBe("split");
+    expect(root.direction).toBe("column");
+    expect((root.children[1] as LayoutLeaf).panels).toEqual(["chat"]);
+  });
+
+  it("places a left or top edge drop before the target", () => {
+    const { right, layout } = twoPane();
+
+    const next = applyDrop(layout, { kind: "split", leafId: right.id, edge: "left" }, "chat");
+
+    const root = next.root as LayoutSplit;
+    expect(root.direction).toBe("row");
+    expect((root.children[0] as LayoutLeaf).panels).toEqual(["chat"]);
+  });
+
+  it("is a no-op when a panel is dropped on the leaf it already occupies", () => {
+    const { right, layout } = twoPane();
+
+    const next = applyDrop(layout, { kind: "tab", leafId: right.id, index: 0 }, "files");
+
+    expect(visiblePanelIds(next)).toEqual(["chat", "files", "changes"]);
+    expect(leafCount(next)).toBe(2);
+  });
+
+  it("removes an emptied leaf and collapses its parent split into the sibling", () => {
+    const { layout } = twoPane();
+
+    const next = removePanel(layout, "chat");
+
+    expect(next.root.type).toBe("leaf");
+    expect(visiblePanelIds(next)).toEqual(["files", "changes"]);
+    expect(leafCount(next)).toBe(1);
+  });
+
+  it("refuses to remove the last panel in the layout", () => {
+    const only: Layout = { version: 2, root: leaf(["chat"]) };
+    expect(removePanel(only, "chat")).toBe(only);
+  });
+
+  it("keeps the active index inside the panel list after a removal", () => {
+    const { right, layout } = twoPane();
+
+    const next = removePanel(layout, "changes");
+
+    expect(findLeaf(next.root, right.id)!.active).toBe(0);
+  });
+
+  it("adds a hidden panel to a named leaf, or the first leaf by default", () => {
+    const { left, layout } = twoPane();
+
+    expect(visiblePanelIds(addPanel(layout, "todos", left.id))).toEqual(["chat", "todos", "files", "changes"]);
+    expect(visiblePanelIds(addPanel(layout, "todos"))).toEqual(["chat", "todos", "files", "changes"]);
+    // Already present: unchanged.
+    expect(addPanel(layout, "chat")).toBe(layout);
+  });
+
+  it("collapses a leaf but never the last uncollapsed one", () => {
+    const { left, right, layout } = twoPane();
+
+    const one = setCollapsed(layout, left.id, true);
+    expect(findLeaf(one.root, left.id)!.collapsed).toBe(true);
+
+    const two = setCollapsed(one, right.id, true);
+    expect(two).toBe(one);
+  });
+
+  it("clamps a split ratio away from the edges", () => {
+    const { layout } = twoPane();
+    const id = (layout.root as LayoutSplit).id;
+
+    expect((setRatio(layout, id, 0.42).root as LayoutSplit).ratio).toBeCloseTo(0.42);
+    expect((setRatio(layout, id, 0).root as LayoutSplit).ratio).toBeGreaterThan(0);
+    expect((setRatio(layout, id, 1).root as LayoutSplit).ratio).toBeLessThan(1);
   });
 });
