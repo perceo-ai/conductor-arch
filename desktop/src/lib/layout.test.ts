@@ -263,13 +263,40 @@ describe("resolveDrop", () => {
   });
 
   it("splits on the nearest edge by fraction, not pixels", () => {
-    // 800x200: 20px from the left is 2.5% across; 20px from the top is 10% down.
-    // Left is nearer as a fraction, so a left split wins.
+    // 800x200 leaf, 30px tab bar (content height 170). Fractions below are
+    // x/width and (y - tabBarHeight)/contentHeight.
     const wide = rect("a", { rect: { left: 0, top: 0, width: 800, height: 200 } });
+    // (20,50): x is 2.5% across; y is (50-30)/170 ~= 11.8% into the content.
+    // Left is nearer as a fraction, so a left split wins.
     expect(resolveDrop([wide], { x: 20, y: 50 })).toEqual({ kind: "split", leafId: "a", edge: "left" });
+    // (400,45): x is dead centre (50%); y is (45-30)/170 ~= 8.8% into the
+    // content. Top is the only edge near enough, so top wins.
     expect(resolveDrop([wide], { x: 400, y: 45 })).toEqual({ kind: "split", leafId: "a", edge: "top" });
+    // (780,100): x is 97.5% across (2.5% from the right); y is (100-30)/170
+    // ~= 41.2% into the content, past the centre-zone threshold. Right wins.
     expect(resolveDrop([wide], { x: 780, y: 100 })).toEqual({ kind: "split", leafId: "a", edge: "right" });
+    // (400,195): x is dead centre; y is (195-30)/170 ~= 97.1% into the
+    // content, i.e. 2.9% from the bottom. Bottom wins.
     expect(resolveDrop([wide], { x: 400, y: 195 })).toEqual({ kind: "split", leafId: "a", edge: "bottom" });
+  });
+
+  it("computes the vertical fraction against content height, not full leaf height", () => {
+    // Same 800x200 leaf, 30px tab bar. y=60 is 30% down the FULL leaf height
+    // (outside the centre zone under a full-height formula, which would
+    // append as a tab) but only (60-30)/170 ~= 17.6% into the CONTENT height
+    // (inside the top zone). The content-relative formula is the one the
+    // spec calls for, so this must resolve to a top split, not a tab append.
+    const wide = rect("a", { rect: { left: 0, top: 0, width: 800, height: 200 } });
+    expect(resolveDrop([wide], { x: 400, y: 60 })).toEqual({ kind: "split", leafId: "a", edge: "top" });
+  });
+
+  it("breaks an exact tie between axes in favour of the horizontal edge", () => {
+    // Default 400x400 leaf, 30px tab bar (content height 370). Pick x and y
+    // so the fractional distance to the nearest edge is exactly equal on
+    // both axes: x=40 -> fx=0.1; y=67 -> (67-30)/370=0.1. Both are inside
+    // the centre-zone threshold (0.25), so this is a real tie, not a
+    // one-axis-only case, and the rule says horizontal wins.
+    expect(resolveDrop([rect("a")], { x: 40, y: 67 })).toEqual({ kind: "split", leafId: "a", edge: "left" });
   });
 
   it("offers no split on an axis too small to divide", () => {
@@ -282,10 +309,14 @@ describe("resolveDrop", () => {
 
   it("previews the rectangle the panel will occupy", () => {
     const leafRect = rect("a");
+    expect(dropPreviewRect(leafRect, { kind: "split", leafId: "a", edge: "left" }))
+      .toEqual({ left: 0, top: 0, width: 200, height: 400 });
     expect(dropPreviewRect(leafRect, { kind: "split", leafId: "a", edge: "right" }))
       .toEqual({ left: 200, top: 0, width: 200, height: 400 });
     expect(dropPreviewRect(leafRect, { kind: "split", leafId: "a", edge: "top" }))
       .toEqual({ left: 0, top: 0, width: 400, height: 200 });
+    expect(dropPreviewRect(leafRect, { kind: "split", leafId: "a", edge: "bottom" }))
+      .toEqual({ left: 0, top: 200, width: 400, height: 200 });
     // A tab drop fills the leaf's content area, below the tab bar.
     expect(dropPreviewRect(leafRect, { kind: "tab", leafId: "a", index: 0 }))
       .toEqual({ left: 0, top: 30, width: 400, height: 370 });

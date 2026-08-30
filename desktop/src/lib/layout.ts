@@ -360,10 +360,11 @@ function tabIndexAt(tabs: Array<{ left: number; width: number }>, x: number): nu
  * Turn a pointer position into a drop intent against a set of measured leaf
  * rectangles. Pure geometry: the caller measures the DOM, this only decides.
  *
- * The centre zone is the middle 50% of each axis; outside it, the nearer
- * edge is chosen by fraction of that axis (x/width vs y/height), not raw
- * pixels, so a wide short leaf isn't all-left-and-right. Ties go horizontal.
- * An axis under 120px offers no split on that axis.
+ * The centre zone is the middle 50% of each axis, measured within the
+ * leaf's content box below its tab bar; outside it, the nearer edge is
+ * chosen by fraction of that axis (x/width vs y/contentHeight), not raw
+ * pixels, so a wide short leaf isn't all-left-and-right. Ties go
+ * horizontal. An axis under 120px offers no split on that axis.
  */
 export function resolveDrop(leaves: LeafRect[], pointer: { x: number; y: number }): Drop | null {
   const hit = leaves.find((candidate) => containsPointer(candidate.rect, pointer));
@@ -373,11 +374,13 @@ export function resolveDrop(leaves: LeafRect[], pointer: { x: number; y: number 
     return { kind: "tab", leafId: hit.leafId, index: tabIndexAt(hit.tabs, pointer.x) };
   }
 
-  const fx = (pointer.x - hit.rect.left) / hit.rect.width;
-  const fy = (pointer.y - hit.rect.top) / hit.rect.height;
+  const contentTop = hit.rect.top + hit.tabBarHeight;
+  const contentHeight = Math.max(1, hit.rect.height - hit.tabBarHeight);
+  const fx = (pointer.x - hit.rect.left) / Math.max(1, hit.rect.width);
+  const fy = (pointer.y - contentTop) / contentHeight;
 
   const canSplitX = hit.rect.width >= MIN_SPLIT_AXIS_PX;
-  const canSplitY = hit.rect.height >= MIN_SPLIT_AXIS_PX;
+  const canSplitY = contentHeight >= MIN_SPLIT_AXIS_PX;
   const append: Drop = { kind: "tab", leafId: hit.leafId, index: hit.tabs.length };
 
   const nearX = Math.min(fx, 1 - fx);
