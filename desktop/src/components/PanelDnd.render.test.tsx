@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "solid-js/web";
 
 import { leaf, type LayoutLeaf } from "@/lib/layout";
@@ -246,5 +246,51 @@ describe("PanelDnd rendered feedback", () => {
     secondTab.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await Promise.resolve();
     expect(secondTab.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("in edit mode, a click below the drag threshold still reaches its target (pointer-capture regression)", async () => {
+    // Task 10's live-Electron repro: capturing the pointer on pointerdown
+    // (before the 4px threshold is known to have been crossed) makes
+    // Chromium retarget the click it synthesizes on pointerup to the
+    // capturing element, so a plain click on a tab, "Hide", or "Collapse"
+    // inside edit mode did nothing at all. jsdom does not implement that
+    // capture-retargeting behaviour — `panelDnd.test.ts`'s "does not take
+    // pointer capture until the drag threshold is crossed" is the test that
+    // actually exercises the fix — so this instead proves the fix didn't
+    // regress the ordinary, un-retargeted path: a real mousedown-then-click
+    // sequence (never crossing the threshold) on each edit-mode control
+    // reaches that control.
+    const bar = mountActivatable({ editing: true });
+    const tabs = [...bar.querySelectorAll<HTMLElement>("[data-tab-index]")];
+    const secondTab = tabs[1]!.querySelector<HTMLButtonElement>("button")!;
+    const hideFirst = tabs[0]!.querySelector<HTMLButtonElement>(".workbench-tab-close")!;
+    const collapseBtn = bar.querySelector<HTMLButtonElement>(".workbench-leaf-collapse-btn")!;
+
+    function clickWithoutDragging(el: HTMLElement) {
+      el.dispatchEvent(pointerEvent("pointerdown", 10, 10));
+      el.dispatchEvent(pointerEvent("pointerup", 11, 10)); // 1px of jitter, well under THRESHOLD
+      el.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    }
+
+    expect(secondTab.getAttribute("aria-selected")).toBe("false");
+    clickWithoutDragging(secondTab);
+    await Promise.resolve();
+    expect(secondTab.getAttribute("aria-selected")).toBe("true");
+
+    clickWithoutDragging(hideFirst);
+    await Promise.resolve();
+    expect(layoutStore.hiddenPanels()).toContain(FIRST_ID);
+
+    // Collapse is spied rather than asserted via the resulting DOM class:
+    // `setCollapsed` itself refuses to collapse the sole remaining open leaf
+    // (a separate, already-covered rule in `store/layout.test.ts`), and this
+    // single-leaf tree has nowhere else for content to go. What this test
+    // needs to prove is narrower — that the click reaches the button's
+    // handler at all — so it asserts the call, not the store's business
+    // logic on top of it.
+    const setCollapsed = vi.spyOn(layoutStore, "setCollapsed");
+    clickWithoutDragging(collapseBtn);
+    expect(setCollapsed).toHaveBeenCalledWith("panel-dnd-render-leaf", true);
+    setCollapsed.mockRestore();
   });
 });

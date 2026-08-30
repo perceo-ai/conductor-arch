@@ -122,8 +122,11 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
       </div>
       {/* While a child is collapsed the ratio does not drive anything, so a
           drag here would change nothing on screen while still forking the
-          preset and scheduling a remote save. */}
-      <Show when={!anyCollapsed()}>
+          preset and scheduling a remote save. Resizing is a structural edit
+          like drag, split, collapse, close, and add — all of it lives inside
+          edit mode, so outside it the handle is not just visually dimmed but
+          absent from the DOM: no element, no pointerdown handler, no resize. */}
+      <Show when={!anyCollapsed() && layoutStore.editing()}>
         <SplitHandle
           direction={props.node.direction}
           ratio={ratio}

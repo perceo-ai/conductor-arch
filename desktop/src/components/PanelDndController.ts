@@ -96,6 +96,8 @@ export function createPanelDragController(options: ControllerOptions) {
         startY: number;
         pointerId: number;
         captureTarget: BeginPanelDrag["captureTarget"];
+        /** Whether `setPointerCapture` has actually been called for this session. */
+        captured: boolean;
       })
     | null = null;
   let framePending = false;
@@ -125,7 +127,7 @@ export function createPanelDragController(options: ControllerOptions) {
 
   function cleanup() {
     if (!current) return;
-    current.captureTarget.releasePointerCapture?.(current.pointerId);
+    if (current.captured) current.captureTarget.releasePointerCapture?.(current.pointerId);
     window.removeEventListener("pointermove", onPointerMove);
     window.removeEventListener("pointerup", onPointerUp);
     window.removeEventListener("pointercancel", onPointerCancel);
@@ -143,6 +145,13 @@ export function createPanelDragController(options: ControllerOptions) {
    * tests can drive the state machine without synthesizing DOM events; the
    * window `pointermove` listener below is just this same call wired to the
    * real pointer.
+   *
+   * Pointer capture is taken here, on the threshold crossing, not in
+   * `begin()`. Capturing on pointerdown retargets the click Chromium
+   * synthesizes on pointerup to the capturing element even when the pointer
+   * never actually dragged — dead tab switches, dead "Hide", dead "Collapse"
+   * in edit mode, all from the same bug. Below the threshold there is no
+   * drag, so there must be no capture, so a plain click behaves normally.
    */
   function move(input: { clientX: number; clientY: number }) {
     if (!current) return;
@@ -155,6 +164,8 @@ export function createPanelDragController(options: ControllerOptions) {
         return;
       }
       current.dragging = true;
+      current.captured = true;
+      current.captureTarget.setPointerCapture?.(current.pointerId);
       document.body.classList.add("panel-dragging");
     }
     scheduleMeasure();
@@ -212,12 +223,14 @@ export function createPanelDragController(options: ControllerOptions) {
         startY: input.clientY,
         pointerId: input.pointerId,
         captureTarget: input.captureTarget,
+        captured: false,
         drop: null,
         preview: null,
         caret: null,
       };
       activeDragSessions += 1;
-      input.captureTarget.setPointerCapture?.(input.pointerId);
+      // No `setPointerCapture` here — see `move()`, which takes it only once
+      // the drag threshold is actually crossed.
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", onPointerUp);
       window.addEventListener("pointercancel", onPointerCancel);

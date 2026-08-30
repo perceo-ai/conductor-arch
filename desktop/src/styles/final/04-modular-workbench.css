@@ -48,12 +48,16 @@
   overflow: hidden;
 }
 
+/* Only rendered at all while `layoutStore.editing()` is true (see
+   `LayoutNodeView.tsx`) — resizing is a structural edit like every other
+   affordance in this mode, so there is nothing to style, or to gate here,
+   outside it. */
 .workbench-split > .resize-handle-split {
   position: relative;
   flex: 0 0 1px;
   width: 1px;
   height: auto;
-  background: var(--ui-border, #262626);
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 55%, transparent);
 }
 
 .workbench-split[data-direction="column"] > .resize-handle-split {
@@ -85,13 +89,6 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 .workbench-split > .resize-handle-split:hover,
 .workbench-split > .resize-handle-split:focus-visible {
   background: var(--lc-accent, #c39b50);
-}
-
-/* Edit mode makes every split handle read as interactive rather than as a
-   plain 1px divider, so the tree's resize points are discoverable without
-   first hovering each one. */
-.workbench-editing .workbench-split > .resize-handle-split {
-  background: color-mix(in srgb, var(--lc-accent, #c39b50) 55%, transparent);
 }
 
 /* ---- Leaves ---- */

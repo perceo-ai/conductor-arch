@@ -12,6 +12,7 @@ vi.mock("@/lib/panelWidths", async (importOriginal) => {
 
 import { leaf, split, type LayoutNode } from "@/lib/layout";
 import { registerPanel, unregisterPanel } from "@/lib/panelRegistry";
+import { layoutStore } from "@/store/layout";
 import {
   PANEL_MIN_HEIGHT_PX,
   PANEL_MIN_PX,
@@ -79,6 +80,7 @@ afterEach(() => {
     delete PANEL_MIN_PX[panel.id];
     delete PANEL_MIN_HEIGHT_PX[panel.id];
   }
+  layoutStore.setEditing(false);
 });
 
 function mount(node: LayoutNode) {
@@ -109,7 +111,23 @@ describe("LayoutNodeView", () => {
     expect(container.dataset.direction).toBe("row");
     expect([...host.querySelectorAll("[data-leaf-id]")].map((el) => el.getAttribute("data-leaf-id")))
       .toEqual(["a", "b"]);
+    // Resizing is a structural edit like drag, split, collapse, close, and
+    // add — the handle exists only inside edit mode (see LayoutNodeView.tsx),
+    // not as a permanently-present-but-dimmed divider.
+    expect(host.querySelectorAll(".resize-handle-split")).toHaveLength(0);
+  });
+
+  it("renders the resize handle only in edit mode", () => {
+    const host = mount(
+      split("row", leaf([PANELS.wide.id], { id: "a" }), leaf([PANELS.wider.id], { id: "b" }), 0.4),
+    );
+    expect(host.querySelectorAll(".resize-handle-split")).toHaveLength(0);
+
+    layoutStore.setEditing(true);
     expect(host.querySelectorAll(".resize-handle-split")).toHaveLength(1);
+
+    layoutStore.setEditing(false);
+    expect(host.querySelectorAll(".resize-handle-split")).toHaveLength(0);
   });
 
   it("gives the first child the stored ratio and the second the remainder", () => {
@@ -193,9 +211,11 @@ describe("LayoutNodeView", () => {
     expect(flexOf(column, 1)).toBe(`0 0 ${COLLAPSED_HEADER_PX}px`);
   });
 
-  it("hides the resize handle while a child is collapsed", () => {
+  it("hides the resize handle while a child is collapsed, even in edit mode", () => {
     // The ratio drives nothing in this state, so a drag would fork the preset
-    // and schedule a save with nothing visibly changing.
+    // and schedule a save with nothing visibly changing. Edit mode alone is
+    // not enough to show it — collapse still wins.
+    layoutStore.setEditing(true);
     const host = mount(
       split(
         "row",
