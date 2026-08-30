@@ -1243,3 +1243,108 @@ Not verified: the Windows service on a real Windows host — it is unit-covered
 (launcher contents, task XML, UTF-16 encoding, temp-path refusal) and
 cross-compiles, but no `schtasks` call has been executed. CI's Windows job builds
 and smokes the CLI; it does not install the task.
+
+## Workbench layout editing (2026-08-29)
+
+The fixed four-region workbench is gone. The layout is a recursive split tree —
+`split(row|column, childA, childB, ratio)` down to leaves that each hold a tab
+list — plus an explicit edit mode reached from the Layout menu or `mod+shift+l`.
+Regions, `Stack`, `defaultRegion`, `clampRegionSize`, the device-local layout
+prefs, and the panel grip button were deleted rather than kept alongside.
+
+Suite at `765a544`: `tsc --noEmit` clean, 79 desktop test files / 577 tests
+passed, `pnpm build` green.
+
+### Verified in the real Electron window
+
+Playwright against `dist-electron/main.js` on macOS, 1600x1000, with
+`XDG_DATA_HOME`/`XDG_STATE_HOME` on a scratch dir and a seeded repo and
+workspace, so the real database was never touched. Screenshots for each check
+are in `/tmp/wbsmoke/shots/` — they are under `/tmp` and are not durable; the
+per-check numbers below are the durable record.
+
+- **No grip button exists in either mode.** A DOM sweep for a `grip` class or a
+  grip/drag-handle/move-panel/reorder label returns `[]` in both modes, and no
+  loaded CSS rule matches `/grip/i`.
+- **Outside edit mode a tab-bar press-and-drag moves nothing.** No drag ghost,
+  no drop preview, no `body.panel-dragging`, and the serialized tree is
+  byte-identical before and after. Plain tab clicks still switch panels. The tab
+  bar deliberately has no `pointerdown` handler at all outside edit mode, which
+  is why.
+- **Both entry points into edit mode work** and produce the same toolbar —
+  `role="toolbar"`, `aria-label="Editing layout"`, buttons `Add panel`,
+  `Revert changes`, `Done`.
+- **A drag to a leaf's right edge previews exactly the right half.** Chat leaf
+  `{420, 79, 731x921}`, live preview `{785.48, 79, 365.48x921}` against the
+  ideal `{785.5, 79, 365.5x921}`. Releasing splits that leaf and the panel takes
+  the half it was shown.
+- **A drag onto a tab bar shows a 2px caret, not a half-leaf.** Measured
+  `{x 1252.88, y 190.4, 2x40}`, sitting on the `changes` tab's left edge, i.e.
+  between Files and Changes; the drop inserted at index 2. A preview rect is
+  still drawn for a tab drop, but it is the leaf's whole content area below the
+  bar, not a half.
+- **Revert restores the entry snapshot exactly.** After a drag split, a hide,
+  and a collapse, `Revert changes` produced a tree string-identical to the one
+  captured at edit-mode entry, node ids included.
+- **Escape priority is right.** With a drag in flight Escape kills only the drag
+  (ghost and preview gone, tree unchanged) and edit mode stays up; with no drag
+  in flight Escape exits edit mode.
+- **A collapsed leaf in a row split really does become a rail.** `flex: 0 0 36px`,
+  `offsetWidth` 36, `scrollWidth` 36, sibling 695 of 731. The old failure — the
+  collapsed leaf resolving to the tab strip's max-content width and refusing to
+  shrink — does not reproduce. jsdom could not have shown this; it does no
+  layout.
+- **The Code preset's PR strip renders at its stated ratio.** 115.1px of a 960px
+  column = 0.1199, not the 0.256 the width-min table used to clamp it to.
+- **A created split survives a full app restart.** Not a renderer reload: the
+  Electron process was closed and relaunched against the same scratch dirs, and
+  the nested row split came back with the same node ids and ratios under the
+  forked `Code (edited)` preset.
+
+### Two real bugs the unit tests cannot see
+
+Both were found only by driving a real pointer, and both are open.
+
+**Every click inside a tab bar is swallowed in edit mode.** In edit mode
+`PanelLeaf` puts `onPointerDown` on the whole `.workbench-tablist`, and
+`PanelDndController.begin` calls `setPointerCapture` on that bar. Chromium
+retargets the following `click` to the capture element, so a capture-phase
+listener sees every edit-mode click arrive at
+`DIV.workbench-tablist`, never at the button under the cursor. In edit mode this
+kills tab switching, every `Hide <panel>` close button, and every
+`Collapse panel` button. Confirmed with an isolated repro in the same renderer:
+with a parent capture the child button's click never fires, without it it does.
+jsdom stubs `setPointerCapture` and `fireEvent.click` targets the button
+directly, so the Task 9 tests pass while the affordances are dead.
+
+**The Add panel menu closes before its own click lands.** `LayoutEditBar`
+registers a `once` `pointerdown` listener on `window` that closes the menu
+unconditionally; the menu's `stopPropagation` guard is on `click`, the wrong
+event. Measured: between `mouse.down()` and `mouse.up()` on a menu item the item
+count is already 0, so `addPanel` is never called. A synthetic `element.click()`
+on the same item does add the panel, which is how "closed panel appears in the
+add list, and adding it back puts it in the layout" was confirmed at all.
+
+Because of the first bug, the collapse for the rail measurement and the add-back
+for the panel list had to be fired with a synthetic `element.click()`. The
+geometry and tree state measured afterwards are real; only the input path was
+worked around, and that is exactly what the two bugs are.
+
+Closing a panel *is* reachable by mouse today: right-clicking a tab opens a
+context menu with `Hide <panel>`, and that path works, because a secondary
+button never starts a drag.
+
+### Not verified
+
+Keyboard-only operation of the edit-mode buttons (untested — it may well work,
+since the bug is pointer-specific). Any platform but macOS, any window size but
+1600x1000. The GTK client, which this plan did not touch. Multi-client
+propagation of an edited preset — only one client was ever connected. Dragging a
+split's resize handle; the handles were located and measured but not dragged.
+
+One expectation in the original Task 10 brief could not be performed as written:
+it asked that entering edit mode show "the edit bar and split handles". Split
+handles are not edit-mode chrome — `LayoutNodeView` renders them whenever a
+split has no collapsed child, and `.workbench-split`'s children are
+`[child, resize-handle, child]` identically in both modes. There is nothing
+about handles that changes on entering edit mode.
