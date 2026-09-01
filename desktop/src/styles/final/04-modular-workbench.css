@@ -288,6 +288,13 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   padding: 0 3px;
 }
 
+/* Review is an action, not a tab. Now that the tabs no longer stretch to fill
+   the strip, it has to claim the leftover width itself to stay on the right
+   edge — the auto margin collapses to nothing when the tabs do overflow. */
+.workbench-tablist .ws-review-prompt-button {
+  margin-left: auto;
+}
+
 .workbench-tab-close {
   position: absolute;
   right: 1px;
