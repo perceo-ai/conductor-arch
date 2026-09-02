@@ -399,7 +399,14 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         .current_dir(&start.launch.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        // Piped, not inherited. Inheriting sent the provider's own errors to
+        // the daemon's stderr — the systemd journal for a service install —
+        // where nothing archductor shows ever looked. A provider that refuses
+        // to start (`--dangerously-skip-permissions cannot be used with
+        // root/sudo` is the one that cost an afternoon) printed its reason and
+        // the session simply vanished, leaving "unknown session" as the only
+        // symptom.
+        .stderr(Stdio::piped());
     for (key, value) in &start.launch.env {
         command.env(key, value);
     }
@@ -409,6 +416,9 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         .spawn()
         .with_context(|| format!("spawn managed {:?} provider process", start.kind))?;
     let pid = child.id();
+    // Held until the process row exists below, which is what gives the session
+    // id the drained lines are filed under.
+    let child_stderr = child.stderr.take();
     let stdin = child
         .stdin
         .take()
@@ -424,6 +434,9 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         &start.launch,
         pid,
     )?;
+    if let Some(stderr) = child_stderr {
+        spawn_provider_stderr_reader(start.db_path.to_path_buf(), process.id, start.kind, stderr);
+    }
     let snapshot = running_session_snapshot(
         process.id,
         start.thread_id,
@@ -465,6 +478,44 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         connection,
         start.event_tx,
     ))
+}
+
+/// Drain a managed provider's stderr into its session transcript.
+///
+/// Providers report their own startup refusals here and nowhere else, so
+/// without this the session dies with no explanation anywhere a user or an
+/// operator looks. The lines land beside the transport's own output, which the
+/// desktop and `archcar messages` already render.
+fn spawn_provider_stderr_reader(
+    db_path: PathBuf,
+    session_id: i64,
+    kind: SessionKind,
+    stderr: std::process::ChildStderr,
+) {
+    let channel = format!("{kind}-stderr");
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        // A provider that fails at startup writes a line or two; one that runs
+        // for hours could write many. Record the beginning, which is where the
+        // reason lives, and stop rather than growing the transcript unbounded.
+        const MAX_STDERR_LINES: usize = 200;
+        let runtime_store = RuntimeSessionStore::new(db_path);
+        for (seen, line) in reader.lines().map_while(Result::ok).enumerate() {
+            if seen >= MAX_STDERR_LINES {
+                let _ = runtime_store.append_provider_native_output(
+                    session_id,
+                    &channel,
+                    "[further stderr suppressed]",
+                );
+                break;
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            warn!(session_id, %channel, line = %line, "managed provider stderr");
+            let _ = runtime_store.append_provider_native_output(session_id, &channel, &line);
+        }
+    });
 }
 
 fn spawn_stdout_line_reader(stdout: std::process::ChildStdout) -> Receiver<String> {
@@ -3624,7 +3675,7 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn raw_terminal_write_failure_emits_error_and_terminates_session() {
         let temp = tempfile::tempdir().unwrap();
@@ -3873,6 +3924,47 @@ mod tests {
     fn provider_input_local_ids_are_session_scoped() {
         assert_eq!(provider_input_local_id(7, 3), "session-7-input-3");
         assert_ne!(provider_input_local_id(1, 1), provider_input_local_id(2, 1));
+    }
+
+    #[test]
+    fn provider_stderr_reaches_the_session_transcript() {
+        // A provider that refuses to start explains itself on stderr and
+        // exits. That used to be inherited by the daemon and land in the
+        // systemd journal, so the session vanished with no visible reason:
+        // `--dangerously-skip-permissions cannot be used with root/sudo` cost
+        // an afternoon precisely because nothing archductor shows had it.
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43992);
+        let db_path = temp.path().join("state.db");
+
+        let mut child = ProcessCommand::new("sh")
+            .args(["-c", "echo 'refusing to start' >&2; echo 'second line' >&2"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        spawn_provider_stderr_reader(db_path.clone(), process.id, SessionKind::CLAUDE, stderr);
+        let _ = child.wait();
+
+        // The drain runs on its own thread; poll the transcript for it.
+        let recorded = (0..100)
+            .find_map(|_| {
+                let text = std::fs::read_to_string(&process.log_path).unwrap_or_default();
+                if text.contains("refusing to start") {
+                    return Some(text);
+                }
+                thread::sleep(Duration::from_millis(20));
+                None
+            })
+            .unwrap_or_default();
+
+        assert!(recorded.contains("refusing to start"), "{recorded}");
+        assert!(recorded.contains("second line"), "{recorded}");
     }
 
     #[test]

@@ -20,6 +20,14 @@ contents:
     file_info:
       mode: 0755
 
+  # The daemon, not an optional extra: every CLI command, the desktop app, and
+  # every MCP client talk to archcar, and `archductor service install` resolves
+  # it from PATH. Shipping only the CLI leaves a package that cannot start.
+  - src: target/release/archcar
+    dst: /usr/bin/archcar
+    file_info:
+      mode: 0755
+
   - src: packaging/assets/archductor.png
     dst: /usr/share/icons/hicolor/256x256/apps/archductor.png
     file_info:

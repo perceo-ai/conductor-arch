@@ -109,6 +109,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The diff stat and the PR number are separate spans with no whitespace
+   between them in the markup, so without a gap they render as "+5 -0PR #109". */
+.dashboard-card-essentials {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
 .ws-tab-shell {
   cursor: pointer;
   white-space: nowrap;

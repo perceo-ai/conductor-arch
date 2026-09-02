@@ -4281,10 +4281,16 @@ impl WorkspaceStore {
         if let Some(existing) = self.existing_pull_request_for_workspace(&workspace)? {
             return Ok(format!("Existing PR: {}\n", existing.url));
         }
-        let changed = self.changed_files(name)?;
-        if changed.is_empty() {
+        // A pull request proposes everything the branch has done since it
+        // forked. Gating on `changed_files` — a `git status` of the working
+        // tree — meant that committing your work, the thing the old error
+        // message told you to do, made the branch ineligible. `branch_changed_
+        // files` is the set the PR draft already describes: committed since the
+        // fork point, plus anything still uncommitted.
+        if self.branch_changed_files(name)?.is_empty() {
             anyhow::bail!(
-                "workspace {name} has no changed files; commit changes before creating a PR"
+                "workspace {name} has nothing to propose: no commits since it branched and no \
+                 uncommitted changes"
             );
         }
         let mut args = vec!["pr", "create"];
@@ -12698,6 +12704,73 @@ mod tests {
     }
 
     #[test]
+    fn committed_work_still_counts_as_something_to_propose() {
+        // Regression: the PR precondition read the *working tree*, so
+        // committing your work — exactly what the old error told you to do —
+        // left `changed_files` empty and made the branch ineligible.
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        fs::write(workspace.path.join("note.txt"), "work\n").unwrap();
+        // Uncommitted work is proposable, and was before this fix too.
+        assert!(store
+            .changed_files("berlin")
+            .unwrap()
+            .iter()
+            .any(|path| path == "note.txt"));
+
+        git(&workspace.path, ["add", "note.txt"]).unwrap();
+        git(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add a note",
+            ],
+        )
+        .unwrap();
+
+        // Committing removes it from the working-tree view the old gate used...
+        assert!(!store
+            .changed_files("berlin")
+            .unwrap()
+            .iter()
+            .any(|path| path == "note.txt"));
+        // ...but it is still what the branch proposes, which is the gate now.
+        assert!(store
+            .branch_changed_files("berlin")
+            .unwrap()
+            .iter()
+            .any(|path| path == "note.txt"));
+    }
+
+    #[test]
     fn branch_push_state_reports_no_upstream_ahead_behind_and_diverged() {
         let temp = tempfile::tempdir().unwrap();
         let origin_path = temp.path().join("origin.git");
@@ -16659,16 +16732,16 @@ working_directory = "apps/web"
                 "pwd; printf 'root=%s\\nwork=%s\\n' \"$ARCHDUCTOR_WORKSPACE_PATH\" \"$ARCHDUCTOR_WORKING_DIRECTORY\"",
             )
             .unwrap();
+        let working_directory = workspace.path.join("apps/web").canonicalize().unwrap();
 
-        assert_eq!(result.cwd, workspace.path.join("apps/web"));
+        assert_eq!(result.cwd, working_directory);
         assert!(result.stdout.contains(result.cwd.to_str().unwrap()));
         assert!(result
             .stdout
             .contains(&format!("root={}", workspace.path.to_string_lossy())));
-        assert!(result.stdout.contains(&format!(
-            "work={}",
-            workspace.path.join("apps/web").to_string_lossy()
-        )));
+        assert!(result
+            .stdout
+            .contains(&format!("work={}", working_directory.to_string_lossy())));
     }
 
     #[test]
@@ -17989,12 +18062,10 @@ working_directory = "apps/api"
         let setup = store.setup_workspace("berlin").unwrap();
         wait_for_log(&setup.log_path, "work=");
         let log = store.read_latest_setup_log("berlin").unwrap();
+        let working_directory = workspace.path.join("apps/api").canonicalize().unwrap();
 
-        assert!(log.contains(workspace.path.join("apps/api").to_str().unwrap()));
-        assert!(log.contains(&format!(
-            "work={}",
-            workspace.path.join("apps/api").to_string_lossy()
-        )));
+        assert!(log.contains(working_directory.to_str().unwrap()));
+        assert!(log.contains(&format!("work={}", working_directory.to_string_lossy())));
     }
 
     #[test]
@@ -19111,15 +19182,16 @@ working_directory = "apps/worker"
             .unwrap();
 
         let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
+        let working_directory = workspace.path.join("apps/worker").canonicalize().unwrap();
 
-        assert_eq!(launch.cwd, workspace.path.join("apps/worker"));
+        assert_eq!(launch.cwd, working_directory);
         assert_eq!(
             launch.env_value("ARCHDUCTOR_WORKSPACE_PATH"),
             workspace.path.to_str()
         );
         assert_eq!(
             launch.env_value("ARCHDUCTOR_WORKING_DIRECTORY"),
-            workspace.path.join("apps/worker").to_str()
+            working_directory.to_str()
         );
     }
 

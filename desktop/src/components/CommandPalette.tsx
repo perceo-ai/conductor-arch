@@ -8,12 +8,17 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore, actions } from "@/store";
 import type { Accent } from "@/store/prefs";
-import { PRODUCT_RIGHT_PANEL_TABS, type RightPanelTab } from "@/lib/rightPanelTabs";
+import { workspacePanels } from "@/lib/panelRegistry";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
-import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
+import {
+  parseKeybindingOverrides,
+  resolveShortcut,
+  shortcutForAction,
+  type ShortcutAction,
+} from "@/lib/shortcuts";
 import { send } from "@/bridge/client";
 import { openFileInCenter } from "@/pages/openFileBridge";
 
@@ -27,14 +32,17 @@ interface Command {
   label: string;
   hint?: string;
   group: string;
+  shortcut?: ShortcutAction;
   run: () => void;
 }
 
-// Right-panel targets the palette can jump to (these actually drive the
-// CommandCenter right panel via nav.setRightPanelTab).
-const WORKSPACE_PANELS: { tab: RightPanelTab; label: string }[] = PRODUCT_RIGHT_PANEL_TABS.map(
-  (tab) => ({ tab: tab.id, label: tab.label }),
-);
+const PANEL_SHORTCUTS: Partial<Record<string, ShortcutAction>> = {
+  changes: "show-changes",
+  files: "show-files",
+  checks: "show-checks",
+  summary: "show-summary",
+  terminal: "toggle-terminal",
+};
 
 export default function CommandPalette() {
   const [open, setOpen] = createSignal(false);
@@ -42,18 +50,37 @@ export default function CommandPalette() {
   const [cursor, setCursor] = createSignal(0);
   const activeShortcuts = createMemo(() => parseKeybindingOverrides(prefsStore.state.keybindings));
   let inputRef: HTMLInputElement | undefined;
+  let panelRef: HTMLDivElement | undefined;
+  let previousFocus: HTMLElement | undefined;
 
   function close() {
+    const restore = previousFocus;
     setOpen(false);
     setQuery("");
     setCursor(0);
+    previousFocus = undefined;
+    queueMicrotask(() => {
+      if (restore?.isConnected && !restore.matches(":disabled, [aria-disabled='true']")) {
+        restore.focus();
+        if (document.activeElement === restore) return;
+      }
+      const fallback = document.querySelector<HTMLElement>(
+        "[data-focus-target='workspace-main'], .settings-search input, .page-shell, .settings-main, main",
+      );
+      fallback?.focus();
+    });
+  }
+  function openPalette() {
+    if (!open()) {
+      const active = document.activeElement;
+      previousFocus = active instanceof HTMLElement ? active : undefined;
+      setOpen(true);
+    }
+    queueMicrotask(() => inputRef?.focus());
   }
   function toggle() {
     if (open()) close();
-    else {
-      setOpen(true);
-      queueMicrotask(() => inputRef?.focus());
-    }
+    else openPalette();
   }
 
   onMount(() => {
@@ -67,15 +94,29 @@ export default function CommandPalette() {
         close();
       }
     };
-    const onOpen = () => {
-      setOpen(true);
-      queueMicrotask(() => inputRef?.focus());
-    };
+    const onOpen = () => openPalette();
     window.addEventListener("keydown", onKey);
     window.addEventListener("archductor:open-command-palette", onOpen);
     onCleanup(() => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("archductor:open-command-palette", onOpen);
+    });
+  });
+
+  // Make the palette a true modal keyboard surface. Electron supports inert;
+  // the focusin guard also keeps focus contained for programmatic focus moves.
+  createEffect(() => {
+    if (!open()) return;
+    const background = document.querySelector<HTMLElement>(".window-content");
+    background?.setAttribute("inert", "");
+    const containFocus = (event: FocusEvent) => {
+      if (panelRef?.contains(event.target as Node)) return;
+      inputRef?.focus();
+    };
+    document.addEventListener("focusin", containFocus);
+    onCleanup(() => {
+      background?.removeAttribute("inert");
+      document.removeEventListener("focusin", containFocus);
     });
   });
 
@@ -97,10 +138,10 @@ export default function CommandPalette() {
   const commands = createMemo<Command[]>(() => {
     const list: Command[] = [];
     // Pages.
-    const pages: { page: Parameters<typeof nav.goToPage>[0]; label: string }[] = [
-      { page: "dashboard", label: "Dashboard" },
-      { page: "history", label: "History" },
-      { page: "settings", label: "Settings" },
+    const pages: { page: Parameters<typeof nav.goToPage>[0]; label: string; shortcut: ShortcutAction }[] = [
+      { page: "dashboard", label: "Dashboard", shortcut: "goto-dashboard" },
+      { page: "history", label: "History", shortcut: "goto-history" },
+      { page: "settings", label: "Settings", shortcut: "goto-settings" },
     ];
     for (const p of pages) {
       list.push({
@@ -108,40 +149,36 @@ export default function CommandPalette() {
         label: `Go to ${p.label}`,
         hint: "Page",
         group: "Navigate",
+        shortcut: p.shortcut,
         run: () => nav.goToPage(p.page),
       });
     }
     // Workspaces.
-    for (const name of workspacesStore.state.order) {
+    for (const [index, name] of workspacesStore.state.order.entries()) {
       const row = workspacesStore.row(name);
       list.push({
         id: `ws:${name}`,
         label: titleCaseWorkspace(name),
         hint: row?.branch ?? row?.repository,
         group: "Workspaces",
+        shortcut: index < 9 ? `switch-workspace-${index + 1}` as ShortcutAction : undefined,
         run: () => nav.selectWorkspace(name),
       });
     }
-    // Workspace views (only meaningful with a selected workspace). These focus
-    // the workspace and drive the CommandCenter right-panel tab.
+    // Workspace panels are generated from the live registry so hidden and
+    // dynamically registered surfaces always retain a keyboard path.
     const active = nav.selectedWorkspace();
     if (active) {
-      list.push({
-        id: "view:chats",
-        label: "Chats",
-        hint: titleCaseWorkspace(active),
-        group: "Workspace",
-        run: () => nav.selectWorkspace(active),
-      });
-      for (const t of WORKSPACE_PANELS) {
+      for (const panel of workspacePanels()) {
         list.push({
-          id: `panel:${t.tab}`,
-          label: t.label,
+          id: `panel:${panel.id}`,
+          label: `Show: ${panel.title}`,
           hint: titleCaseWorkspace(active),
-          group: "Workspace",
+          group: "Panels",
+          shortcut: PANEL_SHORTCUTS[panel.id],
           run: () => {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab(t.tab);
+            actions.revealPanel(panel.id);
           },
         });
       }
@@ -152,6 +189,7 @@ export default function CommandPalette() {
       label: `Switch to ${prefsStore.state.theme === "dark" ? "light" : "dark"} theme`,
       hint: "Appearance",
       group: "Appearance",
+      shortcut: "toggle-theme",
       run: () => prefsStore.setTheme(prefsStore.state.theme === "dark" ? "light" : "dark"),
     });
     const ACCENTS: Accent[] = ["amber", "blue", "green", "rose"];
@@ -168,6 +206,7 @@ export default function CommandPalette() {
       label: "Keyboard shortcuts",
       hint: "Help",
       group: "Help",
+      shortcut: "show-help",
       run: () => uiStore.setHelpOpen(true),
     });
     list.push({
@@ -183,6 +222,7 @@ export default function CommandPalette() {
       label: "Add project…",
       hint: "Action",
       group: "Actions",
+      shortcut: "add-project",
       run: () => dialogs.open({ kind: "add-project" }),
     });
     const firstRepo = repositoriesStore.state.order[0];
@@ -193,6 +233,7 @@ export default function CommandPalette() {
         label: `New workspace in ${repoForNew}…`,
         hint: "Action",
         group: "Actions",
+        shortcut: "new-workspace",
         run: () => dialogs.open({ kind: "create-workspace", repository: repoForNew }),
       });
     }
@@ -202,6 +243,7 @@ export default function CommandPalette() {
         label: "Workspace actions…",
         hint: titleCaseWorkspace(active),
         group: "Actions",
+        shortcut: "workspace-actions",
         run: () => dialogs.open({ kind: "workspace-actions", workspace: active }),
       });
     }
@@ -258,16 +300,33 @@ export default function CommandPalette() {
     } else if (e.key === "Enter") {
       e.preventDefault();
       runAt(cursor());
+    } else if (e.key === "Tab") {
+      // Results use arrows rather than Tab, leaving one stable focus stop and
+      // preventing the browser from escaping the modal surface.
+      e.preventDefault();
+      inputRef?.focus();
     }
   }
 
   return (
     <Show when={open()}>
       <div class="cmdk-overlay" onClick={close}>
-        <div class="cmdk-panel" onClick={(e) => e.stopPropagation()}>
+        <div
+          ref={panelRef}
+          class="cmdk-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Command palette"
+          onClick={(e) => e.stopPropagation()}
+        >
           <input
             ref={inputRef}
             class="cmdk-input"
+            role="combobox"
+            aria-controls="cmdk-listbox"
+            aria-expanded="true"
+            aria-autocomplete="list"
+            aria-activedescendant={filtered()[cursor()] ? `cmdk-option-${cursor()}` : undefined}
             placeholder="Search commands, workspaces, pages…"
             value={query()}
             onInput={(e) => {
@@ -276,7 +335,7 @@ export default function CommandPalette() {
             }}
             onKeyDown={onInputKey}
           />
-          <div class="cmdk-list">
+          <div id="cmdk-listbox" class="cmdk-list" role="listbox">
             <Show
               when={filtered().length > 0}
               fallback={<div class="cmdk-empty">No matches</div>}
@@ -284,8 +343,13 @@ export default function CommandPalette() {
               <For each={filtered()}>
                 {(cmd, i) => (
                   <button
+                    id={`cmdk-option-${i()}`}
                     class="cmdk-item"
                     classList={{ "cmdk-item-active": i() === cursor() }}
+                    role="option"
+                    aria-selected={i() === cursor()}
+                    tabIndex={-1}
+                    data-shortcut={cmd.shortcut ? shortcutForAction(cmd.shortcut, activeShortcuts()) : undefined}
                     onMouseEnter={() => setCursor(i())}
                     onClick={() => runAt(i())}
                   >
@@ -293,6 +357,11 @@ export default function CommandPalette() {
                     <span class="cmdk-item-label">{cmd.label}</span>
                     <Show when={cmd.hint}>
                       <span class="cmdk-item-hint">{cmd.hint}</span>
+                    </Show>
+                    <Show when={cmd.shortcut && shortcutForAction(cmd.shortcut, activeShortcuts())}>
+                      <kbd class="cmdk-item-shortcut">
+                        {shortcutForAction(cmd.shortcut!, activeShortcuts())}
+                      </kbd>
                     </Show>
                   </button>
                 )}

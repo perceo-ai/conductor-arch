@@ -1,6 +1,7 @@
 import { For, Show, type JSX } from "solid-js";
 import Icon from "@/components/Icon";
 import type { QueuedArchcarInput } from "@/bridge/protocol";
+import { configuredShortcut } from "@/lib/configuredShortcut";
 
 // Presentational pieces of the composer. Each takes everything it needs as
 // props and owns no state, so the composer's reactive graph stays in one place
@@ -30,19 +31,6 @@ export function ComposerErrorBanner(props: {
         onClick={() => props.onDismiss()}
       >
         <Icon name="x" />
-      </button>
-    </div>
-  );
-}
-
-/** A plan is waiting on review. Shown above the input because approving it (or
- *  saying what to change) is what the composer is for until it is resolved. */
-export function ComposerPlanReview(props: { onApprove: () => void }) {
-  return (
-    <div class="chat-plan-review">
-      <span class="chat-plan-review-label">Plan ready — approve it, or say what to change.</span>
-      <button class="ui-button-primary chat-plan-approve" onClick={() => props.onApprove()}>
-        Approve &amp; build
       </button>
     </div>
   );
@@ -187,6 +175,7 @@ export function ComposerSendButton(props: {
         <button
           class="chat-send-btn"
           classList={{ "chat-send-btn-active": props.hasText }}
+          data-shortcut={configuredShortcut("send-immediate")}
           onClick={() => props.onActivate()}
           title="Send"
           disabled={!props.hasText}
@@ -215,6 +204,7 @@ export function ComposerToggle(props: {
       class="chat-plan-toggle"
       classList={{ "chat-plan-toggle-on": props.on }}
       title={props.title}
+      data-shortcut={props.label === "Plan" ? configuredShortcut("toggle-plan-mode") : undefined}
       onClick={() => props.onClick()}
     >
       <Icon name={props.icon} />

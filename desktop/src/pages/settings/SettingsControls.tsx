@@ -1,5 +1,6 @@
 import {  Show,  type JSX } from "solid-js";
 import Icon, { type IconName } from "@/components/Icon";
+import PeekCard, { type PeekTriggerProps } from "@/components/PeekCard";
 
 export type SettingsSection = "general" | "clients" | "agents" | "repository" | "advanced";
 
@@ -52,10 +53,31 @@ export function SettingsRow(props: {
   control?: JSX.Element;
   accent?: boolean;
 }) {
-  return (
-    <div class="settings-row" classList={{ "settings-row-accent": props.accent }}>
+  const renderRow = (peek?: PeekTriggerProps) => (
+    <div
+      class="settings-row"
+      classList={{ "settings-row-accent": props.accent }}
+      onPointerEnter={peek?.onPointerEnter}
+      onPointerLeave={peek?.onPointerLeave}
+    >
       <div class="settings-row-copy">
-        <div class="settings-row-title">{props.title}</div>
+        <div class="settings-row-title-line">
+          <div class="settings-row-title">{props.title}</div>
+          {peek ? (
+            <span
+              ref={peek.ref}
+              aria-describedby={peek["aria-describedby"]}
+              onFocus={peek.onFocus}
+              onBlur={peek.onBlur}
+              onKeyDown={peek.onKeyDown}
+              class="settings-row-peek-trigger"
+              tabIndex={0}
+              aria-label={`About ${props.title}`}
+            >
+              <Icon name="circle-help" />
+            </span>
+          ) : null}
+        </div>
         <Show when={props.description}>
           <div class="settings-row-description">{props.description}</div>
         </Show>
@@ -67,6 +89,26 @@ export function SettingsRow(props: {
         <div class="settings-row-control">{props.control}</div>
       </Show>
     </div>
+  );
+  return (
+    <Show when={props.description || props.meta} fallback={renderRow()}>
+      <PeekCard
+        content={
+          <div class="peek-content settings-help-content">
+            <div class="peek-eyebrow">Setting</div>
+            <div class="peek-title-row"><strong>{props.title}</strong></div>
+            <Show when={props.description}>
+              <div class="peek-description">{props.description}</div>
+            </Show>
+            <Show when={props.meta}>
+              <div class="peek-meta">{props.meta}</div>
+            </Show>
+          </div>
+        }
+      >
+        {(peek) => renderRow(peek)}
+      </PeekCard>
+    </Show>
   );
 }
 export function SettingsTextInput(props: {

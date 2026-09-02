@@ -6,6 +6,7 @@ import type {
   ArchcarInputDelivery,
   ArchcarInputKind,
   SessionKind,
+  LayoutPresetRecord,
   SyncSelection,
   WorkspaceGitAction,
 } from "./common";
@@ -105,6 +106,10 @@ export type ArchcarRequest =
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
+  | { type: "list_layout_presets" }
+  | { type: "save_layout_preset"; preset: LayoutPresetRecord }
+  | { type: "delete_layout_preset"; id: string }
+  | { type: "set_project_default_preset"; repository: string; preset_id: string }
   | { type: "get_settings_source"; repository?: string; layer?: string }
   | { type: "list_repository_branches"; repository: string }
   | { type: "list_agent_providers" }
@@ -114,6 +119,7 @@ export type ArchcarRequest =
   | { type: "get_setup_readiness"; recheck?: boolean }
   // Daemon background service + remote access.
   | { type: "get_service_status" }
+  | { type: "service_doctor" }
   | { type: "install_service"; input: { listen?: string; archcar_path?: string } }
   | { type: "uninstall_service" }
   | { type: "get_remote_access" }
@@ -244,4 +250,3 @@ export type WorkspaceChangeScope = "all" | "uncommitted" | { commit: { sha: stri
 export function commitScopeSha(scope: WorkspaceChangeScope): string | null {
   return typeof scope === "object" ? scope.commit.sha : null;
 }
-

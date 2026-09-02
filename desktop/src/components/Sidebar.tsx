@@ -4,7 +4,7 @@ import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
-import { SIDEBAR_MAX, SIDEBAR_MIN, measuredWidth, panelDragMax } from "@/lib/panelWidths";
+import { SIDEBAR_MAX, SIDEBAR_MIN, panelDragMax } from "@/lib/panelWidths";
 import Icon from "./Icon";
 import { workspaceRowActivity } from "@/lib/workspaceStatus";
 import {
@@ -17,6 +17,13 @@ import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { runShellAction } from "@/lib/shellAction";
 import ClientSwitcher from "./ClientSwitcher";
+import PeekCard from "./PeekCard";
+import { RepositoryPeek, WorkspacePeek } from "./SidebarPeek";
+import {
+  parseKeybindingOverrides,
+  shortcutForAction,
+  type ShortcutAction,
+} from "@/lib/shortcuts";
 
 // Run a lifecycle action and surface any failure as a toast rather than
 // swallowing it — a silently-failing remove/delete is how a dead workspace ends
@@ -132,6 +139,18 @@ function repoMenuItems(repo: string): ContextMenuItem[] {
 // with no workspaces yet still appears. Each workspace row reads only its own
 // store slice, so a status change on one workspace re-renders that row alone.
 
+function keyHint(action: ShortcutAction): string | undefined {
+  return shortcutForAction(action, parseKeybindingOverrides(prefsStore.state.keybindings));
+}
+
+function workspaceShortcut(name: string): ShortcutAction | undefined {
+  const active = workspacesStore.state.order.filter(
+    (candidate) => workspacesStore.row(candidate)?.status !== "archived",
+  );
+  const index = active.indexOf(name);
+  return index >= 0 && index < 9 ? `switch-workspace-${index + 1}` as ShortcutAction : undefined;
+}
+
 function WorkspaceRow(props: { name: string }) {
   const row = () => workspacesStore.row(props.name);
   const selected = () => nav.selectedWorkspace() === props.name;
@@ -139,18 +158,25 @@ function WorkspaceRow(props: { name: string }) {
   const hasDiffStats = () => ((row()?.additions ?? 0) > 0 || (row()?.deletions ?? 0) > 0);
   const activity = () => workspaceRowActivity(row() ?? {});
   return (
-    <button
-      class="workspace-row-shell"
-      classList={{ selected: selected() }}
-      onClick={() => nav.selectWorkspace(props.name)}
-      onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.name))}
-      onKeyDown={(e) => {
-        if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
-          openContextMenuFromKeyboard(e, workspaceMenuItems(props.name));
-        }
-      }}
+    <PeekCard
+      content={<Show when={row()}>{(details) => <WorkspacePeek row={details()} />}</Show>}
     >
-      <span class="workspace-row-head">
+      {(peek) => (
+        <button
+          {...peek}
+          class="workspace-row-shell"
+          classList={{ selected: selected() }}
+          data-shortcut={workspaceShortcut(props.name) ? keyHint(workspaceShortcut(props.name)!) : undefined}
+          onClick={() => nav.selectWorkspace(props.name)}
+          onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.name))}
+          onKeyDown={(e) => {
+            if (typeof peek.onKeyDown === "function") peek.onKeyDown(e);
+            if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+              openContextMenuFromKeyboard(e, workspaceMenuItems(props.name));
+            }
+          }}
+        >
+          <span class="workspace-row-head">
         {/* Icon keys off `state`, not `action`: six situations share the
             `view` action and used to share one glyph, which made a merged PR
             indistinguishable from failing checks at a glance. */}
@@ -199,8 +225,10 @@ function WorkspaceRow(props: { name: string }) {
             <span class="workspace-row-deletions">-{row()?.deletions ?? 0}</span>
           </span>
         </Show>
-      </span>
-    </button>
+          </span>
+        </button>
+      )}
+    </PeekCard>
   );
 }
 
@@ -256,26 +284,39 @@ function ProjectGroup(props: { repo: string }) {
   };
   return (
     <div class="project-group">
-      <div
-        class="project-row"
-        tabIndex={0}
-        onContextMenu={(e) => openContextMenu(e, repoMenuItems(props.repo))}
-        onKeyDown={(e) => {
-          if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
-            openContextMenuFromKeyboard(e, repoMenuItems(props.repo));
-          }
-        }}
+      <PeekCard
+        content={
+          <Show when={repositoriesStore.row(props.repo)}>
+            {(row) => <RepositoryPeek row={row()} />}
+          </Show>
+        }
       >
-        <ProjectAvatar repo={props.repo} />
-        <span class="project-name">{props.repo}</span>
-        <button
-          class="ui-button-icon project-add"
-          title="New workspace"
-          onClick={() => dialogs.open({ kind: "create-workspace", repository: props.repo })}
-        >
-          <Icon name="plus" />
-        </button>
-      </div>
+        {(peek) => (
+          <div
+            {...peek}
+            class="project-row"
+            tabIndex={0}
+            onContextMenu={(e) => openContextMenu(e, repoMenuItems(props.repo))}
+            onKeyDown={(e) => {
+              if (typeof peek.onKeyDown === "function") peek.onKeyDown(e);
+              if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+                openContextMenuFromKeyboard(e, repoMenuItems(props.repo));
+              }
+            }}
+          >
+            <ProjectAvatar repo={props.repo} />
+            <span class="project-name">{props.repo}</span>
+            <button
+              class="ui-button-icon project-add"
+              title="New workspace"
+              data-shortcut={keyHint("new-workspace")}
+              onClick={() => dialogs.open({ kind: "create-workspace", repository: props.repo })}
+            >
+              <Icon name="plus" />
+            </button>
+          </div>
+        )}
+      </PeekCard>
       <For each={names()}>{(name) => <WorkspaceRow name={name} />}</For>
     </div>
   );
@@ -301,6 +342,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         <button
           class="ui-button-icon"
           disabled={!nav.canBack()}
+          data-shortcut={keyHint("nav-back")}
           onClick={() => nav.back()}
           title="Back"
         >
@@ -309,12 +351,13 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         <button
           class="ui-button-icon"
           disabled={!nav.canForward()}
+          data-shortcut={keyHint("nav-forward")}
           onClick={() => nav.forward()}
           title="Forward"
         >
           <Icon name="arrow-right" />
         </button>
-        <button class="ui-button-icon" onClick={props.onToggle} title="Hide sidebar">
+        <button class="ui-button-icon" data-shortcut={keyHint("toggle-sidebar")} onClick={props.onToggle} title="Hide sidebar">
           <Icon name="panel-left" />
         </button>
       </div>
@@ -325,6 +368,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         <button
           class="sidebar-nav-button"
           classList={{ active: nav.activePage() === "dashboard" }}
+          data-shortcut={keyHint("goto-dashboard")}
           onClick={() => nav.goToPage("dashboard")}
         >
           <Icon name="layout-dashboard" class="sidebar-nav-icon" />
@@ -333,6 +377,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         <button
           class="sidebar-nav-button"
           classList={{ active: nav.activePage() === "history" }}
+          data-shortcut={keyHint("goto-history")}
           onClick={() => nav.goToPage("history")}
         >
           <Icon name="history" class="sidebar-nav-icon" />
@@ -345,6 +390,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         <button
             class="ui-button-icon"
             title="Add repository"
+            data-shortcut={keyHint("add-project")}
             onClick={() => dialogs.open({ kind: "add-project" })}
           >
             <Icon name="plus" />
@@ -383,6 +429,7 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         <button
           class="sidebar-nav-button"
           classList={{ active: nav.activePage() === "settings" }}
+          data-shortcut={keyHint("goto-settings")}
           onClick={() => nav.goToPage("settings")}
         >
           <Icon name="settings" class="sidebar-nav-icon" />
@@ -395,10 +442,17 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
           edge="right"
           width={width}
           min={SIDEBAR_MIN}
+          // There is no second fixed-width column left to measure: the region
+          // model's right panel is gone and everything to the right of the
+          // sidebar is one workbench that divides itself by ratio, each split
+          // clamped in pixels against its children's minimums. So the only
+          // reservation this drag owes is the workbench's own floor, which is
+          // `panelDragMax`'s `centerMin` default. (It used to measure
+          // `.ws-right-panel`, a selector nothing has emitted since the region
+          // model was deleted — it always returned 0.)
           max={() =>
             panelDragMax({
               viewportWidth: window.innerWidth,
-              otherPanelWidth: measuredWidth(".ws-right-panel"),
               hardMax: SIDEBAR_MAX,
               panelMin: SIDEBAR_MIN,
             })

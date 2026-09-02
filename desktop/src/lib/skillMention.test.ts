@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  insertSkillMention,
   rankSkills,
   skillMentionAt,
   skillsForProvider,
@@ -98,24 +97,5 @@ describe("skillsForProvider", () => {
 
   it("falls back to everything when the provider is unknown", () => {
     expect(skillsForProvider(SKILLS, null)).toHaveLength(3);
-  });
-});
-
-describe("insertSkillMention", () => {
-  it("replaces the typed query and leaves a trailing space", () => {
-    const mention = skillMentionAt("/rev", 4)!;
-    expect(insertSkillMention("/rev", mention, "review")).toEqual({
-      value: "/review ",
-      cursor: 8,
-    });
-  });
-
-  it("keeps the surrounding text intact without doubling the space", () => {
-    const value = "please /rev the diff";
-    const mention = skillMentionAt("please /rev", 11)!;
-    expect(insertSkillMention(value, mention, "review")).toEqual({
-      value: "please /review the diff",
-      cursor: 14,
-    });
   });
 });

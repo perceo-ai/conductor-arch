@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-08-14.
+Current as of 2026-08-24.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -48,10 +48,13 @@ paths and known rough edges.
 - **PR handoff**: `draft_pull_request` builds a title/body from the summary,
   tasks, agent contributions, check evidence, and risks; `create_pull_request`
   is now reachable over archcar/CLI (previously core-only).
-- **Right panel tabs** are the strategy set: Tasks, Summary, Files, Changes,
-  Checks, Context, Review, PR. Nothing was dropped — Todos live under Tasks,
-  Timeline under Summary, Checkpoints under Changes, Processes moved into the
-  terminal dock. The dock is now a draggable, persisted vertical split.
+- **Modular workspace layouts** replace the fixed right-panel shell. Code is
+  the immutable compatibility layout; Wide, Review, and Watch are opt-in
+  built-ins. Chat, Summary, Files, Changes, Checks, Todos, Checkpoints,
+  Processes, Timeline, Context, the PR strip, and Terminal are registered
+  panels that can move only to valid regions. Editing a built-in forks it once.
+  Custom preset definitions live in archcar; active choice and region geometry
+  remain device-local.
 - **Left rail indicators**: active agent count, blocked-task and open-task
   chips, and PR state per workspace row; `blocked` is a new status kind that
   outranks running/review in the status dot.
@@ -306,6 +309,18 @@ in-process `core` access), so every state change must flow through an
 `desktop/src/lib/log.ts`; the Electron main process appends them plus every IPC
 request/response/event to `~/.local/state/archductor/desktop.log`. The archcar
 sidecar logs every RPC on its side (`log_archcar_rpc`).
+
+Workspace layout is now a first-class desktop/core/CLI path. The renderer builds
+the shell from a versioned layout model and panel registry instead of a fixed
+centre/right template. The top-bar Layout menu switches Code/Wide/Review/Watch,
+saves and renames user presets, confirms user-preset deletion, and writes a
+project default. Pointer drag uses a 4px threshold, valid-region targets, tab
+insertion carets, pointer capture, and Escape cancellation; panel menus provide
+the keyboard path. Region resize/collapse state remains local and responsive
+auto-collapse protects the centre at narrow widths. Archcar persists only user
+presets in `layout_presets`; built-ins are compiled in and cannot be overwritten
+or deleted. CLI parity is under `archductor layout` and `archductor archcar
+layout-presets`.
 
 State-changing archcar parity with the retired GTK flows (protocol + server
 handlers in `crates/core/src/archcar/{protocol,server}.rs`, TS in
@@ -625,6 +640,57 @@ Before calling behavior done, name:
 If one layer is skipped, say exactly why.
 
 ## Recent Verification
+
+Peek previews and keyboard continuity on 2026-08-24:
+
+- Workspaces, repositories, the active machine, and explanatory Settings rows
+  now expose read-only contextual Peeks after hover intent or immediately on
+  keyboard focus. Peeks never take focus, close on leave/blur/Escape, and flip
+  and clamp inside the viewport; every mutation still requires entering or
+  clicking the underlying surface.
+- The machine switcher now uses the same 30px row and 14px icon alignment as
+  Dashboard and History. Its connection address moved into the Peek. The
+  command palette is a modal combobox/listbox with a focus trap, inert
+  background, arrow navigation, and exact opener-focus restoration. Holding
+  Alt temporarily labels visible enabled controls with their current configured
+  shortcuts without moving focus or inventing bindings.
+- Written verification passed: all 458 desktop tests, desktop type-check, and
+  the production Electron build. A real Electron smoke of the production
+  renderer and preload measured the machine and Dashboard rows at 30px with
+  both icons at x=14, confirmed both machine and Settings Peeks are read-only,
+  confirmed command-palette
+  open/trap/close/focus restoration, and confirmed Alt badges appear and
+  dismiss without changing focus. Evidence:
+  `.context/peek-actions-smoke/settings-peek.png`.
+- CLI smoke was not run because this change has no CLI, daemon, protocol, or
+  persisted-settings behavior; the shortcut bindings it displays remain the
+  existing renderer-local preference map.
+
+Modular workspace layouts on 2026-08-24:
+
+- Written verification passed: `cargo fmt --all -- --check`, clippy with
+  warnings denied for core/CLI/archcar, core library tests (902 passed, one
+  ignored), all CLI tests, desktop type-check/build, and 444 desktop tests after
+  merging the latest `origin/main`.
+  The desktop total includes a real DOM regression proving that changing the
+  selected panel remounts its component instead of leaving the previous panel
+  body under new tab metadata.
+- Live CLI/archcar smoke used isolated `XDG_*` directories and a temporary Git
+  repository. It registered the repository, listed all four built-ins, saved a
+  custom preset through the raw RPC envelope, showed it through the CLI, marked
+  it as project default, listed it through the direct archcar command, restored
+  Code as default, deleted the custom preset, and confirmed it was absent. Only
+  the daemon started by the smoke was stopped.
+- Real production Electron smoke used an isolated daemon and seeded workspace.
+  It verified Code geometry; instant Wide/Review switching; a right-to-bottom
+  Changes drag surviving renderer reload; immutable built-in forking; PR strip
+  and Terminal dock kind preservation; keyboard menu movement; Escape drag
+  cancellation; restoration of Todos, Checkpoints, Processes, Timeline, and
+  Context; command-palette restoration of hidden Changes; 900px auto-collapse;
+  and reduced-motion computed styles. The visual pass found and fixed the stale
+  panel-body lifecycle bug described above.
+- Evidence: `.context/modular-layout-smoke/electron-review-layout.png` and
+  `.context/modular-layout-smoke/electron.log`.
 
 Client switcher on 2026-08-20:
 
@@ -983,3 +1049,369 @@ Not yet manually smoke-verified in this branch:
 - The chat tab strip scrolls (it was `overflow: hidden`, which hid every tab
   past the first when the column narrowed) and the new-chat button is pinned
   outside the scroller.
+
+## Headless and remote deployment (2026-08-24)
+
+The daemon was already headless (no GUI deps) and the remote client/server
+split already worked. Deployment was what did not: the pieces below are the gap
+between "the architecture supports a server" and "an operator can stand one up".
+
+- **Packaging shipped the CLI without the daemon.** `.deb`/`.rpm` (nfpm), the
+  AppImage AppDir, and the Flatpak all installed only `archductor`, so
+  `service install` failed at `archcar is not on PATH` and every command fell
+  back to a sidecar it could not find. The tarball, AUR, Nix, and Homebrew were
+  already correct. `crates/cli/tests/publish_workflow.rs` now asserts every
+  packager ships `archcar`, the same way it already guarded icons and fonts.
+- **The systemd unit died at logout.** `systemctl --user enable --now` gives a
+  unit that stops when the user's last login session ends, which on an
+  SSH-managed server means the daemon exits with the connection. Install now
+  runs `loginctl enable-linger` and reports the outcome as
+  `ServiceStatus.boot_persistent`; a failure comes back as a warning carrying
+  the `sudo` command. macOS has no agent-level equivalent — a LaunchAgent
+  starts at login — so it reports `false` plus a warning rather than implying
+  boot-start it does not have.
+- **launchd only bootstrapped into `gui/<uid>`.** Over SSH with nobody at the
+  console there is no GUI domain and `bootstrap` fails outright. `start`/`stop`
+  now try `gui/<uid>` then `user/<uid>`, and `status` checks both domains.
+- **The units carried no PATH.** launchd hands a job
+  `/usr/bin:/bin:/usr/sbin:/sbin`; a systemd user unit is barely richer. Neither
+  can see Homebrew, a version manager, or `~/.local/bin`, so a service-installed
+  daemon reported "running" and then failed every session at "command not
+  found". Install probes the user's login shell (`-l -c`, POSIX shells only —
+  fish/nu `$PATH` is a list) and unions it with the process PATH and the
+  well-known install dirs, dropping directories that do not exist. The value is
+  recorded as `PATH` in the unit and XML-escaped, since a `&` in a path
+  produces a plist launchd silently refuses.
+- **Restart semantics diverged.** systemd `Restart=on-failure` never restarted a
+  clean `exit(0)` while launchd `KeepAlive` always did. Now `Restart=always`
+  with `StartLimitIntervalSec=60`/`StartLimitBurst=10` in `[Unit]` so a crash
+  loop cannot wedge the unit in `failed`, and `ThrottleInterval` on the plist.
+- **`service doctor`** (core `service::doctor`, archcar `service_doctor`, CLI
+  `archductor service doctor`, a "Check daemon environment" button on the
+  desktop Background service card) resolves `git`, `gh`, and every chat-launchable
+  agent CLI against the PATH recorded in the unit rather than the caller's.
+  `archductor doctor` probes the shell, which is exactly the environment that is
+  not in question.
+- **`archductor service setup`** is the headless bootstrap: install, provision
+  the token, run the environment check, print the client `remote connect` line.
+  `archductor mcp setup` keeps its MCP-client framing over the same shared path.
+- Install refuses a binary inside a temporary mount (`/tmp/.mount_*`), which is
+  what an AppImage would otherwise write into a unit that breaks at next boot.
+- README gained a "Headless and remote setup" section (previously the only
+  recipe lived in `docs/api.md`), and `docs/api.md` documents linger, the
+  recorded PATH, and `service_doctor`.
+
+Three of these came out of the Linux verification rather than the code read,
+and all three only bite the non-interactive case:
+
+- **Linger has to be enabled before `systemctl --user`, not after.** Enabling it
+  is what starts the user manager; without one there is no bus to talk to, so
+  the original ordering worked from an SSH login (PAM had already started a
+  manager) and failed everywhere else.
+- **`systemctl --user` needs `XDG_RUNTIME_DIR`.** PAM sets it for a login
+  session and nothing sets it for a provisioning script, a cron job, or
+  `docker exec`. All `systemctl --user` calls now point at `/run/user/<uid>`
+  when the environment does not, which linger guarantees exists.
+- **"Failed to connect to bus: No medium found" now explains itself.** That is
+  what a caller with no session and no linger gets, and it says nothing about
+  either. Install turns it into the `sudo loginctl enable-linger <user>` command
+  plus why sudo is needed here and not over SSH. `current_user_name` falls back
+  to `id -un` because `USER` is unset in exactly those contexts.
+
+`archductor archcar service-status` / `service-doctor` expose both over the
+protocol, so a client connected to a remote daemon diagnoses *the server*.
+`archductor service doctor` is inherently local — it reads a unit file — and
+would otherwise answer for the laptop.
+
+Verified on macOS: 911 core tests including 17 in `service.rs` (unit rendering,
+restart semantics, PATH merge order, XML escaping, temporary-mount refusal,
+doctor resolution against a supplied PATH and its verdict), the packaging guard,
+458 desktop tests, `tsc --noEmit`, `pnpm build`, clippy and fmt clean, plus a
+live launchd install/status/uninstall smoke in a scratch `HOME` (bootstrapped
+into `gui/501`, PATH baked in, removed with no residue) and a `service doctor`
+run resolving `gh` at `/opt/homebrew/bin/gh` and `claude` at
+`~/.local/bin/claude` — both invisible to launchd's default PATH, which is the
+bug.
+
+Verified on Linux, in a privileged systemd container with a real PID 1 and an
+unprivileged user, driven over `docker exec` so there is no login session:
+
+- linger off → install fails with the actionable `enable-linger arch` message
+  rather than the raw bus error;
+- linger on → install succeeds with `boot_persistent=true`, and the unit carries
+  `Environment=PATH=/home/arch/.local/bin:…`;
+- `/proc/<mainpid>/environ` on the *running* daemon confirms that PATH reached
+  the process, and `service doctor` resolves `gh` and `claude` out of
+  `~/.local/bin` — a directory absent from systemd's default user PATH;
+- stripping the `Environment=PATH=` line reproduces the old unit, and doctor
+  then reports `MISSING gh` against the manager default, which is the
+  before-picture for this whole change;
+- `Restart=always` brings the daemon back from both `SIGKILL` and `SIGTERM`
+  (the clean exit `on-failure` would have left down);
+- `service setup --listen 0.0.0.0:7420` prints the token, the public-bind
+  warning, and the client `remote connect` line; a client then connects over the
+  TCP listener, drives a real RPC, and a wrong token is refused with
+  `archcar authentication failed`;
+- `service uninstall` disables the unit, removes the file, leaves no archcar
+  process, and deliberately leaves linger alone.
+
+Deliberately not built here: a Windows service (`ServiceManager::detect` still
+returns `Unsupported`, so `archcar.exe` ships in the Windows ZIP with nothing to
+keep it alive) and TLS for the remote listener. The transport remains one shared
+bearer token in cleartext with no per-client identity and no handshake rate
+limit; a non-loopback listener still requires a VPN, SSH tunnel, or TLS proxy.
+
+## Windows service and the SSH transport (2026-08-24)
+
+The two items the headless pass deliberately left open.
+
+### Windows background service
+
+`ServiceManager::detect` returned `Unsupported` on Windows, so `archcar.exe`
+shipped in the release ZIP with nothing to keep it alive. There is now a
+`ScheduledTask` variant backed by a per-user Task Scheduler logon task.
+
+- **Not an SCM service** on purpose: that needs an administrator and a
+  service-control handler compiled into archcar, and buys nothing for a tool
+  that runs as one user against that user's repositories.
+- **A launcher script carries the environment.** A scheduled task's action has
+  no environment block, so install writes
+  `%APPDATA%\archductor\archcar-service.cmd` with `set "PATH=…"` and the listen
+  address, and the task runs `cmd /c` on it. The launcher runs archcar in the
+  foreground rather than `start /B`, so the task's own process stays alive as
+  long as the daemon and Task Scheduler's restart rules apply to the daemon
+  instead of to a launcher that exited immediately.
+- **Two restart mechanisms.** `RestartOnFailure` only fires on a non-zero exit —
+  the same hole `Restart=on-failure` leaves on systemd. A one-minute repeating
+  logon trigger plus `MultipleInstancesPolicy=IgnoreNew` closes it: the retry is
+  a no-op while the daemon is alive and becomes the restart when it is not.
+- The task definition is written as **UTF-16LE with a BOM**, because
+  `schtasks /Create /XML` rejects UTF-8 and says nothing about encoding.
+- `boot_persistent` is false with a warning: running while logged off means
+  storing the account password in Task Scheduler, which install will not do.
+
+### SSH transport
+
+The remote transport was a shared bearer token in cleartext. `ssh://` is now a
+first-class alternative: the client runs
+`archductor archcar stdio-proxy` on the far side over ssh, the proxy connects to
+the server's own local socket, and the two pump bytes at each other — the shape
+`git` over ssh and `docker -H ssh://` use.
+
+**TLS was considered and not built.** It would have encrypted the channel while
+leaving the single shared credential and the open port in place. SSH removes all
+three problems using authentication the server already runs: encryption from
+sshd, a distinct identity per client, revocation by editing `authorized_keys`,
+and no listener at all. It also avoids adding a crypto stack and its C build
+dependencies to a workspace that has to build on MSYS2 windows-gnu, musl, and
+several distro families. The TCP listener stays for loopback and trusted
+networks, with its warning unchanged.
+
+- `ssh://[user@]host[:port][/path/to/archductor]`. The destination goes to `ssh`
+  verbatim, so `~/.ssh/config` aliases, jump hosts, and per-host keys work. The
+  program path is settable because `ssh host <command>` runs a non-interactive
+  shell that often skips the profile adding `~/.local/bin` to PATH.
+- `ArchcarEndpoint::Ssh` / `ArchcarStream::Ssh` alongside the existing variants;
+  `is_remote()` replaces the variant matches that used to mean "not local", so a
+  new transport cannot silently fall into a local-only branch. `remote status`
+  had exactly that bug during the smoke and now reports the transport.
+- Profiles: an `ssh://` entry saves and loads with a blank token; the TCP
+  transport still refuses one.
+- The proxy always talks to the *local* daemon, bypassing any remote profile the
+  server itself may have saved from being used as a client, and spawns the
+  sidecar if it is not already up.
+- ssh's stderr is drained on a thread and reported when the stream ends early,
+  after a bounded wait for the child — reading it immediately raced the drain and
+  surfaced the "Permanently added … to the list of known hosts" warning instead
+  of "Permission denied (publickey)".
+- The Electron main process speaks the same transport (`Duplex` in place of
+  `net.Socket`, `parseSshAddress`/`sshArgs` mirroring the Rust), so the app
+  follows an `ssh://` profile like the CLI does.
+
+Verified: 917 core tests, 465 desktop tests, `tsc --noEmit`, clippy, fmt, a
+Windows cross-check (`cargo check --target x86_64-pc-windows-gnu` under mingw),
+and a two-container SSH smoke on a Docker network — a client holding only the
+`archductor` CLI (no `archcar` binary, no repo) connected over `ssh://` to a
+server running sshd, then added a repository, created a workspace, and read back
+`service doctor` describing the *server's* PATH (`gh` at `/home/arch/.local/bin`,
+which exists only there). `ss -ltnp` on the server showed port 22 and no archcar
+listener. Revoking `authorized_keys` produced
+`ssh transport failed: Permission denied (publickey)`, and restoring it worked
+again immediately.
+
+Not verified: the Windows service on a real Windows host — it is unit-covered
+(launcher contents, task XML, UTF-16 encoding, temp-path refusal) and
+cross-compiles, but no `schtasks` call has been executed. CI's Windows job builds
+and smokes the CLI; it does not install the task.
+
+## Workbench layout editing (2026-08-29)
+
+The fixed four-region workbench is gone. The layout is a recursive split tree —
+`split(row|column, childA, childB, ratio)` down to leaves that each hold a tab
+list — plus an explicit edit mode reached from the Layout menu or `mod+shift+l`.
+Regions, `Stack`, `defaultRegion`, `clampRegionSize`, the device-local layout
+prefs, and the panel grip button were deleted rather than kept alongside.
+
+Suite at `765a544`: `tsc --noEmit` clean, 79 desktop test files / 577 tests
+passed, `pnpm build` green.
+
+### Verified in the real Electron window
+
+Playwright against `dist-electron/main.js` on macOS, 1600x1000, with
+`XDG_DATA_HOME`/`XDG_STATE_HOME` on a scratch dir and a seeded repo and
+workspace, so the real database was never touched. Screenshots for each check
+are in `/tmp/wbsmoke/shots/` — they are under `/tmp` and are not durable; the
+per-check numbers below are the durable record.
+
+- **No grip button exists in either mode.** A DOM sweep for a `grip` class or a
+  grip/drag-handle/move-panel/reorder label returns `[]` in both modes, and no
+  loaded CSS rule matches `/grip/i`.
+- **Outside edit mode a tab-bar press-and-drag moves nothing.** No drag ghost,
+  no drop preview, no `body.panel-dragging`, and the serialized tree is
+  byte-identical before and after. Plain tab clicks still switch panels. The tab
+  bar deliberately has no `pointerdown` handler at all outside edit mode, which
+  is why.
+- **Both entry points into edit mode work** and produce the same toolbar —
+  `role="toolbar"`, `aria-label="Editing layout"`, buttons `Add panel`,
+  `Revert changes`, `Done`.
+- **A drag to a leaf's right edge previews exactly the right half.** Chat leaf
+  `{420, 79, 731x921}`, live preview `{785.48, 79, 365.48x921}` against the
+  ideal `{785.5, 79, 365.5x921}`. Releasing splits that leaf and the panel takes
+  the half it was shown.
+- **A drag onto a tab bar shows a 2px caret, not a half-leaf.** Measured
+  `{x 1252.88, y 190.4, 2x40}`, sitting on the `changes` tab's left edge, i.e.
+  between Files and Changes; the drop inserted at index 2. A preview rect is
+  still drawn for a tab drop, but it is the leaf's whole content area below the
+  bar, not a half.
+- **Revert restores the entry snapshot exactly.** After a drag split, a hide,
+  and a collapse, `Revert changes` produced a tree string-identical to the one
+  captured at edit-mode entry, node ids included.
+- **Escape priority is right.** With a drag in flight Escape kills only the drag
+  (ghost and preview gone, tree unchanged) and edit mode stays up; with no drag
+  in flight Escape exits edit mode.
+- **A collapsed leaf in a row split really does become a rail.** `flex: 0 0 36px`,
+  `offsetWidth` 36, `scrollWidth` 36, sibling 695 of 731. The old failure — the
+  collapsed leaf resolving to the tab strip's max-content width and refusing to
+  shrink — does not reproduce. jsdom could not have shown this; it does no
+  layout.
+- **The Code preset's PR strip renders at its stated ratio.** 115.1px of a 960px
+  column = 0.1199, not the 0.256 the width-min table used to clamp it to.
+- **A created split survives a full app restart.** Not a renderer reload: the
+  Electron process was closed and relaunched against the same scratch dirs, and
+  the nested row split came back with the same node ids and ratios under the
+  forked `Code (edited)` preset.
+
+### Two real bugs the unit tests cannot see
+
+Both were found only by driving a real pointer, and both are open.
+
+**Every click inside a tab bar is swallowed in edit mode.** In edit mode
+`PanelLeaf` puts `onPointerDown` on the whole `.workbench-tablist`, and
+`PanelDndController.begin` calls `setPointerCapture` on that bar. Chromium
+retargets the following `click` to the capture element, so a capture-phase
+listener sees every edit-mode click arrive at
+`DIV.workbench-tablist`, never at the button under the cursor. In edit mode this
+kills tab switching, every `Hide <panel>` close button, and every
+`Collapse panel` button. Confirmed with an isolated repro in the same renderer:
+with a parent capture the child button's click never fires, without it it does.
+jsdom stubs `setPointerCapture` and `fireEvent.click` targets the button
+directly, so the Task 9 tests pass while the affordances are dead.
+
+**The Add panel menu closes before its own click lands.** `LayoutEditBar`
+registers a `once` `pointerdown` listener on `window` that closes the menu
+unconditionally; the menu's `stopPropagation` guard is on `click`, the wrong
+event. Measured: between `mouse.down()` and `mouse.up()` on a menu item the item
+count is already 0, so `addPanel` is never called. A synthetic `element.click()`
+on the same item does add the panel, which is how "closed panel appears in the
+add list, and adding it back puts it in the layout" was confirmed at all.
+
+Because of the first bug, the collapse for the rail measurement and the add-back
+for the panel list had to be fired with a synthetic `element.click()`. The
+geometry and tree state measured afterwards are real; only the input path was
+worked around, and that is exactly what the two bugs are.
+
+Closing a panel *is* reachable by mouse today: right-clicking a tab opens a
+context menu with `Hide <panel>`, and that path works, because a secondary
+button never starts a drag.
+
+### Not verified
+
+Keyboard-only operation of the edit-mode buttons (untested — it may well work,
+since the bug is pointer-specific). Any platform but macOS, any window size but
+1600x1000. The GTK client, which this plan did not touch. Multi-client
+propagation of an edited preset — only one client was ever connected. Dragging a
+split's resize handle; the handles were located and measured but not dragged.
+
+One expectation in the original Task 10 brief could not be performed as written:
+it asked that entering edit mode show "the edit bar and split handles". Split
+handles are not edit-mode chrome — `LayoutNodeView` renders them whenever a
+split has no collapsed child, and `.workbench-split`'s children are
+`[child, resize-handle, child]` identically in both modes. There is nothing
+about handles that changes on entering edit mode.
+
+### Re-verification after the pointer-capture and Add-panel fixes (2026-08-29)
+
+The two bugs above are fixed: `PanelDndController.move` now defers
+`setPointerCapture` until the 4px drag threshold is actually crossed
+(`PanelDndController.ts`), and `LayoutEditBar`'s outside-click dismiss checks
+containment instead of firing unconditionally on the opening `pointerdown`.
+Split resize handles also changed since the note above — `LayoutNodeView` now
+gates `SplitHandle` behind `layoutStore.editing()` as well as
+`!anyCollapsed()`, so outside edit mode there is no handle in the DOM at all.
+
+Regression risk this run was built to close: the unit test for the
+pointer-capture fix stubs `setPointerCapture` as a no-op in jsdom, so it would
+pass even if the bug came back. Re-verified live in the real Electron window,
+same recipe as before (fresh scratch `XDG_DATA_HOME`/`XDG_STATE_HOME` under
+`/tmp`, seeded via the CLI, no real data touched), with the added constraint
+that every check below used only real mouse input — `locator.click()` or
+`mouse.move`/`down`/`up` — never a synthetic `element.click()`. Screenshots in
+`/tmp/wbverify/shots/` (not durable).
+
+All nine checks passed:
+
+1. **Real click switches tabs.** Clicking `Files` in a 4-tab leaf made it the
+   sole active tab.
+2. **Real click on a tab's `Hide <panel>` button removes it.** Hiding `Checks`
+   left the leaf's panel list `[summary, files, changes]`.
+3. **Real click on `Collapse panel` collapses the leaf.** The chat leaf (a row
+   split child) went from `w=731` to the `36px` rail, `collapsed=true`.
+4. **Real clicks open Add panel and re-add a hidden panel.** `Checks` appeared
+   in the Add-panel list after being hidden, and a real click on it put it back
+   in a leaf's panel list (it landed on the last-focused leaf, not necessarily
+   the one it was hidden from — that's `addPanel` targeting the focused leaf,
+   not a bug).
+5. **A real drag past 4px to a leaf's right edge previews and splits.**
+   Mid-drag state was `ghost=1, preview=1, caret=1, body.panel-dragging=true`;
+   releasing over the target produced a new row split with the dragged panel
+   occupying the new leaf.
+6. **Press-and-release with no movement is a plain click.** Ghost/preview/caret
+   counts were 0 before, during, and after; the tab still activated normally.
+7. **Press, move 2px, release stays below the 4px threshold.** Same all-zero
+   drag state throughout; the tab still activated.
+8. **Split resize handles are edit-mode-only and functional.**
+   `.resize-handle-split` count was 0 outside edit mode, 1 inside. Dragging the
+   handle 100px moved a real boundary: one leaf's rect went from
+   `w=571.5` to `w=471.6` (its neighbor gaining the difference).
+9. **Sidebar resizing (a separate, pre-existing mechanism) still works outside
+   edit mode.** The sidebar started pinned to its `aria-valuemax` (420px, this
+   window's cap), so the drag direction was reversed to demonstrate movement:
+   dragging the handle -100px took the sidebar from `420px` to `320px`.
+
+One test-construction wrinkle worth recording, not a product bug: at a 448px
+leaf width a tab's `Hide` close button visually overlaps the right two-thirds
+of its own tab's hit box (the squeezed-label issue already noted above as
+cosmetic). A `locator.click()` aimed at a tab's bounding-box center lands on
+the close button instead and Playwright's actionability check refuses to
+proceed. Real per-check clicks were aimed at the tab's left edge instead,
+which is where a user aiming at the visible label text would land. This is
+the same cosmetic squeeze already on record, just now observed to have a
+functional edge at this width, and it was not fixed as part of this
+verification-only pass.
+
+Not re-verified: keyboard-only operation, any platform but macOS, the GTK
+client, multi-client propagation, and drag-based ratio changes on the row
+split created mid-run by check 5 (only the pre-existing column split's handle
+in check 8 was drag-tested, and it happened to become a row split's handle
+after check 5 restructured the tree — the check adapted to whichever handle
+survived rather than a specific one).

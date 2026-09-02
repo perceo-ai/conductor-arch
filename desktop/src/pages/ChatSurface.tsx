@@ -19,7 +19,8 @@ import { ThreadTab, FileTab } from "./chat/ChatTabs";
 import { Timeline } from "./chat/Timeline";
 import { Composer } from "./chat/Composer";
 import { FileView, CommitView } from "./chat/FileViews";
-import { InteractionBanner, PlanCard } from "./chat/Interactions";
+import { InteractionBanner } from "./chat/Interactions";
+import { configuredShortcut } from "@/lib/configuredShortcut";
 
 // Chat surface — center panel of the command center. Holds chat tabs + open-file
 // tabs, and a content stack showing either the chat timeline or a file's diff,
@@ -197,7 +198,12 @@ export default function ChatSurface(props: { workspace: string }) {
         </div>
         {/* Pinned outside the scroller: opening a new chat must not require
             scrolling past every tab you already have. */}
-        <button class="ui-button-icon ws-chat-new" title="New chat" onClick={() => void newChat()}>
+        <button
+          class="ui-button-icon ws-chat-new"
+          title="New chat"
+          data-shortcut={configuredShortcut("new-chat")}
+          onClick={() => void newChat()}
+        >
           <Icon name="plus" />
         </button>
       </div>
@@ -218,13 +224,14 @@ export default function ChatSurface(props: { workspace: string }) {
         </Match>
         <Match when={view().kind === "chat" && activeThread()}>
           <Timeline threadId={activeThread()!.id} workspace={props.workspace} />
+          {/* A plan renders inside the timeline, with its own actions. What
+              stays pinned here is the blocking kind of ask — a permission
+              prompt stalls the turn until it is answered, so it may not scroll
+              away. */}
           <Show when={interactionsStore.pending(activeThread()!.id)}>
             {(rec) => (
-              <Show
-                when={rec().kind === "plan_approval"}
-                fallback={<InteractionBanner rec={rec()} />}
-              >
-                <PlanCard rec={rec()} />
+              <Show when={rec().kind !== "plan_approval"}>
+                <InteractionBanner rec={rec()} />
               </Show>
             )}
           </Show>
@@ -246,4 +253,3 @@ export default function ChatSurface(props: { workspace: string }) {
     </div>
   );
 }
-

@@ -2,7 +2,7 @@
 // --- Responses -------------------------------------------------------------
 import type { BackgroundTask } from "./background";
 import type { ArchcarMessage, ChatSnapshot, QueuedArchcarInput } from "./chat";
-import type { AgentProviderSummary, AgentSkill, SessionKind, SyncAction, SyncPlan, WorkflowRunSummary, WorkspaceGitAction } from "./common";
+import type { AgentProviderSummary, AgentSkill, LayoutPresetRecord, SessionKind, SyncAction, SyncPlan, WorkflowRunSummary, WorkspaceGitAction } from "./common";
 import type { ProviderInteractionRecord } from "./events";
 import type { WorkspaceChangeScope } from "./requests";
 import type { ArchcarProcessSummary, ArchcarRunScript, SetupReport } from "./setup";
@@ -101,6 +101,8 @@ export type ArchcarResponse =
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
+  | { type: "layout_presets"; presets: LayoutPresetRecord[] }
+  | { type: "layout_preset_saved"; preset: LayoutPresetRecord }
   | { type: "repository_branches"; repository: string; branches: string[] }
   | { type: "agent_providers"; providers: AgentProviderSummary[] }
   | { type: "prompt_packs"; repository: string; packs: string[]; active?: string }
@@ -116,6 +118,7 @@ export type ArchcarResponse =
   | { type: "workspace_removed"; name: string }
   | { type: "review_comment_added"; comment: ReviewComment }
   | { type: "service_status"; status: ServiceStatus }
+  | { type: "service_doctor_report"; report: ServiceDoctorReport }
   | { type: "remote_access"; listen?: string; token: string; token_path: string }
   | { type: "mcp_registration"; clients: McpClientRegistration[] }
   | { type: "background_task_saved"; task: BackgroundTask }
@@ -160,9 +163,32 @@ export interface ServiceStatus {
   running: boolean;
   unit_path?: string | null;
   listen?: string | null;
+  /** Whether the daemon survives this user logging out. */
+  boot_persistent?: boolean;
+  /** The PATH recorded in the unit, when it records one. */
+  path?: string | null;
+  /** Conditions that did not fail the operation but change what it means. */
+  warnings?: string[];
   detail: string;
+}
+
+/** One tool the daemon needs, resolved against the *service's* PATH. */
+export interface ServiceDoctorRow {
+  name: string;
+  command: string;
+  resolved?: string | null;
+  required: boolean;
+  detail: string;
+}
+
+export interface ServiceDoctorReport {
+  status: ServiceStatus;
+  path: string;
+  path_source: string;
+  rows: ServiceDoctorRow[];
+  ok: boolean;
+  feedback: string;
 }
 
 // --- Background development tasks -----------------------------------------
 // Mirrors crates/core/src/background_tasks.rs.
-

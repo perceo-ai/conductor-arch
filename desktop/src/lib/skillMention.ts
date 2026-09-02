@@ -62,20 +62,6 @@ export function rankSkills(
   return scored.slice(0, limit).map((item) => item.skill);
 }
 
-/** Replace the typed `/query` with the chosen skill, leaving a trailing space. */
-export function insertSkillMention(
-  value: string,
-  mention: SkillMention,
-  name: string,
-): { value: string; cursor: number } {
-  const before = value.slice(0, mention.start);
-  const after = value.slice(mention.end);
-  // Only add the separating space when there isn't one already, so completing
-  // mid-sentence doesn't leave a double space behind the command.
-  const insert = /^\s/.test(after) ? `/${name}` : `/${name} `;
-  return { value: before + insert + after, cursor: before.length + insert.length };
-}
-
 /** Only offer skills the session's own agent can actually run. */
 export function skillsForProvider(skills: SkillOption[], provider: string | null): SkillOption[] {
   if (!provider) return skills;

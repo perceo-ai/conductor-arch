@@ -7,7 +7,7 @@ import { timelineItemsForSlice } from "@/store/chat";
 import type {
   ArchcarProjectionItem,
 } from "@/bridge/protocol";
-import { isDisplayableTimelineItem } from "@/lib/timeline";
+import { isDisplayableTimelineItem, showsNewChatIntro, withoutPlanSource } from "@/lib/timeline";
 import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
 import DotGridLoader from "@/components/DotGridLoader";
 import {
@@ -18,6 +18,7 @@ import {
 } from "@/lib/chatGeneration";
 import { NewChatIntro } from "./NewChatIntro";
 import { TimelineItem } from "./TimelineItem";
+import { PlanCard } from "./Interactions";
 
 // The scrolling message column, including follow-the-bottom behaviour and the
 // generation loader that trails the last message.
@@ -25,8 +26,17 @@ export function Timeline(props: { threadId: number; workspace: string }) {
   let scrollRef: HTMLDivElement | undefined;
   let followBottom = true;
   const slice = () => chatStore.slice(props.threadId);
+  const pendingPlan = () => {
+    const pending = interactionsStore.pending(props.threadId);
+    return pending?.kind === "plan_approval" ? pending : null;
+  };
   const items = createMemo<ArchcarProjectionItem[]>(() =>
-    timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
+    // The plan card renders the plan, so the assistant message it was lifted
+    // from must not render it a second time.
+    withoutPlanSource(
+      timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
+      pendingPlan()?.detail,
+    ),
   );
   // The loader sits inside the scrolled content, so its appearance and
   // disappearance change the content height — it belongs in the scroll signal
@@ -38,9 +48,11 @@ export function Timeline(props: { threadId: number; workspace: string }) {
       blockedOnUser: interactionsStore.pending(props.threadId) != null
     }),
   );
+  // The plan card is part of the scrolled content, so its arrival has to move
+  // the view the same way a new message does.
   const scrollSignal = createMemo(
     () =>
-      `${generation()}|` +
+      `${generation()}|${pendingPlan()?.id ?? ""}|` +
       items()
         .map((item) => `${item.id}:${item.status}:${item.stream_state}:${item.body.length}`)
         .join("|"),
@@ -80,10 +92,16 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     <div class="chat-timeline-scroll" ref={scrollRef} onScroll={updateFollowBottom}>
       <div class="chat-messages">
         <Show
-          when={items().length > 0}
+          when={!showsNewChatIntro(items().length, pendingPlan() != null)}
           fallback={<NewChatIntro workspace={props.workspace} threadId={props.threadId} />}
         >
           <For each={items()}>{(item) => <TimelineItem item={item} agentIdle={agentIdle()} />}</For>
+        </Show>
+        {/* A proposed plan is a message in the conversation, not chrome bolted
+            above the composer: it belongs in the scrollback where it can be
+            read back later, and it carries its own actions. */}
+        <Show when={pendingPlan()}>
+          {(rec) => <PlanCard rec={rec()} workspace={props.workspace} />}
         </Show>
         {/* Last child of the message column, so it always trails the newest
             message rather than floating in fixed chrome. Inside the scroller,

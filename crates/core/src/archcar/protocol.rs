@@ -9,7 +9,7 @@ use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::doctor::SetupReport;
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
-use crate::service::{InstallService, ServiceStatus};
+use crate::service::{InstallService, ServiceDoctorReport, ServiceStatus};
 use crate::session_state::AgentSessionState;
 use crate::workspace::{
     ChatEventRecord, ChatMessageRecord, Checkpoint, DiffFileSummary, ReviewComment,
@@ -427,6 +427,17 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
     },
+    ListLayoutPresets,
+    SaveLayoutPreset {
+        preset: crate::layout_presets::LayoutPreset,
+    },
+    DeleteLayoutPreset {
+        id: String,
+    },
+    SetProjectDefaultPreset {
+        repository: String,
+        preset_id: String,
+    },
     /// List a repository's local branch names (base-branch options).
     ListRepositoryBranches {
         repository: String,
@@ -698,6 +709,10 @@ pub enum ArchcarRequest {
         session_profile: bool,
     },
     GetServiceStatus,
+    /// Resolve the tools the daemon needs against the *service's* PATH rather
+    /// than the caller's, which is the difference that makes a service-hosted
+    /// daemon fail where the shell succeeds.
+    ServiceDoctor,
     InstallService {
         input: InstallService,
     },
@@ -1106,6 +1121,12 @@ pub enum ArchcarResponse {
         /// Effective settings serialized as pretty TOML.
         toml: String,
     },
+    LayoutPresets {
+        presets: Vec<crate::layout_presets::LayoutPreset>,
+    },
+    LayoutPresetSaved {
+        preset: crate::layout_presets::LayoutPreset,
+    },
     RepositoryBranches {
         repository: String,
         branches: Vec<String>,
@@ -1171,6 +1192,9 @@ pub enum ArchcarResponse {
     },
     ServiceStatus {
         status: ServiceStatus,
+    },
+    ServiceDoctorReport {
+        report: ServiceDoctorReport,
     },
     RemoteAccess {
         /// Address the daemon is currently listening on, when it has a remote
@@ -1879,6 +1903,17 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::ListLayoutPresets => "list_layout_presets".to_owned(),
+        ArchcarRequest::SaveLayoutPreset { preset } => {
+            format!("save_layout_preset id={}", preset.id)
+        }
+        ArchcarRequest::DeleteLayoutPreset { id } => {
+            format!("delete_layout_preset id={id}")
+        }
+        ArchcarRequest::SetProjectDefaultPreset {
+            repository,
+            preset_id,
+        } => format!("set_project_default_preset repository={repository} id={preset_id}"),
         ArchcarRequest::ListRepositoryBranches { repository } => {
             format!("list_repository_branches repository={repository}")
         }
@@ -2111,6 +2146,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             }
         ),
         ArchcarRequest::GetServiceStatus => "get_service_status".to_owned(),
+        ArchcarRequest::ServiceDoctor => "service_doctor".to_owned(),
         ArchcarRequest::InstallService { input } => format!(
             "install_service listen={}",
             input.listen.as_deref().unwrap_or("none")
@@ -2562,6 +2598,12 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::Settings { scope, toml } => {
             format!("settings scope={scope} bytes={}", toml.len())
         }
+        ArchcarResponse::LayoutPresets { presets } => {
+            format!("layout_presets count={}", presets.len())
+        }
+        ArchcarResponse::LayoutPresetSaved { preset } => {
+            format!("layout_preset_saved id={}", preset.id)
+        }
         ArchcarResponse::SetupReadiness { report } => {
             format!(
                 "setup_readiness complete={} rows={}",
@@ -2604,8 +2646,14 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             body.chars().count()
         ),
         ArchcarResponse::ServiceStatus { status } => format!(
-            "service_status manager={} installed={} running={}",
-            status.manager, status.installed, status.running
+            "service_status manager={} installed={} running={} boot_persistent={}",
+            status.manager, status.installed, status.running, status.boot_persistent
+        ),
+        ArchcarResponse::ServiceDoctorReport { report } => format!(
+            "service_doctor ok={} rows={} missing={}",
+            report.ok,
+            report.rows.len(),
+            report.rows.iter().filter(|row| !row.found()).count()
         ),
         ArchcarResponse::McpRegistration { clients } => format!(
             "mcp_registration {}",
@@ -4775,5 +4823,71 @@ mod tests {
         let summary = archcar_response_summary(&response);
         assert_eq!(summary, "summary_draft workspace=berlin chars=14");
         assert!(!summary.contains("secret"));
+    }
+
+    #[test]
+    fn layout_preset_protocol_round_trips_without_logging_json_bodies() {
+        let preset = crate::layout_presets::LayoutPreset {
+            id: "custom-one".to_owned(),
+            name: "Custom one".to_owned(),
+            builtin: false,
+            layout_json: "{\"secret\":true}".to_owned(),
+            hidden_json: "[]".to_owned(),
+            created_at: "1".to_owned(),
+            updated_at: "2".to_owned(),
+        };
+        let cases = [
+            (
+                ArchcarRequest::ListLayoutPresets,
+                "\"type\":\"list_layout_presets\"",
+                "list_layout_presets",
+            ),
+            (
+                ArchcarRequest::SaveLayoutPreset {
+                    preset: preset.clone(),
+                },
+                "\"type\":\"save_layout_preset\"",
+                "save_layout_preset id=custom-one",
+            ),
+            (
+                ArchcarRequest::DeleteLayoutPreset {
+                    id: "custom-one".to_owned(),
+                },
+                "\"type\":\"delete_layout_preset\"",
+                "delete_layout_preset id=custom-one",
+            ),
+            (
+                ArchcarRequest::SetProjectDefaultPreset {
+                    repository: "demo".to_owned(),
+                    preset_id: "custom-one".to_owned(),
+                },
+                "\"type\":\"set_project_default_preset\"",
+                "set_project_default_preset repository=demo id=custom-one",
+            ),
+        ];
+        for (request, type_tag, summary) in cases {
+            let json = serde_json::to_string(&request).unwrap();
+            assert!(json.contains(type_tag));
+            assert_eq!(
+                serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+                request
+            );
+            assert_eq!(archcar_request_summary(&request), summary);
+            assert!(!summary.contains("secret"));
+        }
+
+        let response = ArchcarResponse::LayoutPresets {
+            presets: vec![preset.clone()],
+        };
+        assert_eq!(
+            archcar_response_summary(&response),
+            "layout_presets count=1"
+        );
+        assert!(!archcar_response_summary(&response).contains("secret"));
+        let saved = ArchcarResponse::LayoutPresetSaved { preset };
+        assert_eq!(
+            archcar_response_summary(&saved),
+            "layout_preset_saved id=custom-one"
+        );
     }
 }

@@ -7,8 +7,10 @@ import SetupModal from "./components/SetupModal";
 import Toasts from "./components/Toasts";
 import ContextMenu from "./components/ContextMenu";
 import CommandPalette from "./components/CommandPalette";
+import KeyboardHints from "./components/KeyboardHints";
 import ShortcutsHelp from "./components/ShortcutsHelp";
 import Icon from "./components/Icon";
+import { isPanelDragActive } from "./components/PanelDndController";
 import { PageStack } from "./pages";
 import { runShellAction } from "./lib/shellAction";
 import { providersStore } from "./store/providers";
@@ -22,12 +24,17 @@ import {
   actions,
   workspacesStore,
   repositoriesStore,
+  layoutStore,
 } from "./store";
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
-import { PRODUCT_RIGHT_PANEL_TABS } from "./lib/rightPanelTabs";
 import { installExternalLinkHandler } from "./lib/externalLinks";
-import { parseKeybindingOverrides, resolveShortcut, type ShortcutAction } from "./lib/shortcuts";
+import {
+  parseKeybindingOverrides,
+  resolveShortcut,
+  shortcutForAction,
+  type ShortcutAction,
+} from "./lib/shortcuts";
 
 const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
   "toggle-sidebar",
@@ -58,6 +65,7 @@ const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
   "push-branch",
   "open-pr-github",
   "start-review",
+  "edit-layout",
   "show-uncommitted",
   "show-files",
   "show-checks",
@@ -141,14 +149,6 @@ export default function App() {
     return false;
   }
 
-  function moveRightPanel(delta: 1 | -1) {
-    const current = nav.rightPanelTab();
-    const tabs = PRODUCT_RIGHT_PANEL_TABS.map((tab) => tab.id);
-    const index = Math.max(0, tabs.indexOf(current));
-    nav.setRightPanelTab(tabs[(index + delta + tabs.length) % tabs.length]);
-    queueMicrotask(() => focusFirst(["[data-focus-target='workspace-panel']", "[data-focus-target='workspace-main']"]));
-  }
-
   function moveWorkspace(delta: 1 | -1) {
     const names = workspacesStore.state.order.filter((name) => workspacesStore.row(name)?.status !== "archived");
     if (names.length === 0) return;
@@ -184,6 +184,16 @@ export default function App() {
         setHelpOpen(false);
         return;
       }
+      if (e.key === "Escape" && layoutStore.editing()) {
+        // A drag in flight owns Escape: the drag controller's own keydown
+        // listener cancels it. Falling through here as well would exit edit
+        // mode on the same keypress, leaving no way to abort a drag and keep
+        // editing — so this defers entirely rather than also acting.
+        if (isPanelDragActive()) return;
+        e.preventDefault();
+        layoutStore.setEditing(false);
+        return;
+      }
       if (isTypingTarget(e.target)) return;
       const action = resolveShortcut(e, activeShortcuts());
       if (!action || action === "open-palette") return;
@@ -198,7 +208,7 @@ export default function App() {
           setSidebarCollapsed((c) => !c);
           break;
         case "toggle-right-panel":
-          window.dispatchEvent(new CustomEvent("archductor:toggle-right-panel"));
+          layoutStore.toggleSidePanel();
           break;
         case "nav-back":
           nav.back();
@@ -230,7 +240,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("changes");
+            actions.revealPanel("changes");
           }
           break;
         }
@@ -262,6 +272,9 @@ export default function App() {
         case "start-review":
           window.dispatchEvent(new CustomEvent("archductor:start-review"));
           break;
+        case "edit-layout":
+          layoutStore.setEditing(true);
+          break;
         case "focus-composer":
           focusFirst(["[data-focus-target='chat-composer']", ".chat-input-view"]);
           break;
@@ -273,10 +286,10 @@ export default function App() {
           queueMicrotask(() => focusFirst(["[data-focus-target='sidebar-search']", ".sidebar-search", ".sidebar-search-minimal"]));
           break;
         case "next-panel":
-          moveRightPanel(1);
+          layoutStore.cyclePanel(1);
           break;
         case "prev-panel":
-          moveRightPanel(-1);
+          layoutStore.cyclePanel(-1);
           break;
         case "next-workspace":
           moveWorkspace(1);
@@ -296,13 +309,14 @@ export default function App() {
           window.dispatchEvent(new CustomEvent("archductor:new-chat"));
           break;
         case "toggle-terminal":
+          actions.revealPanel("terminal");
           window.dispatchEvent(new CustomEvent("archductor:toggle-terminal-dock"));
           break;
         case "show-uncommitted": {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("changes");
+            actions.revealPanel("changes");
           }
           break;
         }
@@ -310,7 +324,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("files");
+            actions.revealPanel("files");
           }
           break;
         }
@@ -318,7 +332,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("checks");
+            actions.revealPanel("checks");
           }
           break;
         }
@@ -326,7 +340,7 @@ export default function App() {
           const active = nav.selectedWorkspace();
           if (active) {
             nav.selectWorkspace(active);
-            nav.setRightPanelTab("summary");
+            actions.revealPanel("summary");
           }
           break;
         }
@@ -364,7 +378,11 @@ export default function App() {
             onToggle={() => setSidebarCollapsed((c) => !c)}
           />
           <Show when={sidebarCollapsed()}>
-            <button class="ui-button-icon reopen-sidebar" onClick={() => setSidebarCollapsed(false)}>
+            <button
+              class="ui-button-icon reopen-sidebar"
+              data-shortcut={shortcutForAction("toggle-sidebar", activeShortcuts())}
+              onClick={() => setSidebarCollapsed(false)}
+            >
               <Icon name="panel-right" />
             </button>
           </Show>
@@ -376,6 +394,7 @@ export default function App() {
       <Toasts />
       <ContextMenu />
       <CommandPalette />
+      <KeyboardHints />
       <ShortcutsHelp
         open={helpOpen()}
         shortcuts={activeShortcuts()}

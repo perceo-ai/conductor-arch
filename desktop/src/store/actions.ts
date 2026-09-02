@@ -11,6 +11,9 @@ import type { ArchcarResponse } from "@/bridge/protocol";
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { nav } from "./nav";
+import { layoutStore } from "./layout";
+import { visiblePanelIds, type PanelId } from "@/lib/layout";
+import { panelDescriptor } from "@/lib/panelRegistry";
 
 async function refreshInventory(): Promise<void> {
   await Promise.all([workspacesStore.refresh(), repositoriesStore.refresh()]);
@@ -43,6 +46,16 @@ export interface CreateWorkspaceInput {
 export const actions = {
   /** Re-pull workspaces + repositories (archcar has no inventory-changed event). */
   refreshInventory,
+
+  revealPanel(panelId: PanelId, options: { activate?: boolean } = {}) {
+    const descriptor = panelDescriptor(panelId);
+    if (!descriptor) return;
+    if (!visiblePanelIds(layoutStore.layout()).includes(panelId)) layoutStore.addPanel(panelId);
+    const leafId = layoutStore.leafOf(panelId);
+    if (leafId) layoutStore.setCollapsed(leafId, false);
+    if (options.activate !== false) layoutStore.activatePanel(panelId);
+    layoutStore.focusPanel(panelId);
+  },
 
   // --- Repository / project -------------------------------------------------
   async addRepository(input: AddRepositoryInput): Promise<string | undefined> {

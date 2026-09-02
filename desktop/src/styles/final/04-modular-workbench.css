@@ -1,0 +1,633 @@
+/* Modular workbench */
+.ws-command-center,
+.ws-workbench,
+.ws-workbench-main,
+.workbench-split,
+.workbench-split-child,
+.workbench-leaf,
+.workbench-panel-body {
+  min-width: 0;
+  min-height: 0;
+}
+
+.ws-workbench {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ws-workbench-main {
+  flex: 1 1 auto;
+  display: flex;
+  overflow: hidden;
+}
+
+/* ---- Split tree ----
+   A split lays its two children along `data-direction` with a drag handle
+   between them; the flex basis of each child comes from the node's ratio,
+   which LayoutNodeView clamps in pixels against each child's minimum. */
+.workbench-split {
+  flex: 1 1 auto;
+  display: flex;
+  overflow: hidden;
+}
+
+.workbench-split[data-direction="row"] {
+  flex-direction: row;
+}
+
+.workbench-split[data-direction="column"] {
+  flex-direction: column;
+}
+
+.workbench-split-child {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Only rendered at all while `layoutStore.editing()` is true (see
+   `LayoutNodeView.tsx`) — resizing is a structural edit like every other
+   affordance in this mode, so there is nothing to style, or to gate here,
+   outside it. */
+.workbench-split > .resize-handle-split {
+  position: relative;
+  flex: 0 0 1px;
+  width: 1px;
+  height: auto;
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 55%, transparent);
+}
+
+.workbench-split[data-direction="column"] > .resize-handle-split {
+  width: auto;
+  height: 1px;
+  cursor: row-resize;
+}
+
+/* The grab area is wider than the 1px rule, the way the old edge handles were,
+   without the divider itself claiming layout space. The base .resize-handle
+   pseudo-element is a 2px centred bar; a split handle needs a plain overlay. */
+.workbench-split > .resize-handle-split::after {
+  inset: -3px;
+  top: -3px;
+  bottom: -3px;
+  left: -3px;
+  right: -3px;
+  width: auto;
+  height: auto;
+  transform: none;
+  background: transparent;
+}
+
+.workbench-split > .resize-handle-split:hover::after,
+body.resizing-col .workbench-split > .resize-handle-split::after {
+  background: transparent;
+}
+
+.workbench-split > .resize-handle-split:hover,
+.workbench-split > .resize-handle-split:focus-visible {
+  background: var(--lc-accent, #c39b50);
+}
+
+/* ---- Leaves ---- */
+.workbench-leaf {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  contain: layout paint;
+  overflow: hidden;
+  background: var(--ui-panel, #191919);
+}
+
+/* Collapsed: the strip and nothing else, filling the fixed extent its parent
+   split assigned (COLLAPSED_HEADER_PX in a column, COLLAPSED_RAIL_PX in a row).
+   The leaf itself still flexes — it is the *wrapper* that is pinned. */
+.workbench-leaf-collapsed {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+/* A compact leaf is chrome-free: the panel inside is its own bar or console,
+   so the leaf must not paint a second surface behind it. */
+.workbench-leaf-compact {
+  background: transparent;
+}
+
+/* A leaf collapsed inside a row has rail width, not label width: stack what is
+   left vertically and clip it rather than letting the strip demand its
+   max-content width back. */
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tablist {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 3px;
+  overflow: hidden;
+}
+
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tab {
+  justify-content: center;
+  padding: 0 2px;
+  overflow: hidden;
+}
+
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tab > span {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* A collapsed rail is COLLAPSED_RAIL_PX (36px) wide. A 20px Hide button beside
+   the tab leaves nothing of the tab to click, and there is nothing to hide
+   from in a pane that is already shut — expand the leaf first. */
+.workbench-split[data-direction="row"] > .workbench-split-child-collapsed .workbench-tab-close {
+  display: none;
+}
+
+.workbench-leaf > .workbench-panel-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+/* Panels that scroll their own content must not also scroll here, or the
+   window gets two nested scrollbars. */
+.workbench-leaf > .workbench-panel-body[data-panel-id="chat"],
+.workbench-leaf > .workbench-panel-body[data-panel-kind="strip"],
+.workbench-leaf > .workbench-panel-body[data-panel-kind="dock"] {
+  overflow: hidden;
+}
+
+.workbench-leaf > .workbench-panel-body[data-panel-kind="strip"] {
+  flex: 0 0 auto;
+  min-height: 40px;
+}
+
+.workbench-leaf .ws-run-section {
+  flex: 1 1 auto;
+  height: 100%;
+}
+
+/* One tab is not a choice. A single-panel leaf shows its body only — the way
+   the centre region did before the tree — but the strip comes back in edit
+   mode, where it is the leaf's drag handle and tab drop target. A collapsed
+   leaf is exempt: the strip is all it has left to render. */
+.workbench-leaf:not(.workbench-leaf-collapsed) > .workbench-tablist-single {
+  display: none;
+}
+
+.workbench-editing .workbench-leaf > .workbench-tablist-single {
+  display: flex;
+}
+
+/* A dashed outline per leaf so the split boundaries — otherwise a bare 1px
+   line — read as "this is the thing you are rearranging" while editing. */
+.workbench-editing .workbench-leaf {
+  outline: 1px dashed var(--ui-border-strong, #3a3a3a);
+  outline-offset: -1px;
+}
+
+.workbench-leaf-collapse-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: 4px;
+  border-radius: 4px;
+  color: var(--lc-text-muted, #858585);
+}
+
+.workbench-leaf-collapse-btn:hover,
+.workbench-leaf-collapse-btn:focus-visible {
+  background: var(--ui-panel-hover, #202020);
+  color: var(--lc-text-strong, #f0f0f0);
+}
+
+.workbench-leaf-collapse-btn .ui-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* Outside edit mode the close button only appears on hover/focus (see the
+   opacity rules at the tab strip below); in edit mode it — and the collapse
+   button above — are the only way to reach these actions, so they stay put.
+
+   `position: static` is the load-bearing half. The base rule parks the button
+   absolutely over the right 20px of its own tab and keeps it out of the hit
+   test with `pointer-events: none`; making it permanently clickable without
+   also taking it out of that overlay turned the right 21px of every tab in
+   edit mode into Hide, so clicking a tab usually deleted its panel. Laid out
+   statically it takes its own slot in the shell's flex row beside the tab,
+   and a click on a tab's visible label selects that tab. */
+.workbench-editing .workbench-tab-close {
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* The filled rectangle a panel will actually occupy on drop — this replaces
+   the old thin outline-on-the-whole-leaf feedback, which told you "somewhere
+   in here" but never "here, this shape". `.panel-drop-caret` (below,
+   alongside the rest of the drag layer) adds the one thing this can't show:
+   which slot among a tab bar's tabs a "tab" drop would land in. */
+.panel-drop-preview {
+  position: fixed;
+  z-index: 101;
+  border: 2px solid var(--lc-accent, #c39b50);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 14%, transparent);
+  pointer-events: none;
+}
+
+.workbench-panel-body {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.workbench-tab:focus-visible,
+.resize-handle:focus-visible {
+  outline: 2px solid var(--lc-accent, #c39b50);
+  outline-offset: -2px;
+}
+
+/* The tab strip has to stay legible in a 220px-wide left region holding four
+   panels, so the label gets the pixels and the chrome gives them up: tabs are
+   sized to their own text rather than splitting the strip into equal columns,
+   the strip's side inset is halved, and hiding a panel — a rare, undoable
+   action already offered by the tab context menu — overlays the label on hover
+   instead of reserving a lane in every tab forever. */
+.workbench-tablist {
+  gap: 2px;
+  padding-left: 5px;
+  padding-right: 5px;
+}
+
+.workbench-tab-shell {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.workbench-tablist .workbench-tab {
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 3px;
+  padding: 0 6px;
+}
+
+.workbench-tablist .nav-button-count {
+  min-width: 13px;
+  height: 13px;
+  padding: 0 3px;
+}
+
+/* Review is an action, not a tab. Now that the tabs no longer stretch to fill
+   the strip, it has to claim the leftover width itself to stay on the right
+   edge — the auto margin collapses to nothing when the tabs do overflow. */
+.workbench-tablist .ws-review-prompt-button {
+  margin-left: auto;
+}
+
+.workbench-tab-close {
+  position: absolute;
+  right: 1px;
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--ui-panel-hover, #202020);
+  color: var(--lc-text-muted, #858585);
+  opacity: 0;
+  /* Invisible but still laid out — without this it swallows clicks meant for
+     the label now that it no longer sits in its own padding lane. */
+  pointer-events: none;
+}
+
+.workbench-tab-close .ui-icon {
+  width: 11px;
+  height: 11px;
+}
+
+.workbench-tab-shell:hover .workbench-tab-close,
+.workbench-tab-shell:focus-within .workbench-tab-close {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* The close button lands on top of the count badge. Drop the badge while it is
+   showing so the two do not overlap — the count is back the moment the pointer
+   leaves, and its box still holds the tab's width steady in the meantime. */
+.workbench-tab-shell:hover .nav-button-count,
+.workbench-tab-shell:focus-within .nav-button-count {
+  opacity: 0;
+}
+
+.layout-edit-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ui-border, #262626);
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 10%, var(--ui-panel, #191919));
+  color: var(--lc-text-strong, #f0f0f0);
+  font-size: 11px;
+}
+
+.layout-edit-bar .ui-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--lc-accent, #c39b50);
+}
+
+.layout-edit-bar-label {
+  font-weight: 650;
+}
+
+.layout-edit-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.layout-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border, #2d2d2d);
+  border-radius: 6px;
+  background: var(--ui-panel-2, #202020);
+  color: var(--lc-text, #d0d0d0);
+  font-size: 11px;
+}
+
+.layout-edit-btn .ui-icon {
+  color: inherit;
+}
+
+.layout-edit-btn:hover,
+.layout-edit-btn:focus-visible {
+  background: var(--ui-panel-hover, #262626);
+}
+
+.layout-edit-done {
+  border-color: var(--lc-accent, #c39b50);
+  color: var(--lc-accent, #c39b50);
+}
+
+.layout-edit-add {
+  position: relative;
+}
+
+.layout-edit-add-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 80;
+  margin-top: 4px;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--ui-border-strong, #363636);
+  border-radius: 8px;
+  background: var(--ui-panel-3, #1a1a1a);
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.layout-edit-add-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: #d0d0d0;
+  text-align: left;
+  font-size: 12px;
+}
+
+.layout-edit-add-item:hover,
+.layout-edit-add-item:focus-visible {
+  background: var(--ui-panel-hover, #202020);
+  outline: none;
+}
+
+.layout-controls {
+  position: relative;
+  -webkit-app-region: no-drag;
+}
+
+.layout-trigger {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border-radius: 5px;
+  color: #bcbcbc;
+  font-size: 11px;
+}
+
+.layout-trigger .ui-icon,
+.layout-trigger-chevron {
+  width: 13px;
+  height: 13px;
+}
+
+.layout-trigger-chevron {
+  opacity: 0.65;
+}
+
+.layout-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+
+.layout-menu {
+  position: absolute;
+  top: 38px;
+  right: 64px;
+  width: 230px;
+  max-height: min(520px, calc(100vh - 56px));
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--ui-border-strong, #363636);
+  border-radius: 9px;
+  background: var(--ui-panel-3, #1a1a1a);
+  box-shadow: var(--ui-shadow-popover);
+}
+
+.layout-menu-heading,
+.layout-menu-section-label {
+  padding: 6px 8px;
+}
+
+.layout-menu-heading {
+  color: var(--lc-text-strong, #f0f0f0);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.layout-menu-section-label {
+  color: var(--lc-text-muted, #858585);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.layout-menu-item {
+  width: 100%;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: #d0d0d0;
+  text-align: left;
+}
+
+.layout-menu-item:hover,
+.layout-menu-item:focus-visible {
+  background: var(--ui-panel-hover, #202020);
+  outline: none;
+}
+
+.layout-menu-item .ui-icon {
+  width: 14px;
+  height: 14px;
+  color: #929292;
+}
+
+.layout-preset-item {
+  gap: 6px;
+}
+
+.layout-preset-item.is-active {
+  color: var(--lc-text-strong, #f0f0f0);
+  background: color-mix(in srgb, var(--lc-accent, #c39b50) 11%, transparent);
+}
+
+.layout-preset-check {
+  width: 14px;
+  color: var(--lc-accent, #c39b50);
+  font-size: 11px;
+  text-align: center;
+}
+
+.layout-preset-badge {
+  margin-left: auto;
+  padding: 1px 5px;
+  border: 1px solid var(--ui-border, #2d2d2d);
+  border-radius: 999px;
+  color: var(--lc-text-muted, #858585);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+}
+
+.layout-preset-badge + .layout-preset-badge {
+  margin-left: 0;
+}
+
+.layout-menu-item.is-destructive {
+  color: var(--ui-danger, #e86f6f);
+}
+
+.layout-menu-separator {
+  height: 1px;
+  margin: 5px 4px;
+  background: var(--ui-border, #262626);
+}
+
+/* Dragging is deliberately impossible outside edit mode — PanelLeaf attaches
+   no pointerdown handler at all there — so the grab cursor is scoped to the
+   mode that can act on it rather than advertising on every tab in the mode
+   users spend all their time in. */
+.workbench-editing .workbench-tab {
+  cursor: grab;
+}
+
+.panel-dragging,
+.panel-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.panel-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  max-width: 180px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--ui-border-strong, #363636);
+  border-radius: 7px;
+  background: var(--ui-panel-3, #1a1a1a);
+  box-shadow: var(--ui-shadow-popover);
+  color: var(--lc-text-strong, #f0f0f0);
+  font-size: 12px;
+  pointer-events: none;
+  transition: opacity 90ms ease, transform 90ms ease;
+  will-change: transform;
+}
+
+.panel-drag-ghost .ui-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.panel-drag-ghost span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The exact tab slot a "tab" drop would insert at, shown only while the
+   pointer is over the bar itself — `.panel-drop-preview` already covers the
+   content-append case, where there is no slot to point at. */
+.panel-drop-caret {
+  position: fixed;
+  z-index: 102;
+  border-radius: 1px;
+  background: var(--lc-accent, #c39b50);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel-drag-ghost {
+    transition: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ws-workbench *,
+  .ws-workbench *::before,
+  .ws-workbench *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

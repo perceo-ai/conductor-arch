@@ -48,10 +48,6 @@
     color: #0550ae;
     font-weight: bold;
 }
-.lc-theme-light .ws-right-panel {
-    background-color: #f8fafc;
-    border-left-color: #d9e0e8;
-}
 .lc-theme-light .ws-right-tabs {
     background-color: #f8fafc;
 }
@@ -146,9 +142,9 @@
 .lc-theme-light .nav-button-active {
     color: #111827;
 }
+/* Underline comes from the `::after` bar in `motion/04-surfaces.css`. */
 .lc-theme-light .ws-chat-tabs .ws-tab-shell.ws-tab-active {
     background-color: transparent;
-    border-bottom-color: var(--lc-accent);
 }
 .lc-theme-light .settings-readiness-pill {
     background: #fff1f2;

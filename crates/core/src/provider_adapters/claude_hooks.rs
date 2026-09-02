@@ -6,6 +6,33 @@ use crate::archcar::harness_contract::{InteractionAnswer, ProviderInteractionRes
 
 const ARCHCAR_CLAUDE_HOOK_FLAG: &str = "--archcar-claude-hook";
 
+/// The binary that implements `--archcar-claude-hook`.
+///
+/// It is the CLI, not the daemon. That distinction only shows up in a real
+/// deployment: a dev sidecar runs as `archductor --archcar-serve`, so
+/// `current_exe()` is already the right binary, but a service install runs
+/// `archcar` — which ignores the flag, tries to bind the socket a daemon is
+/// already holding, and fails. Every hook then errors: permission prompts,
+/// plan mode, and the SessionStart context injection.
+const HOOK_BINARY_STEM: &str = "archductor";
+
+/// Resolve the hook command from the running executable: use it when it is
+/// already the CLI, else the CLI beside it, else leave the bare name for PATH.
+pub fn resolve_claude_hook_binary(current_exe: &Path) -> std::path::PathBuf {
+    let file_name = format!(
+        "{HOOK_BINARY_STEM}{}",
+        if cfg!(windows) { ".exe" } else { "" }
+    );
+    if current_exe.file_stem().and_then(|stem| stem.to_str()) == Some(HOOK_BINARY_STEM) {
+        return current_exe.to_path_buf();
+    }
+    let sibling = current_exe.with_file_name(&file_name);
+    if sibling.exists() {
+        return sibling;
+    }
+    std::path::PathBuf::from(file_name)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaudeHookRequest {
     PreToolUse {
@@ -61,9 +88,10 @@ pub fn encode_claude_hook_noop() -> Value {
 }
 
 pub fn build_claude_hook_settings(executable: &Path, thread_id: i64) -> Value {
+    let hook_binary = resolve_claude_hook_binary(executable);
     let hook = json!({
         "type": "command",
-        "command": executable.to_string_lossy(),
+        "command": hook_binary.to_string_lossy(),
         "args": [ARCHCAR_CLAUDE_HOOK_FLAG, thread_id.to_string()],
     });
     json!({
@@ -372,6 +400,56 @@ mod tests {
             assert_eq!(hook["command"], "/usr/local/bin/archductor", "{event}");
             assert_eq!(hook["args"][1], "7", "{event}");
         }
+    }
+
+    #[test]
+    fn hooks_point_at_the_cli_even_when_the_daemon_binary_builds_them() {
+        // A service install runs `archcar`, which does not implement
+        // `--archcar-claude-hook`: it would try to bind the socket the daemon
+        // already holds and every hook would fail. Only a dev sidecar happens
+        // to be the right binary already.
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path();
+        let archcar = bin.join("archcar");
+        let archductor = bin.join(if cfg!(windows) {
+            "archductor.exe"
+        } else {
+            "archductor"
+        });
+        std::fs::write(&archcar, "").unwrap();
+        std::fs::write(&archductor, "").unwrap();
+
+        let settings = build_claude_hook_settings(&archcar, 3);
+        assert_eq!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            archductor.to_string_lossy().as_ref()
+        );
+
+        // The dev sidecar path is unchanged.
+        let settings = build_claude_hook_settings(&archductor, 3);
+        assert_eq!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            archductor.to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn the_hook_binary_falls_back_to_the_bare_name_for_path_lookup() {
+        // Nothing beside the daemon: leave a bare name so PATH resolves it,
+        // rather than a path that is known not to work.
+        let temp = tempfile::tempdir().unwrap();
+        let lonely = temp.path().join("archcar");
+        std::fs::write(&lonely, "").unwrap();
+
+        let resolved = resolve_claude_hook_binary(&lonely);
+        assert_eq!(
+            resolved,
+            Path::new(if cfg!(windows) {
+                "archductor.exe"
+            } else {
+                "archductor"
+            })
+        );
     }
 
     #[test]

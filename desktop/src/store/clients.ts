@@ -3,9 +3,13 @@ import { createStore } from "solid-js/store";
 import { clients as bridge, type ClientSummary, type ClientsResult } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
 import { actions } from "./actions";
+import { bumpDaemonEpoch } from "./daemonEpoch";
 import { providersStore } from "./providers";
 import { setupStore } from "./setup";
 import { toastsStore } from "./toasts";
+import { layoutPresetsStore } from "./layoutPresets";
+import { nav } from "./nav";
+import { workspacesStore } from "./workspaces";
 
 // The saved daemons this machine can point at. One of them is active, or none
 // for this machine's local daemon. Main owns the files (clients.json plus the
@@ -48,11 +52,18 @@ function applyResult(res: ClientsResult): boolean {
 
 /** Re-pull everything that belonged to the previous daemon. */
 async function resync(): Promise<void> {
+  // Invalidate anything still in flight to the daemon we just left, before the
+  // re-pull below issues requests to the new one. Without this a slow response
+  // from the old daemon can land afterwards and overwrite the new state.
+  bumpDaemonEpoch();
   await actions.refreshInventory().catch(() => undefined);
   await setupStore.check().catch(() => undefined);
   // The new daemon may know a different set of agents than the old one, so a
   // stale registry would offer providers this host cannot actually run.
   await providersStore.load().catch(() => undefined);
+  const selected = nav.selectedWorkspace();
+  const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
+  await layoutPresetsStore.load(repository).catch(() => undefined);
 }
 
 async function run(

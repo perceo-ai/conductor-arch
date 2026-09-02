@@ -1,0 +1,275 @@
+// @vitest-environment node
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ArchcarRequest, ArchcarResponse, LayoutPresetRecord } from "@/bridge/protocol";
+import type { Layout, LayoutLeaf, LayoutNode } from "@/lib/layout";
+
+function leafHolding(layout: Layout, panelId: string): LayoutLeaf {
+  const found: LayoutLeaf[] = [];
+  const walk = (node: LayoutNode) => {
+    if (node.type === "leaf") {
+      if (node.panels.includes(panelId)) found.push(node);
+      return;
+    }
+    walk(node.children[0]);
+    walk(node.children[1]);
+  };
+  walk(layout.root);
+  if (found.length === 0) throw new Error(`no leaf holds ${panelId}`);
+  return found[0];
+}
+
+const send = vi.fn<(request: ArchcarRequest) => Promise<ArchcarResponse>>();
+vi.mock("@/bridge/client", () => ({ send }));
+
+function record(id: string, name: string, layout: unknown, hidden: unknown = []): LayoutPresetRecord {
+  return {
+    id,
+    name,
+    builtin: ["code", "wide", "review", "watch"].includes(id),
+    layout_json: typeof layout === "string" ? layout : JSON.stringify(layout),
+    hidden_json: JSON.stringify(hidden),
+    created_at: "1",
+    updated_at: "1",
+  };
+}
+
+async function codeLayout() {
+  const { builtinPreset } = await import("@/lib/layoutPresets");
+  return builtinPreset("code")!.layout;
+}
+
+function responses(records: LayoutPresetRecord[], defaultId?: string) {
+  send.mockImplementation(async (request) => {
+    if (request.type === "list_layout_presets") return { type: "layout_presets", presets: records };
+    if (request.type === "get_settings") {
+      return {
+        type: "settings",
+        scope: request.repository ?? "global",
+        toml: defaultId
+          ? `[customization.view]\ndefault_layout_preset = "${defaultId}"\n`
+          : "[customization.view]\ntheme = \"dark\"\n",
+      };
+    }
+    if (request.type === "save_layout_preset") return { type: "layout_preset_saved", preset: request.preset };
+    return { type: "ack" };
+  });
+}
+
+describe("layoutPresetsStore", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.useRealTimers();
+    send.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("loads built-ins first, sanitizes remote users, and restores the local active id", async () => {
+    const unknown = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const layout = await codeLayout();
+    leafHolding(layout, "summary").panels.push("future-panel");
+    responses([record("custom-two", "Zeta", layout), record("code", "Server Code", layout)]);
+    const { prefsStore } = await import("./prefs");
+    prefsStore.setActivePresetId("custom-two");
+    const { layoutPresetsStore } = await import("./layoutPresets");
+
+    await layoutPresetsStore.load("demo");
+
+    expect(layoutPresetsStore.presets().map((preset) => preset.name)).toEqual([
+      "Code",
+      "Wide",
+      "Review",
+      "Watch",
+      "Zeta",
+    ]);
+    expect(layoutPresetsStore.activeId()).toBe("custom-two");
+    expect(leafHolding(layoutPresetsStore.activePreset()!.layout, "summary").panels).not.toContain("future-panel");
+    expect(unknown).toHaveBeenCalledOnce();
+  });
+
+  it("falls back once for invalid JSON and chooses project default before Code", async () => {
+    responses([record("broken", "Broken", "{"), record("custom-default", "Default", await codeLayout())], "custom-default");
+    const { prefsStore } = await import("./prefs");
+    prefsStore.setActivePresetId("missing-on-daemon");
+    const { toastsStore } = await import("./toasts");
+    const error = vi.spyOn(toastsStore, "error");
+    const { layoutPresetsStore } = await import("./layoutPresets");
+
+    await layoutPresetsStore.load("demo");
+
+    expect(layoutPresetsStore.activeId()).toBe("custom-default");
+    expect(error).toHaveBeenCalledOnce();
+    expect(layoutPresetsStore.presets().find((preset) => preset.id === "broken")?.layout)
+      .toEqual((await import("@/lib/layoutPresets")).builtinPreset("code")!.layout);
+
+    prefsStore.setActivePresetId("still-missing");
+    responses([], "also-missing");
+    await layoutPresetsStore.load("demo");
+    expect(layoutPresetsStore.activeId()).toBe("code");
+  });
+
+  it("warns when a stored layout was silently replaced, not just when its JSON is unparseable", async () => {
+    // The exact case the spec says will happen — a version-1 record, for which
+    // there is no migration path — parses fine, so the old `try/catch` around
+    // `JSON.parse` never fired: the record came back as Code with no toast,
+    // and the first subsequent edit persisted the Code tree over it.
+    responses([record("legacy", "Legacy", { version: 1, regions: { left: {}, center: {} } })]);
+    const { toastsStore } = await import("./toasts");
+    const error = vi.spyOn(toastsStore, "error");
+    const { layoutPresetsStore } = await import("./layoutPresets");
+
+    await layoutPresetsStore.load("demo");
+
+    expect(error).toHaveBeenCalledOnce();
+    expect(String(error.mock.calls[0][0])).toContain("restored with Code");
+    expect(layoutPresetsStore.presets().find((preset) => preset.id === "legacy")?.layout)
+      .toEqual((await import("@/lib/layoutPresets")).builtinPreset("code")!.layout);
+  });
+
+  it("does not warn for a stored layout that only needed repairing", async () => {
+    // A tree that survives sanitising — a clamped ratio, a dropped duplicate —
+    // is still the user's layout, so the "we replaced it" toast must not fire.
+    const layout = await codeLayout();
+    (layout.root as { ratio: number }).ratio = 42;
+    responses([record("repairable", "Repairable", layout)]);
+    const { toastsStore } = await import("./toasts");
+    const error = vi.spyOn(toastsStore, "error");
+    const { layoutPresetsStore } = await import("./layoutPresets");
+
+    await layoutPresetsStore.load("demo");
+
+    expect(error).not.toHaveBeenCalled();
+    const stored = layoutPresetsStore.presets().find((preset) => preset.id === "repairable")!;
+    expect((stored.layout.root as { ratio: number }).ratio).toBeLessThan(1);
+    expect(leafHolding(stored.layout, "chat").panels).toEqual(["chat"]);
+  });
+
+  it("forks a built-in once and debounces exactly one remote save for 250ms", async () => {
+    vi.useFakeTimers();
+    responses([]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    const { layoutStore } = await import("./layout");
+    await layoutPresetsStore.load();
+    send.mockClear();
+
+    layoutStore.setRatio((layoutStore.layout().root as { id: string }).id, 0.4);
+    layoutStore.setCollapsed(leafHolding(layoutStore.layout(), "chat").id, true);
+    layoutStore.removePanel("files");
+    const fork = layoutStore.activePreset().id;
+    layoutStore.removePanel("summary");
+    expect(fork).toMatch(/^custom-/);
+    expect(layoutStore.activePreset().id).toBe(fork);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(send).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0][0]).toMatchObject({
+      type: "save_layout_preset",
+      preset: { id: fork, builtin: false },
+    });
+    const request = send.mock.calls[0][0];
+    if (request.type !== "save_layout_preset") throw new Error("expected save request");
+    const savedLayout = JSON.parse(request.preset.layout_json) as Layout;
+    // Ratios are proportions, so they travel with the preset; the tree that
+    // ships is exactly the tree on screen.
+    expect(savedLayout.version).toBe(2);
+    expect((savedLayout.root as { ratio: number }).ratio).toBeCloseTo(0.4);
+    expect(leafHolding(savedLayout, "chat").collapsed).toBe(true);
+  });
+
+  it("keeps local edits when sync fails and offers one retry toast", async () => {
+    vi.useFakeTimers();
+    responses([]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    const { layoutStore } = await import("./layout");
+    const { toastsStore } = await import("./toasts");
+    await layoutPresetsStore.load();
+    const push = vi.spyOn(toastsStore, "push");
+    send.mockRejectedValueOnce(new Error("offline"));
+
+    layoutStore.removePanel("files");
+    const local = structuredClone(layoutStore.layout());
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(layoutStore.layout()).toEqual(local);
+    expect(push).toHaveBeenCalledOnce();
+    expect(push.mock.calls[0][1]).toBe("error");
+    expect(push.mock.calls[0][3]?.label).toBe("Retry");
+  });
+
+  it("selects immediately, protects built-ins, deletes users, and sets a project default", async () => {
+    responses([record("custom-one", "Mine", await codeLayout())]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    await layoutPresetsStore.load("demo");
+    send.mockClear();
+
+    expect(layoutPresetsStore.select("wide")).toBe(true);
+    expect(layoutPresetsStore.activeId()).toBe("wide");
+    expect(await layoutPresetsStore.delete("wide")).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    expect(await layoutPresetsStore.delete("custom-one")).toBe(true);
+    expect(send).toHaveBeenCalledWith({ type: "delete_layout_preset", id: "custom-one" });
+
+    await layoutPresetsStore.setProjectDefault("demo", "wide");
+    expect(send).toHaveBeenCalledWith({
+      type: "set_project_default_preset",
+      repository: "demo",
+      preset_id: "wide",
+    });
+    expect(layoutPresetsStore.projectDefaultId()).toBe("wide");
+  });
+
+  it("drops a debounced save when the daemon changed inside the debounce window", async () => {
+    // Edit on daemon A, switch to B before the 250ms timer fires. The queued
+    // write must not land on B: it carries A's layout.
+    vi.useFakeTimers();
+    responses([]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    const { layoutStore } = await import("./layout");
+    const { bumpDaemonEpoch } = await import("./daemonEpoch");
+    await layoutPresetsStore.load();
+    send.mockClear();
+
+    // Queue an edit against daemon A, then switch before the timer fires.
+    layoutStore.removePanel("files");
+    bumpDaemonEpoch();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("still saves a debounced edit when the daemon has not changed", async () => {
+    vi.useFakeTimers();
+    responses([]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    const { layoutStore } = await import("./layout");
+    await layoutPresetsStore.load();
+    send.mockClear();
+
+    layoutStore.removePanel("files");
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "save_layout_preset" }),
+    );
+  });
+
+  it("saves a named working copy and renames user presets", async () => {
+    responses([]);
+    const { layoutPresetsStore } = await import("./layoutPresets");
+    await layoutPresetsStore.load();
+    send.mockClear();
+
+    expect(await layoutPresetsStore.saveWorkingCopy("Team layout")).toBe(true);
+    const copyId = layoutPresetsStore.activeId();
+    expect(copyId).toMatch(/^custom-/);
+    expect(layoutPresetsStore.activePreset()?.name).toBe("Team layout");
+    expect(await layoutPresetsStore.rename("Team layout 2")).toBe(true);
+    expect(layoutPresetsStore.activePreset()).toMatchObject({ id: copyId, name: "Team layout 2" });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+});

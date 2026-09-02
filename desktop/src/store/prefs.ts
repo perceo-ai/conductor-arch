@@ -31,6 +31,7 @@ export interface Prefs {
   density: Density;
   // Persisted layout state so the app restores where you left off.
   sidebarCollapsed: boolean;
+  activePresetId: string;
   // Machine-local keyboard overrides, e.g. "palette=ctrl+p; focus=ctrl+j".
   keybindings: string;
   /**
@@ -48,21 +49,41 @@ const DEFAULTS: Prefs = {
   accent: "amber",
   density: "cozy",
   sidebarCollapsed: false,
+  activePresetId: "code",
   keybindings: "",
   pinnedWorkspaces: [],
 };
 
+function persistedPrefs(prefs: Prefs) {
+  return {
+    defaultProvider: prefs.defaultProvider,
+    defaultModel: prefs.defaultModel,
+    theme: prefs.theme,
+    accent: prefs.accent,
+    density: prefs.density,
+    sidebarCollapsed: prefs.sidebarCollapsed,
+    activePresetId: prefs.activePresetId,
+    keybindings: prefs.keybindings,
+    pinnedWorkspaces: prefs.pinnedWorkspaces,
+  };
+}
+
 function load(): Prefs {
   try {
     const raw = typeof localStorage !== "undefined" ? localStorage.getItem(KEY) : null;
-    if (!raw) return { ...DEFAULTS };
-    const parsed = JSON.parse(raw) as Partial<Prefs>;
-    const merged = { ...DEFAULTS, ...parsed };
+    const parsed = raw ? (JSON.parse(raw) as Partial<Prefs>) : {};
+    const merged: Prefs = {
+      ...DEFAULTS,
+      ...parsed,
+    };
     // Drop only the stale model/provider if the model list changed between
     // versions; keep appearance prefs intact.
     if (!MODELS[merged.defaultProvider]?.includes(merged.defaultModel)) {
       merged.defaultProvider = DEFAULTS.defaultProvider;
       merged.defaultModel = DEFAULTS.defaultModel;
+    }
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(KEY, JSON.stringify(persistedPrefs(merged)));
     }
     return merged;
   } catch {
@@ -77,16 +98,7 @@ function persist() {
     if (typeof localStorage === "undefined") return;
     localStorage.setItem(
       KEY,
-      JSON.stringify({
-        defaultProvider: state.defaultProvider,
-        defaultModel: state.defaultModel,
-        theme: state.theme,
-        accent: state.accent,
-        density: state.density,
-        sidebarCollapsed: state.sidebarCollapsed,
-        keybindings: state.keybindings,
-        pinnedWorkspaces: state.pinnedWorkspaces,
-      }),
+      JSON.stringify(persistedPrefs(state)),
     );
   } catch {
     // best-effort; a private-mode / quota failure just means it won't persist
@@ -132,6 +144,11 @@ export const prefsStore = {
 
   setSidebarCollapsed(collapsed: boolean) {
     setState("sidebarCollapsed", collapsed);
+    persist();
+  },
+
+  setActivePresetId(activePresetId: string) {
+    setState("activePresetId", activePresetId);
     persist();
   },
 

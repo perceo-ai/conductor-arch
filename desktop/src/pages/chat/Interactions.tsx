@@ -8,6 +8,8 @@ import type {
 } from "@/bridge/protocol";
 import Icon from "@/components/Icon";
 import { renderMarkdown } from "@/lib/markdown";
+import { configuredShortcut } from "@/lib/configuredShortcut";
+import { openFileInCenter } from "@/pages/openFileBridge";
 
 // Agent-initiated interactions: permission prompts, questions, and plan
 // approvals. Rendered above the composer, because resolving one is the next
@@ -112,10 +114,11 @@ function PermissionActions(props: {
   );
 }
 
-// The plan the agent proposed, shown as its own block with the file it was
-// written to. Approving it is what ends planning and starts the build, so the
-// buttons live in the composer where the next action is.
-export function PlanCard(props: { rec: ProviderInteractionRecord }) {
+// The plan the agent proposed, rendered inline in the timeline as the message
+// it is, with its own actions. It used to be pinned above the composer with
+// approve living in the composer's chrome — which split one object across two
+// surfaces and put the plan somewhere the scrollback could not reach.
+export function PlanCard(props: { rec: ProviderInteractionRecord; workspace: string }) {
   return (
     <div class="chat-plan-card">
       <div class="chat-plan-card-head">
@@ -129,6 +132,29 @@ export function PlanCard(props: { rec: ProviderInteractionRecord }) {
         class="chat-plan-card-body markdown-body"
         innerHTML={renderMarkdown(props.rec.detail)}
       />
+      <div class="chat-plan-card-actions">
+        <Show when={props.rec.plan_path}>
+          {(path) => (
+            <button
+              class="ui-button-sm chat-plan-card-open"
+              onClick={() => openFileInCenter(props.workspace, path())}
+            >
+              <Icon name="external" />
+              Open plan
+            </button>
+          )}
+        </Show>
+        <span class="chat-plan-card-hint">or say what to change</span>
+        <button
+          class="ui-button-primary chat-plan-approve"
+          data-shortcut={configuredShortcut("approve-plan")}
+          onClick={() =>
+            void actions.resolveInteraction(props.rec.id, { type: "approve" }).catch(() => {})
+          }
+        >
+          Approve &amp; build
+        </button>
+      </div>
     </div>
   );
 }

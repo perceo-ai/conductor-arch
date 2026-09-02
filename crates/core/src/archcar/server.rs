@@ -1709,6 +1709,64 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListLayoutPresets => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| store.list_layout_presets()) {
+                Ok(presets) => ArchcarResponse::LayoutPresets { presets },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SaveLayoutPreset { preset } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.save_layout_preset(&preset))
+            {
+                Ok(preset) => ArchcarResponse::LayoutPresetSaved { preset },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::DeleteLayoutPreset { id } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result = WorkspaceStore::open_app(&db_path)
+                .and_then(|store| store.delete_layout_preset(&id))
+                .and_then(|()| clear_deleted_preset_defaults(&db_path, &id));
+            match result {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SetProjectDefaultPreset {
+            repository,
+            preset_id,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let result: anyhow::Result<()> = WorkspaceStore::open_app(&db_path).and_then(|store| {
+                anyhow::ensure!(
+                    store
+                        .list_layout_presets()?
+                        .iter()
+                        .any(|preset| preset.id == preset_id),
+                    "unknown layout preset {preset_id}"
+                );
+                RepositoryStore::open(&db_path)
+                    .and_then(|store| store.get_by_name(&repository))
+                    .and_then(|record| {
+                        crate::settings::set_default_layout_preset(&record.root_path, &preset_id)
+                    })
+            });
+            match result {
+                Ok(()) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListRepositoryBranches { repository } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match RepositoryStore::open(&db_path)
@@ -2464,6 +2522,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 message: err.to_string(),
             },
         },
+        ArchcarRequest::ServiceDoctor => match crate::service::doctor(&AppPaths::from_env()) {
+            Ok(report) => ArchcarResponse::ServiceDoctorReport { report },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
         ArchcarRequest::InstallService { input } => {
             match crate::service::install(&AppPaths::from_env(), &input) {
                 Ok(status) => ArchcarResponse::ServiceStatus { status },
@@ -3200,6 +3264,42 @@ fn refresh_workspace_context_after_change(
 /// Read each client's current registration, folding in whatever the run that
 /// just happened reported so a failure explains itself instead of showing up as
 /// a silent "not registered".
+/// After deleting a preset, drop it as any repository's project default.
+///
+/// The preset row lives in the app database while the default that points at it
+/// lives in each repository's committed `settings.toml`, so deleting the row on
+/// its own leaves a setting naming a preset that is gone — the layout silently
+/// falls back to Code while the UI still shows the missing preset as default.
+///
+/// A repository that cannot be rewritten (read-only checkout, malformed TOML)
+/// must not fail the delete: the preset is already gone, and the stale default
+/// is inert. Log and continue.
+fn clear_deleted_preset_defaults(db_path: &Path, preset_id: &str) -> anyhow::Result<()> {
+    let repositories = match RepositoryStore::open(db_path).and_then(|store| store.list()) {
+        Ok(repositories) => repositories,
+        Err(err) => {
+            warn!(error = %err, "could not list repositories to clear a deleted layout default");
+            return Ok(());
+        }
+    };
+    for repository in repositories {
+        match crate::settings::clear_default_layout_preset(&repository.root_path, preset_id) {
+            Ok(true) => info!(
+                repository = %repository.name,
+                preset_id,
+                "cleared the project default for a deleted layout preset"
+            ),
+            Ok(false) => {}
+            Err(err) => warn!(
+                repository = %repository.name,
+                error = %err,
+                "could not clear the project default for a deleted layout preset"
+            ),
+        }
+    }
+    Ok(())
+}
+
 fn mcp_registration_response(outcomes: Vec<crate::mcp::McpRegistrationOutcome>) -> ArchcarResponse {
     use crate::archcar::protocol::McpClientRegistration;
     let clients = crate::mcp::archductor_mcp_registered()
@@ -4241,6 +4341,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::ListLayoutPresets
             | ArchcarRequest::ListRepositoryBranches { .. }
             | ArchcarRequest::ListAgentProviders
             | ArchcarRequest::ListPromptPacks { .. }
@@ -4248,6 +4349,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSetupReadiness { .. }
             | ArchcarRequest::GetPullRequestDraft { .. }
             | ArchcarRequest::GetServiceStatus
+            | ArchcarRequest::ServiceDoctor
             | ArchcarRequest::GetRemoteAccess
             | ArchcarRequest::ListBackgroundTasks { .. }
             | ArchcarRequest::GetBackgroundTask { .. }
@@ -5624,6 +5726,92 @@ mod tests {
             ]
         );
         assert_eq!(command.failure_context, "run git clone");
+    }
+
+    #[test]
+    fn layout_preset_dispatch_lists_saves_sets_default_and_deletes() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+        let added = dispatch_request(
+            ArchcarRequest::AddRepository {
+                path: repo_path.to_string_lossy().into_owned(),
+                name: Some("demo".to_owned()),
+                remote_name: None,
+                default_branch: Some("main".to_owned()),
+                workspace_parent: None,
+            },
+            &state,
+        );
+        assert!(matches!(added, ArchcarResponse::RepositoryAdded { .. }));
+
+        let listed = dispatch_request(ArchcarRequest::ListLayoutPresets, &state);
+        assert!(
+            matches!(listed, ArchcarResponse::LayoutPresets { ref presets } if presets.len() == 4)
+        );
+        let preset = crate::layout_presets::LayoutPreset {
+            id: "custom-one".to_owned(),
+            name: "Custom one".to_owned(),
+            builtin: false,
+            layout_json: "{\"version\":1,\"docks\":[]}".to_owned(),
+            hidden_json: "[]".to_owned(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let saved = dispatch_request(
+            ArchcarRequest::SaveLayoutPreset {
+                preset: preset.clone(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(saved, ArchcarResponse::LayoutPresetSaved { ref preset } if preset.id == "custom-one")
+        );
+        let listed = dispatch_request(ArchcarRequest::ListLayoutPresets, &state);
+        assert!(
+            matches!(listed, ArchcarResponse::LayoutPresets { ref presets } if presets.len() == 5)
+        );
+
+        let defaulted = dispatch_request(
+            ArchcarRequest::SetProjectDefaultPreset {
+                repository: "demo".to_owned(),
+                preset_id: "custom-one".to_owned(),
+            },
+            &state,
+        );
+        assert_eq!(defaulted, ArchcarResponse::Ack);
+        assert_eq!(
+            crate::settings::load_repository_settings(&repo_path)
+                .unwrap()
+                .customization
+                .view
+                .default_layout_preset
+                .as_deref(),
+            Some("custom-one")
+        );
+
+        let deleted = dispatch_request(
+            ArchcarRequest::DeleteLayoutPreset {
+                id: "custom-one".to_owned(),
+            },
+            &state,
+        );
+        assert_eq!(deleted, ArchcarResponse::Ack);
+        let listed = dispatch_request(ArchcarRequest::ListLayoutPresets, &state);
+        assert!(
+            matches!(listed, ArchcarResponse::LayoutPresets { ref presets } if presets.len() == 4)
+        );
     }
 
     #[test]

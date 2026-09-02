@@ -74,9 +74,9 @@ button.ws-tab-shell {
   outline-offset: -2px;
 }
 
+/* Underline comes from the `::after` bar in `motion/04-surfaces.css`. */
 .ws-tab-shell.ws-tab-active {
   background: #1d1d1d;
-  border-bottom-color: var(--lc-accent);
 }
 
 .ws-tab-label {
@@ -149,7 +149,6 @@ button.ws-tab-shell.ws-chat-new:hover {
 .ws-chat-tab-shell.ws-tab-active,
 .ws-file-tab.ws-tab-active {
   background: transparent;
-  border-bottom-color: var(--lc-accent);
 }
 
 .ws-chat-tab-dot {

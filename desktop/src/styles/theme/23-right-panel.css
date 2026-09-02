@@ -1,9 +1,5 @@
 
 /* ── Right panel ── */
-.ws-right-panel {
-    background-color: #171717;
-    border-left: 1px solid #272727;
-}
 .ws-right-tabs {
     min-height: 40px;
     background-color: #171717;

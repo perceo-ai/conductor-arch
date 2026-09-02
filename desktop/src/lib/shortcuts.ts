@@ -46,6 +46,7 @@ export type ShortcutAction =
   | "copy-link"
   | "toggle-plan-mode"
   | "approve-plan"
+  | "edit-layout"
   | `switch-workspace-${WorkspaceSlot}`;
 
 export interface KeyEventLike {
@@ -86,6 +87,7 @@ export const DEFAULT_SHORTCUTS: ShortcutBinding[] = [
   { action: "push-branch", keys: "mod+shift+y", label: "Push branch", aliases: ["push"] },
   { action: "open-pr-github", keys: "mod+shift+g", label: "Open PR in GitHub", aliases: ["github"] },
   { action: "start-review", keys: "mod+shift+r", label: "Start review", aliases: ["review"] },
+  { action: "edit-layout", keys: "mod+shift+l", label: "Edit layout", aliases: ["edit-layout", "layout-edit"] },
   { action: "focus-composer", keys: "mod+l", label: "Focus chat input", aliases: ["focus"] },
   { action: "focus-workspace", keys: "mod+alt+l", label: "Focus workspace", aliases: ["workspace"] },
   { action: "focus-search", keys: "mod+f", label: "Focus sidebar", aliases: ["search", "focus-sidebar"] },
@@ -258,6 +260,14 @@ export function formatShortcutKeys(keys: string): string {
       return part.length === 1 ? part.toUpperCase() : part[0].toUpperCase() + part.slice(1);
     })
     .join(" ");
+}
+
+export function shortcutForAction(
+  action: ShortcutAction,
+  shortcuts: ShortcutMap = DEFAULT_SHORTCUTS,
+): string | undefined {
+  const binding = shortcuts.find((candidate) => candidate.action === action && candidate.keys);
+  return binding ? formatShortcutKeys(binding.keys) : undefined;
 }
 
 export function shortcutHelp(shortcuts: ShortcutMap = DEFAULT_SHORTCUTS): { keys: string; label: string }[] {

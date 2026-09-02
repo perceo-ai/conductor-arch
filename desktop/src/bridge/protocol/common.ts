@@ -82,3 +82,12 @@ export type ArchcarInputKind = "user" | "review_prompt" | "control_command" | "r
 export type ArchcarInputDelivery = "auto" | "immediate";
 export type WorkspaceGitAction = "create_pr" | "push_branch" | "merge_pr" | "open_pr";
 
+export type LayoutPresetRecord = {
+  id: string;
+  name: string;
+  builtin: boolean;
+  layout_json: string;
+  hidden_json: string;
+  created_at: string;
+  updated_at: string;
+};

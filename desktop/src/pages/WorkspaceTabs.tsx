@@ -4,6 +4,7 @@ import { openExternal, send } from "@/bridge/client";
 import { actions, nav, threadsStore, toastsStore, workspacesStore } from "@/store";
 import Icon from "@/components/Icon";
 import { parsePrReadiness, type PrCheckRow, type PrGateTone } from "@/lib/prReadiness";
+import { configuredShortcut } from "@/lib/configuredShortcut";
 import type {
   WorkflowRun,
   WorkflowRunSummary,
@@ -628,6 +629,7 @@ export function ReviewPromptButton(props: { workspace: string }) {
 
   async function queueReviewPrompt() {
     if (busy()) return;
+    actions.revealPanel("changes");
     setBusy(true);
     try {
       const thread = await activeWorkspaceChatThread(props.workspace);
@@ -669,7 +671,12 @@ export function ReviewPromptButton(props: { workspace: string }) {
   });
 
   return (
-    <button class="ws-review-prompt-button" disabled={busy()} onClick={() => void queueReviewPrompt()}>
+    <button
+      class="ws-review-prompt-button"
+      disabled={busy()}
+      data-shortcut={configuredShortcut("start-review")}
+      onClick={() => void queueReviewPrompt()}
+    >
       {busy() ? "Queueing…" : "Review"}
     </button>
   );

@@ -134,6 +134,68 @@ archductor workspace archive fix-auth --remove-worktree
 
 Normal work happens in the desktop app; the CLI mirrors the same backend for automation and debugging. Run `archductor doctor` to check your environment.
 
+## Headless and remote setup
+
+Everything above works without a GUI. The `archcar` daemon owns all state; the desktop app, the CLI, and MCP clients are all just clients of it. So a server with no display can host the daemon and your laptop can drive it.
+
+### On the server
+
+```bash
+# Install the CLI and the daemon (tarball, .deb/.rpm, AUR, Nix, or Homebrew —
+# every packager ships both `archductor` and `archcar`).
+
+# One command: install the background service, provision the access token,
+# and check that the daemon can reach the tools it needs.
+#
+# Omit --listen when clients will connect over SSH (the recommended path
+# below) — SSH needs no open port at all.
+archductor service setup --listen 0.0.0.0:7420
+```
+
+`service setup` writes a launchd agent (macOS), a systemd user unit (Linux), or a Task Scheduler logon task (Windows), starts it, and prints the token. Manage it afterwards with `archductor service install|uninstall|status|doctor|token`.
+
+Two things it handles that are easy to get wrong by hand:
+
+- **Surviving logout.** systemd stops a user manager when the user's last session ends, so an SSH-installed unit would die the moment you disconnect. Install runs `loginctl enable-linger` for you and tells you if it could not. `archductor service status` reports `boot_persistent`.
+- **The daemon's PATH.** launchd gives a job `/usr/bin:/bin:/usr/sbin:/sbin`, and a systemd user unit is barely richer — neither can see Homebrew, a version manager, or `~/.local/bin`. Install probes your login shell and bakes the resulting PATH into the unit. `archductor service doctor` resolves `git`, `gh`, and every agent CLI against *that* PATH, which is the check that catches "the service is running but every session fails".
+
+On macOS a launchd **agent** starts at login, not at boot. On a headless Mac, log in once after a reboot, or install a root-owned LaunchDaemon. Windows logon tasks have the same scope: running while logged off means storing the account password in Task Scheduler, which archductor will not do for you.
+
+### On each client machine
+
+Two transports. **Prefer SSH** unless you have a reason not to:
+
+```bash
+# SSH (recommended): encrypted, no open port, no shared secret.
+archductor remote connect ssh://you@server
+
+# Token over TCP: only on loopback or a network you already trust.
+archductor remote connect server:7420 --token <token>
+
+archductor remote status      # where requests go, and over which transport
+archductor remote disconnect  # back to the local daemon
+```
+
+The CLI, the desktop app (Settings → Remote daemon), and `archductor mcp serve` all follow the saved profile, so one `remote connect` moves the whole machine. Sessions, terminals, checks, and PR operations then run **on the server**, which is where the agent CLIs and `gh` auth have to be installed.
+
+#### Why SSH is the better default
+
+`ssh://` runs `archductor archcar stdio-proxy` on the far side and pipes the protocol through the SSH connection. That means:
+
+| | SSH | Token over TCP |
+| --- | --- | --- |
+| Encryption | yes, by sshd | **none** |
+| Identity | your SSH key, per user | one shared token for everyone |
+| Revoke one user | remove their `authorized_keys` line | impossible — rotating cuts off everybody |
+| Open port on the daemon | none | yes |
+| Server setup | sshd, which a headless box already runs | `--listen`, plus a firewall you trust |
+
+The server needs no `--listen` at all for SSH; `archductor service install` with no listener is enough. If `archductor` is not on the non-interactive PATH over SSH, give the path explicitly: `ssh://you@server/opt/archductor/bin/archductor`. Host aliases, jump hosts, and per-host keys work because the destination is handed to `ssh` verbatim — so `~/.ssh/config` applies.
+
+> **Security.** The TCP transport is a shared bearer token in cleartext: no TLS, no per-client identity, and rotating the token revokes every client at once. A bare port (`--listen 7420`) binds loopback only; anything else must sit behind a VPN, an SSH tunnel, or a TLS reverse proxy. Use `ssh://` and none of that applies.
+
+`docs/api.md` documents the protocol itself.
+
 ## How it works
 
 1. **Add a project.** Register an existing repository path or clone a Git URL. A project wraps one repository and holds its committed settings, scripts, and prompts.
@@ -142,6 +204,31 @@ Normal work happens in the desktop app; the CLI mirrors the same backend for aut
 4. **Review.** Inspect changed files, diffs, todos, local review comments, sibling-workspace conflicts, PR checks, and GitHub PR comments. Stage any of them straight back into the selected agent session.
 5. **Ship.** Create, refresh, merge, and archive GitHub PRs through your local `gh` auth. Merge blockers (open todos, unresolved comments, failed or pending checks) are configurable.
 6. **Repeat or archive.** Archive the workspace, restore it later, or move on to the next task.
+
+### Workspace layouts
+
+The workspace top bar includes a Layout menu. **Code** preserves the original
+chat-centre/right-inspector arrangement; **Wide**, **Review**, and **Watch** are
+alternate built-ins. Built-ins are immutable: dragging, moving, hiding, or
+restoring a panel while one is active creates one editable `(<name> edited)`
+copy, leaving Code available as a recovery baseline.
+
+Panels can move by dragging their tab or through the keyboard-accessible panel
+menu. Regions can be resized or collapsed, and hidden panels can be restored
+from Layout or the command palette. Preset definitions sync through `archcar`;
+the active preset, region sizes, and collapsed regions stay local to each
+device. “Set as project default” writes
+`customization.view.default_layout_preset` to the repository-committed
+`.archductor/settings.toml` while preserving other keys.
+
+The same lifecycle is available from the CLI:
+
+```bash
+archductor layout presets --repository my-app
+archductor layout show wide
+archductor layout set-default wide --repository my-app
+archductor layout delete custom-my-layout
+```
 
 ## Configuration
 
@@ -163,6 +250,9 @@ Scripts and agent processes receive Archductor context via environment variables
 - File-editable repository settings (scripts, prompts, environment, Git behavior, merge rules, workspace/view defaults)
 - CLI parity with the app backend; export/import of shared and local settings bundles
 - Linked workspace directories (symlinked under `.context/linked-directories`)
+- Modular workspace layouts with four immutable built-ins, synced custom
+  presets, drag/menu movement, hide/restore, region sizing/collapse, and
+  per-project defaults
 
 **In progress 🚧**
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { Duplex } from "node:stream";
 
 // Node port of crates/core/src/archcar/{client,transport}.rs framing.
 //
@@ -121,6 +122,84 @@ function connectOnce(endpoint: string): Promise<net.Socket> {
 export interface RemoteConfig {
   address: string;
   token: string;
+  /**
+   * Set when the address is an `ssh://` one. The transport is then an `ssh`
+   * child running the stdio proxy on the far side, and `token` is unused —
+   * sshd has already authenticated the caller.
+   */
+  ssh?: SshTarget;
+}
+
+/** Mirrors `SshTarget` in crates/core/src/archcar/remote.rs. */
+export interface SshTarget {
+  destination: string;
+  port: number | null;
+  program: string;
+}
+
+const SSH_SCHEME = "ssh://";
+const DEFAULT_SSH_PROGRAM = "archductor";
+const SSH_PROXY_ARGS = ["archcar", "stdio-proxy", "--quiet"];
+
+export function isSshAddress(value: string): boolean {
+  return value.trim().startsWith(SSH_SCHEME);
+}
+
+/**
+ * Parse `ssh://[user@]host[:port][/path/to/archductor]`. Returns null for a
+ * non-ssh address; throws for an ssh address that is malformed, because
+ * falling back to the TCP transport would demand a token the user never meant
+ * to supply.
+ */
+export function parseSshAddress(value: string): SshTarget | null {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(SSH_SCHEME)) return null;
+  const rest = trimmed.slice(SSH_SCHEME.length);
+  if (!rest) throw new Error("ssh address needs a host");
+
+  const slash = rest.indexOf("/");
+  const authority = slash >= 0 ? rest.slice(0, slash) : rest;
+  const programPart = slash >= 0 ? rest.slice(slash).trim() : "";
+  if (!authority) throw new Error("ssh address needs a host");
+
+  let destination = authority;
+  let port: number | null = null;
+  // A bracketed IPv6 literal has no port suffix to split off.
+  if (!authority.endsWith("]")) {
+    const colon = authority.lastIndexOf(":");
+    if (colon >= 0) {
+      const parsed = Number(authority.slice(colon + 1));
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+        throw new Error(`ssh address port \`${authority.slice(colon + 1)}\` is not a port`);
+      }
+      destination = authority.slice(0, colon);
+      port = parsed;
+    }
+  }
+  if (!destination) throw new Error(`ssh address \`${rest}\` has no host part`);
+  return {
+    destination,
+    port,
+    program: programPart && programPart !== "/" ? programPart : DEFAULT_SSH_PROGRAM,
+  };
+}
+
+/** The `ssh` argument list. Mirrors `SshTarget::ssh_args`. */
+export function sshArgs(target: SshTarget): string[] {
+  const args = [
+    // No pty: this is a byte pipe, and a pty would mangle it.
+    "-T",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=3",
+    // The app has no terminal, so a password prompt would hang it.
+    "-o",
+    "BatchMode=yes",
+  ];
+  if (target.port !== null) args.push("-p", String(target.port));
+  args.push(target.destination, target.program, ...SSH_PROXY_ARGS);
+  return args;
 }
 
 export function remoteProfilePath(): string {
@@ -135,6 +214,8 @@ export function resolveRemoteConfig(
 ): RemoteConfig | null {
   const address = env.ARCHDUCTOR_ARCHCAR_REMOTE?.trim();
   if (address) {
+    const ssh = parseSshAddress(address);
+    if (ssh) return { address, token: "", ssh };
     const token = env.ARCHDUCTOR_ARCHCAR_TOKEN?.trim() || readLocalToken()?.trim();
     if (!token) {
       throw new Error(
@@ -149,6 +230,12 @@ export function resolveRemoteConfig(
     const parsed = JSON.parse(raw) as { address?: string; token?: string };
     const parsedAddress = parsed.address?.trim();
     const parsedToken = parsed.token?.trim();
+    // An ssh:// profile has no token by design; only the TCP transport needs
+    // one, so only the TCP transport treats a blank token as incomplete.
+    if (parsedAddress && isSshAddress(parsedAddress)) {
+      const ssh = parseSshAddress(parsedAddress);
+      if (ssh) return { address: parsedAddress, token: "", ssh };
+    }
     if (parsedAddress && parsedToken) return { address: parsedAddress, token: parsedToken };
   } catch {
     // A malformed profile falls back to the local daemon rather than wedging
@@ -194,6 +281,19 @@ export function clientIdFrom(label: string): string {
  * id with no matching client, and adopts a pre-existing single profile so a
  * machine that only ever ran `remote connect` keeps its connection.
  */
+/**
+ * Mirrors `profile_is_usable` in crates/core/src/archcar/remote.rs. Only the
+ * TCP transport needs a token; an `ssh://` entry with a blank one is complete,
+ * not half-written. Requiring a token here dropped ssh clients from the list,
+ * so the switcher showed "This machine" while every request went to the remote
+ * daemon.
+ */
+function clientIsUsable(address: string | undefined, token: string | undefined): boolean {
+  const trimmed = address?.trim();
+  if (!trimmed) return false;
+  return isSshAddress(trimmed) || !!token?.trim();
+}
+
 export function parseClients(raw: string | null, profileRaw: string | null): ClientsFile {
   let file: ClientsFile = { clients: [] };
   if (raw) {
@@ -209,16 +309,14 @@ export function parseClients(raw: string | null, profileRaw: string | null): Cli
       file = { clients: [] };
     }
   }
-  file.clients = file.clients.filter(
-    (c) => c && c.id && c.address?.trim() && c.token?.trim(),
-  );
+  file.clients = file.clients.filter((c) => c && c.id && clientIsUsable(c.address, c.token));
   if (!file.clients.some((c) => c.id === file.active_id)) delete file.active_id;
   if (file.clients.length === 0 && profileRaw) {
     try {
       const profile = JSON.parse(profileRaw) as { address?: string; token?: string };
       const address = profile.address?.trim();
-      const token = profile.token?.trim();
-      if (address && token) {
+      const token = profile.token?.trim() ?? "";
+      if (address && clientIsUsable(address, token)) {
         const id = clientIdFrom(address);
         file = { active_id: id, clients: [{ id, label: address, address, token }] };
       }
@@ -310,6 +408,38 @@ export function loadRemoteConfig(): RemoteConfig | null {
     () => readFile(remoteProfilePath()),
     () => readFile(path.join(stateDir(), "archcar.token")),
   );
+}
+
+/**
+ * Connect over SSH: spawn `ssh <host> archductor archcar stdio-proxy` and use
+ * its pipes as the byte stream. No listener and no shared token on the server.
+ */
+function connectSsh(target: SshTarget): Promise<Duplex> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("ssh", sshArgs(target), { stdio: ["pipe", "pipe", "pipe"] });
+    // ssh reports its own failures here — an unresolvable host, a refused key,
+    // a missing archductor on the far side. Without this the caller would only
+    // see the stream close.
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+
+    const stream = Duplex.from({ readable: child.stdout, writable: child.stdin });
+    child.once("exit", (code) => {
+      if (code === 0) return;
+      const detail = stderr.trim() || `ssh exited with ${code}`;
+      stream.destroy(new Error(`ssh transport failed: ${detail}`));
+    });
+    // Closing the stream has to take the ssh child with it, or every request
+    // would leak a process.
+    stream.once("close", () => {
+      if (child.exitCode === null) child.kill();
+    });
+    resolve(stream);
+  });
 }
 
 /** Connect to a remote archcar: TCP, then the token line before any framing. */
@@ -427,7 +557,7 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
 }
 
 /** Read newline-delimited JSON envelopes off a socket, invoking `onLine` per line. */
-function lineReader(socket: net.Socket, onLine: (line: string) => void): void {
+function lineReader(socket: Duplex, onLine: (line: string) => void): void {
   let buf = "";
   socket.setEncoding("utf8");
   socket.on("data", (chunk: string) => {
@@ -448,7 +578,7 @@ export class ArchcarBridge {
   // silently. Deferring to first use surfaces the error through the IPC handler
   // instead, and still lets the window open.
   private endpoint: string | null;
-  private subSocket: net.Socket | null = null;
+  private subSocket: Duplex | null = null;
 
   constructor(endpoint?: string) {
     this.endpoint = endpoint ?? null;
@@ -464,8 +594,9 @@ export class ArchcarBridge {
    * or the local endpoint (spawning archcar if needed). Remote config is
    * re-read per connection so a settings change applies without a restart.
    */
-  private async open(): Promise<net.Socket> {
+  private async open(): Promise<Duplex> {
     const remote = loadRemoteConfig();
+    if (remote?.ssh) return connectSsh(remote.ssh);
     if (remote) return connectRemote(remote);
     const endpoint = this.resolveEndpoint();
     await ensureDaemon(endpoint);

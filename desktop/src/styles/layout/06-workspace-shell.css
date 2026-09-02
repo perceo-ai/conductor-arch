@@ -45,18 +45,6 @@
   flex-direction: column;
   overflow: hidden;
 }
-.ws-right-panel {
-  position: relative;
-  flex: 0 1 320px;
-  width: 320px;
-  min-width: 260px;
-  max-width: min(440px, 30vw);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-left: 1px solid var(--lc-border, #2a2a2a);
-  background: #191919;
-}
 .command-center-strip {
   display: flex;
   flex-direction: row;
@@ -80,13 +68,7 @@
   overflow: auto;
 }
 
-/* The inspector only drops out when the three minimums genuinely cannot fit
-   (below Electron's 900px floor, e.g. a zoomed-in renderer). Above that it
-   shrinks instead — hiding it at 1100px made the centre column jump. */
 @media (max-width: 880px) {
-  .ws-right-panel {
-    display: none;
-  }
   .chat-toolbar-left {
     flex-wrap: wrap;
   }

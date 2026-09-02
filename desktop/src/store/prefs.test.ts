@@ -1,11 +1,12 @@
 // @vitest-environment node
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // prefs drives the default model new chats start on. Runs in the node env where
 // localStorage is absent, so this also exercises the no-localStorage fallback.
 
 describe("prefsStore", () => {
   beforeEach(() => vi.resetModules());
+  afterEach(() => vi.unstubAllGlobals());
 
   it("defaults to a concrete codex model", async () => {
     const { prefsStore } = await import("./prefs");
@@ -51,6 +52,20 @@ describe("prefsStore", () => {
     expect(prefsStore.state.sidebarCollapsed).toBe(false);
     prefsStore.setSidebarCollapsed(true);
     expect(prefsStore.state.sidebarCollapsed).toBe(true);
+  });
+
+  it("defaults device-local layout preferences", async () => {
+    const { prefsStore } = await import("./prefs");
+    expect(prefsStore.state.activePresetId).toBe("code");
+    prefsStore.setActivePresetId("wide");
+    expect(prefsStore.state.activePresetId).toBe("wide");
+  });
+
+  it("drops the retired region prefs", async () => {
+    const { prefsStore } = await import("./prefs");
+    expect("regionSizes" in prefsStore.state).toBe(false);
+    expect("collapsedRegions" in prefsStore.state).toBe(false);
+    expect(typeof prefsStore.state.activePresetId).toBe("string");
   });
 
   it("tracks custom keyboard bindings", async () => {
