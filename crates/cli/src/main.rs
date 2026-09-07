@@ -174,6 +174,10 @@ enum Command {
         #[command(subcommand)]
         command: RemoteCommand,
     },
+    /// Launch the Archductor desktop app (the Electron GUI). `gtk` is a
+    /// backwards-compatible alias from when the desktop app was a GTK build.
+    #[command(alias = "gtk")]
+    Gui,
 }
 
 #[derive(Debug, Subcommand)]
@@ -3548,6 +3552,7 @@ fn run_cli() -> Result<()> {
                 workspace.name
             );
         }
+        Command::Gui => launch_desktop_gui()?,
     }
 
     Ok(())
@@ -3693,6 +3698,56 @@ fn local_store_command_name(command: &Command) -> Option<&'static str> {
         Command::Discard { .. } => Some("discard"),
         _ => None,
     }
+}
+
+/// Resolve the installed Archductor desktop launcher. Mirrors the sidecar
+/// lookup in the Electron app: an explicit override, then PATH, then the known
+/// package install locations.
+fn resolve_desktop_binary() -> Result<PathBuf> {
+    if let Some(bin) = std::env::var_os("ARCHDUCTOR_DESKTOP_BIN") {
+        let path = PathBuf::from(bin);
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+
+    // Installed launcher name (electron-builder executableName) or the `gtk` alias.
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for name in ["archductor-desktop", "archductor-gtk"] {
+            if let Some(hit) = std::env::split_paths(&path_var)
+                .map(|dir| dir.join(name))
+                .find(|candidate| candidate.is_file())
+            {
+                return Ok(hit);
+            }
+        }
+    }
+
+    // Known package install locations (AUR /opt, per-user local install).
+    let mut candidates = vec![PathBuf::from("/opt/archductor/archductor-desktop")];
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".local/opt/archductor/archductor-desktop"));
+    }
+    if let Some(hit) = candidates.into_iter().find(|candidate| candidate.is_file()) {
+        return Ok(hit);
+    }
+
+    anyhow::bail!(
+        "could not find the Archductor desktop app. Install the package that ships \
+         `archductor-desktop` (AUR, .deb/.rpm, or AppImage), or point ARCHDUCTOR_DESKTOP_BIN \
+         at the launcher binary."
+    )
+}
+
+/// Launch the desktop GUI detached so it outlives this CLI invocation and does
+/// not tie up the terminal.
+fn launch_desktop_gui() -> Result<()> {
+    let program = resolve_desktop_binary()?;
+    ProcessCommand::new(&program)
+        .spawn()
+        .with_context(|| format!("failed to launch the desktop app at {}", program.display()))?;
+    println!("Launched Archductor desktop ({}).", program.display());
+    Ok(())
 }
 
 fn layout_presets_from_response(

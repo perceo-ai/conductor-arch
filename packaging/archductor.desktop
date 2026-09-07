@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Archductor
+GenericName=Coding Agent Workspace Manager
+Comment=Parallel coding-agent workflow built around Git worktrees
+Exec=archductor-desktop %U
+Icon=archductor
+Type=Application
+Categories=Development;IDE;
+Keywords=git;worktree;agent;codex;claude;
+StartupNotify=true
+Terminal=false

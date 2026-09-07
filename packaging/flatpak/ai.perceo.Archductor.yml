@@ -1,3 +1,11 @@
+# DEPRECATED (pre-Electron): this manifest predates the desktop GUI rewrite. It
+# builds only the `archductor` CLI against the GNOME runtime and sets it as the
+# launch command, so `flatpak run` starts the CLI, not the desktop app. The old
+# GTK app it was written for is removed. A GUI Flatpak needs the
+# org.freedesktop.Platform runtime plus flatpak-node-generator-vendored npm
+# sources for the desktop/ Electron build; that conversion is tracked as
+# follow-up and must pass flatpak-builder before it ships. Use the AUR package,
+# AppImage, or deb/rpm for the desktop GUI today.
 app-id: ai.perceo.Archductor
 runtime: org.gnome.Platform
 runtime-version: '50'
@@ -12,7 +20,7 @@ finish-args:
   - --filesystem=host
   # Network access is required for git fetch, gh CLI, and agent sessions.
   - --share=network
-  # IPC and display sockets are required for GTK desktop integration.
+  # IPC and display sockets (retained for the pending Electron desktop build).
   - --share=ipc
   - --socket=fallback-x11
   - --socket=wayland

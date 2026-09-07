@@ -5,6 +5,10 @@
 # agent shells out to (git, gh, ssh) — declared for deb/rpm below.
 appId: ai.perceo.archductor
 productName: Archductor
+# The GUI launcher binary is named `archductor-desktop` so it never collides
+# with the `archductor` CLI (both land in /usr/bin on source installs like the
+# AUR package). Applies to every linux target's launcher + generated .desktop.
+executableName: archductor-desktop
 copyright: Copyright © Perceo
 
 directories:
