@@ -1,0 +1,23 @@
+packaging/aur/PKGBUILD
+  s_38e884d61912a3::t_4f5741c328452a 49-50
+crates/cli/src/main.rs
+  s_38e884d61912a3::t_7e136aa8fedfff 3555
+  s_38e884d61912a3::t_ac763e55c1e711 3703-3752
+  s_38e884d61912a3::t_6b62e879714c00 177-180
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "af0a6c8d01889ac72a7dfa19aece03c7b0a44753",
+  "prompts": {},
+  "sessions": {
+    "s_38e884d61912a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d04fdca8-3110-4156-b5e4-41bcc939f2dd",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
