@@ -1,0 +1,27 @@
+packaging/archductor.desktop
+  s_38e884d61912a3::t_e4600eeeef95e6 1-11
+packaging/aur/PKGBUILD
+  s_38e884d61912a3::t_469d4294a64be5 9-14,21-23,25-32,37-50,53-56,59-60
+packaging/README.md
+  s_38e884d61912a3::t_d1bea49486efc9 154-162
+  s_38e884d61912a3::t_6e3a416696e00e 92-97,104-109
+  s_38e884d61912a3::t_d26220dba2103a 110
+desktop/electron-builder.yml
+  s_38e884d61912a3::t_0e45b322376616 8-11
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "56615ce5ad34e739d8de91368d0bf97f991ad93e",
+  "prompts": {},
+  "sessions": {
+    "s_38e884d61912a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d04fdca8-3110-4156-b5e4-41bcc939f2dd",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
