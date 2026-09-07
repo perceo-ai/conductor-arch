@@ -11,7 +11,12 @@ Load other docs only when the task needs them:
   `docs/mvp-scope.md`
 - Manual release/app verification: `docs/manual-testing-checklist.md`
 - Upstream Conductor parity: `docs/archductor-docs-parity-map.md`
-- User-facing install, workflow, or configuration docs: `README.md`
+- User-facing install, workflow, or configuration docs: `README.md` and the
+  task-shaped guides in `docs/guides/` (index: `docs/guides/README.md`). When a
+  behavior change alters user-visible workflow, settings keys, or CLI flags,
+  update the matching guide in the same change.
+- The published docs site (`docs.perceo.ai`) mirrors these guides from the
+  `perceo-docs` repository. Repository guides are the source; the site follows.
 
 Use official Conductor docs as the parity baseline when working on parity:
 
