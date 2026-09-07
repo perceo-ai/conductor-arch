@@ -46,6 +46,8 @@ package() {
     # from the `archductor` CLI (see desktop/electron-builder.yml).
     install -d "$pkgdir/usr/bin"
     ln -s "/opt/$pkgname/archductor-desktop" "$pkgdir/usr/bin/archductor-desktop"
+    # Backwards-compatible alias from the GTK era; also matches `archductor gtk`.
+    ln -s "/opt/$pkgname/archductor-desktop" "$pkgdir/usr/bin/archductor-gtk"
 
     # CLI + daemon on PATH (the GUI also carries its own copies under resources/bin).
     install -Dm755 target/release/archductor "$pkgdir/usr/bin/archductor"
