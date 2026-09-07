@@ -43,6 +43,7 @@ impl RepositoryStore {
 
         let conn = Connection::open(path.as_ref())
             .with_context(|| format!("open database {}", path.as_ref().display()))?;
+        crate::storage::configure_workspace_db(&conn)?;
         let store = Self { conn };
         store.migrate()?;
         Ok(store)

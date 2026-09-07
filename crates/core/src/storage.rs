@@ -1,7 +1,21 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension};
+use std::time::Duration;
+
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub(crate) fn configure_workspace_db(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    conn.execute_batch("PRAGMA foreign_keys = ON")?;
+    Ok(())
+}
 
 pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
+    configure_workspace_db(conn)?;
+    let journal_mode: String = conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if journal_mode != "wal" {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+    }
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS repositories (
@@ -664,4 +678,46 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, alter_sql: &str) 
         conn.execute(alter_sql, [])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{thread, time::Duration};
+
+    use rusqlite::Connection;
+
+    use crate::workspace::WorkspaceStore;
+
+    #[test]
+    fn workspace_store_waits_out_a_brief_concurrent_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open(&db_path).unwrap();
+
+        let blocker = Connection::open(&db_path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let open_path = db_path.clone();
+        let opening = thread::spawn(move || WorkspaceStore::open(open_path));
+        thread::sleep(Duration::from_millis(100));
+        blocker.execute_batch("COMMIT").unwrap();
+
+        opening
+            .join()
+            .unwrap()
+            .expect("a short writer lock should not fail an Archductor request");
+    }
+
+    #[test]
+    fn workspace_database_uses_wal_for_concurrent_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        WorkspaceStore::open(&db_path).unwrap();
+        let conn = Connection::open(db_path).unwrap();
+
+        let mode: String = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+    }
 }

@@ -1437,14 +1437,9 @@ fn apply_provider_control_plan(
             let _ = crate::platform::interrupt_process_group(connection.child.id());
         }
         HarnessControlPlan::RestartRequired(controls) => {
-            if started.kind == SessionKind::CLAUDE && connection.native_thread_id.is_none() {
-                let _ = event_tx.send(ArchcarEvent::SessionError {
-                    session_id: Some(started.session_id),
-                    thread_id: Some(started.thread_id),
-                    message: "Claude session has no native session id to resume".to_owned(),
-                });
-                return;
-            }
+            // Claude does not report its native id until the first input. Keep
+            // startup controls on the connection now; its loop restarts only
+            // after the adapter is ready and the id is available.
             apply_provider_connection_controls(connection, controls);
             let metadata = provider_connection_harness_metadata(harness_name, connection);
             let _ = runtime_store
@@ -4675,6 +4670,77 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
         );
 
         assert!(!connection.fast_mode);
+
+        let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn claude_startup_control_waits_for_native_id_without_reporting_resume_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let mut child = ProcessCommand::new("bash")
+            .args(["-lc", "cat >/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let process = record_thread_session_with_port_and_pid(&store, &thread, 43993, pid);
+        let (_native_tx, native_rx) = mpsc::channel();
+        let mut connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: native_rx,
+            next_read_line: 0,
+            native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            model: None,
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            pid,
+            true,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let (event_tx, event_rx) = mpsc::channel();
+        let runtime_store = RuntimeSessionStore::new(temp.path().join("state.db"));
+
+        apply_provider_control_plan(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut connection,
+            "claude-stream-json",
+            HarnessControlPlan::RestartRequired(DesiredHarnessControls {
+                model: Some("claude-opus-5".to_owned()),
+                ..DesiredHarnessControls::default()
+            }),
+        );
+
+        assert_eq!(connection.model.as_deref(), Some("claude-opus-5"));
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ArchcarEvent::SessionMessagesUpdated { thread_id } if thread_id == thread.id
+        ));
+        assert!(event_rx
+            .try_iter()
+            .all(|event| !matches!(event, ArchcarEvent::SessionError { .. })));
 
         let _ = connection.child.kill();
     }

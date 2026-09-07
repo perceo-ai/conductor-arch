@@ -183,7 +183,9 @@ impl ProviderInputStore {
     }
 
     fn open(&self) -> Result<Connection> {
-        Ok(Connection::open(&self.db_path)?)
+        let conn = Connection::open(&self.db_path)?;
+        crate::storage::configure_workspace_db(&conn)?;
+        Ok(conn)
     }
 }
 
