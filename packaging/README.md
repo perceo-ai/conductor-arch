@@ -89,11 +89,24 @@ example:
 
 ### AUR (Arch Linux)
 
+The AUR package builds the Rust sidecars **and** the Electron desktop GUI, so it
+installs the full product: the `archductor` CLI, the `archcar` daemon, and the
+`archductor-desktop` GUI (with a `.desktop` launcher entry and icon). Building
+therefore needs `nodejs` + `pnpm` in addition to the Rust toolchain (declared in
+`makedepends`).
+
 ```bash
 scripts/update-aur-checksum.sh 0.1.0 <64-character-sha256>
 cd packaging/aur
 makepkg -si
 ```
+
+Layout after install:
+
+- `/usr/bin/archductor` — CLI
+- `/usr/bin/archcar` — daemon
+- `/usr/bin/archductor-desktop` → `/opt/archductor/archductor-desktop` — GUI
+- `/usr/share/applications/archductor.desktop`, icon under `hicolor/256x256`
 
 ### Nix
 
@@ -138,6 +151,15 @@ flatpak run ai.perceo.Archductor
 
 > **Note:** The Flatpak sandbox requires `--filesystem=host` to access arbitrary
 > repository paths. The app works best installed from AppImage or native packages.
+>
+> **Pending Electron conversion:** this manifest predates the Electron GUI — it
+> still builds only the `archductor` CLI against the GNOME runtime and sets it as
+> the launch `command`, so `flatpak run` starts the CLI, not the desktop app. A
+> real GUI Flatpak needs the `org.freedesktop.Platform` runtime plus
+> `flatpak-node-generator`-vendored offline npm sources for the `desktop/` build.
+> That conversion must be validated with `flatpak-builder` before it ships, so it
+> is tracked as follow-up work rather than bundled into the AUR GUI fix. Use the
+> AUR package, AppImage, or `.deb`/`.rpm` for the desktop GUI today.
 
 ### Windows portable ZIP (preview)
 
