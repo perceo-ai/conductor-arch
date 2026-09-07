@@ -9,7 +9,15 @@ describe("layout presets", () => {
     expect(code.name).toBe("Code");
     expect(code.builtin).toBe(true);
     expect(code.layout.version).toBe(2);
-    expect(visiblePanelIds(code.layout)).toEqual(["chat", "pr", "summary", "files", "changes", "checks"]);
+    expect(visiblePanelIds(code.layout)).toEqual([
+      "chat",
+      "pr",
+      "summary",
+      "files",
+      "changes",
+      "checks",
+      "terminal",
+    ]);
   });
 
   it("ships the approved Wide, Review, and Watch arrangements", () => {

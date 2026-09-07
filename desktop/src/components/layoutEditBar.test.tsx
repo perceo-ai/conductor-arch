@@ -58,21 +58,21 @@ describe("layout edit bar", () => {
     const menuBefore = host.querySelector(".layout-edit-add-menu");
     expect(menuBefore).toBeTruthy();
 
-    const terminalItem = [...host.querySelectorAll<HTMLButtonElement>(".layout-edit-add-item")].find((item) =>
-      item.textContent?.includes("Terminal"),
+    const todosItem = [...host.querySelectorAll<HTMLButtonElement>(".layout-edit-add-item")].find((item) =>
+      item.textContent?.includes("Todos"),
     )!;
-    expect(terminalItem).toBeTruthy();
-    expect(layoutStore.hiddenPanels()).toContain("terminal");
+    expect(todosItem).toBeTruthy();
+    expect(layoutStore.hiddenPanels()).toContain("todos");
 
-    terminalItem.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    todosItem.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     // The crux of the regression: the menu must still be mounted right after
     // the pointerdown that starts the click, or the click that follows has
     // nothing left to land on.
     expect(host.querySelector(".layout-edit-add-menu")).toBeTruthy();
 
-    terminalItem.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    todosItem.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(layoutStore.hiddenPanels()).not.toContain("terminal");
+    expect(layoutStore.hiddenPanels()).not.toContain("todos");
     // Selecting an item does still close the menu — just after, not before,
     // its own click.
     expect(host.querySelector(".layout-edit-add-menu")).toBeNull();

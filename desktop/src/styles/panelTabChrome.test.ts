@@ -137,7 +137,7 @@ describe("panel tab chrome", () => {
     expect(grabbable.filter((selector) => !selector.includes(".workbench-editing"))).toEqual([]);
   });
 
-  it("sizes tabs to their labels instead of splitting the strip evenly", () => {
+  it("shares the right-panel strip evenly between its tabs", () => {
     const flex = rulesFor(".workbench-tab-shell")
       .filter((rule) => !/:(hover|focus-within)/.test(rule.selector))
       .flatMap((rule) => {
@@ -145,8 +145,36 @@ describe("panel tab chrome", () => {
         return value ? [value] : [];
       })
       .at(-1);
-    // `flex-grow: 0` is the load-bearing half: a tab that may not grow past its
-    // content leaves the strip's spare width to the tabs that need it.
-    expect(flex).toMatch(/^0\s/);
+    expect(flex).toBe("1 1 0");
+  });
+
+  it("lets right-panel tabs fill their strip instead of floating as inset cards", () => {
+    const stripRules = rulesFor(".ws-right-tabs");
+    const stripPadding = stripRules
+      .filter((rule) => rule.selector === ".ws-right-tabs")
+      .flatMap((rule) => {
+        const value = declaration(rule.body, "padding");
+        return value ? [value] : [];
+      })
+      .at(-1);
+    const tabRadius = stripRules
+      .filter((rule) => rule.selector.includes(".workbench-tab"))
+      .flatMap((rule) => {
+        const value = declaration(rule.body, "border-radius");
+        return value ? [value] : [];
+      })
+      .at(-1);
+
+    expect(stripPadding).toBe("0");
+    expect(tabRadius).toBe("0");
+  });
+
+  it("keeps an xterm host inside a narrow terminal dock", () => {
+    const terminalRule = rulesFor(".ws-terminal").find((rule) => rule.selector === ".ws-terminal");
+
+    expect(terminalRule).toBeDefined();
+    expect(declaration(terminalRule!.body, "flex")).toBe("1 1 0");
+    expect(declaration(terminalRule!.body, "min-width")).toBe("0");
+    expect(declaration(terminalRule!.body, "width")).toBe("0");
   });
 });

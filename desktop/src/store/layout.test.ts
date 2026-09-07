@@ -244,17 +244,26 @@ describe("layoutStore", () => {
     // Hardcoded, not derived from visiblePanelIds(), which is the function
     // cyclePanel walks internally — deriving the expectation from it would
     // only restate the implementation. This is the Code tree's leaf order:
-    // chat | pr | summary, files, changes, checks.
+    // chat | pr | summary, files, changes, checks | terminal.
     layoutStore.setFocusedLeaf(leafHolding(layoutStore.layout(), "chat").id);
 
-    // Seven forward steps from "chat" walk all six tabs and wrap onto a second
+    // Eight forward steps from "chat" walk all seven tabs and wrap onto a second
     // lap, so the end-of-list boundary is actually crossed.
-    const forward = Array.from({ length: 7 }, () => layoutStore.cyclePanel(1));
-    expect(forward).toEqual(["pr", "summary", "files", "changes", "checks", "chat", "pr"]);
+    const forward = Array.from({ length: 8 }, () => layoutStore.cyclePanel(1));
+    expect(forward).toEqual([
+      "pr",
+      "summary",
+      "files",
+      "changes",
+      "checks",
+      "terminal",
+      "chat",
+      "pr",
+    ]);
 
     // Backward off the front of the list wraps to the last tab.
     const backward = Array.from({ length: 3 }, () => layoutStore.cyclePanel(-1));
-    expect(backward).toEqual(["chat", "checks", "changes"]);
+    expect(backward).toEqual(["chat", "terminal", "checks"]);
   });
 
   it("forks an immutable built-in once before arrangement edits", async () => {

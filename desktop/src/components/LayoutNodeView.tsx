@@ -15,6 +15,7 @@ import {
   type Rect,
   type SplitDirection,
 } from "@/lib/layout";
+import { panelDescriptor } from "@/lib/panelRegistry";
 import PanelLeaf from "./PanelLeaf";
 import { SplitHandle } from "./ResizeHandle";
 
@@ -66,6 +67,12 @@ function minPxOf(node: LayoutNode, direction: SplitDirection): number {
   return node.direction === direction ? first + second : Math.max(first, second);
 }
 
+function fixedStripHeight(node: LayoutNode, direction: SplitDirection): number | undefined {
+  if (direction !== "column" || node.type !== "leaf" || node.display !== "compact") return undefined;
+  if (!node.panels.every((panel) => panelDescriptor(panel)?.kind === "strip")) return undefined;
+  return node.panels.reduce((height, panel) => Math.max(height, panelMinHeightPx(panel)), 0);
+}
+
 const EMPTY_RECT: Rect = { left: 0, top: 0, width: 0, height: 0 };
 
 function SplitView(props: { node: LayoutSplit; workspace: string }) {
@@ -89,7 +96,9 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
   });
 
   const collapsed = (index: 0 | 1) => allCollapsed(props.node.children[index]);
+  const fixedHeight = (index: 0 | 1) => fixedStripHeight(props.node.children[index], props.node.direction);
   const anyCollapsed = () => collapsed(0) || collapsed(1);
+  const anyFixed = () => fixedHeight(0) != null || fixedHeight(1) != null;
   const clamp = (ratio: number, availableOverride?: number) => {
     const px = availableOverride ?? availablePx();
     // Before the first measurement there is nothing to clamp against; the
@@ -119,6 +128,9 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
   const childStyle = (index: 0 | 1): JSX.CSSProperties => {
     if (collapsed(index)) return { flex: `0 0 ${collapsedPx()}px` };
     if (collapsed(index === 0 ? 1 : 0)) return { flex: "1 1 0%" };
+    const fixed = fixedHeight(index);
+    if (fixed != null) return { flex: `0 0 ${fixed}px` };
+    if (fixedHeight(index === 0 ? 1 : 0) != null) return { flex: "1 1 0%" };
     const share = index === 0 ? ratio() : 1 - ratio();
     return { flex: `${share} 1 0%` };
   };
@@ -148,7 +160,7 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
           like drag, split, collapse, close, and add — all of it lives inside
           edit mode, so outside it the handle is not just visually dimmed but
           absent from the DOM: no element, no pointerdown handler, no resize. */}
-      <Show when={!anyCollapsed() && layoutStore.editing()}>
+      <Show when={!anyCollapsed() && !anyFixed() && layoutStore.editing()}>
         <SplitHandle
           direction={props.node.direction}
           ratio={ratio}

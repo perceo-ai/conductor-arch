@@ -52,9 +52,10 @@
 
 /* ---- Terminal tab (xterm.js) ---- */
 .ws-terminal {
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 0;
-  width: 100%;
+  width: 0;
   padding: 8px 10px;
   background: #151515;
   overflow: hidden;

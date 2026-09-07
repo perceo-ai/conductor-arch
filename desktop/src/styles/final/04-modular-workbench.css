@@ -295,6 +295,23 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   margin-left: auto;
 }
 
+/* Inspector tabs are the strip, not inset controls floating inside it. */
+.ws-right-tabs {
+  gap: 0;
+  padding: 0;
+}
+
+.ws-right-tabs .workbench-tab-shell {
+  flex: 1 1 0;
+  align-self: stretch;
+}
+
+.ws-right-tabs .workbench-tab {
+  height: 40px;
+  min-height: 40px;
+  border-radius: 0;
+}
+
 .workbench-tab-close {
   position: absolute;
   right: 1px;
