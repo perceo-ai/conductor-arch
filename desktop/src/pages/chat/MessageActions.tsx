@@ -1,4 +1,3 @@
-import { Show } from "solid-js";
 import Icon from "@/components/Icon";
 import {
   openContextMenu,
@@ -7,14 +6,12 @@ import {
 } from "@/components/ContextMenu";
 import { actions } from "@/store";
 import { toastsStore } from "@/store/toasts";
-import type { ArchcarProjectionItem } from "@/bridge/protocol";
 
-// The per-message overflow menu: fork this conversation from here, either into
-// a second tab in the same workspace or into a workspace of its own.
+// One persistent action after a completed turn forks the conversation into a
+// second tab in the same workspace or into a workspace of its own.
 //
-// The fork point is the item's `timeline_seq`. An item without one cannot say
-// where it sits in the conversation, so it gets no menu rather than a menu that
-// would silently fork the whole thing.
+// The fork point is the turn-ending message's `timeline_seq`; Timeline only
+// renders this control when that position exists.
 
 export function forkMenuItems(props: {
   threadId: number;
@@ -61,22 +58,21 @@ async function runFork(input: {
   }
 }
 
-export function MessageActions(props: { item: ArchcarProjectionItem; threadId: number }) {
-  const seq = () => props.item.timeline_seq;
+export function TurnForkAction(props: { threadId: number; timelineSeq: number }) {
   return (
-    <Show when={seq() != null}>
-      <button
-        class="chat-message-actions"
-        aria-label="Message actions"
-        title="Message actions"
-        onClick={(e) => openContextMenu(e, forkMenuItems({ threadId: props.threadId, timelineSeq: seq()! }))}
-        onKeyDown={(e) => {
-          if (e.key !== "Enter" && e.key !== " ") return;
-          openContextMenuFromKeyboard(e, forkMenuItems({ threadId: props.threadId, timelineSeq: seq()! }));
-        }}
-      >
-        <Icon name="ellipsis" />
-      </button>
-    </Show>
+    <button
+      class="chat-turn-fork"
+      aria-label="Fork turn"
+      title="Fork turn"
+      onClick={(e) => openContextMenu(e, forkMenuItems(props))}
+      onKeyDown={(e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        openContextMenuFromKeyboard(e, forkMenuItems(props));
+      }}
+    >
+      <Icon name="git-branch" />
+      <span>Fork</span>
+      <Icon name="chevron-down" />
+    </button>
   );
 }

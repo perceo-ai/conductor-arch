@@ -1,7 +1,6 @@
 import { render } from "solid-js/web";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { MessageActions, forkMenuItems } from "./MessageActions";
-import type { ArchcarProjectionItem } from "@/bridge/protocol";
+import { TurnForkAction, forkMenuItems } from "./MessageActions";
 
 const forkChat = vi.fn();
 vi.mock("@/store", () => ({
@@ -10,21 +9,6 @@ vi.mock("@/store", () => ({
   },
 }));
 
-function item(overrides: Partial<ArchcarProjectionItem> = {}): ArchcarProjectionItem {
-  return {
-    id: "message:7",
-    sequence: 7,
-    render_class: "user_chat",
-    role_label: "user",
-    title: "",
-    body: "add a cart",
-    status: "complete",
-    stream_state: "complete",
-    timeline_seq: 42,
-    ...overrides,
-  };
-}
-
 function mount(node: () => unknown) {
   const host = document.createElement("div");
   document.body.append(host);
@@ -32,7 +16,7 @@ function mount(node: () => unknown) {
   return host;
 }
 
-describe("MessageActions", () => {
+describe("TurnForkAction", () => {
   beforeEach(() => {
     forkChat.mockReset();
     forkChat.mockResolvedValue({ workspace: "checkout-fork", threadId: 2 });
@@ -68,15 +52,11 @@ describe("MessageActions", () => {
     );
   });
 
-  it("renders a trigger for a message that has a timeline position", () => {
-    const host = mount(() => <MessageActions item={item()} threadId={1} />);
-    expect(host.querySelector("button[aria-label='Message actions']")).not.toBeNull();
-  });
+  it("renders a visible turn action instead of an ellipsis trigger", () => {
+    const host = mount(() => <TurnForkAction threadId={1} timelineSeq={42} />);
+    const button = host.querySelector("button[aria-label='Fork turn']");
 
-  it("renders no trigger when the item has no timeline position", () => {
-    // Forking "from here" is meaningless without a position, and defaulting to
-    // the whole conversation would be a silently different action.
-    const host = mount(() => <MessageActions item={item({ timeline_seq: null })} threadId={1} />);
+    expect(button?.textContent).toBe("Fork");
     expect(host.querySelector("button[aria-label='Message actions']")).toBeNull();
   });
 });

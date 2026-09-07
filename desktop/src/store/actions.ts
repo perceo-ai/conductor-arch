@@ -229,8 +229,8 @@ export const actions = {
   },
 
   /**
-   * Fork a chat at a timeline point — Conductor's "Fork to new tab" and
-   * "Fork to new workspace" under each message.
+   * Fork a chat at a completed turn's timeline point — Conductor's
+   * "Fork to new tab" and "Fork to new workspace" actions.
    *
    * `newWorkspace` is the whole difference between the two: the daemon creates
    * the worktree and branch when it is set. Selection follows the fork, because
