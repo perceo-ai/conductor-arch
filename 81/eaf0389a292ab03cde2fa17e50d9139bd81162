@@ -1,0 +1,41 @@
+desktop/src/components/layoutEditBar.test.tsx
+  s_258991a35619e5::t_51661537da4473 61-62,64-65,67,73,75
+desktop/src/styles/panelTabChrome.test.ts
+  s_258991a35619e5::t_7e241becadb24e 171-177
+  s_258991a35619e5::t_604a95bbd91a30 140,148
+  s_258991a35619e5::t_8bf417cb5a07e3 178
+  s_258991a35619e5::t_73565b2dcbdd44 149-170
+desktop/src/store/layout.test.ts
+  s_258991a35619e5::t_51661537da4473 247,250,252-262,266
+desktop/src/components/LayoutNodeView.tsx
+  s_258991a35619e5::t_016076d90beec2 18,70-75,99,101,131-133,163
+desktop/src/lib/layoutPresets.test.ts
+  s_258991a35619e5::t_73565b2dcbdd44 12-20
+desktop/src/lib/layout.ts
+  s_258991a35619e5::t_016076d90beec2 538
+  s_258991a35619e5::t_3a38948c3f8da0 532-537
+desktop/src/components/LayoutNodeView.test.tsx
+  s_258991a35619e5::t_73565b2dcbdd44 13,97-101,103-104
+  s_258991a35619e5::t_016076d90beec2 102
+desktop/src/styles/final/04-modular-workbench.css
+  s_258991a35619e5::t_3a38948c3f8da0 298-314
+desktop/src/styles/layout/09-history-terminal.css
+  s_258991a35619e5::t_ef6997865647a4 55-56
+  s_258991a35619e5::t_f78d40f6f7fa4f 58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "81eaf0389a292ab03cde2fa17e50d9139bd81162",
+  "prompts": {},
+  "sessions": {
+    "s_258991a35619e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07d9a-8717-7930-8954-b93806959056",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
