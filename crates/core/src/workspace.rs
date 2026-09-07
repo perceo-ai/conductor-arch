@@ -792,6 +792,60 @@ pub struct ChatTranscriptSummary {
     pub updated_at: String,
 }
 
+/// Fork a chat at a message: everything up to and including that message is
+/// copied into a fresh thread, and the conversation continues from there
+/// without disturbing the original.
+/// How much of a conversation a fork carries.
+///
+/// Two ways to say "up to here" because the two callers hold different handles:
+/// the CLI has `chat_messages.id`, while the desktop timeline is projected from
+/// provider events and only knows the global `timeline_seq`. Both counters share
+/// `chat_timeline_seq`, so they compare against each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkCutoff {
+    /// The whole conversation.
+    Everything,
+    ThroughMessage(i64),
+    /// Everything at or before this point on the shared timeline.
+    ThroughTimelinePosition(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkChatThread {
+    pub thread_id: i64,
+    pub cutoff: ForkCutoff,
+    /// Workspace the fork lands in. `None` keeps it beside the original, which
+    /// is the "fork to new tab" case; naming another workspace is the "fork to
+    /// new workspace" case, once that workspace exists.
+    pub target_workspace: Option<String>,
+    pub title: Option<String>,
+}
+
+/// The thread a fork produced, and enough about it to report the result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkedChatThread {
+    pub thread: ChatThreadRecord,
+    /// Workspace the fork landed in.
+    pub workspace: String,
+    /// How many transcript messages were carried over.
+    pub copied_messages: usize,
+    /// The workspace the fork came from, so a caller can say where it went.
+    pub source_workspace: String,
+}
+
+/// Where "fork to new workspace" puts the fork when the caller picks nothing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkWorkspaceDefaults {
+    pub repository: String,
+    pub name: String,
+    pub branch: String,
+    pub base_ref: String,
+}
+
+/// Marks messages a fork carried over, so the timeline can tell inherited
+/// history from what the new chat said itself.
+pub const FORKED_MESSAGE_SOURCE: &str = "fork";
+
 /// Plan markdown file under a workspace's `.context/plans/`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextPlanFile {
@@ -811,6 +865,43 @@ pub const CONTEXT_PLANS_DIR: &str = ".context/plans";
 
 fn is_transcript_role(role: &str) -> bool {
     matches!(role, "user" | "agent")
+}
+
+/// Reduce a git remote URL to something two machines can compare.
+///
+/// The same repository is `git@github.com:me/app.git` on one box and
+/// `https://github.com/me/app` on another, and a trailing slash or `.git` is
+/// noise either way. Host and path are what identify it.
+pub fn normalize_remote_url(url: &str) -> String {
+    let url = url.trim().trim_end_matches('/');
+    let url = url.strip_suffix(".git").unwrap_or(url);
+    // scp-style `git@host:path` has no scheme and its separator is `:`.
+    let rest = match url.split_once("://") {
+        Some((_scheme, rest)) => rest,
+        None => url,
+    };
+    // Drop any userinfo (`git@`, `oauth2:token@`) — it identifies the caller,
+    // not the repository.
+    let rest = match rest.rsplit_once('@') {
+        Some((_userinfo, host_and_path)) => host_and_path,
+        None => rest,
+    };
+    rest.replacen(':', "/", 1).to_lowercase()
+}
+
+/// Name a fork after its source without stacking "(fork)" forever when someone
+/// forks a fork.
+fn fork_title(source_title: &str) -> String {
+    let base = source_title.trim();
+    let base = base.strip_suffix(')').and_then(|rest| {
+        let (head, tail) = rest.rsplit_once(" (fork")?;
+        // "(fork)" or "(fork 2)" — anything else is part of the real title.
+        (tail.is_empty() || tail.trim_start().parse::<u32>().is_ok()).then_some(head)
+    });
+    match base {
+        Some(base) => format!("{base} (fork)"),
+        None => format!("{source_title} (fork)"),
+    }
 }
 
 /// List `.context/plans/*.md` under a workspace checkout. A missing directory
@@ -7112,6 +7203,219 @@ mutation($threadId: ID!) {{
             .collect())
     }
 
+    /// Copy a conversation up to a chosen message into a new chat thread.
+    ///
+    /// The fork is a *new* provider session, not a resumed one: `native_thread_id`
+    /// is deliberately left null, because no provider here exposes "resume this
+    /// rollout from message N". The carried messages are real `chat_messages`
+    /// rows so the new chat reads as a continuation, and the agent is given the
+    /// same history as context on its first turn — see
+    /// [`Self::fork_transcript_context`].
+    ///
+    /// Provider, model, and harness metadata are inherited, so a fork runs the
+    /// same agent the original did unless the caller changes it afterwards.
+    pub fn fork_chat_thread(&self, input: ForkChatThread) -> Result<ForkedChatThread> {
+        let source = self.get_chat_thread(input.thread_id)?;
+        let source_workspace = self.workspace_name_by_id(source.workspace_id)?;
+        let target_workspace = input
+            .target_workspace
+            .clone()
+            .unwrap_or_else(|| source_workspace.clone());
+
+        // A cutoff of `None` means the whole conversation. The key is
+        // `(COALESCE(timeline_seq, id), id)` — the same two-part ordering the
+        // timeline query uses. Sequence alone is not enough: a row that predates
+        // `timeline_seq` backfill falls back to its id, which can tie with
+        // another row's sequence, and a tie would drag the rest of the
+        // conversation into the fork.
+        let order_key =
+            |message: &ChatMessageRecord| (message.timeline_seq.unwrap_or(message.id), message.id);
+        let cutoff = match input.cutoff {
+            ForkCutoff::Everything => None,
+            ForkCutoff::ThroughMessage(message_id) => {
+                let message = self.get_chat_message(message_id)?;
+                anyhow::ensure!(
+                    message.thread_id == input.thread_id,
+                    "message {message_id} belongs to chat {}, not chat {}",
+                    message.thread_id,
+                    input.thread_id
+                );
+                Some(order_key(&message))
+            }
+            // A timeline position names a point, not a row, so it takes every
+            // message at that position — hence the maximum tiebreaker.
+            ForkCutoff::ThroughTimelinePosition(seq) => Some((seq, i64::MAX)),
+        };
+
+        let messages: Vec<ChatMessageRecord> = self
+            .chat_transcript_messages(input.thread_id)?
+            .into_iter()
+            .filter(|message| match cutoff {
+                Some(cutoff) => order_key(message) <= cutoff,
+                None => true,
+            })
+            .collect();
+
+        let title = input
+            .title
+            .clone()
+            .unwrap_or_else(|| fork_title(&source.title));
+        let fork = self.create_chat_thread(
+            &target_workspace,
+            &source.provider,
+            &title,
+            source.harness_metadata.as_deref(),
+        )?;
+
+        // Fresh timeline sequences rather than the originals: `timeline_seq` is
+        // a global counter, and reusing its values would put two threads'
+        // messages at the same point in a shared ordering.
+        for message in &messages {
+            let seq = self.next_chat_timeline_seq()?;
+            self.conn.execute(
+                "INSERT INTO chat_messages (thread_id, role, content, source, timeline_seq, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    fork.id,
+                    message.role,
+                    message.content,
+                    FORKED_MESSAGE_SOURCE,
+                    seq,
+                    message.created_at,
+                ],
+            )?;
+        }
+
+        Ok(ForkedChatThread {
+            thread: self.get_chat_thread(fork.id)?,
+            workspace: target_workspace,
+            copied_messages: messages.len(),
+            source_workspace,
+        })
+    }
+
+    /// Repository, name, branch, and base for the workspace a chat fork should
+    /// get when the caller names none of them.
+    ///
+    /// Derived in core so the CLI and the desktop app cannot drift on what
+    /// "fork to new workspace" means.
+    pub fn fork_workspace_defaults(&self, thread_id: i64) -> Result<ForkWorkspaceDefaults> {
+        let thread = self.get_chat_thread(thread_id)?;
+        let source = self.get_by_id(thread.workspace_id)?;
+        let repository = self.repository_name_by_id(source.repository_id)?;
+
+        // One suffix for both the workspace and the branch, so `checkout-fork-2`
+        // never ends up on branch `lc/checkout-fork-3`.
+        let mut suffix = String::new();
+        for attempt in 1..=100 {
+            suffix = if attempt == 1 {
+                String::new()
+            } else {
+                format!("-{attempt}")
+            };
+            let candidate = format!("{}-fork{suffix}", source.name);
+            if !self.workspace_exists_by_name(&candidate)? {
+                break;
+            }
+        }
+
+        Ok(ForkWorkspaceDefaults {
+            repository,
+            name: format!("{}-fork{suffix}", source.name),
+            branch: format!("{}-fork{suffix}", source.branch),
+            // The source's own branch, not the repository default: a fork
+            // continues the work the conversation is about.
+            base_ref: source.branch,
+        })
+    }
+
+    /// The registered repository whose remote points at `url`, if any.
+    ///
+    /// This is how a workspace on one machine finds its counterpart repository
+    /// on another: the daemon's own `root_path` means nothing to a different
+    /// filesystem, but the clone URL is the same everywhere.
+    pub fn find_repository_by_remote_url(&self, url: &str) -> Result<Option<String>> {
+        let wanted = normalize_remote_url(url);
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT name, root_path, remote_name FROM repositories ORDER BY id")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (name, root_path, remote_name) in rows {
+            let Some(found) = repository_remote_url(Path::new(&root_path), &remote_name) else {
+                continue;
+            };
+            if normalize_remote_url(&found) == wanted {
+                return Ok(Some(name));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Create a chat in `workspace` seeded with a conversation from elsewhere.
+    ///
+    /// The rows are marked with the same source a fork uses, so the agent gets
+    /// the history replayed on its first turn by the same path — an imported
+    /// conversation and a forked one are the same problem.
+    pub fn seed_imported_chat(
+        &self,
+        workspace: &str,
+        provider: &str,
+        title: &str,
+        transcript: &[(String, String)],
+    ) -> Result<ChatThreadRecord> {
+        let thread = self.create_chat_thread(workspace, provider, title, None)?;
+        let now = timestamp();
+        for (role, content) in transcript {
+            anyhow::ensure!(
+                is_transcript_role(role),
+                "imported transcript may only contain user and agent messages, got `{role}`"
+            );
+            let seq = self.next_chat_timeline_seq()?;
+            self.conn.execute(
+                "INSERT INTO chat_messages (thread_id, role, content, source, timeline_seq, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![thread.id, role, content, FORKED_MESSAGE_SOURCE, seq, now],
+            )?;
+        }
+        self.get_chat_thread(thread.id)
+    }
+
+    /// The inherited conversation, rendered for the agent's first turn in a
+    /// fork. Without this the new session would see a timeline full of history
+    /// it has no memory of.
+    pub fn fork_transcript_context(&self, thread_id: i64) -> Result<Option<String>> {
+        let carried: Vec<ChatMessageRecord> = self
+            .list_chat_messages(thread_id)?
+            .into_iter()
+            .filter(|message| message.source == FORKED_MESSAGE_SOURCE)
+            .collect();
+        if carried.is_empty() {
+            return Ok(None);
+        }
+        let mut rendered =
+            String::from("Conversation carried over from the chat this one was forked from:\n\n");
+        for message in carried {
+            let speaker = if message.role == "user" {
+                "User"
+            } else {
+                "Assistant"
+            };
+            rendered.push_str(&format!("{speaker}: {}\n\n", message.content.trim()));
+        }
+        Ok(Some(rendered))
+    }
+
     /// Plan markdown files a workspace has saved under `.context/plans/`.
     pub fn list_context_plans(&self, workspace_name: &str) -> Result<Vec<ContextPlanFile>> {
         let root = self.workspace_path(workspace_name)?;
@@ -11428,6 +11732,24 @@ fn unsupported_managed_prompt_mutation() -> Result<()> {
         "managed prompt snapshot mutation requires handle-relative no-follow operations; \
          refusing to modify .context/PROMPTS.md on this platform"
     )
+}
+
+/// The configured URL of a repository's remote, when it has one.
+///
+/// Public because it is the only field of a repository that means anything on a
+/// different machine, so every "same repo over there" question goes through it.
+pub fn repository_remote_url(root_path: &Path, remote_name: &str) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root_path)
+        .args(["remote", "get-url", remote_name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!url.is_empty()).then_some(url)
 }
 
 fn remote_exists(root_path: &Path, remote_name: &str) -> bool {
@@ -23579,6 +23901,313 @@ spotlight_testing = true
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].source, "control_command");
         assert_eq!(messages[2].role, "agent");
+    }
+
+    /// A chat with four transcript rows plus one control row, and the id of the
+    /// second agent reply — the natural "fork from here" point.
+    fn chat_with_history(store: &WorkspaceStore) -> (ChatThreadRecord, i64) {
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Checkout rewrite", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "add a cart", "user_send")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "agent", "Cart added.", "agent_screen_parse")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "system", "/model gpt-5.6-sol", "control_command")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "now add checkout", "user_send")
+            .unwrap();
+        let fork_point = store
+            .append_chat_message(thread.id, "agent", "Checkout added.", "agent_screen_parse")
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "and a coupon field", "user_send")
+            .unwrap();
+        (thread, fork_point.id)
+    }
+
+    #[test]
+    fn forking_at_a_message_carries_the_conversation_up_to_it_and_no_further() {
+        let (_temp, store) = test_workspace_store();
+        let (thread, fork_point) = chat_with_history(&store);
+
+        let forked = store
+            .fork_chat_thread(ForkChatThread {
+                thread_id: thread.id,
+                cutoff: ForkCutoff::ThroughMessage(fork_point),
+                target_workspace: None,
+                title: None,
+            })
+            .unwrap();
+
+        let carried = store.list_chat_messages(forked.thread.id).unwrap();
+        assert_eq!(
+            carried
+                .iter()
+                .map(|m| (m.role.as_str(), m.content.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("user", "add a cart"),
+                ("agent", "Cart added."),
+                ("user", "now add checkout"),
+                ("agent", "Checkout added."),
+            ],
+            "the control row is not transcript, and nothing after the fork point comes along"
+        );
+        assert_eq!(forked.copied_messages, 4);
+        // The original is untouched — forking is not moving.
+        assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 6);
+    }
+
+    #[test]
+    fn forking_cuts_correctly_when_timeline_sequences_tie() {
+        // Rows written before `timeline_seq` existed fall back to their id, so
+        // one row's id can equal another's sequence. Comparing sequence alone
+        // would drag the whole conversation into the fork — which is exactly
+        // what a live smoke against hand-seeded rows showed.
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Tied", None)
+            .unwrap();
+        let mut ids = Vec::new();
+        for (role, content) in [
+            ("user", "first"),
+            ("agent", "second"),
+            ("user", "third"),
+            ("agent", "fourth"),
+        ] {
+            ids.push(
+                store
+                    .append_chat_message(thread.id, role, content, "user_send")
+                    .unwrap()
+                    .id,
+            );
+        }
+        // Flatten every sequence to the same value.
+        store
+            .conn
+            .execute(
+                "UPDATE chat_messages SET timeline_seq = 7 WHERE thread_id = ?1",
+                params![thread.id],
+            )
+            .unwrap();
+
+        let forked = store
+            .fork_chat_thread(ForkChatThread {
+                thread_id: thread.id,
+                cutoff: ForkCutoff::ThroughMessage(ids[1]),
+                target_workspace: None,
+                title: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            store
+                .list_chat_messages(forked.thread.id)
+                .unwrap()
+                .iter()
+                .map(|m| m.content.clone())
+                .collect::<Vec<_>>(),
+            vec!["first".to_owned(), "second".to_owned()],
+            "a tie on timeline_seq must break by id, not swallow the rest"
+        );
+    }
+
+    #[test]
+    fn forking_without_a_message_takes_the_whole_conversation() {
+        let (_temp, store) = test_workspace_store();
+        let (thread, _) = chat_with_history(&store);
+
+        let forked = store
+            .fork_chat_thread(ForkChatThread {
+                thread_id: thread.id,
+                cutoff: ForkCutoff::Everything,
+                target_workspace: None,
+                title: None,
+            })
+            .unwrap();
+
+        assert_eq!(forked.copied_messages, 5);
+    }
+
+    #[test]
+    fn a_fork_inherits_the_agent_but_starts_a_new_provider_session() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Parser", Some("model=opus;effort=high"))
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "fix it", "user_send")
+            .unwrap();
+
+        let forked = store
+            .fork_chat_thread(ForkChatThread {
+                thread_id: thread.id,
+                cutoff: ForkCutoff::Everything,
+                target_workspace: None,
+                title: None,
+            })
+            .unwrap();
+
+        assert_eq!(forked.thread.provider, "claude");
+        assert_eq!(forked.thread.model.as_deref(), Some("opus"));
+        assert!(
+            forked.thread.native_thread_id.is_none(),
+            "no provider can resume a rollout from an arbitrary message, so the fork has to be \
+             a fresh session seeded with the transcript"
+        );
+    }
+
+    #[test]
+    fn a_forks_carried_messages_are_replayed_to_the_agent_as_context() {
+        let (_temp, store) = test_workspace_store();
+        let (thread, fork_point) = chat_with_history(&store);
+        let forked = store
+            .fork_chat_thread(ForkChatThread {
+                thread_id: thread.id,
+                cutoff: ForkCutoff::ThroughMessage(fork_point),
+                target_workspace: None,
+                title: None,
+            })
+            .unwrap();
+
+        let context = store
+            .fork_transcript_context(forked.thread.id)
+            .unwrap()
+            .expect("a fork carries history");
+
+        assert!(context.contains("User: add a cart"), "{context}");
+        assert!(context.contains("Assistant: Checkout added."), "{context}");
+        assert!(
+            !context.contains("coupon"),
+            "history after the fork point is not the fork's: {context}"
+        );
+    }
+
+    #[test]
+    fn a_chat_that_carries_nothing_replays_nothing() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Fresh", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "hello", "user_send")
+            .unwrap();
+
+        assert!(store.fork_transcript_context(thread.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn forking_through_a_message_from_a_different_chat_is_refused() {
+        let (_temp, store) = test_workspace_store();
+        let (thread, _) = chat_with_history(&store);
+        let other = store
+            .create_chat_thread("berlin", "codex", "Unrelated", None)
+            .unwrap();
+        let stranger = store
+            .append_chat_message(other.id, "user", "elsewhere", "user_send")
+            .unwrap();
+
+        let err = store
+            .fork_chat_thread(ForkChatThread {
+                thread_id: thread.id,
+                cutoff: ForkCutoff::ThroughMessage(stranger.id),
+                target_workspace: None,
+                title: None,
+            })
+            .unwrap_err();
+
+        assert!(err.to_string().contains("belongs to chat"), "{err}");
+    }
+
+    #[test]
+    fn remote_urls_match_across_the_forms_two_machines_use() {
+        // The same repository, cloned two different ways on two machines.
+        let ssh = normalize_remote_url("git@github.com:perceo-ai/conductor-arch.git");
+        assert_eq!(
+            ssh,
+            normalize_remote_url("https://github.com/perceo-ai/conductor-arch")
+        );
+        assert_eq!(
+            ssh,
+            normalize_remote_url("https://github.com/perceo-ai/conductor-arch.git/")
+        );
+        assert_eq!(
+            ssh,
+            normalize_remote_url("ssh://git@github.com/perceo-ai/Conductor-Arch")
+        );
+        // Different repositories still differ.
+        assert_ne!(
+            ssh,
+            normalize_remote_url("git@github.com:perceo-ai/archfleet.git")
+        );
+        // A token in the URL identifies the caller, not the repository.
+        assert_eq!(
+            ssh,
+            normalize_remote_url("https://oauth2:abc123@github.com/perceo-ai/conductor-arch.git")
+        );
+    }
+
+    #[test]
+    fn an_imported_chat_replays_its_conversation_to_the_agent() {
+        let (_temp, store) = test_workspace_store();
+
+        let thread = store
+            .seed_imported_chat(
+                "berlin",
+                "claude",
+                "From devbox",
+                &[
+                    ("user".to_owned(), "port the parser".to_owned()),
+                    ("agent".to_owned(), "Ported.".to_owned()),
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 2);
+        // Imported history reaches the agent by the same path a fork's does.
+        let context = store
+            .fork_transcript_context(thread.id)
+            .unwrap()
+            .expect("an imported chat carries history");
+        assert!(context.contains("User: port the parser"), "{context}");
+        assert!(context.contains("Assistant: Ported."), "{context}");
+    }
+
+    #[test]
+    fn an_imported_transcript_refuses_rows_that_are_not_conversation() {
+        // Tool calls and `/model` control rows are not transcript, and letting
+        // them in would replay machinery to the agent as if a human said it.
+        let (_temp, store) = test_workspace_store();
+
+        let err = store
+            .seed_imported_chat(
+                "berlin",
+                "codex",
+                "From devbox",
+                &[("system".to_owned(), "/model opus".to_owned())],
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("user and agent"), "{err}");
+    }
+
+    #[test]
+    fn fork_titles_do_not_stack_when_a_fork_is_itself_forked() {
+        assert_eq!(fork_title("Checkout rewrite"), "Checkout rewrite (fork)");
+        assert_eq!(
+            fork_title("Checkout rewrite (fork)"),
+            "Checkout rewrite (fork)"
+        );
+        // A real title that happens to end in parentheses keeps them.
+        assert_eq!(
+            fork_title("Rework parser (v2)"),
+            "Rework parser (v2) (fork)"
+        );
     }
 
     #[test]

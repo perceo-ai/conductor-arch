@@ -154,6 +154,8 @@ archductor service setup --listen 0.0.0.0:7420
 
 `service setup` writes a launchd agent (macOS), a systemd user unit (Linux), or a Task Scheduler logon task (Windows), starts it, and prints the token. Manage it afterwards with `archductor service install|uninstall|status|doctor|token`.
 
+It exits non-zero if the daemon did not start, so a provisioning script can trust the exit status, and it will not print connection instructions for a listener that is not up.
+
 Two things it handles that are easy to get wrong by hand:
 
 - **Surviving logout.** systemd stops a user manager when the user's last session ends, so an SSH-installed unit would die the moment you disconnect. Install runs `loginctl enable-linger` for you and tells you if it could not. `archductor service status` reports `boot_persistent`.
@@ -175,6 +177,19 @@ archductor remote connect server:7420 --token <token>
 archductor remote status      # where requests go, and over which transport
 archductor remote disconnect  # back to the local daemon
 ```
+
+To pull a workspace back onto the machine in front of you — same branch, same
+conversation — use `remote import`. It reads from the remote and writes to your
+*local* daemon, matching repositories by clone URL rather than by path:
+
+```bash
+archductor remote import fix-auth --thread-id 12
+# first time on this machine, when it has no clone of the repository yet:
+archductor remote import fix-auth --thread-id 12 --clone-into ~/src/my-app
+```
+
+The desktop app has the same action on a workspace's right-click menu ("Copy to
+this machine"), shown only while a remote client is selected.
 
 The CLI, the desktop app (Settings → Remote daemon), and `archductor mcp serve` all follow the saved profile, so one `remote connect` moves the whole machine. Sessions, terminals, checks, and PR operations then run **on the server**, which is where the agent CLIs and `gh` auth have to be installed.
 
@@ -250,16 +265,19 @@ Scripts and agent processes receive Archductor context via environment variables
 - File-editable repository settings (scripts, prompts, environment, Git behavior, merge rules, workspace/view defaults)
 - CLI parity with the app backend; export/import of shared and local settings bundles
 - Linked workspace directories (symlinked under `.context/linked-directories`)
+- Command palette, force-push, Linear-sourced workspace creation, and prompt-pack switching in the desktop app
+- Fork any message to a new chat tab or a new workspace (worktree + branch off the source branch), carrying the conversation up to that point
+- Copy a workspace from a remote daemon onto this machine, with its chat, matching repositories by clone URL
+- Multiple saved daemons with labels; switch between them from the app or `archductor remote use`
 - Modular workspace layouts with four immutable built-ins, synced custom
   presets, drag/menu movement, hide/restore, region sizing/collapse, and
   per-project defaults
 
 **In progress 🚧**
 
-- Electron UI polish and full visual parity; several historical affordances (force-push, PR review-thread resolve/reopen, richer settings editors, command palette) not yet ported to the desktop app
-- Linear-sourced workspace creation in the desktop UI (available via CLI)
+- Electron UI polish and full visual parity; PR review-thread resolve/reopen is still CLI-only (`archductor pr resolve-thread`), and the settings editors want more structure
 - Terminal rendering handles common ANSI/control redraws but is not a full emulator
-- Prompt-pack switching / import / export and richer notification controls
+- Prompt-pack import/export and richer notification controls
 - Native Windows: compiles and assembles a portable ZIP, but install/launch/runtime smoke still required before a stable support claim
 - Flatpak packaging (needs broad filesystem permissions for arbitrary repo access)
 

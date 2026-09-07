@@ -985,6 +985,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             body: item.body,
                             status: item.status.as_str().to_owned(),
                             stream_state: item.stream_state.as_str().to_owned(),
+                            timeline_seq: item.timeline_seq,
                         })
                         .collect(),
                     }
@@ -1966,6 +1967,51 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ImportWorkspaceFromRemote {
+            repository_url,
+            branch,
+            base_ref,
+            name,
+            transcript,
+            chat_title,
+            provider,
+        } => match import_workspace_from_remote(
+            state,
+            &repository_url,
+            &branch,
+            base_ref,
+            name,
+            &transcript,
+            chat_title,
+            provider,
+        ) {
+            Ok(response) => response,
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::ForkChatThread {
+            thread_id,
+            through_message_id,
+            through_timeline_seq,
+            new_workspace,
+            title,
+        } => match fork_chat_thread(
+            state,
+            thread_id,
+            match (through_message_id, through_timeline_seq) {
+                (Some(id), _) => crate::workspace::ForkCutoff::ThroughMessage(id),
+                (None, Some(seq)) => crate::workspace::ForkCutoff::ThroughTimelinePosition(seq),
+                (None, None) => crate::workspace::ForkCutoff::Everything,
+            },
+            new_workspace,
+            title,
+        ) {
+            Ok(response) => response,
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
         ArchcarRequest::CloseChatThread { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|s| s.close_chat_thread(thread_id)) {
@@ -4207,6 +4253,126 @@ fn send_session_control(
 /// Open the workspace store the way lifecycle-mutating CLI/GTK flows do:
 /// with the logs directory wired and pending lifecycle jobs recovered so a
 /// prior crash mid-create/delete doesn't leave the store inconsistent.
+/// Recreate a remote workspace on this daemon.
+///
+/// Deliberately refuses rather than cloning when no local repository matches:
+/// the daemon has no business picking a directory on someone's disk. The error
+/// names the URL so the caller can offer `clone` with a destination the user
+/// chose.
+#[allow(clippy::too_many_arguments)]
+fn import_workspace_from_remote(
+    state: &Arc<Mutex<ServerState>>,
+    repository_url: &str,
+    branch: &str,
+    base_ref: Option<String>,
+    name: Option<String>,
+    transcript: &[crate::archcar::protocol::ArchcarChatTranscriptMessage],
+    chat_title: Option<String>,
+    provider: Option<String>,
+) -> Result<ArchcarResponse> {
+    let store = open_lifecycle_workspace_store(state)?;
+    let repository = store
+        .find_repository_by_remote_url(repository_url)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no repository here has remote {repository_url} — rerun with \
+                 `--clone-into <dir>` to clone and register it in one step"
+            )
+        })?;
+
+    let branch = branch.trim();
+    anyhow::ensure!(!branch.is_empty(), "a branch is required to import");
+    let workspace = store.create_lifecycle_job(CreateWorkspace {
+        repository_name: repository.clone(),
+        // An empty name lets the backend generate one, same as the New
+        // workspace dialog.
+        name: name.unwrap_or_default(),
+        branch: branch.to_owned(),
+        base_ref,
+    })?;
+
+    let mut thread_id = None;
+    if !transcript.is_empty() {
+        let messages: Vec<(String, String)> = transcript
+            .iter()
+            .map(|message| (message.role.clone(), message.content.clone()))
+            .collect();
+        let thread = store.seed_imported_chat(
+            &workspace.name,
+            provider.as_deref().unwrap_or("codex"),
+            chat_title.as_deref().unwrap_or("Imported chat"),
+            &messages,
+        )?;
+        thread_id = Some(thread.id);
+    }
+
+    Ok(ArchcarResponse::WorkspaceImported {
+        workspace: workspace.name,
+        repository,
+        branch: branch.to_owned(),
+        thread_id,
+        copied_messages: transcript.len(),
+    })
+}
+
+/// Fork a chat, optionally into a workspace created for it.
+///
+/// The workspace has to exist before the fork can land in it, and workspace
+/// creation is a lifecycle job (worktree, branch, setup scripts), so this is
+/// two steps rather than one store call. If the fork fails after the workspace
+/// is created the workspace stays — it is a real worktree on disk by then, and
+/// silently removing one is worse than leaving an empty one behind.
+fn fork_chat_thread(
+    state: &Arc<Mutex<ServerState>>,
+    thread_id: i64,
+    cutoff: crate::workspace::ForkCutoff,
+    new_workspace: Option<crate::archcar::protocol::ForkWorkspaceRequest>,
+    title: Option<String>,
+) -> Result<ArchcarResponse> {
+    let store = open_lifecycle_workspace_store(state)?;
+
+    let (target_workspace, created_workspace) = match new_workspace {
+        Some(request) => {
+            let defaults = store.fork_workspace_defaults(thread_id)?;
+            let created = store.create_lifecycle_job(CreateWorkspace {
+                repository_name: defaults.repository,
+                name: request.name.unwrap_or(defaults.name),
+                branch: request.branch.unwrap_or(defaults.branch),
+                base_ref: Some(request.base_ref.unwrap_or(defaults.base_ref)),
+            })?;
+            (Some(created.name), true)
+        }
+        None => (None, false),
+    };
+
+    let forked = store.fork_chat_thread(crate::workspace::ForkChatThread {
+        thread_id,
+        cutoff,
+        target_workspace,
+        title,
+    })?;
+
+    let harness = crate::workspace::SessionHarnessOptions::from_metadata(
+        forked.thread.harness_metadata.as_deref(),
+    );
+    Ok(ArchcarResponse::ChatThreadForked {
+        thread: ArchcarChatThread {
+            id: forked.thread.id,
+            provider: forked.thread.provider,
+            title: forked.thread.title,
+            status: forked.thread.status,
+            model: forked.thread.model,
+            effort_mode: harness.effort_mode,
+            fast_mode: harness.fast_mode,
+            updated_at: forked.thread.updated_at,
+            archived_at: forked.thread.archived_at,
+        },
+        workspace: forked.workspace,
+        created_workspace,
+        copied_messages: forked.copied_messages,
+    })
+}
+
 fn open_lifecycle_workspace_store(state: &Arc<Mutex<ServerState>>) -> Result<WorkspaceStore> {
     let (db_path, logs_dir) = {
         let guard = state.lock().unwrap();
@@ -4686,6 +4852,10 @@ fn repository_summaries(db_path: &Path) -> Result<Vec<ArchcarRepositorySummary>>
                 .map(|(repo, active, total)| ArchcarRepositorySummary {
                     id: repo.id,
                     name: repo.name,
+                    remote_url: crate::workspace::repository_remote_url(
+                        &repo.root_path,
+                        &repo.remote_name,
+                    ),
                     root_path: repo.root_path.to_string_lossy().into_owned(),
                     default_branch: repo.default_branch,
                     remote_name: repo.remote_name,

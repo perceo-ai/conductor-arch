@@ -32,6 +32,18 @@ const api = {
     return res.value;
   },
 
+  /**
+   * Send a request to *this machine's* archcar, even while a remote client is
+   * selected. Only for cross-daemon work like importing a remote workspace.
+   */
+  requestLocal: async <Res = unknown>(payload: unknown): Promise<Res> => {
+    const res = (await ipcRenderer.invoke("archcar:request-local", payload)) as
+      | { ok: true; value: Res }
+      | { ok: false; error: string };
+    if (!res.ok) throw new Error(res.error);
+    return res.value;
+  },
+
   /** Ensure the event subscription is running. Idempotent. */
   ensureEvents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("archcar:subscribe"),
 

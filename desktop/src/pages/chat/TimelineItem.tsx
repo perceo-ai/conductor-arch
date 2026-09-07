@@ -7,6 +7,7 @@ import Icon from "@/components/Icon";
 import type { IconName } from "@/components/Icon";
 import { renderMarkdown, renderMarkdownWithInlineFileChips } from "@/lib/markdown";
 import { ansiToHtml } from "@/lib/ansi";
+import { MessageActions } from "./MessageActions";
 import {
   formatReasoningText,
   inlineEventVerbChip,
@@ -17,13 +18,14 @@ import {
 
 // One row of the chat timeline. The projection built in core decides which
 // shape a row takes; this module owns how each shape renders.
-function UserBubble(props: { body: string }) {
+function UserBubble(props: { body: string; item: ArchcarProjectionItem; threadId: number }) {
   return (
     <div class="chat-user-row">
       <div
         class="chat-user-bubble markdown-body"
         innerHTML={renderMarkdownWithInlineFileChips(stripArchductorMetadata(props.body))}
       />
+      <MessageActions item={props.item} threadId={props.threadId} />
     </div>
   );
 }
@@ -103,22 +105,29 @@ function ReasoningBlock(props: { item: ArchcarProjectionItem }) {
   );
 }
 
-export function TimelineItem(props: { item: ArchcarProjectionItem; agentIdle: boolean }) {
+export function TimelineItem(props: {
+  item: ArchcarProjectionItem;
+  agentIdle: boolean;
+  threadId: number;
+}) {
   const cls = () => props.item.render_class;
   return (
     <Switch fallback={<InlineCard item={props.item} agentIdle={props.agentIdle} />}>
       <Match when={cls() === "user_chat"}>
-        <UserBubble body={props.item.body} />
+        <UserBubble body={props.item.body} item={props.item} threadId={props.threadId} />
       </Match>
       <Match when={cls() === "assistant_chat"}>
         {/* Reasoning already marked itself as streaming; agent prose did not,
             so a reply still arriving looked identical to a finished one and new
             text simply appeared. */}
-        <div
-          class="chat-agent-text markdown-body"
-          classList={{ "chat-stream-active": props.item.stream_state === "streaming" }}
-          innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
-        />
+        <div class="chat-agent-row">
+          <div
+            class="chat-agent-text markdown-body"
+            classList={{ "chat-stream-active": props.item.stream_state === "streaming" }}
+            innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
+          />
+          <MessageActions item={props.item} threadId={props.threadId} />
+        </div>
       </Match>
       <Match when={cls() === "reasoning_card"}>
         <ReasoningBlock item={props.item} />

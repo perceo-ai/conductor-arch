@@ -42,6 +42,10 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Parser)]
 #[command(name = "archductor")]
 #[command(about = "Archductor Git worktree workflow for parallel coding agents")]
+// With a daemon on every machine, "which build is this box running?" is a
+// question the CLI has to be able to answer — version skew between a client and
+// its remote daemon is otherwise invisible.
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -206,6 +210,35 @@ enum RemoteCommand {
     Remove {
         /// Client name or id.
         client: String,
+    },
+    /// Copy a workspace from a saved remote daemon onto this machine.
+    ///
+    /// Reads the workspace's repository and branch (and optionally a chat) from
+    /// the remote, then recreates it against a *local* clone of the same
+    /// repository. Both daemons are contacted; neither talks to the other.
+    Import {
+        /// Workspace name on the remote daemon.
+        workspace: String,
+        /// Saved client to read from. Defaults to the active one.
+        #[arg(long)]
+        from: Option<String>,
+        /// Carry this chat's conversation across. Omit to import no chat.
+        #[arg(long)]
+        thread_id: Option<i64>,
+        /// Name for the local workspace. Defaults to the remote's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Branch for the local workspace. Defaults to the remote's branch.
+        #[arg(long)]
+        branch: Option<String>,
+        /// Clone the repository here first when this machine has no copy of it.
+        ///
+        /// Without this the import stops and asks, because picking a directory
+        /// on someone's disk is not the daemon's call. With it the whole
+        /// first-time flow is one command — which matters because `repo add`
+        /// is refused while a remote profile is active, i.e. exactly here.
+        #[arg(long, value_name = "DIR")]
+        clone_into: Option<String>,
     },
     /// Show where archcar requests from this machine currently go.
     Status,
@@ -431,6 +464,36 @@ enum ArchcarCommand {
     /// Print one chat's user/agent transcript (no tool calls).
     ChatTranscript {
         thread_id: i64,
+    },
+    /// Fork a chat into a new one, carrying the conversation up to a message.
+    ///
+    /// Without `--new-workspace` the fork is a second chat in the same
+    /// workspace; with it, a workspace (worktree + branch) is created from the
+    /// source workspace's branch and the fork lands there.
+    ForkChat {
+        thread_id: i64,
+        /// Carry the conversation through this message. Omit for the whole chat.
+        #[arg(long)]
+        through_message_id: Option<i64>,
+        /// Carry the conversation through this point on the shared timeline.
+        /// The desktop app uses this; `--through-message-id` wins if both given.
+        #[arg(long)]
+        through_timeline_seq: Option<i64>,
+        /// Create a workspace for the fork instead of reusing the source's.
+        #[arg(long)]
+        new_workspace: bool,
+        /// Name for that workspace. Defaults to `<source>-fork`.
+        #[arg(long, requires = "new_workspace")]
+        workspace_name: Option<String>,
+        /// Branch for that workspace. Defaults to `<source-branch>-fork`.
+        #[arg(long, requires = "new_workspace")]
+        workspace_branch: Option<String>,
+        /// Base the new branch here. Defaults to the source workspace's branch.
+        #[arg(long, requires = "new_workspace")]
+        base_ref: Option<String>,
+        /// Title for the forked chat. Defaults to `<source title> (fork)`.
+        #[arg(long)]
+        title: Option<String>,
     },
     /// List plan markdown saved under the workspace's .context/plans/.
     ContextPlans {
@@ -1827,6 +1890,30 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(
                         client.send(ArchcarRequest::GetChatTranscript { thread_id })?,
                     );
+                }
+                ArchcarCommand::ForkChat {
+                    thread_id,
+                    through_message_id,
+                    through_timeline_seq,
+                    new_workspace,
+                    workspace_name,
+                    workspace_branch,
+                    base_ref,
+                    title,
+                } => {
+                    print_archcar_response(client.send(ArchcarRequest::ForkChatThread {
+                        thread_id,
+                        through_message_id,
+                        through_timeline_seq,
+                        new_workspace: new_workspace.then_some(
+                            archductor_core::archcar::protocol::ForkWorkspaceRequest {
+                                name: workspace_name,
+                                branch: workspace_branch,
+                                base_ref,
+                            },
+                        ),
+                        title,
+                    })?);
                 }
                 ArchcarCommand::ContextPlans { workspace } => {
                     print_archcar_response(
@@ -3280,6 +3367,22 @@ fn run_cli() -> Result<()> {
                     println!("Now using this machine's local daemon.");
                 }
             }
+            RemoteCommand::Import {
+                workspace,
+                from,
+                thread_id,
+                name,
+                branch,
+                clone_into,
+            } => run_remote_import(
+                &paths,
+                &workspace,
+                from.as_deref(),
+                thread_id,
+                name,
+                branch,
+                clone_into,
+            )?,
             RemoteCommand::Status => {
                 let env_remote = std::env::var(remote::REMOTE_ENV)
                     .ok()
@@ -3776,6 +3879,35 @@ fn print_archcar_response(response: ArchcarResponse) {
                     ws.name, ws.repository_name, ws.branch, ws.status, chat_count
                 );
             }
+        }
+        ArchcarResponse::WorkspaceImported {
+            workspace,
+            repository,
+            branch,
+            thread_id,
+            copied_messages,
+        } => {
+            println!("imported {workspace} (repository {repository}, branch {branch})");
+            match thread_id {
+                Some(thread_id) => {
+                    println!("chat {thread_id} carried {copied_messages} message(s)")
+                }
+                None => println!("no chat imported"),
+            }
+        }
+        ArchcarResponse::ChatThreadForked {
+            thread,
+            workspace,
+            created_workspace,
+            copied_messages,
+        } => {
+            println!(
+                "forked chat {} \"{}\" into workspace {workspace}{}",
+                thread.id,
+                thread.title,
+                if created_workspace { " (created)" } else { "" }
+            );
+            println!("carried {copied_messages} message(s)");
         }
         ArchcarResponse::ChatThreads { workspace, threads } => {
             println!("chat_threads {} {}", workspace, threads.len());
@@ -5037,13 +5169,17 @@ fn run_first_run_setup(
     listen: Option<String>,
     no_service: bool,
     archcar_path: Option<String>,
-) -> anyhow::Result<(std::net::SocketAddr, String)> {
+) -> anyhow::Result<FirstRunOutcome> {
     let listen = listen.unwrap_or_else(|| remote::DEFAULT_REMOTE_PORT.to_string());
     let address = remote::parse_listen_addr(&listen)?;
     let token = remote::ensure_token(paths)?;
 
+    let mut daemon = DaemonOutcome::Started;
     if no_service {
         println!("skipped service install (--no-service)");
+        // Not a failure: the operator is running archcar themselves, and may
+        // already have. Neither "listening" nor "not listening" is knowable.
+        daemon = DaemonOutcome::Skipped;
     } else {
         match service::install(
             paths,
@@ -5053,14 +5189,163 @@ fn run_first_run_setup(
             },
         ) {
             Ok(status) => print_service_status(&status),
-            // A missing service manager should not block the rest of setup.
-            Err(err) => eprintln!(
-                "service install failed: {err:#}
-start archcar yourself, then rerun with --no-service"
-            ),
+            // A missing service manager should not block the rest of setup —
+            // the token and the environment check are still worth printing —
+            // but it must not be reported as if the daemon came up.
+            Err(err) => {
+                eprintln!("service install failed: {err:#}");
+                eprintln!();
+                eprintln!(
+                    "Nothing is listening yet. Either fix the cause above and rerun \
+                     `archductor service setup`, or start archcar yourself and rerun with \
+                     --no-service."
+                );
+                daemon = DaemonOutcome::Failed;
+            }
         }
     }
-    Ok((address, token))
+    Ok(FirstRunOutcome {
+        address,
+        token,
+        daemon,
+    })
+}
+
+/// What `service setup` and `mcp setup` need to know about the run: where the
+/// daemon would listen, the token, and — the part that used to be dropped —
+/// what actually happened to the daemon.
+struct FirstRunOutcome {
+    address: std::net::SocketAddr,
+    token: String,
+    daemon: DaemonOutcome,
+}
+
+/// Three outcomes, not two. Collapsing `Skipped` into `Failed` would report a
+/// deliberate `--no-service` run as a broken one; collapsing it into `Started`
+/// is what made a failed install print connection instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonOutcome {
+    /// The service manager took it and reported it running.
+    Started,
+    /// Install was attempted and did not work. Nothing is up.
+    Failed,
+    /// `--no-service`: the operator owns the process, so its state is unknown.
+    Skipped,
+}
+
+impl DaemonOutcome {
+    /// Whether to print the address as a live listener rather than a plan.
+    fn is_running(self) -> bool {
+        self == Self::Started
+    }
+
+    /// Whether client connection instructions are worth printing: true unless
+    /// we know for a fact there is nothing to connect to.
+    fn worth_connecting_to(self) -> bool {
+        self != Self::Failed
+    }
+}
+
+/// Copy a remote daemon's workspace onto this machine.
+///
+/// Two clients on purpose: the saved remote for reads, and an explicitly *local*
+/// one for the write. `ArchcarClient::from_paths` follows the saved profile, so
+/// using it here would send the import straight back to the machine it came
+/// from — which is the bug this whole command exists to avoid.
+fn run_remote_import(
+    paths: &AppPaths,
+    workspace: &str,
+    from: Option<&str>,
+    thread_id: Option<i64>,
+    name: Option<String>,
+    branch: Option<String>,
+    clone_into: Option<String>,
+) -> Result<()> {
+    let clients = remote::load_clients(paths)?;
+    let profile = match from {
+        Some(key) => clients
+            .find(key)
+            .ok_or_else(|| anyhow::anyhow!("no saved client named `{key}`"))?,
+        None => clients.active().ok_or_else(|| {
+            anyhow::anyhow!(
+                "this machine is using its local daemon; name the source with `--from <client>`"
+            )
+        })?,
+    };
+    let source = archductor_core::archcar::client::ArchcarClient::from_saved_client(profile)?;
+
+    let remote_workspace = match source.send(ArchcarRequest::ListWorkspaces)? {
+        ArchcarResponse::Workspaces { workspaces } => workspaces
+            .into_iter()
+            .find(|candidate| candidate.name == workspace)
+            .ok_or_else(|| {
+                anyhow::anyhow!("`{workspace}` is not a workspace on {}", profile.label)
+            })?,
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", profile.label),
+        other => anyhow::bail!(
+            "unexpected response listing workspaces: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+
+    let repository_url = match source.send(ArchcarRequest::ListRepositories)? {
+        ArchcarResponse::Repositories { repositories } => repositories
+            .into_iter()
+            .find(|repo| repo.name == remote_workspace.repository_name)
+            .and_then(|repo| repo.remote_url)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "repository `{}` on {} has no remote URL, so there is nothing to match a \
+                     local clone against",
+                    remote_workspace.repository_name,
+                    profile.label
+                )
+            })?,
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", profile.label),
+        other => anyhow::bail!(
+            "unexpected response listing repositories: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+
+    let (transcript, chat_title) = match thread_id {
+        Some(thread_id) => match source.send(ArchcarRequest::GetChatTranscript { thread_id })? {
+            ArchcarResponse::ChatTranscript {
+                title, messages, ..
+            } => (messages, Some(title)),
+            ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", profile.label),
+            other => anyhow::bail!(
+                "unexpected response reading the chat: {}",
+                archductor_core::archcar::protocol::archcar_response_summary(&other)
+            ),
+        },
+        None => (Vec::new(), None),
+    };
+
+    let local = archductor_core::archcar::client::ArchcarClient::local(paths);
+    if let Some(dest) = clone_into {
+        // Clone through the local daemon rather than shelling out here, so the
+        // clone is registered as a repository in the same step.
+        println!("cloning {repository_url} into {dest}");
+        match local.send(ArchcarRequest::CloneRepository {
+            url: repository_url.clone(),
+            dest,
+            name: None,
+        })? {
+            ArchcarResponse::Error { message } => anyhow::bail!("clone failed: {message}"),
+            response => print_archcar_response(response),
+        }
+    }
+    print_archcar_response(local.send(ArchcarRequest::ImportWorkspaceFromRemote {
+        repository_url,
+        branch: branch.unwrap_or(remote_workspace.branch),
+        base_ref: Some(remote_workspace.base_ref),
+        name: name.or(Some(remote_workspace.name)),
+        transcript,
+        chat_title,
+        provider: None,
+    })?);
+    Ok(())
 }
 
 /// Headless server bootstrap: one command to go from a fresh box to a daemon
@@ -5073,7 +5358,7 @@ fn run_service_setup(
     no_service: bool,
     archcar_path: Option<String>,
 ) -> anyhow::Result<()> {
-    let (address, token) = run_first_run_setup(paths, listen, no_service, archcar_path)?;
+    let outcome = run_first_run_setup(paths, listen, no_service, archcar_path)?;
 
     println!();
     match service::doctor(paths) {
@@ -5092,22 +5377,46 @@ fn run_service_setup(
     }
 
     println!();
-    print_remote_access_hint(paths, address, &token);
-    println!();
-    println!("On each client machine:");
-    println!(
-        "  archductor remote connect <this-host>:{} --token {token}",
-        address.port()
-    );
+    print_remote_access_hint(paths, outcome.address, &outcome.token, outcome.daemon);
+    if outcome.daemon.worth_connecting_to() {
+        println!();
+        println!("On each client machine:");
+        println!(
+            "  archductor remote connect <this-host>:{} --token {token}",
+            outcome.address.port(),
+            token = outcome.token
+        );
+    }
+    // Setup that could not start the daemon has not set the machine up. Saying
+    // so in the exit status is the only part a provisioning script can read.
+    if outcome.daemon == DaemonOutcome::Failed {
+        anyhow::bail!("service setup did not start the daemon");
+    }
     Ok(())
 }
 
 /// The listener, the token, and the warning that has to go with a public bind.
-fn print_remote_access_hint(paths: &AppPaths, address: std::net::SocketAddr, token: &str) {
-    println!(
-        "archcar listens on {address}; token stored in {}",
-        remote::token_path(paths).display()
-    );
+fn print_remote_access_hint(
+    paths: &AppPaths,
+    address: std::net::SocketAddr,
+    token: &str,
+    daemon: DaemonOutcome,
+) {
+    if daemon.is_running() {
+        println!(
+            "archcar listens on {address}; token stored in {}",
+            remote::token_path(paths).display()
+        );
+    } else {
+        // The token is real and worth keeping; the listener is not up yet.
+        // Printing the first without the second is what made a failed run read
+        // as a successful one.
+        println!(
+            "archcar is not running yet. Once it starts it will listen on {address}; token \
+             stored in {}",
+            remote::token_path(paths).display()
+        );
+    }
     if remote::is_public_addr(&address) {
         println!(
             "WARNING: {address} is reachable from other machines. The connection is not encrypted \
@@ -5126,7 +5435,7 @@ fn run_mcp_setup(
     no_service: bool,
     archcar_path: Option<String>,
 ) -> anyhow::Result<()> {
-    let (address, token) = run_first_run_setup(paths, listen, no_service, archcar_path)?;
+    let outcome = run_first_run_setup(paths, listen, no_service, archcar_path)?;
 
     println!();
     println!("Archductor MCP server is `archductor mcp serve` (stdio).");
@@ -5137,13 +5446,16 @@ fn run_mcp_setup(
         .unwrap_or_else(|_| "archductor".to_owned());
     println!("{}", mcp_client_config_json(&exe));
     println!();
-    print_remote_access_hint(paths, address, &token);
+    print_remote_access_hint(paths, outcome.address, &outcome.token, outcome.daemon);
     println!(
         "To drive this daemon from another machine, set {}=<host>:{} and {}=<token> there.",
         remote::REMOTE_ENV,
-        address.port(),
+        outcome.address.port(),
         remote::TOKEN_ENV
     );
+    if outcome.daemon == DaemonOutcome::Failed {
+        anyhow::bail!("mcp setup did not start the daemon");
+    }
     Ok(())
 }
 

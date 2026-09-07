@@ -14,6 +14,7 @@ import {
   parseSshAddress,
   isSshAddress,
   sshArgs,
+  sshFailureHint,
 } from "./archcar";
 
 // Resolution order for server-hosted execution: environment variables win,
@@ -359,5 +360,35 @@ describe("clientIdFrom", () => {
     expect(clientIdFrom("devbox:7420")).toBe("devbox-7420");
     expect(clientIdFrom("My Devbox!")).toBe("my-devbox");
     expect(clientIdFrom("!!!")).toBe("client");
+  });
+});
+
+describe("sshFailureHint", () => {
+  // BatchMode=yes means ssh refuses an unknown host instead of prompting, so
+  // this is the first thing every new machine hits. Kept in step with
+  // `ssh_failure_hint` in crates/core/src/archcar/remote.rs.
+  it("explains an unknown host key with the command that fixes it", () => {
+    const hint = sshFailureHint("Host key verification failed.", "arch@buildbox", 2222);
+
+    expect(hint).toContain("ssh-keyscan -p 2222 buildbox");
+    expect(hint).toContain("ssh -p 2222 arch@buildbox");
+    expect(hint).toContain("BatchMode");
+  });
+
+  it("leaves the port out of the suggested commands when there is none", () => {
+    const hint = sshFailureHint("Host key verification failed.", "buildbox", null);
+
+    expect(hint).toContain("ssh-keyscan buildbox");
+    expect(hint).not.toContain("-p ");
+  });
+
+  it("suggests an explicit path when archductor is missing on the far side", () => {
+    const hint = sshFailureHint("bash: archductor: command not found", "arch@buildbox", null);
+
+    expect(hint).toContain("ssh://arch@buildbox/");
+  });
+
+  it("invents no advice for an unrecognized failure", () => {
+    expect(sshFailureHint("Connection reset by peer", "buildbox", null)).toBeNull();
   });
 });

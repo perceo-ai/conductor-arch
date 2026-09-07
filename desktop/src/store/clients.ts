@@ -96,6 +96,14 @@ export const clientsStore = {
     return active?.label ?? "This machine";
   },
 
+  /**
+   * Requests are going to another machine's daemon. Gates the actions that only
+   * make sense across a machine boundary, like importing a workspace here.
+   */
+  isRemote(): boolean {
+    return !!state.envAddress || state.activeId != null;
+  },
+
   /** The connection is pinned by the environment and cannot be switched here. */
   pinned(): boolean {
     return !!state.envAddress;

@@ -185,6 +185,10 @@ pub struct SshStream {
     /// thread so a full pipe cannot deadlock the transfer, and reported when
     /// the stream ends early so the caller sees the reason instead of EOF.
     stderr: Arc<Mutex<String>>,
+    /// The destination and port, kept only so a failure can name the exact
+    /// command that fixes it rather than quoting ssh at the operator.
+    destination: String,
+    port: Option<u16>,
 }
 
 impl SshStream {
@@ -200,11 +204,15 @@ impl SshStream {
             .lock()
             .map(|text| ssh_failure_reason(&text))
             .unwrap_or_default();
-        let message = match (detail.is_empty(), status) {
+        let mut message = match (detail.is_empty(), status) {
             (false, _) => format!("ssh transport failed: {detail}"),
             (true, Some(status)) => format!("ssh exited with {status} before the daemon answered"),
             (true, None) => "ssh transport closed unexpectedly".to_owned(),
         };
+        if let Some(hint) = ssh_failure_hint(&detail, &self.destination, self.port) {
+            message.push_str("\n\n");
+            message.push_str(&hint);
+        }
         io::Error::new(io::ErrorKind::BrokenPipe, message)
     }
 }
@@ -244,6 +252,46 @@ fn ssh_failure_reason(stderr: &str) -> String {
         return stderr.trim().to_owned();
     }
     interesting.join("; ")
+}
+
+/// Turn ssh's own diagnostics into the command that fixes them.
+///
+/// These three account for essentially every first connection to a new box.
+/// The host-key one in particular is unavoidable and self-inflicted: the
+/// transport passes `BatchMode=yes` (a password or accept-this-key prompt would
+/// hang a GUI with no terminal), so ssh refuses an unknown host outright
+/// instead of asking. Quoting "Host key verification failed." at someone
+/// setting up their first machine tells them nothing about what to do.
+fn ssh_failure_hint(detail: &str, destination: &str, port: Option<u16>) -> Option<String> {
+    let host = destination.rsplit('@').next().unwrap_or(destination);
+    let port_flag = port.map(|port| format!(" -p {port}")).unwrap_or_default();
+    let keyscan_port = port.map(|port| format!("-p {port} ")).unwrap_or_default();
+
+    if detail.contains("Host key verification failed") {
+        return Some(format!(
+            "This host is not in your known_hosts, and the connection runs with BatchMode=yes so \
+             ssh cannot ask you to accept it. Connect once by hand to accept the key:\n    ssh{} \
+             {destination}\nor add it without a prompt:\n    ssh-keyscan {}{} >> \
+             ~/.ssh/known_hosts",
+            port_flag, keyscan_port, host
+        ));
+    }
+    if detail.contains("Permission denied") {
+        return Some(format!(
+            "ssh could not authenticate, and BatchMode=yes disables password prompts, so the \
+             daemon needs key auth. Check that your key is on the server:\n    ssh-copy-id{} \
+             {destination}",
+            port_flag
+        ));
+    }
+    if detail.contains("command not found") || detail.contains("No such file or directory") {
+        return Some(format!(
+            "ssh connected but could not run `archductor` on the far side — a non-interactive \
+             shell often skips the profile that adds ~/.local/bin to PATH. Give the path \
+             explicitly, e.g. ssh://{destination}/usr/bin/archductor"
+        ));
+    }
+    None
 }
 
 impl Drop for SshStream {
@@ -308,6 +356,8 @@ pub fn connect_ssh(target: &SshTarget) -> Result<SshStream> {
         stdin,
         stdout,
         stderr,
+        destination: target.destination.clone(),
+        port: target.port,
     })
 }
 
@@ -714,6 +764,48 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn an_unknown_host_key_is_explained_with_the_command_that_fixes_it() {
+        // BatchMode=yes means ssh refuses instead of prompting, so this is the
+        // first thing every new machine hits. The raw ssh line says nothing
+        // about what to do about it.
+        let hint = ssh_failure_hint("Host key verification failed.", "arch@buildbox", Some(2222))
+            .expect("an unknown host key is explainable");
+
+        assert!(hint.contains("ssh-keyscan -p 2222 buildbox"), "{hint}");
+        assert!(hint.contains("ssh -p 2222 arch@buildbox"), "{hint}");
+        assert!(hint.contains("BatchMode"), "{hint}");
+    }
+
+    #[test]
+    fn the_default_port_is_left_out_of_the_suggested_commands() {
+        let hint = ssh_failure_hint("Host key verification failed.", "buildbox", None)
+            .expect("an unknown host key is explainable");
+
+        assert!(hint.contains("ssh-keyscan buildbox"), "{hint}");
+        assert!(
+            !hint.contains("-p "),
+            "no port flag when none was given: {hint}"
+        );
+    }
+
+    #[test]
+    fn a_missing_archductor_on_the_far_side_suggests_an_explicit_path() {
+        let hint = ssh_failure_hint(
+            "bash: line 1: archductor: command not found",
+            "arch@buildbox",
+            None,
+        )
+        .expect("a missing far-side binary is explainable");
+
+        assert!(hint.contains("ssh://arch@buildbox/"), "{hint}");
+    }
+
+    #[test]
+    fn an_unrecognized_ssh_failure_gets_no_invented_advice() {
+        assert!(ssh_failure_hint("Connection reset by peer", "buildbox", None).is_none());
+    }
 
     fn ssh(address: &str) -> SshTarget {
         parse_ssh_address(address)

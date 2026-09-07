@@ -184,6 +184,25 @@ export type ArchcarRequest =
     }
   | { type: "list_diff_contributions"; workspace: string }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
+  | {
+      type: "import_workspace_from_remote";
+      repository_url: string;
+      branch: string;
+      base_ref?: string;
+      name?: string;
+      transcript?: { role: string; content: string; created_at: string }[];
+      chat_title?: string;
+      provider?: string;
+    }
+  | {
+      type: "fork_chat_thread";
+      thread_id: number;
+      /** Fork through this point on the shared timeline. */
+      through_timeline_seq?: number;
+      /** Present creates a workspace for the fork; absent forks into a new tab. */
+      new_workspace?: { name?: string; branch?: string; base_ref?: string };
+      title?: string;
+    }
   | { type: "close_chat_thread"; thread_id: number }
   | { type: "reopen_chat_thread"; thread_id: number }
   // Repository & workspace lifecycle (parity with in-process GTK flows).

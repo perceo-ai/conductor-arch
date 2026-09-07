@@ -1,5 +1,5 @@
 import { createResource, createSignal, For, Show } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore, prefsStore } from "@/store";
+import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore, prefsStore, clientsStore } from "@/store";
 import { repoAvatar, openExternal } from "@/bridge/client";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
@@ -41,6 +41,23 @@ function workspaceMenuItems(name: string): ContextMenuItem[] {
   const archived = () => workspacesStore.row(name)?.status === "archived";
   return [
     { label: "Open", run: () => nav.selectWorkspace(name) },
+    // Only across a machine boundary: "copy to this machine" is meaningless
+    // when this machine is already the one running it.
+    ...(clientsStore.isRemote()
+      ? [
+          {
+            label: "Copy to this machine",
+            icon: "arrow-down-circle" as const,
+            run: () =>
+              runAction(
+                "Copy to this machine",
+                actions
+                  .importWorkspaceFromRemote({ workspace: name })
+                  .then(() => undefined),
+              ),
+          },
+        ]
+      : []),
     {
       label: prefsStore.isPinned(name) ? "Unpin" : "Pin to top",
       run: () => prefsStore.togglePinned(name),

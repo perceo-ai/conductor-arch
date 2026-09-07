@@ -502,8 +502,23 @@ fn explain_start_failure(
     boot_persistent: bool,
 ) -> anyhow::Error {
     let no_bus = err.to_string().contains("Failed to connect to bus");
-    if manager != ServiceManager::Systemd || boot_persistent || !no_bus {
+    if manager != ServiceManager::Systemd || !no_bus {
         return err;
+    }
+    if boot_persistent {
+        // Linger is on and there is still no bus: the user manager has been
+        // asked for but has not finished starting. `enable-linger` immediately
+        // followed by `service setup` is the ordinary way to hit this, and the
+        // bare D-Bus error gives no hint that waiting is all it takes.
+        return anyhow::anyhow!(
+            "{err}\n\n\
+             Linger is enabled for {user}, but the systemd user manager has not started yet — it \
+             comes up a moment after linger is enabled, or at the next login. Start it now and \
+             rerun `archductor service install`:\n\
+             \n    sudo systemctl start user@{uid}",
+            user = current_user_name(),
+            uid = current_uid()
+        );
     }
     anyhow::anyhow!(
         "{err}\n\n\
@@ -535,7 +550,19 @@ fn linger_enabled() -> bool {
         "Linger",
     ])
     .map(|output| output.trim().ends_with("=yes"))
-    .unwrap_or(false)
+    // `loginctl show-user` fails outright with "User ID N is not logged in or
+    // lingering" when there is no user manager — which is exactly the state
+    // being diagnosed. Falling back to `false` there would tell someone to
+    // enable linger that already has it on. The marker file is the durable
+    // truth and is readable either way.
+    .unwrap_or_else(|_| linger_marker_exists())
+}
+
+/// systemd records linger as an empty file per user under `/var/lib/systemd`.
+fn linger_marker_exists() -> bool {
+    Path::new("/var/lib/systemd/linger")
+        .join(current_user_name())
+        .exists()
 }
 
 /// The account name to put in a `loginctl` command.
@@ -1081,6 +1108,15 @@ pub struct ServiceDoctorRow {
     /// Where it resolved in the daemon's PATH, when it resolves at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved: Option<String>,
+    /// Where it resolved on the *host's* broadest PATH, when it resolves there.
+    ///
+    /// The difference between this and `resolved` is the whole point of the
+    /// report: present here but not there means "reinstall the unit to re-record
+    /// PATH", absent from both means "the tool is not on this machine at all".
+    /// Telling an operator to reinstall when the real fix is `apt install gh`
+    /// sends them round a loop that cannot terminate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_resolved: Option<String>,
     /// Whether the daemon is unusable without it.
     pub required: bool,
     pub detail: String,
@@ -1089,6 +1125,16 @@ pub struct ServiceDoctorRow {
 impl ServiceDoctorRow {
     pub fn found(&self) -> bool {
         self.resolved.is_some()
+    }
+
+    /// Present on the machine, but not where the daemon will look for it.
+    pub fn found_on_host_only(&self) -> bool {
+        self.resolved.is_none() && self.host_resolved.is_some()
+    }
+
+    /// Not on this machine at all, by any PATH we know how to look down.
+    pub fn missing_everywhere(&self) -> bool {
+        self.resolved.is_none() && self.host_resolved.is_none()
     }
 }
 
@@ -1126,7 +1172,10 @@ pub fn doctor(paths: &AppPaths) -> Result<ServiceDoctorReport> {
             "what an install would record right now (no unit is installed)".to_owned(),
         ),
     };
-    let rows = doctor_rows(&path);
+    // The broadest view of the host, resolved once: `service_path_env` probes
+    // the login shell, which is far too expensive to redo per row.
+    let host_path = service_path_env();
+    let rows = doctor_rows(&path, &host_path);
     let (ok, feedback) = doctor_verdict(&rows);
     Ok(ServiceDoctorReport {
         status,
@@ -1159,17 +1208,71 @@ fn doctor_verdict(rows: &[ServiceDoctorRow]) -> (bool, String) {
     if problems.is_empty() {
         return (true, "The daemon can reach everything it needs.".to_owned());
     }
+
+    // Two different failures wear the same face in the rows above, and they
+    // have opposite fixes. Name whichever ones actually apply, and never both
+    // when only one is true.
+    //
+    // Only tools that *caused* a problem earn a line. Every required tool that
+    // is missing did; an absent agent CLI only did if no agent resolved at all,
+    // because the bar for agents is one of them, not all of them.
+    let blames = |row: &&ServiceDoctorRow| row.required || !agents_found;
+    let mut fixes: Vec<String> = Vec::new();
+    let host_only: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.found_on_host_only())
+        .filter(blames)
+        .map(|row| row.command.as_str())
+        .collect();
+    let nowhere: Vec<&str> = rows
+        .iter()
+        // An agent that is nowhere is not itself the problem — "no agent at
+        // all" is, and naming all eight of them as things to install is noise.
+        .filter(|row| row.required && row.missing_everywhere())
+        .map(|row| row.command.as_str())
+        .collect();
+    if !host_only.is_empty() {
+        fixes.push(format!(
+            "{} {} on this machine's PATH but not on the service's — reinstall with `archductor \
+             service install` to re-record it",
+            host_only.join(", "),
+            if host_only.len() == 1 { "is" } else { "are" }
+        ));
+    }
+    if !nowhere.is_empty() {
+        fixes.push(format!(
+            "{} {} not installed on this machine at all — install {} first (`archductor doctor` \
+             prints the command for this distro)",
+            nowhere.join(", "),
+            if nowhere.len() == 1 { "is" } else { "are" },
+            if nowhere.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    // Only suppressed when re-recording PATH would actually bring an agent
+    // back; a `gh` in `host_only` says nothing about the agents.
+    let an_agent_is_on_the_host = rows
+        .iter()
+        .any(|row| !row.required && row.found_on_host_only());
+    if !agents_found && !an_agent_is_on_the_host {
+        fixes.push(
+            "no agent CLI is installed on this machine — install at least one (codex, claude, \
+             gemini, opencode, …)"
+                .to_owned(),
+        );
+    }
+    // The fixes each start with a command name (`gh`, `no agent CLI`), so the
+    // first needs capitalising to read as a sentence after the problems.
+    let mut advice = fixes.join("; ");
+    if let Some(first) = advice.get(..1).map(str::to_uppercase) {
+        advice.replace_range(..1, &first);
+    }
     (
         false,
-        format!(
-            "The daemon {}. These are on your PATH but not on the service's; reinstall with \
-             `archductor service install` to re-record it.",
-            problems.join(", and ")
-        ),
+        format!("The daemon {}. {advice}.", problems.join(", and ")),
     )
 }
 
-fn doctor_rows(path: &str) -> Vec<ServiceDoctorRow> {
+fn doctor_rows(path: &str, host_path: &str) -> Vec<ServiceDoctorRow> {
     let mut rows = vec![
         doctor_row(
             "Git",
@@ -1177,6 +1280,7 @@ fn doctor_rows(path: &str) -> Vec<ServiceDoctorRow> {
             true,
             "Every workspace is a git worktree.",
             path,
+            host_path,
         ),
         doctor_row(
             "GitHub CLI",
@@ -1184,6 +1288,7 @@ fn doctor_rows(path: &str) -> Vec<ServiceDoctorRow> {
             true,
             "PR creation, checks, and review all run through gh.",
             path,
+            host_path,
         ),
     ];
     rows.extend(
@@ -1196,6 +1301,7 @@ fn doctor_rows(path: &str) -> Vec<ServiceDoctorRow> {
                     false,
                     "Agent CLI; at least one has to resolve.",
                     path,
+                    host_path,
                 )
             }),
     );
@@ -1208,13 +1314,17 @@ fn doctor_row(
     required: bool,
     detail: &str,
     path: &str,
+    host_path: &str,
 ) -> ServiceDoctorRow {
     let resolved = crate::doctor::command_in_path(std::ffi::OsStr::new(path), command)
+        .map(|found| found.display().to_string());
+    let host_resolved = crate::doctor::command_in_path(std::ffi::OsStr::new(host_path), command)
         .map(|found| found.display().to_string());
     ServiceDoctorRow {
         name: name.to_owned(),
         command: command.to_owned(),
         resolved,
+        host_resolved,
         required,
         detail: detail.to_owned(),
     }
@@ -1491,7 +1601,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         write_executable(&bin.join("git"));
 
-        let rows = doctor_rows(&bin.display().to_string());
+        let rows = doctor_rows(&bin.display().to_string(), NO_PATH);
 
         let git = rows.iter().find(|row| row.command == "git").unwrap();
         assert!(git.found(), "{git:?}");
@@ -1510,11 +1620,129 @@ mod tests {
         // An empty PATH means `gh` is missing *and* no agent resolves. Naming
         // only the first sends the operator back for a second pass.
         let temp = tempfile::tempdir().unwrap();
-        let (ok, feedback) = doctor_verdict(&doctor_rows(&temp.path().display().to_string()));
+        let (ok, feedback) =
+            doctor_verdict(&doctor_rows(&temp.path().display().to_string(), NO_PATH));
 
         assert!(!ok);
         assert!(feedback.contains("gh"), "{feedback}");
         assert!(feedback.contains("any agent CLI"), "{feedback}");
+    }
+
+    #[test]
+    fn a_missing_bus_without_linger_points_at_enable_linger() {
+        let err = explain_start_failure(
+            anyhow::anyhow!("systemctl --user daemon-reload failed: Failed to connect to bus"),
+            ServiceManager::Systemd,
+            false,
+        );
+
+        assert!(err.to_string().contains("enable-linger"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_bus_with_linger_already_on_points_at_the_user_manager() {
+        // `enable-linger` immediately followed by `service setup` races the
+        // user manager's start. Repeating the linger advice here would be
+        // useless — linger is already on.
+        let err = explain_start_failure(
+            anyhow::anyhow!("systemctl --user daemon-reload failed: Failed to connect to bus"),
+            ServiceManager::Systemd,
+            true,
+        );
+
+        let text = err.to_string();
+        assert!(text.contains("systemctl start user@"), "{text}");
+        assert!(text.contains("has not started yet"), "{text}");
+        assert!(
+            !text.contains("enable-linger"),
+            "linger is already on: {text}"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_start_failure_is_passed_through_untouched() {
+        let err = explain_start_failure(
+            anyhow::anyhow!("systemctl --user enable failed: unit not found"),
+            ServiceManager::Systemd,
+            false,
+        );
+
+        assert_eq!(
+            err.to_string(),
+            "systemctl --user enable failed: unit not found"
+        );
+    }
+
+    #[test]
+    fn doctor_verdict_says_reinstall_only_for_tools_the_host_actually_has() {
+        // `gh` on the host but not on the service PATH: re-recording the unit
+        // is the fix, and the only fix worth printing.
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        for command in ["gh", "claude"] {
+            write_executable(&host.join(command));
+        }
+        let service = temp.path().join("service");
+        std::fs::create_dir_all(&service).unwrap();
+        write_executable(&service.join("git"));
+
+        let rows = doctor_rows(&service.display().to_string(), &host.display().to_string());
+        let (ok, feedback) = doctor_verdict(&rows);
+
+        assert!(!ok, "{feedback}");
+        assert!(feedback.contains("reinstall"), "{feedback}");
+        assert!(
+            !feedback.contains("not installed on this machine"),
+            "nothing here is missing from the host: {feedback}"
+        );
+    }
+
+    #[test]
+    fn a_reinstallable_gh_does_not_swallow_the_advice_about_missing_agents() {
+        // `gh` on the host and no agent anywhere are independent problems with
+        // independent fixes; re-recording PATH cannot conjure an agent CLI.
+        let temp = tempfile::tempdir().unwrap();
+        let host = temp.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        write_executable(&host.join("gh"));
+        let service = temp.path().join("service");
+        std::fs::create_dir_all(&service).unwrap();
+        write_executable(&service.join("git"));
+
+        let rows = doctor_rows(&service.display().to_string(), &host.display().to_string());
+        let (ok, feedback) = doctor_verdict(&rows);
+
+        assert!(!ok, "{feedback}");
+        assert!(feedback.contains("reinstall"), "{feedback}");
+        assert!(
+            feedback.contains("no agent CLI is installed"),
+            "the agent problem still needs its own fix: {feedback}"
+        );
+    }
+
+    #[test]
+    fn doctor_verdict_says_install_it_when_the_host_does_not_have_it_either() {
+        // The case that cost real time in the container: `gh` was absent from
+        // the machine entirely and the advice was still "reinstall the unit",
+        // which can never fix it.
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        write_executable(&bin.join("git"));
+
+        let rows = doctor_rows(&bin.display().to_string(), &bin.display().to_string());
+        let (ok, feedback) = doctor_verdict(&rows);
+
+        assert!(!ok, "{feedback}");
+        assert!(
+            feedback.contains("not installed on this machine"),
+            "{feedback}"
+        );
+        assert!(
+            !feedback.contains("reinstall"),
+            "re-recording PATH cannot install a missing tool: {feedback}"
+        );
     }
 
     #[test]
@@ -1526,7 +1754,7 @@ mod tests {
             write_executable(&bin.join(command));
         }
 
-        let (ok, feedback) = doctor_verdict(&doctor_rows(&bin.display().to_string()));
+        let (ok, feedback) = doctor_verdict(&doctor_rows(&bin.display().to_string(), NO_PATH));
 
         assert!(ok, "{feedback}");
         // One agent is the bar; the others being absent is not a problem.

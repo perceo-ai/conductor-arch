@@ -110,6 +110,21 @@ export type ArchcarResponse =
   | { type: "settings_saved"; scope: string; layer: string }
   | { type: "setup_readiness"; report: SetupReport }
   | { type: "chat_thread_created"; thread: ArchcarChatThread }
+  | {
+      type: "workspace_imported";
+      workspace: string;
+      repository: string;
+      branch: string;
+      thread_id?: number;
+      copied_messages: number;
+    }
+  | {
+      type: "chat_thread_forked";
+      thread: ArchcarChatThread;
+      workspace: string;
+      created_workspace: boolean;
+      copied_messages: number;
+    }
   | { type: "repository_added"; name: string }
   | { type: "repository_removed"; name: string }
   | { type: "chat_paste_saved"; relative_path: string; label: string }
@@ -177,6 +192,12 @@ export interface ServiceDoctorRow {
   name: string;
   command: string;
   resolved?: string | null;
+  /**
+   * Where it resolved on the host's broadest PATH. Present here but absent from
+   * `resolved` means the unit needs re-recording; absent from both means the
+   * tool is not installed at all — opposite fixes.
+   */
+  host_resolved?: string | null;
   required: boolean;
   detail: string;
 }

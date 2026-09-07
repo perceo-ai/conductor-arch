@@ -11,6 +11,17 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 
 fn main() -> Result<()> {
+    // archcar takes no arguments and pulls in no argument parser, but the one
+    // question worth asking a daemon from the outside is which build it is:
+    // a client talking to a stale remote daemon otherwise fails in ways that
+    // look like bugs. Hand-matched so this stays a zero-dependency check.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+    {
+        println!("archcar {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let paths = AppPaths::from_env();
     let _log_guard = init_logger(&paths)?;
     reconcile_managed_sessions_on_startup(&paths)?;
