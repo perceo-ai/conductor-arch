@@ -88,24 +88,41 @@ The same four commands are also offered in the command palette, so
 
 ## Getting local files into a workspace
 
-A new worktree has tracked files only. Two mechanisms, and **`.worktreeinclude`
-takes precedence** when it exists and is non-empty:
+A new worktree has tracked files only. Two sources of copy patterns, and they
+are **combined, not ranked**: `included_file_patterns` concatenates the
+`.worktreeinclude` lines with `file_include_globs` and matches gitignored files
+against the union.
 
 ```
-# .worktreeinclude — gitignore syntax, in the repository root
+# .worktreeinclude — one pattern per line, in the repository root
 .env*
 certs/**
 ```
 
 ```toml
-# .archductor/settings.toml — used only when there is no .worktreeinclude
+# .archductor/settings.toml — added to the above, not overridden by it
 file_include_globs = """
 .env
 config/*.local.json
 """
 ```
 
-With neither, the built-in default is `.env*`.
+Three things that surprise people:
+
+- **There is no precedence.** A pattern in either source copies files. Removing
+  a glob from `settings.toml` does nothing if `.worktreeinclude` still matches.
+- **`.env*` is not a runtime fallback.** It is written into the scaffolded
+  `settings.toml` when a repository is bootstrapped. With both sources genuinely
+  empty, nothing is copied at all.
+- **Negation lines are dropped.** `parse_pattern_lines` discards lines starting
+  with `!` (and `#`), so gitignore-style negation in `.worktreeinclude` silently
+  does nothing. There is no way to exclude a file once a pattern matches it.
+
+> The settings inspector disagrees with the copier. `inspect_repository_settings`
+> reports a precedence (`.worktreeinclude` > `file_include_globs` > `.env*`) for
+> display, but `copy_included_ignored_files` unions them. Trust the behavior
+> described here; the inspector's `active_file_patterns` is a UI label, not what
+> runs.
 
 Only gitignored files are copied. Dependencies and build output are
 deliberately excluded — reproducing them with `[scripts] setup` is faster and

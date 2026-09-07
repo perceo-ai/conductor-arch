@@ -49,13 +49,19 @@ no other cause.
 A new worktree contains tracked files only. Your `.env`, your local config,
 your certificates — none of it is there.
 
-Two mechanisms, and **`.worktreeinclude` wins if it exists and is non-empty**:
+Two sources of copy patterns, and they are **combined, not ranked** — the
+patterns from both are concatenated and matched against the repository's
+gitignored files:
 
-| Source | Precedence |
+| Source | Behavior |
 | --- | --- |
-| `.worktreeinclude` in the repository root | Highest — if present and non-empty, `file_include_globs` is ignored entirely |
-| `file_include_globs` in `.archductor/settings.toml` | Used when there is no `.worktreeinclude` |
-| Built-in default | `.env*` |
+| `.worktreeinclude` in the repository root | Its lines are added to the pattern list |
+| `file_include_globs` in `.archductor/settings.toml` | Its globs are added too — having a `.worktreeinclude` does not disable it |
+| Neither configured | Nothing is copied. `.env*` is scaffolded into a new `settings.toml`, but it is not a runtime fallback |
+
+Lines starting with `!` or `#` in `.worktreeinclude` are discarded, so
+gitignore-style negation does not work — once a pattern matches, the file is
+copied.
 
 Only gitignored files are ever copied. Build output and dependency directories
 are not — reproduce those with `[scripts] setup`, which is both faster and
