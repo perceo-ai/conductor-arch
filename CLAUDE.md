@@ -4,8 +4,10 @@ Read the full Claude instructions in `claude/CLAUDE.md`, then read the current
 status in `progress.md`.
 
 Before calling behavior done, verify with written tests plus relevant CLI smoke
-and GTK smoke. Keep CLI and GTK behavior in line; do not land a user-visible
-change in only one surface unless you report the other as incomplete.
+and desktop (Electron) smoke. Keep CLI and desktop behavior in line; do not land
+a user-visible change in only one surface unless you report the other as
+incomplete. (The old GTK app under `crates/gtk-app` is deprecated and removed —
+the desktop surface is the Electron app in `desktop/`.)
 
 Old one-off implementation plans/specs have been pruned from `docs/`; use the
 durable docs listed in `claude/CLAUDE.md` instead of dated task artifacts.
