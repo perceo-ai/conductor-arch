@@ -24,12 +24,19 @@ server-hosted daemon unchanged.
 ```bash
 archductor doctor                    # environment check
 archductor setup                     # provider readiness; --recheck to re-read the environment
-archductor status                    # everything, at a glance
-archductor archcar status            # is the daemon up
-archductor archcar ensure            # start it if not
+archductor status                    # workspaces at a glance (reads the database directly)
+archductor remote status             # which daemon this machine talks to
+archductor service status            # is the background service installed and running
 archductor archcar providers         # every agent this build knows, and how far it drives each
 archductor archcar inventory-snapshot  # repositories, workspaces, and active chats in one request
 ```
+
+There is no "start the daemon" command, because you never need one: the client
+spawns `archcar` itself when it cannot reach a running daemon. Any `archcar`
+subcommand therefore doubles as a liveness check — `archductor archcar
+inventory-snapshot` is a cheap one. `archductor archcar status` and
+`archductor archcar ensure` are **session** commands, not daemon ones; they take
+a session id and a workspace respectively.
 
 ## Repositories
 

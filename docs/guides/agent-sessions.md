@@ -133,7 +133,7 @@ archductor archcar permission-mode <session-id> <mode>
 archductor archcar interrupt <session-id>
 archductor archcar kill <session-id>
 archductor archcar screen <session-id>        # current PTY screen
-archductor archcar messages <session-id>
+archductor archcar messages <thread-id>      # a thread id, not a session id
 ```
 
 Switching model mid-thread is the common one: start cheap, escalate when the

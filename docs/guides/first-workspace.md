@@ -205,7 +205,7 @@ Work down this list; it is ordered by how often it is the answer.
 | Agent starts and dies | The provider CLI is not on the daemon's `PATH`. `archductor setup`, and `archductor service doctor` if the daemon runs as a service. |
 | Two workspaces fight over a port | The `run` script hardcodes a port instead of using `$ARCHDUCTOR_PORT`. |
 | PR commands fail | `gh auth status`. Or the branch has no upstream — `archductor archcar push-branch <workspace>`. |
-| Everything is stale | `archductor archcar status`, then `archductor archcar ensure`. |
+| Everything looks stale | `archductor archcar inventory-snapshot` forces a round-trip through the daemon; the client spawns it if it is not running. If that fails, `archductor service status` and `archductor service doctor`. |
 
 `archductor archcar processes <workspace>` lists every setup, run, check, and
 session process the daemon believes it owns, which is the fastest way to find
