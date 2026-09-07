@@ -1,0 +1,37 @@
+desktop/src/styles/layout/07-chat.css
+  s_258991a35619e5::t_4e653da452ed78 120-125,128,136-144,146,149,152-153
+desktop/src/store/actions.ts
+  s_258991a35619e5::t_282398374d96bb 232-233
+desktop/src/pages/chat/MessageActions.test.tsx
+  s_258991a35619e5::t_282398374d96bb 19
+  s_258991a35619e5::t_04b2be2ef81950 3,55-57,59
+desktop/src/pages/chat/TimelineItem.tsx
+  s_258991a35619e5::t_4e653da452ed78 10,21,111,117,123-133
+desktop/src/lib/timeline.ts
+  s_258991a35619e5::t_4e653da452ed78 52-86
+desktop/src/pages/chat/Timeline.tsx
+  s_258991a35619e5::t_4e653da452ed78 10-15,56,106-111
+desktop/src/pages/chat/Timeline.test.tsx
+  s_258991a35619e5::t_2f032d35cab393 21,54,89,130-145,151-167
+  s_258991a35619e5::t_04b2be2ef81950 146-148,150
+  s_258991a35619e5::t_42e8b745be4eee 149
+desktop/src/pages/chat/MessageActions.tsx
+  s_258991a35619e5::t_4e653da452ed78 10-11,61,63-76
+  s_258991a35619e5::t_282398374d96bb 13-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "27214b5cd3f449d282edd5d0f1e1eed720bba825",
+  "prompts": {},
+  "sessions": {
+    "s_258991a35619e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07d9a-8717-7930-8954-b93806959056",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
