@@ -287,7 +287,19 @@ Scripts and agent processes receive Archductor context via environment variables
 
 ## Documentation
 
+Task-shaped guides live in [`docs/guides/`](docs/guides/README.md):
+
+- [Your first workspace](docs/guides/first-workspace.md) — install to merged PR
+- [Running work in parallel](docs/guides/parallel-workspaces.md) — ports, copied files, conflicts, layouts, shortcuts
+- [Configuring a repository](docs/guides/repository-settings.md) — the full `.archductor/settings.toml` schema, and which keys are wired up
+- [Agent sessions](docs/guides/agent-sessions.md) — queueing vs steering, plan mode, background tasks, MCP
+- [Running the daemon on a server](docs/guides/remote-daemon.md) — headless and remote setup
+- [CLI cookbook](docs/guides/cli.md)
+
+Reference and project material:
+
 - [Current progress and known gaps](progress.md)
+- [External API and protocol](docs/api.md)
 - [MVP scope](docs/mvp-scope.md)
 - [GUI MVP handoff](docs/conductor-gui-mvp-handoff.md)
 - [Manual testing checklist](docs/manual-testing-checklist.md)
