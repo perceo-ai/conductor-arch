@@ -40,6 +40,7 @@ export type IconName =
   | "pencil"
   | "play"
   | "plus"
+  | "ellipsis"
   | "refresh"
   | "search"
   | "circle-check"
@@ -67,6 +68,7 @@ export type IconName =
 const PATHS: Record<IconName, () => JSX.Element> = {
   alert: () => <><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" /><path d="M12 9v4" /><path d="M12 17h.01" /></>,
   "alert-circle": () => <><circle cx="12" cy="12" r="10" /><line x1="12" x2="12" y1="8" y2="12" /><line x1="12" x2="12.01" y1="16" y2="16" /></>,
+  ellipsis: () => <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
   "arrow-left": () => <><path d="m12 19-7-7 7-7" /><path d="M19 12H5" /></>,
   "arrow-right": () => <><path d="M5 12h14" /><path d="m12 5 7 7-7 7" /></>,
   "arrow-up": () => <><path d="m5 12 7-7 7 7" /><path d="M12 19V5" /></>,

@@ -414,6 +414,44 @@ export function loadRemoteConfig(): RemoteConfig | null {
  * Connect over SSH: spawn `ssh <host> archductor archcar stdio-proxy` and use
  * its pipes as the byte stream. No listener and no shared token on the server.
  */
+/**
+ * Turn ssh's own diagnostics into the command that fixes them. Mirrors
+ * `ssh_failure_hint` in crates/core/src/archcar/remote.rs — the app and the CLI
+ * hit the identical failures and must not explain them differently.
+ *
+ * The host-key case is the one that matters: `sshArgs` passes BatchMode=yes
+ * because a prompt would hang a window with no terminal, so ssh refuses an
+ * unknown host outright rather than asking. Every first connection to a new
+ * machine lands here.
+ */
+export function sshFailureHint(detail: string, destination: string, port: number | null): string | null {
+  const host = destination.includes("@") ? destination.slice(destination.lastIndexOf("@") + 1) : destination;
+  const portFlag = port === null ? "" : ` -p ${port}`;
+  const keyscanPort = port === null ? "" : `-p ${port} `;
+
+  if (detail.includes("Host key verification failed")) {
+    return (
+      `This host is not in your known_hosts, and the connection runs with BatchMode=yes so ssh ` +
+      `cannot ask you to accept it. Connect once by hand to accept the key:\n    ssh${portFlag} ${destination}\n` +
+      `or add it without a prompt:\n    ssh-keyscan ${keyscanPort}${host} >> ~/.ssh/known_hosts`
+    );
+  }
+  if (detail.includes("Permission denied")) {
+    return (
+      `ssh could not authenticate, and BatchMode=yes disables password prompts, so the daemon ` +
+      `needs key auth. Check that your key is on the server:\n    ssh-copy-id${portFlag} ${destination}`
+    );
+  }
+  if (detail.includes("command not found") || detail.includes("No such file or directory")) {
+    return (
+      `ssh connected but could not run \`archductor\` on the far side — a non-interactive shell ` +
+      `often skips the profile that adds ~/.local/bin to PATH. Give the path explicitly, e.g. ` +
+      `ssh://${destination}/usr/bin/archductor`
+    );
+  }
+  return null;
+}
+
 function connectSsh(target: SshTarget): Promise<Duplex> {
   return new Promise((resolve, reject) => {
     const child = spawn("ssh", sshArgs(target), { stdio: ["pipe", "pipe", "pipe"] });
@@ -431,7 +469,8 @@ function connectSsh(target: SshTarget): Promise<Duplex> {
     child.once("exit", (code) => {
       if (code === 0) return;
       const detail = stderr.trim() || `ssh exited with ${code}`;
-      stream.destroy(new Error(`ssh transport failed: ${detail}`));
+      const hint = sshFailureHint(detail, target.destination, target.port);
+      stream.destroy(new Error(`ssh transport failed: ${detail}${hint ? `\n\n${hint}` : ""}`));
     });
     // Closing the stream has to take the ssh child with it, or every request
     // would leak a process.
@@ -603,8 +642,29 @@ export class ArchcarBridge {
     return connectOnce(endpoint);
   }
 
+  /**
+   * This machine's daemon, ignoring the selected remote.
+   *
+   * Importing a remote workspace needs both halves at once — the remote for
+   * reads, this one for the write — and `open()` follows the selection, so it
+   * would send the import back to the machine it came from.
+   */
+  private async openLocal(): Promise<Duplex> {
+    const endpoint = this.resolveEndpoint();
+    await ensureDaemon(endpoint);
+    return connectOnce(endpoint);
+  }
+
+  /** Send to this machine's daemon even while a remote is selected. */
+  async requestLocal<Req, Res>(payload: Req): Promise<Res> {
+    return this.send(await this.openLocal(), payload);
+  }
+
   async request<Req, Res>(payload: Req): Promise<Res> {
-    const socket = await this.open();
+    return this.send(await this.open(), payload);
+  }
+
+  private async send<Req, Res>(socket: Duplex, payload: Req): Promise<Res> {
     const envelope: RpcEnvelope<Req> = { id: randomUUID(), payload };
     return new Promise<Res>((resolve, reject) => {
       const timer = setTimeout(() => {

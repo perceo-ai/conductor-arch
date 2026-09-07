@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface MockApi {
   request: ReturnType<typeof vi.fn>;
+  requestLocal: ReturnType<typeof vi.fn>;
   ensureEvents: ReturnType<typeof vi.fn>;
   onEvent: ReturnType<typeof vi.fn>;
   onWindowFocus: ReturnType<typeof vi.fn>;
@@ -24,6 +25,7 @@ beforeEach(() => {
   vi.resetModules();
   api = {
     request: vi.fn(async () => response({ type: "workspaces", workspaces: [] })),
+    requestLocal: vi.fn(async () => response({ type: "ack" })),
     ensureEvents: vi.fn(async () => ({ ok: true })),
     onEvent: vi.fn(() => () => {}),
     onWindowFocus: vi.fn(() => () => {}),
@@ -116,5 +118,113 @@ describe("actions.deleteWorkspace", () => {
       remove_worktree: true,
       delete_branch: true,
     });
+  });
+});
+
+describe("actions.importWorkspaceFromRemote", () => {
+  const remoteWorkspace = {
+    name: "parser",
+    repository_name: "app",
+    branch: "lc/parser",
+    base_ref: "main",
+  };
+
+  function routeRemote() {
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "list_workspaces")
+        return response({ type: "workspaces", workspaces: [remoteWorkspace] });
+      if (req.type === "list_repositories")
+        return response({
+          type: "repositories",
+          repositories: [{ name: "app", remote_url: "git@github.com:me/app.git" }],
+        });
+      if (req.type === "get_chat_transcript")
+        return response({
+          type: "chat_transcript",
+          thread_id: 1,
+          title: "Parser port",
+          messages: [{ role: "user", content: "port it", created_at: "1" }],
+        });
+      return response({ type: "ack" });
+    });
+  }
+
+  it("reads from the remote but writes to the local daemon", async () => {
+    // The whole point of the action: using `send` for the write would recreate
+    // the workspace on the machine it came from.
+    routeRemote();
+    api.requestLocal.mockResolvedValue(
+      response({
+        type: "workspace_imported",
+        workspace: "parser",
+        repository: "app-local",
+        branch: "lc/parser",
+        thread_id: 4,
+        copied_messages: 1,
+      }),
+    );
+    const { actions } = await import("./actions");
+
+    const result = await actions.importWorkspaceFromRemote({ workspace: "parser", threadId: 1 });
+
+    expect(result).toEqual({ workspace: "parser", threadId: 4 });
+    // Reads went to the selected daemon...
+    const readTypes = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
+    expect(readTypes).toEqual(
+      expect.arrayContaining(["list_workspaces", "list_repositories", "get_chat_transcript"]),
+    );
+    expect(readTypes).not.toContain("import_workspace_from_remote");
+    // ...and the single write went to this machine.
+    expect(api.requestLocal).toHaveBeenCalledTimes(1);
+    expect(api.requestLocal.mock.calls[0][0]).toMatchObject({
+      type: "import_workspace_from_remote",
+      repository_url: "git@github.com:me/app.git",
+      branch: "lc/parser",
+      chat_title: "Parser port",
+    });
+  });
+
+  it("imports no chat when no thread is named", async () => {
+    routeRemote();
+    api.requestLocal.mockResolvedValue(
+      response({
+        type: "workspace_imported",
+        workspace: "parser",
+        repository: "app-local",
+        branch: "lc/parser",
+        copied_messages: 0,
+      }),
+    );
+    const { actions } = await import("./actions");
+
+    await actions.importWorkspaceFromRemote({ workspace: "parser" });
+
+    const readTypes = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
+    expect(readTypes).not.toContain("get_chat_transcript");
+    expect(api.requestLocal.mock.calls[0][0]).toMatchObject({ transcript: [] });
+  });
+
+  it("refuses a workspace the connected daemon does not have", async () => {
+    routeRemote();
+    const { actions } = await import("./actions");
+    await expect(
+      actions.importWorkspaceFromRemote({ workspace: "nope" }),
+    ).rejects.toThrow("not a workspace on the connected daemon");
+    expect(api.requestLocal).not.toHaveBeenCalled();
+  });
+
+  it("stops when the remote repository has no URL to match on", async () => {
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "list_workspaces")
+        return response({ type: "workspaces", workspaces: [remoteWorkspace] });
+      if (req.type === "list_repositories")
+        return response({ type: "repositories", repositories: [{ name: "app" }] });
+      return response({ type: "ack" });
+    });
+    const { actions } = await import("./actions");
+    await expect(
+      actions.importWorkspaceFromRemote({ workspace: "parser" }),
+    ).rejects.toThrow("no remote URL");
+    expect(api.requestLocal).not.toHaveBeenCalled();
   });
 });

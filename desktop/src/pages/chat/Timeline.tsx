@@ -95,7 +95,11 @@ export function Timeline(props: { threadId: number; workspace: string }) {
           when={!showsNewChatIntro(items().length, pendingPlan() != null)}
           fallback={<NewChatIntro workspace={props.workspace} threadId={props.threadId} />}
         >
-          <For each={items()}>{(item) => <TimelineItem item={item} agentIdle={agentIdle()} />}</For>
+          <For each={items()}>
+            {(item) => (
+              <TimelineItem item={item} agentIdle={agentIdle()} threadId={props.threadId} />
+            )}
+          </For>
         </Show>
         {/* A proposed plan is a message in the conversation, not chrome bolted
             above the composer: it belongs in the scrollback where it can be

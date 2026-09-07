@@ -1415,3 +1415,179 @@ split created mid-run by check 5 (only the pre-existing column split's handle
 in check 8 was drag-tested, and it happened to become a row split's handle
 after check 5 restructured the tree — the check adapted to whichever handle
 survived rather than a specific one).
+
+## Headless Linux setup papercuts (2026-09-03)
+
+Validated the packaged-Linux, many-daemons setup path for the first time, in a
+privileged `debian:bookworm` container with real PID-1 systemd running amd64
+binaries (the target architecture), driven over `docker exec` — which has no
+login session, no `XDG_RUNTIME_DIR`, and no `USER`, i.e. the provisioning case
+an interactive SSH test hides. See [[systemd-service-smoke-recipe]].
+
+### Confirmed working, end to end
+
+- `service setup` installs the systemd user unit, enables it, and reports
+  `boot_persistent=true`.
+- PATH baking is real: the login-shell PATH is recorded in the unit and the
+  daemon process genuinely receives it, read from `/proc/<MainPID>/environ`
+  rather than from anything the process reports about itself.
+- `doctor` detects the distro and prints the exact `apt install` line.
+- The full loop under the managed service: `repo add`, `workspace create`,
+  `status`.
+- macOS client → Linux daemon over `ssh://arch@host:2222`: `remote connect`,
+  `remote status`, `archcar workspaces`, and `archcar service-status` /
+  `service-doctor` correctly answering *for the server*.
+
+### Fixed in this pass
+
+Seven papercuts, all on the path walked on every new machine:
+
+1. `service setup` exited 0 when service install failed, so a provisioning
+   script could not tell. It now returns `DaemonOutcome::Failed` and exits
+   non-zero.
+2. After a failed install it still printed `archcar listens on …`, the token,
+   and the `remote connect` line — instructions for a listener that was not up.
+   The connect block is now suppressed unless there is something to connect to.
+3. The failure message ended in an orphan sentence fragment (`start archcar
+   yourself, then rerun with --no-service`) with no prefix.
+4. `doctor_verdict` unconditionally said missing tools were "on your PATH but
+   not on the service's; reinstall". That advice cannot fix a tool that is not
+   installed at all, which was the actual case. Rows now carry `host_resolved`
+   alongside `resolved`, and the verdict distinguishes "reinstall the unit" from
+   "install the tool", naming only the tools that caused a problem — an absent
+   optional agent CLI is only worth mentioning when *no* agent resolved.
+5. Neither binary had `--version`. With a daemon per machine, version skew
+   between a client and its remote daemon was invisible. Both have it now;
+   `archcar` hand-matches the flag rather than taking a clap dependency.
+6. The first `remote connect ssh://` to any new host failed with a bare `Host
+   key verification failed.` — unavoidable, since the transport passes
+   `BatchMode=yes` so ssh refuses instead of prompting. `ssh_failure_hint` now
+   turns that (and `Permission denied`, and a missing far-side `archductor`)
+   into the exact command that fixes it. Mirrored in
+   `desktop/electron/archcar.ts` as `sshFailureHint`, because the app spawns its
+   own ssh and hit the identical wall.
+7. Found while verifying 1–6: `enable-linger` immediately followed by `service
+   setup` races the user manager's start, and `explain_start_failure` suppressed
+   its guidance whenever linger was already on — leaving a bare D-Bus error.
+   That branch now says the manager has not started yet and gives
+   `sudo systemctl start user@<uid>`.
+8. Found while verifying 7: `linger_enabled()` shells out to `loginctl
+   show-user`, which fails with "User ID N is not logged in or lingering" in
+   precisely the state being diagnosed — so linger read as *off* while
+   `/var/lib/systemd/linger/<user>` existed, and the installer told an operator
+   to enable something already enabled. It now falls back to the marker file.
+
+Two of these were caught by their own tests rather than by the container: the
+first draft of the verdict listed every absent optional agent as something to
+install, and a second draft let a reinstallable `gh` suppress the advice about
+missing agents entirely. Both are independent problems with independent fixes,
+and the verdict now keeps them independent.
+
+Every fix was verified by following its own advice verbatim on the real path —
+`ssh-keyscan …`, `sudo systemctl start user@1000`, and `archductor service
+install` each turned the failure they were printed for into a success.
+
+### Not covered by this pass
+
+- The Electron app against a remote daemon. Only the CLI was driven over SSH.
+- A live agent session on Linux; the container has no `gh` or agent CLI.
+- Packaged `.deb`/AppImage install. Raw binaries were installed by hand; the
+  `nfpm.yaml` and `electron-builder.yml` paths remain unexercised.
+- `pty_session_resize_updates_child_terminal_size` failed once under a full
+  parallel `cargo test --workspace` run and passed in isolation. Pre-existing
+  flake, unrelated to this work, not investigated.
+
+### Stale docs corrected
+
+README listed the command palette, force-push, Linear-sourced workspace
+creation, and prompt-pack switching as unported to the desktop app. All four
+are present (`CommandPalette.tsx`, `WorkspaceIntel.tsx:728`,
+`CreateWorkspaceForm.tsx:77`, `Settings.tsx`). PR review-thread resolve/reopen
+is the one that really is CLI-only.
+
+## Chat forking and cross-daemon workspace import (2026-09-04)
+
+Two features from Conductor's per-message overflow menu and the multi-machine
+setup this repo is built around.
+
+### Fork a chat (Conductor's "Fork to new tab" / "Fork to new workspace")
+
+`WorkspaceStore::fork_chat_thread` copies a conversation up to a chosen point
+into a fresh thread. Design decisions worth keeping:
+
+- **A fork is a new provider session, not a resumed one.** `native_thread_id` is
+  left null because no provider here exposes "resume this rollout from message
+  N". The carried rows are real `chat_messages` so the new chat reads as a
+  continuation, and `fork_transcript_context` replays them to the agent on its
+  first turn. Provider, model, and harness metadata are inherited.
+- **Two ways to say "up to here"** (`ForkCutoff`): the CLI holds
+  `chat_messages.id`, while the desktop timeline is projected from *provider
+  events* and only knows the global `timeline_seq`. Both counters share
+  `chat_timeline_seq`, so they compare. `ArchcarProjectionItem` now carries
+  `timeline_seq` for exactly this.
+- **The cutoff compares `(COALESCE(timeline_seq, id), id)`**, the same two-part
+  key the timeline query orders by. Sequence alone is not enough — a row
+  predating `timeline_seq` backfill falls back to its id, which can tie with
+  another row's sequence, and a tie dragged the rest of the conversation into
+  the fork. Found by a live smoke whose hand-seeded rows all had `timeline_seq`
+  0; kept honest by `forking_cuts_correctly_when_timeline_sequences_tie`.
+- **Fork to new workspace branches off the source workspace's own branch**, not
+  the repository default: a fork continues the work the conversation is about.
+  `fork_workspace_defaults` derives name and branch in core so the CLI and the
+  app cannot drift, and uses one suffix for both so `checkout-fork-2` never
+  lands on `lc/checkout-fork-3`.
+
+Surfaces: `archductor archcar fork-chat <thread> [--through-message-id N |
+--through-timeline-seq N] [--new-workspace]`, and a per-message overflow menu in
+the desktop timeline (`MessageActions.tsx`) reusing the global context menu, so
+it is keyboard-reachable. An item with no `timeline_seq` gets no menu rather
+than one that would silently fork the whole conversation.
+
+### Import a workspace from a remote daemon
+
+`archductor remote import <workspace> [--from <client>] [--thread-id N]
+[--clone-into <dir>]`, and "Copy to this machine" on a workspace's right-click
+menu in the app (shown only while a remote client is selected).
+
+- **The client owns the orchestration; the daemons never talk to each other.**
+  Reads go to the remote, and the single write goes to the local daemon —
+  `ArchcarClient::local` in the CLI, `bridge.requestLocal` / `sendLocal` in the
+  app. Using the profile-following path for the write would recreate the
+  workspace on the machine it came from, which is the bug the whole feature
+  exists to avoid; `actions.test.ts` asserts the split.
+- **Repositories are matched by clone URL**, not path: a remote daemon's
+  `root_path` means nothing on this filesystem. `normalize_remote_url` reduces
+  `git@github.com:me/app.git`, `https://github.com/me/app`, and a URL carrying
+  an OAuth token to the same key. `ArchcarRepositorySummary` gained `remote_url`.
+- **`--clone-into` exists because of a papercut found in the smoke.** Without a
+  local clone the import stops and asks — the daemon has no business picking a
+  directory on someone's disk. But the first error told the user to run
+  `archductor repo add`, which is *refused while a remote profile is active*,
+  i.e. exactly then. The flag makes the first-time flow one command, and the
+  message now names it.
+- Imported conversations reuse the fork's message source, so an imported chat
+  replays its history to the agent by the same path a forked one does.
+
+### Verified
+
+- Rust: 1032 tests, `cargo test --workspace` exit 0; clippy and fmt clean.
+  Desktop: 616 tests across 80 files, `tsc --noEmit` clean.
+- Live socket smoke for forking (isolated daemon under `/tmp/forksmoke`): fork
+  to a new tab by message id and by timeline seq both carried 4 of 5 transcript
+  messages and excluded the control row; fork to a new workspace created
+  `checkout-fork` on `lc/checkout-fork` as a real worktree, and a second fork
+  produced `checkout-fork-2` on `lc/checkout-fork-2`.
+- Live **two-daemon** smoke for import: two daemons with separate XDG roots and
+  two clones of one bare origin. Importing `parser` from the TCP-connected
+  daemon created a real local worktree on `lc/parser` against the *other* clone
+  (registered under a different name, `app-local`) and carried a 3-message
+  chat. A third daemon with no clone produced the refusal, and rerunning with
+  `--clone-into` cloned, registered, and imported in one command.
+
+### Not covered
+
+- No MCP tools for either feature; MCP exposes a curated subset.
+- The desktop fork menu was verified by unit tests and typecheck, not by
+  driving the real Electron window ([[electron-ui-smoke-recipe]]).
+- Import assumes the branch exists on the shared remote or locally; a branch
+  that only ever lived in the remote worktree is not pushed for you.

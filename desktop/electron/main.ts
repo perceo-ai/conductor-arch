@@ -271,6 +271,21 @@ ipcMain.handle("archcar:request", async (_evt, payload: unknown) => {
   }
 });
 
+// Same shape, but pinned to this machine's daemon. Importing a workspace from
+// the selected remote has to write here, not there.
+ipcMain.handle("archcar:request-local", async (_evt, payload: unknown) => {
+  const type = requestType(payload);
+  logLine("rpc", `local request ${type}`);
+  try {
+    const res = await bridge.requestLocal(payload as never);
+    logLine("rpc", `local response ${type} → ${requestType(res)}`);
+    return { ok: true, value: res };
+  } catch (err) {
+    logLine("error", `local request ${type} failed: ${(err as Error).message}`);
+    return { ok: false, error: (err as Error).message };
+  }
+});
+
 ipcMain.handle("fs:list-workspace-files", async (_evt, opts: { rootPath?: string; cap?: number }) => {
   try {
     if (loadRemoteConfig()) {

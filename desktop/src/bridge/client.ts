@@ -39,6 +39,7 @@ export type ClientsResult =
 
 interface ArchductorApi {
   request<Res = unknown>(payload: unknown): Promise<Res>;
+  requestLocal<Res = unknown>(payload: unknown): Promise<Res>;
   ensureEvents(): Promise<{ ok: boolean }>;
   onEvent(cb: (event: unknown) => void): () => void;
   onWindowFocus(cb: (focused: boolean) => void): () => void;
@@ -106,6 +107,18 @@ export function send<R extends ArchcarResponse = ArchcarResponse>(
   req: ArchcarRequest,
 ): Promise<R> {
   return api().request<R>(req);
+}
+
+/**
+ * Typed request to *this machine's* archcar, even while a remote is selected.
+ *
+ * Only for cross-daemon work: importing a workspace reads from the remote and
+ * writes here, and `send` would put the copy back on the machine it came from.
+ */
+export function sendLocal<R extends ArchcarResponse = ArchcarResponse>(
+  req: ArchcarRequest,
+): Promise<R> {
+  return api().requestLocal<R>(req);
 }
 
 /** Ensure the event stream is running and route events to a handler. */

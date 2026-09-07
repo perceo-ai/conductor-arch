@@ -5,7 +5,7 @@
 // sidebar's post-mutation refresh — the caller re-pulls the workspace and
 // repository lists once the mutation acks.
 
-import { send } from "@/bridge/client";
+import { send, sendLocal } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
 import type { ArchcarResponse } from "@/bridge/protocol";
 import { workspacesStore } from "./workspaces";
@@ -167,6 +167,101 @@ export const actions = {
     if (workspacesStore.row(name)) nav.selectWorkspace(name);
     if (threadId != null) nav.selectChatThread(threadId);
     return name;
+  },
+
+  /**
+   * Copy a workspace on the selected remote daemon onto this machine.
+   *
+   * Reads the repository URL, branch, and (optionally) a conversation from the
+   * remote, then writes to the *local* daemon via `sendLocal`. Using `send` for
+   * the write would recreate the workspace on the machine it came from.
+   *
+   * Fails with the daemon's own message when this machine has no clone of the
+   * repository; picking a directory to clone into is the user's call, not ours.
+   */
+  async importWorkspaceFromRemote(input: {
+    workspace: string;
+    threadId?: number;
+  }): Promise<{ workspace: string; threadId?: number }> {
+    logAction("import_workspace_from_remote", {
+      workspace: input.workspace,
+      thread_id: input.threadId ?? "none",
+    });
+    const remoteWorkspaces = ensureOk(await send({ type: "list_workspaces" }));
+    if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
+    const source = remoteWorkspaces.workspaces.find((w) => w.name === input.workspace);
+    if (!source) throw new Error(`${input.workspace} is not a workspace on the connected daemon`);
+
+    const remoteRepos = ensureOk(await send({ type: "list_repositories" }));
+    if (remoteRepos.type !== "repositories") throw new Error("could not list remote repositories");
+    const repositoryUrl = remoteRepos.repositories.find(
+      (repo) => repo.name === source.repository_name,
+    )?.remote_url;
+    if (!repositoryUrl) {
+      throw new Error(
+        `${source.repository_name} has no remote URL on that daemon, so there is nothing to match a local clone against`,
+      );
+    }
+
+    let transcript: { role: string; content: string; created_at: string }[] = [];
+    let chatTitle: string | undefined;
+    if (input.threadId != null) {
+      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: input.threadId }));
+      if (chat.type === "chat_transcript") {
+        transcript = chat.messages;
+        chatTitle = chat.title;
+      }
+    }
+
+    const imported = ensureOk(
+      await sendLocal({
+        type: "import_workspace_from_remote",
+        repository_url: repositoryUrl,
+        branch: source.branch,
+        base_ref: source.base_ref,
+        name: source.name,
+        transcript,
+        chat_title: chatTitle,
+      }),
+    );
+    if (imported.type !== "workspace_imported") throw new Error("import returned no workspace");
+    return { workspace: imported.workspace, threadId: imported.thread_id };
+  },
+
+  /**
+   * Fork a chat at a timeline point — Conductor's "Fork to new tab" and
+   * "Fork to new workspace" under each message.
+   *
+   * `newWorkspace` is the whole difference between the two: the daemon creates
+   * the worktree and branch when it is set. Selection follows the fork, because
+   * forking and then having to go find the result is not the action anyone
+   * meant to take.
+   */
+  async forkChat(input: {
+    threadId: number;
+    throughTimelineSeq?: number;
+    newWorkspace?: boolean;
+  }): Promise<{ workspace: string; threadId: number }> {
+    logAction("fork_chat_thread", {
+      thread_id: input.threadId,
+      through: input.throughTimelineSeq ?? "all",
+      target: input.newWorkspace ? "new_workspace" : "same_workspace",
+    });
+    const response = ensureOk(
+      await send({
+        type: "fork_chat_thread",
+        thread_id: input.threadId,
+        through_timeline_seq: input.throughTimelineSeq,
+        new_workspace: input.newWorkspace ? {} : undefined,
+      }),
+    );
+    if (response.type !== "chat_thread_forked") throw new Error("fork returned no chat");
+    // A new workspace only shows up in the sidebar after a re-pull; a new tab
+    // in an existing workspace needs its thread list refreshed the same way.
+    await refreshInventory();
+    if (response.created_workspace) nav.selectWorkspace(response.workspace);
+    nav.selectChatThread(response.thread.id);
+    return { workspace: response.workspace, threadId: response.thread.id };
   },
 
   async createWorkspaceFromIssue(input: {

@@ -9,6 +9,12 @@ export interface ArchcarProjectionItem {
   body: string;
   status: string; // pending | running | complete | failed | canceled
   stream_state: string; // snapshot | streaming | complete
+  /**
+   * Position on the daemon's shared chat timeline counter. Absent for items
+   * that never got one. This is what "fork from here" sends — the timeline is
+   * projected from provider events, so it has no chat message id.
+   */
+  timeline_seq?: number | null;
 }
 
 export interface ArchcarChatThread {
@@ -54,6 +60,11 @@ export interface ArchcarRepositorySummary {
   root_path: string;
   default_branch: string;
   remote_name: string;
+  /**
+   * URL that remote points at — the only repository field that means anything
+   * on another machine, so it is what a cross-daemon import matches on.
+   */
+  remote_url?: string | null;
   active_workspaces: number;
   total_workspaces: number;
 }

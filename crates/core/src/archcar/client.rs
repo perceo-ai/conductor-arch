@@ -193,6 +193,23 @@ impl ArchcarClient {
         }
     }
 
+    /// This machine's daemon, ignoring any saved remote profile.
+    ///
+    /// A cross-daemon import needs both halves at once: the remote for reads and
+    /// this one for the write. `from_paths` follows the profile, so it cannot be
+    /// the local half while a remote is selected.
+    pub fn local(paths: &AppPaths) -> Self {
+        Self::new(paths.archcar_endpoint_path())
+    }
+
+    /// A saved client profile, by id or label, without switching to it.
+    pub fn from_saved_client(profile: &remote::ClientProfile) -> Result<Self> {
+        match remote::parse_ssh_address(&profile.address) {
+            Some(target) => Ok(Self::ssh(target?)),
+            None => Ok(Self::remote(profile.address.clone(), profile.token.clone())),
+        }
+    }
+
     pub fn remote(address: impl Into<String>, token: impl Into<String>) -> Self {
         let address = address.into();
         Self::with_endpoint(

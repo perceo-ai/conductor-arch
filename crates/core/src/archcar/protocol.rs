@@ -486,6 +486,27 @@ pub enum ArchcarRequest {
         provider: String,
         title: String,
     },
+    /// Copy a conversation up to a message into a new chat.
+    ///
+    /// `new_workspace` is the difference between Conductor's two fork actions:
+    /// absent forks into a new tab beside the original, present creates a
+    /// workspace (worktree + branch) first and forks into that.
+    ForkChatThread {
+        thread_id: i64,
+        /// Fork through this message. The CLI has message ids to hand.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        through_message_id: Option<i64>,
+        /// Fork through this point on the shared timeline. The desktop timeline
+        /// is projected from provider events and has no message id, only this.
+        /// Ignored when `through_message_id` is given; both absent forks the
+        /// whole conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        through_timeline_seq: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_workspace: Option<ForkWorkspaceRequest>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
     CloseChatThread {
         thread_id: i64,
     },
@@ -504,6 +525,28 @@ pub enum ArchcarRequest {
         default_branch: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_parent: Option<String>,
+    },
+    /// Recreate a workspace seen on another daemon, here.
+    ///
+    /// The caller (CLI or app) reads the source from the remote daemon and
+    /// sends the result to the local one; the two daemons never talk to each
+    /// other. `repository_url` is the join key — a remote daemon's `root_path`
+    /// means nothing on this filesystem.
+    ImportWorkspaceFromRemote {
+        repository_url: String,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_ref: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// Conversation to carry over, oldest first. Empty imports the
+        /// workspace without a chat.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        transcript: Vec<ArchcarChatTranscriptMessage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
     CloneRepository {
         url: String,
@@ -1158,6 +1201,22 @@ pub enum ArchcarResponse {
     ChatThreadCreated {
         thread: ArchcarChatThread,
     },
+    WorkspaceImported {
+        workspace: String,
+        repository: String,
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
+        copied_messages: usize,
+    },
+    ChatThreadForked {
+        thread: ArchcarChatThread,
+        /// Workspace the fork landed in — the original's, or the new one.
+        workspace: String,
+        /// True when this request also created that workspace.
+        created_workspace: bool,
+        copied_messages: usize,
+    },
     RepositoryAdded {
         name: String,
     },
@@ -1481,6 +1540,11 @@ pub struct ArchcarProjectionItem {
     pub body: String,
     pub status: String,
     pub stream_state: String,
+    /// Position on the shared `chat_timeline_seq` counter, when the item has
+    /// one. This is the handle the app forks a chat at: the timeline is
+    /// projected from provider events, so it never sees a `chat_messages.id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_seq: Option<i64>,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,
@@ -1587,6 +1651,21 @@ pub struct ArchcarChatThread {
     pub archived_at: Option<String>,
 }
 
+/// The workspace to create when forking a chat out of its current one.
+///
+/// `base_ref` defaults to the source workspace's own branch rather than the
+/// repository default: forking a conversation means continuing that work, and
+/// starting from `main` would throw away the code the conversation is about.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkWorkspaceRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<String>,
+}
+
 /// Past chat offered as an attachable transcript on the new-chat screen.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ArchcarChatTranscriptSummary {
@@ -1622,6 +1701,11 @@ pub struct ArchcarRepositorySummary {
     pub root_path: String,
     pub default_branch: String,
     pub remote_name: String,
+    /// URL that remote points at. The only field of a repository that means
+    /// anything on a different machine, so it is what a cross-daemon import
+    /// matches on. Absent when the repository has no remote configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
     pub active_workspaces: usize,
     pub total_workspaces: usize,
 }
@@ -1945,6 +2029,22 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::CreateChatThread { workspace, provider, .. } => {
             format!("create_chat_thread workspace={workspace} provider={provider}")
         }
+        ArchcarRequest::ForkChatThread {
+            thread_id,
+            through_message_id,
+            new_workspace,
+            ..
+        } => format!(
+            "fork_chat_thread thread_id={thread_id} through={} target={}",
+            through_message_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "all".to_owned()),
+            if new_workspace.is_some() {
+                "new_workspace"
+            } else {
+                "same_workspace"
+            }
+        ),
         ArchcarRequest::CloseChatThread { thread_id } => {
             format!("close_chat_thread thread_id={thread_id}")
         }
@@ -1954,6 +2054,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::AddRepository { path, name, .. } => format!(
             "add_repository path={path} name={}",
             name.as_deref().unwrap_or("<derived>")
+        ),
+        ArchcarRequest::ImportWorkspaceFromRemote {
+            repository_url,
+            branch,
+            transcript,
+            ..
+        } => format!(
+            "import_workspace_from_remote url={repository_url} branch={branch} messages={}",
+            transcript.len()
         ),
         ArchcarRequest::CloneRepository { url, dest, .. } => {
             format!("clone_repository url={url} dest={dest}")
@@ -2614,6 +2723,23 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::ChatThreadCreated { thread } => {
             format!("chat_thread_created id={}", thread.id)
         }
+        ArchcarResponse::WorkspaceImported {
+            workspace,
+            repository,
+            copied_messages,
+            ..
+        } => format!(
+            "workspace_imported workspace={workspace} repository={repository} messages={copied_messages}"
+        ),
+        ArchcarResponse::ChatThreadForked {
+            thread,
+            workspace,
+            copied_messages,
+            ..
+        } => format!(
+            "chat_thread_forked id={} workspace={workspace} messages={copied_messages}",
+            thread.id
+        ),
         ArchcarResponse::RepositoryAdded { name } => format!("repository_added name={name}"),
         ArchcarResponse::RepositoryRemoved { name } => format!("repository_removed name={name}"),
         ArchcarResponse::ChatPasteSaved { relative_path, .. } => {
