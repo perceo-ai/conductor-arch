@@ -203,8 +203,11 @@ describe("endpointPath", () => {
 
   it("falls back to temp when XDG_RUNTIME_DIR is absent", () => {
     vi.stubEnv("XDG_STATE_HOME", `/tmp/${"deep/".repeat(30)}state`);
-    vi.unstubAllEnvs();
-    vi.stubEnv("XDG_STATE_HOME", `/tmp/${"deep/".repeat(30)}state`);
+    // Force the var genuinely absent. `unstubAllEnvs()` restores the *real*
+    // process env, and a Linux desktop/CI session has XDG_RUNTIME_DIR set
+    // (e.g. /run/user/<uid>), so the "absent" branch never ran and the
+    // endpoint resolved under /run/user instead of the temp fallback.
+    vi.stubEnv("XDG_RUNTIME_DIR", undefined);
 
     expect(endpointPath()).toMatch(
       new RegExp(`^${escapeRegExp(path.join(os.tmpdir(), "archductor"))}/archcar-[0-9a-f]{16}\\.sock$`),
