@@ -1,0 +1,22 @@
+packaging/flatpak/ai.perceo.Archductor.yml
+  s_38e884d61912a3::t_b1df7b4ce8e24a 23
+  s_38e884d61912a3::t_8743b0ece50f4f 1-8
+CLAUDE.md
+  s_38e884d61912a3::t_505efcf6319048 7-10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "9e3ad724e42f700efa99250680cb92a0e2554310",
+  "prompts": {},
+  "sessions": {
+    "s_38e884d61912a3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d04fdca8-3110-4156-b5e4-41bcc939f2dd",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
