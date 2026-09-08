@@ -1,0 +1,22 @@
+desktop/src/lib/workspacePrAction.test.ts
+  s_258991a35619e5::t_d6ebc95717f249 39-60
+desktop/src/lib/workspacePrAction.ts
+  s_258991a35619e5::t_a78bac3041b877 39,62-63,74,121-127
+  s_258991a35619e5::t_e8faed801cbbd7 128-129
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "a744340a9c0c6b7011c6519d2c6146042718560c",
+  "prompts": {},
+  "sessions": {
+    "s_258991a35619e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07d9a-8717-7930-8954-b93806959056",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
