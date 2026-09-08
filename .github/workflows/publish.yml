@@ -371,7 +371,8 @@ jobs:
             bash -lc '
               set -euxo pipefail
               pacman -Syu --noconfirm \
-                cargo dbus git github-cli openssh pkgconf rust sqlite xorg-server-xvfb
+                cargo dbus git github-cli openssh pkgconf rust sqlite xorg-server-xvfb \
+                nodejs pnpm gtk3 nss alsa-lib libxkbcommon libnotify libsecret
               useradd -m builder
               chown -R builder:builder /pkg
               su builder -c "cd /pkg && makepkg --noconfirm"
