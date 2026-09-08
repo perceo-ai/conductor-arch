@@ -6,7 +6,7 @@ import Diff from "@/components/Diff";
 import Icon from "@/components/Icon";
 import { parseCommitLog, shortSha } from "@/lib/commitLog";
 import { langFromPath } from "@/lib/highlight";
-import { openCommitInCenter } from "./openFileBridge";
+import { openCommitInCenter, openFileInCenter } from "./openFileBridge";
 
 // Changes views. The scope selector picks which set of changes the panel lists
 // — everything since the review base, uncommitted work, or one commit — and the
@@ -53,13 +53,11 @@ function stateLabel(f: DiffFileSummary): string {
 function ChangeRow(props: {
   file: DiffFileSummary;
   showState: boolean;
-  selected?: boolean;
   onOpen?: (path: string) => void;
 }) {
   return (
     <button
       class="ws-file-summary-row-content"
-      classList={{ "ws-file-summary-row-selected": props.selected }}
       onClick={() => props.onOpen?.(props.file.path)}
     >
       <Icon name="file-code" class="ws-file-icon" />
@@ -76,10 +74,6 @@ export function ChangesRows(props: {
   workspace: string;
   defaultScope?: WorkspaceChangeScope;
   openFile?: (path: string, scope: WorkspaceChangeScope) => void;
-  /** Fires when the scope picker changes, so an attached diff can follow it. */
-  onScopeChange?: (scope: WorkspaceChangeScope) => void;
-  /** Path to mark as selected, for callers that render a diff alongside. */
-  selectedPath?: string;
 }) {
   const [scope, setScope] = createSignal<WorkspaceChangeScope>(props.defaultScope ?? "uncommitted");
 
@@ -130,7 +124,6 @@ export function ChangesRows(props: {
           onChange={(value) => {
             const next = valueToScope(value);
             setScope(next);
-            props.onScopeChange?.(next);
           }}
         />
         {/* The scope list replaced the old recent-commits rows, which were the
@@ -158,7 +151,6 @@ export function ChangesRows(props: {
               // staged/unstaged/untracked describe the working tree, so the
               // label is meaningless for a commit's files.
               showState={scope() === "uncommitted"}
-              selected={props.selectedPath === file.path}
               onOpen={(path) => props.openFile?.(path, scope())}
             />
           )}
@@ -201,27 +193,13 @@ export function DiffView(props: {
 }
 
 export default function ChangesTab(props: { workspace: string }) {
-  const [scope, setScope] = createSignal<WorkspaceChangeScope>("all");
-  // Undefined means "the whole scope"; picking a row narrows the diff to it.
-  const [path, setPath] = createSignal<string | undefined>(undefined);
   return (
     <div class="ws-changes-tab">
       <ChangesRows
         workspace={props.workspace}
         defaultScope="all"
-        selectedPath={path()}
-        openFile={(nextPath, nextScope) => {
-          setScope(nextScope);
-          setPath(nextPath);
-        }}
-        // A path selected under one scope need not exist in the next, so
-        // switching scope drops back to that scope's whole diff.
-        onScopeChange={(next) => {
-          setScope(next);
-          setPath(undefined);
-        }}
+        openFile={(path, scope) => openFileInCenter(props.workspace, path, scope)}
       />
-      <DiffView workspace={props.workspace} path={path()} scope={scope()} />
     </div>
   );
 }
