@@ -1,0 +1,27 @@
+desktop/src/pages/chat/Timeline.test.tsx
+  s_258991a35619e5::t_608bafadb63471 168-184
+desktop/src/styles/theme/29-chat-markdown.css
+  s_258991a35619e5::t_f3bf96d7b67aac 96
+desktop/src/styles/layout/21-markdown.css
+  s_258991a35619e5::t_f3bf96d7b67aac 107,111
+desktop/src/pages/chat/TimelineItem.tsx
+  s_258991a35619e5::t_f3bf96d7b67aac 58
+desktop/src/styles/theme/35-form-refinements.css
+  s_258991a35619e5::t_f3bf96d7b67aac 94
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "cb3ad6255a19364a7d5d79f5e700d641391bc797",
+  "prompts": {},
+  "sessions": {
+    "s_258991a35619e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07d9a-8717-7930-8954-b93806959056",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
