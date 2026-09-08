@@ -4253,8 +4253,7 @@ fn name_chat_deterministically(db_path: &Path, thread_id: i64, request: &str) ->
         wants_workspace_name: context.wants_workspace_name,
         wants_branch_name: context.wants_branch_name,
     })?;
-    store.apply_deterministic_names(thread_id, &names)?;
-    Ok(true)
+    store.apply_deterministic_names(thread_id, &context, &names)
 }
 
 /// Rate limit for mid-turn context maintenance, keyed by chat thread.
