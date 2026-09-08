@@ -36,6 +36,28 @@ describe("deriveWorkspacePrAction", () => {
     });
   });
 
+  it("offers to create a PR for committed branch changes in a clean worktree", () => {
+    expect(
+      deriveWorkspacePrAction(
+        workspacePrActionInput(
+          {
+            additions: 4,
+            deletions: 1,
+            changedFiles: 0,
+            branchAhead: 0,
+            branchBehind: 0,
+          },
+          undefined,
+        ),
+      ),
+    ).toMatchObject({
+      title: "No pull request yet",
+      actionLabel: "Create PR",
+      action: "create",
+      state: "no-pr",
+    });
+  });
+
   it("does not treat a local successful check process as full merge readiness", () => {
     expect(
       deriveWorkspacePrAction({

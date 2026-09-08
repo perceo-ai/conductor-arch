@@ -87,10 +87,6 @@
 .ws-file-summary-row:hover {
     background-color: #1f1f1f;
 }
-.ws-file-summary-state {
-    color: #9a9a9a;
-    font-size: 12px;
-}
 .ws-file-summary-counts {
     color: #bfc7d5;
     font-family: "Commit Mono", "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, monospace;

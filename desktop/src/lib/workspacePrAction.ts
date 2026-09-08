@@ -36,6 +36,7 @@ export interface WorkspacePrActionInput {
   prNumber?: number | null;
   prState?: string | null;
   changedFiles?: number | null;
+  branchChanged?: boolean;
   checkStatus?: string | null;
   checkExitCode?: number | null;
   branchAhead?: number | null;
@@ -58,6 +59,8 @@ export function workspacePrActionInput(
         prNumber?: number | null;
         prState?: string | null;
         changedFiles?: number | null;
+        additions?: number | null;
+        deletions?: number | null;
         branchAhead?: number | null;
         branchBehind?: number | null;
       }
@@ -68,6 +71,7 @@ export function workspacePrActionInput(
     prNumber: row?.prNumber,
     prState: row?.prState,
     changedFiles: row?.changedFiles,
+    branchChanged: (row?.additions ?? 0) > 0 || (row?.deletions ?? 0) > 0,
     checkStatus: checks?.check_status,
     checkExitCode: checks?.check_exit_code,
     branchAhead: checks?.branch_ahead ?? row?.branchAhead,
@@ -112,6 +116,15 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
         actionLabel: "Push",
         action: "push",
         state: "unpushed",
+      };
+    }
+    if (input.branchChanged) {
+      return {
+        title: "No pull request yet",
+        cssClass: "ws-pr-status-muted",
+        actionLabel: "Create PR",
+        action: "create",
+        state: "no-pr",
       };
     }
     return { title: "No changes", cssClass: "ws-pr-status-muted", action: "none", state: "no-changes" };

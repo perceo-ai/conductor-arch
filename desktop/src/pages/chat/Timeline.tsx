@@ -7,7 +7,12 @@ import { timelineItemsForSlice } from "@/store/chat";
 import type {
   ArchcarProjectionItem,
 } from "@/bridge/protocol";
-import { isDisplayableTimelineItem, showsNewChatIntro, withoutPlanSource } from "@/lib/timeline";
+import {
+  forkableTurnEndIds,
+  isDisplayableTimelineItem,
+  showsNewChatIntro,
+  withoutPlanSource,
+} from "@/lib/timeline";
 import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
 import DotGridLoader from "@/components/DotGridLoader";
 import {
@@ -48,6 +53,7 @@ export function Timeline(props: { threadId: number; workspace: string }) {
       blockedOnUser: interactionsStore.pending(props.threadId) != null
     }),
   );
+  const forkableItems = createMemo(() => forkableTurnEndIds(items(), generation() === "idle"));
   // The plan card is part of the scrolled content, so its arrival has to move
   // the view the same way a new message does.
   const scrollSignal = createMemo(
@@ -97,7 +103,12 @@ export function Timeline(props: { threadId: number; workspace: string }) {
         >
           <For each={items()}>
             {(item) => (
-              <TimelineItem item={item} agentIdle={agentIdle()} threadId={props.threadId} />
+              <TimelineItem
+                item={item}
+                agentIdle={agentIdle()}
+                threadId={props.threadId}
+                forkable={forkableItems().has(item.id)}
+              />
             )}
           </For>
         </Show>
@@ -117,4 +128,3 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     </div>
   );
 }
-

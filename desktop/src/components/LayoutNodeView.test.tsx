@@ -10,7 +10,7 @@ vi.mock("@/lib/panelWidths", async (importOriginal) => {
   return { ...actual, clampSplitRatio: vi.fn(actual.clampSplitRatio) };
 });
 
-import { leaf, split, type LayoutNode } from "@/lib/layout";
+import { codeFallback, leaf, split, type LayoutNode } from "@/lib/layout";
 import { registerPanel, unregisterPanel } from "@/lib/panelRegistry";
 import { layoutStore } from "@/store/layout";
 import {
@@ -94,6 +94,14 @@ const flexOf = (host: HTMLElement, index: 0 | 1) =>
   host.querySelectorAll<HTMLElement>(".workbench-split > .workbench-split-child")[index].style.flex;
 
 describe("LayoutNodeView", () => {
+  it("keeps the Code layout PR strip at one row instead of twelve percent of the window", () => {
+    const host = mount(codeFallback().root);
+    const pr = host.querySelector<HTMLElement>('[data-panel-id="pr"]')!;
+    const splitChild = pr.closest<HTMLElement>(".workbench-split-child")!;
+
+    expect(splitChild.style.flex).toBe("0 0 40px");
+  });
+
   it("renders a leaf directly and a split as two leaves around a handle", () => {
     const only = mount(leaf([PANELS.wide.id], { id: "solo" }));
     expect([...only.querySelectorAll("[data-leaf-id]")].map((el) => el.getAttribute("data-leaf-id")))

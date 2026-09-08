@@ -91,7 +91,7 @@ textarea:focus {
     color: #d6d6d6;
 }
 
-.chat-inline-event-loading .chat-inline-event-chip {
+.chat-inline-event-running .chat-inline-event-chip {
     color: #c5d5f4;
 }
 

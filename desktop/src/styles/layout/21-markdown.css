@@ -104,10 +104,10 @@
   padding: 0;
 }
 
-/* Inline-event status tints (GTK chat-inline-event-loading/-failed). */
+/* Inline-event status tints. */
 .chat-inline-event-failed .chat-inline-event-action {
   color: #f0a8a8;
 }
-.chat-inline-event-loading .chat-inline-event-action {
+.chat-inline-event-running .chat-inline-event-action {
   color: #b6c7e8;
 }

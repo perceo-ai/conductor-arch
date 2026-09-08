@@ -49,6 +49,41 @@ export function showsNewChatIntro(itemCount: number, hasPendingPlan: boolean): b
   return itemCount === 0 && !hasPendingPlan;
 }
 
+/**
+ * Select the final assistant message in each completed user turn.
+ *
+ * A following user message proves the previous turn ended. The newest turn is
+ * forkable only once the shared generation state says the agent is idle.
+ */
+export function forkableTurnEndIds(
+  items: ArchcarProjectionItem[],
+  currentTurnComplete: boolean,
+): Set<string> {
+  const ids = new Set<string>();
+  let inUserTurn = false;
+  let candidate: ArchcarProjectionItem | undefined;
+
+  for (const item of items) {
+    if (item.render_class === "user_chat") {
+      if (candidate) ids.add(candidate.id);
+      inUserTurn = true;
+      candidate = undefined;
+      continue;
+    }
+    if (
+      inUserTurn &&
+      item.render_class === "assistant_chat" &&
+      item.stream_state === "complete" &&
+      item.timeline_seq != null
+    ) {
+      candidate = item;
+    }
+  }
+
+  if (currentTurnComplete && candidate) ids.add(candidate.id);
+  return ids;
+}
+
 export function isDisplayableTimelineItem(item: ArchcarProjectionItem): boolean {
   // Strict allowlist (GTK parity): only known text + inline-event classes render;
   // anything else is ditched rather than shown as a raw event.

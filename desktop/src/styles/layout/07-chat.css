@@ -117,41 +117,40 @@
   gap: 4px;
 }
 
-/* The agent's prose is a plain block, so it needs a row wrapper of its own for
-   the overflow button to sit beside rather than under it. */
+.chat-agent-turn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
 .chat-agent-row {
   display: flex;
+  width: 100%;
   align-items: flex-start;
-  gap: 4px;
 }
 .chat-agent-row > .markdown-body {
   flex: 1;
   min-width: 0;
 }
 
-/* Per-message overflow trigger. Hidden until the row is hovered or the button
-   itself has focus, so a column of dots does not compete with the conversation
-   — but focus-visible keeps it reachable by keyboard alone. */
-.chat-message-actions {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 22px;
-  height: 22px;
-  padding: 0;
+/* A turn is the stable unit a fork can reproduce, so this stays visible after
+   its final assistant message instead of hiding in every message's hover UI. */
+.chat-turn-fork {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  margin-top: 2px;
+  padding: 0 6px;
   border: none;
-  border-radius: 6px;
+  border-radius: 4px;
   background: transparent;
   color: var(--text-muted, #9aa0a6);
-  opacity: 0;
+  font-size: 12px;
   cursor: pointer;
 }
-.chat-user-row:hover .chat-message-actions,
-.chat-agent-row:hover .chat-message-actions,
-.chat-message-actions:focus-visible {
-  opacity: 1;
-}
-.chat-message-actions:hover {
+.chat-turn-fork:hover,
+.chat-turn-fork:focus-visible {
   background: var(--surface-hover, #2e2e2e);
   color: var(--text-primary, #f4f7ff);
 }

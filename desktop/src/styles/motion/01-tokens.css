@@ -166,14 +166,3 @@
         transform: scale(1);
     }
 }
-
-/* Indeterminate progress band, for "something is running" on an element wide
-   enough to host it (loading inline-event chips). */
-@keyframes mo-track-slide {
-    from {
-        transform: translateX(-100%);
-    }
-    to {
-        transform: translateX(300%);
-    }
-}

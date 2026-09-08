@@ -18,6 +18,7 @@ const PLAN_BODY = "## Step one\n\nDo the thing.";
 
 let items: ArchcarProjectionItem[] = [];
 let pending: ProviderInteractionRecord | null = null;
+let session = { runtime_state: "ready", ready: true };
 
 function projectionItem(over: Partial<ArchcarProjectionItem>): ArchcarProjectionItem {
   return {
@@ -50,7 +51,7 @@ function planRecord(detail: string): ProviderInteractionRecord {
 }
 
 vi.mock("@/store", () => ({
-  chatStore: { slice: () => ({ session: { ready: true }, phase: { kind: "ready" }, queue: [] }) },
+  chatStore: { slice: () => ({ session, phase: { kind: "ready" }, queue: [] }) },
   interactionsStore: { pending: () => pending },
   actions: { resolveInteraction: vi.fn(() => Promise.resolve()), revealPanel: vi.fn() },
 }));
@@ -85,6 +86,7 @@ afterEach(() => {
   host = undefined;
   items = [];
   pending = null;
+  session = { runtime_state: "ready", ready: true };
 });
 
 describe("Timeline", () => {
@@ -124,5 +126,60 @@ describe("Timeline", () => {
   it("still shows the intro on a genuinely empty thread", () => {
     const el = mount();
     expect(el.querySelector(".new-chat-intro")).toBeTruthy();
+  });
+
+  it("shows one persistent fork control after the final assistant message in each completed turn", () => {
+    items = [
+      projectionItem({ id: "u1", render_class: "user_chat", body: "first", timeline_seq: 1 }),
+      projectionItem({ id: "a1", body: "working", timeline_seq: 2 }),
+      projectionItem({ id: "a2", body: "first done", timeline_seq: 3 }),
+      projectionItem({ id: "u2", render_class: "user_chat", body: "second", timeline_seq: 4 }),
+      projectionItem({ id: "a3", body: "second done", timeline_seq: 5 }),
+    ];
+
+    const turns = [...mount().querySelectorAll(".chat-agent-turn")];
+    expect(turns.map((turn) => turn.querySelector("button[aria-label='Fork turn']") != null)).toEqual([
+      false,
+      true,
+      true,
+    ]);
+    expect(
+      turns
+        .filter((turn) => turn.querySelector("button[aria-label='Fork turn']"))
+        .map((turn) => turn.querySelector(".chat-agent-text")?.textContent?.trim()),
+    ).toEqual(["first done", "second done"]);
+  });
+
+  it("withholds the current turn fork control until generation finishes", () => {
+    session = { runtime_state: "running", ready: false };
+    items = [
+      projectionItem({ id: "u1", render_class: "user_chat", body: "first", timeline_seq: 1 }),
+      projectionItem({ id: "a1", body: "first done", timeline_seq: 2 }),
+      projectionItem({ id: "u2", render_class: "user_chat", body: "second", timeline_seq: 3 }),
+      projectionItem({ id: "a2", body: "still working", timeline_seq: 4 }),
+    ];
+
+    const turns = [...mount().querySelectorAll(".chat-agent-turn")];
+    expect(turns.map((turn) => turn.querySelector("button[aria-label='Fork turn']") != null)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  it("marks a running command without attaching the looping loader", () => {
+    session = { runtime_state: "running", ready: false };
+    items = [
+      projectionItem({
+        id: "cmd",
+        render_class: "command_card",
+        title: "Ran cargo test",
+        body: "",
+        status: "running",
+      }),
+    ];
+
+    const command = mount().querySelector(".chat-inline-event");
+    expect(command?.classList.contains("chat-inline-event-running")).toBe(true);
+    expect(command?.classList.contains("chat-inline-event-loading")).toBe(false);
   });
 });

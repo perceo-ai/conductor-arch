@@ -529,8 +529,13 @@ const CODE_FALLBACK: Layout = {
     split(
       "column",
       leaf(["pr"], { display: "compact" }),
-      leaf(["summary", "files", "changes", "checks"], { active: 2 }),
-      0.12,
+      split(
+        "column",
+        leaf(["summary", "files", "changes", "checks"], { active: 2 }),
+        leaf(["terminal"], { display: "compact" }),
+        0.58,
+      ),
+      0.1,
     ),
     0.62,
   ),

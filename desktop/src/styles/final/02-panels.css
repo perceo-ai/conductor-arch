@@ -20,6 +20,22 @@
   padding: 6px;
 }
 
+.ws-changes-tab .ws-file-summary-panel {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.ws-changes-tab .ws-changes-header {
+  padding: 8px 10px;
+}
+
+.ws-change-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .ws-dir-row,
 .ws-file-row {
   min-height: 22px;

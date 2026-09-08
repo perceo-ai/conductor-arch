@@ -1432,7 +1432,7 @@ impl WorkspaceStore {
         let db_path = path.as_ref().to_path_buf();
         let conn = Connection::open(&db_path)
             .with_context(|| format!("open database {}", db_path.display()))?;
-        conn.execute_batch("PRAGMA foreign_keys = ON")
+        crate::storage::configure_workspace_db(&conn)
             .with_context(|| format!("enable foreign keys for {}", db_path.display()))?;
         let store = Self {
             conn,
@@ -9693,6 +9693,9 @@ fn spawn_process_monitor(db_path: PathBuf, process_id: i64, mut child: Child) {
         let Ok(conn) = Connection::open(db_path) else {
             return;
         };
+        if crate::storage::configure_workspace_db(&conn).is_err() {
+            return;
+        }
         let now = timestamp();
         let updated = conn.execute(
             "UPDATE processes
