@@ -4141,6 +4141,30 @@ fn note_session_not_ready_for_queue(handle: &SessionHandle) {
     }
 }
 
+fn mark_session_ready_at_turn_boundary(
+    state: &Arc<Mutex<ServerState>>,
+    session_id: i64,
+    thread_id: i64,
+) {
+    let handle = state
+        .lock()
+        .ok()
+        .and_then(|guard| guard.sessions.get(&session_id).cloned());
+    let Some(handle) = handle else {
+        return;
+    };
+    let Ok(mut snapshot) = handle.snapshot.lock() else {
+        return;
+    };
+    if snapshot.thread_id == thread_id
+        && matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE)
+        && snapshot.status == crate::workspace::ProcessStatus::Running
+    {
+        snapshot.ready = true;
+        snapshot.runtime_state = crate::session_state::AgentSessionState::WaitingForInput;
+    }
+}
+
 fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
     let drain_thread_id = match &event {
         ArchcarEvent::SessionReady { thread_id, .. }
@@ -4156,6 +4180,10 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         ..
     } = &event
     {
+        // Completion is the queue's authoritative turn boundary. Providers
+        // also emit SessionReady, but relying on that second event leaves a
+        // follow-up stuck when it is delayed or lost.
+        mark_session_ready_at_turn_boundary(state, *session_id, *thread_id);
         raise_codex_plan_approval(state, *thread_id, *session_id);
     }
     // An ask can only be answered on the connection it arrived on; once the
@@ -6618,6 +6646,79 @@ mod tests {
             thread_id: thread.id,
         }));
         assert_ne!(first.id, second.id);
+    }
+
+    #[test]
+    fn codex_turn_completion_makes_the_session_ready_and_drains_the_follow_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "follow up",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CODEX,
+            )
+            .unwrap();
+        let snapshot = Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::CODEX,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+        }));
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::clone(&snapshot),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+        }));
+
+        handle_session_event(
+            &state,
+            ArchcarEvent::TurnCompleted {
+                session_id: 9,
+                thread_id: thread.id,
+                status: Some("completed".to_owned()),
+            },
+        );
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::SendInput { input, delivery: ArchcarInputDelivery::Auto, .. })
+                if input == "follow up"
+        ));
+        assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
+        assert_eq!(
+            snapshot.lock().unwrap().runtime_state,
+            crate::session_state::AgentSessionState::Running,
+            "delivery immediately starts the queued turn",
+        );
     }
 
     fn interaction_draft_for(
