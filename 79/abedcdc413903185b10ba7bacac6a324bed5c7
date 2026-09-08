@@ -1,0 +1,26 @@
+desktop/src/pages/WorkspaceChanges.test.tsx
+  s_258991a35619e5::t_31bced5aeee489 57,67,86
+  s_258991a35619e5::t_d254ea59865c4e 63-66,68-79
+desktop/src/styles/final/02-panels.css
+  s_258991a35619e5::t_31bced5aeee489 23-38
+desktop/src/styles/layout/08-files-changes.css
+  s_258991a35619e5::t_31bced5aeee489 11,26,47
+desktop/src/pages/WorkspaceChanges.tsx
+  s_258991a35619e5::t_31bced5aeee489 9,50,53,56-62,139-153
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "79abedcdc413903185b10ba7bacac6a324bed5c7",
+  "prompts": {},
+  "sessions": {
+    "s_258991a35619e5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a07d9a-8717-7930-8954-b93806959056",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
