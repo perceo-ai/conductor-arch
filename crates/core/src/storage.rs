@@ -607,6 +607,16 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "naming_requested_seq",
         "ALTER TABLE chat_threads ADD COLUMN naming_requested_seq INTEGER NOT NULL DEFAULT -1",
     )?;
+    // Whether the current chat title is Archductor's own fallback (the opening
+    // words of the request) rather than a name the agent chose. Without it a
+    // fallback title is indistinguishable from a real one, so the naming ask
+    // stops after the first send and the chat keeps the derived name forever.
+    ensure_column(
+        conn,
+        "chat_threads",
+        "title_is_derived",
+        "ALTER TABLE chat_threads ADD COLUMN title_is_derived INTEGER NOT NULL DEFAULT 0",
+    )?;
     // Highest provider timeline sequence whose assistant text has already been
     // scanned for an Archductor metadata block. Without it every turn boundary
     // would re-apply the whole transcript's directives.

@@ -139,6 +139,35 @@ archductor archcar messages <thread-id>      # a thread id, not a session id
 Switching model mid-thread is the common one: start cheap, escalate when the
 agent is clearly out of its depth, without losing the conversation.
 
+## Naming a new chat
+
+A new chat starts as `New chat` in a workspace wearing a codename (`lisbon`) on
+a branch to match (`lc/lisbon`). Sending the first message names all three.
+
+The name comes from a dedicated call to the same provider the chat uses —
+`claude -p` or `codex exec`, run once, in the background, with a prompt whose
+only job is to return the names. It does not depend on the coding agent
+volunteering anything mid-turn, so a chat gets the same treatment every time:
+
+```
+lisbon                       -> stripe-webhook-retry
+lc/lisbon                    -> lc/stripe-webhook-retry
+New chat                     -> Stripe Webhook Retry With Exponential Backoff
+```
+
+The branch keeps the configured prefix (see
+[repository settings](repository-settings.md)); only the slug after it changes.
+A workspace is renamed once — later chats in it retitle themselves and leave the
+workspace and branch alone.
+
+While the call is out, the tab shows the opening words of your request so it is
+never blank. That placeholder is provisional: it is replaced when the real name
+arrives. If the provider is missing or logged out, the call fails, and after a
+few more sends Archductor keeps the derived name rather than waiting forever.
+
+Renaming a workspace moves its branch too, so avoid pushing during the first
+turn of a brand new chat.
+
 ## Keeping track of who did what
 
 With several sessions in one workspace, "which agent wrote this" stops being

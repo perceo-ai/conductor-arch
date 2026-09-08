@@ -3,7 +3,6 @@ import type {
   ArchcarMessage,
   ArchcarProjectionItem,
   ChatSnapshot,
-  ProviderEventRecord,
   QueuedArchcarInput,
   SessionKind,
 } from "@/bridge/protocol";
@@ -28,8 +27,6 @@ export type ChatUiPhase =
 export interface ChatSlice {
   messages: ArchcarMessage[];
   pendingMessages: ArchcarMessage[];
-  // provider events keyed by identity_key for in-place delta merge
-  providerEvents: Record<string, ProviderEventRecord>;
   // projected timeline items (built in core, keyed by id for delta reconcile)
   projection: ArchcarProjectionItem[];
   queue: QueuedArchcarInput[];
@@ -45,7 +42,6 @@ function emptySlice(): ChatSlice {
   return {
     messages: [],
     pendingMessages: [],
-    providerEvents: {},
     projection: [],
     queue: [],
     session: null,
@@ -95,8 +91,6 @@ export const chatStore = {
    *  their identity and do not re-render. */
   applySnapshot(snap: ChatSnapshot) {
     ensure(snap.thread_id);
-    const providerEvents: Record<string, ProviderEventRecord> = {};
-    for (const ev of snap.provider_events) providerEvents[ev.identity_key] = ev;
     const pendingMessages = retirePersistedPendingMessages(
       chat[snap.thread_id]?.pendingMessages ?? [],
       chat[snap.thread_id]?.messages ?? [],
@@ -108,7 +102,6 @@ export const chatStore = {
         {
           messages: snap.messages,
           pendingMessages,
-          providerEvents,
           projection: chat[snap.thread_id]?.projection ?? [],
           queue: snap.queued_inputs,
           session: snap.live_session
@@ -142,13 +135,6 @@ export const chatStore = {
     ensure(threadId);
     setChat(threadId, "projection", reconcile(items, { key: "id", merge: true }));
     recordUpdate(`chat.projection.${threadId}`);
-  },
-
-  /** Merge one provider-event delta in place by identity_key. */
-  mergeProviderEvent(threadId: number, ev: ProviderEventRecord) {
-    ensure(threadId);
-    setChat(threadId, "providerEvents", ev.identity_key, ev);
-    recordUpdate(`chat.providerEvent.${threadId}`);
   },
 
   setQueue(threadId: number, queue: QueuedArchcarInput[]) {

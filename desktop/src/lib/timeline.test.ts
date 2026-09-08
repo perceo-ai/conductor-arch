@@ -1,6 +1,11 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { isDisplayableTimelineItem, showsNewChatIntro, withoutPlanSource } from "./timeline";
+import {
+  isDisplayableTimelineItem,
+  showsNewChatIntro,
+  timelineWindow,
+  withoutPlanSource,
+} from "./timeline";
 import type { ArchcarProjectionItem } from "@/bridge/protocol";
 
 // Assistant text renders only when finalized; reasoning, command, and other
@@ -132,5 +137,40 @@ describe("showsNewChatIntro", () => {
     // withoutPlanSource empties the list here; a chat awaiting plan approval is
     // the opposite of a new one.
     expect(showsNewChatIntro(0, true)).toBe(false);
+  });
+});
+
+describe("timelineWindow", () => {
+  const rows = Array.from({ length: 500 }, (_, i) => i);
+
+  it("returns everything when the thread is shorter than the window", () => {
+    expect(timelineWindow([1, 2, 3], 150)).toEqual({ visible: [1, 2, 3], hidden: 0 });
+  });
+
+  it("keeps the newest rows, because chat is read from the bottom", () => {
+    const { visible, hidden } = timelineWindow(rows, 150);
+    expect(visible).toHaveLength(150);
+    expect(visible[0]).toBe(350);
+    expect(visible.at(-1)).toBe(499);
+    expect(hidden).toBe(350);
+  });
+
+  it("caps the DOM regardless of how long the chat gets", () => {
+    const longer = Array.from({ length: 20_000 }, (_, i) => i);
+    expect(timelineWindow(longer, 150).visible).toHaveLength(150);
+  });
+
+  it("reveals older rows as the window grows", () => {
+    expect(timelineWindow(rows, 300).visible[0]).toBe(200);
+    expect(timelineWindow(rows, 300).hidden).toBe(200);
+  });
+
+  it("hides nothing once the window covers the thread", () => {
+    expect(timelineWindow(rows, 500)).toEqual({ visible: rows, hidden: 0 });
+    expect(timelineWindow(rows, 900)).toEqual({ visible: rows, hidden: 0 });
+  });
+
+  it("treats a negative window as empty rather than slicing from the front", () => {
+    expect(timelineWindow(rows, -10)).toEqual({ visible: [], hidden: 500 });
   });
 });

@@ -110,6 +110,21 @@
   gap: 2px;
   padding: 14px 20px 16px;
 }
+/* Only the newest rows are mounted; this reveals the older ones on demand. */
+.chat-timeline-reveal-older {
+  align-self: center;
+  margin: 4px 0 10px;
+  padding: 4px 12px;
+  border: 1px solid var(--border, #2a2a2a);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted, #8a8a8a);
+  font-size: 12px;
+  cursor: pointer;
+}
+.chat-timeline-reveal-older:hover {
+  color: var(--text, #d8d8d8);
+}
 .chat-user-row {
   display: flex;
   justify-content: flex-end;
