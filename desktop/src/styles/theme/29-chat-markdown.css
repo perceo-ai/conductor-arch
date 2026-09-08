@@ -93,7 +93,7 @@
 .chat-inline-event-terminal .viewport {
     background-color: var(--code-surface);
 }
-.chat-inline-event-loading {
+.chat-inline-event-running {
     color: #b6c7e8;
 }
 .chat-inline-event-failed {

@@ -129,32 +129,6 @@
     animation: mo-breathe var(--mo-loop-fast) var(--mo-in-out) infinite;
 }
 
-/* ── Inline event cards ──
-   A running tool call used to be a static blue tint, indistinguishable from a
-   finished one at a glance. Give it a progress band instead. */
-.chat-inline-event-loading .chat-inline-event-header {
-    position: relative;
-}
-
-.chat-inline-event-loading .chat-inline-event-header::after {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: -2px;
-    height: 1px;
-    overflow: hidden;
-    background: linear-gradient(
-        90deg,
-        transparent,
-        var(--lc-accent) 50%,
-        transparent
-    );
-    background-size: 40% 100%;
-    background-repeat: no-repeat;
-    animation: mo-track-slide var(--mo-loop-fast) var(--mo-in-out) infinite;
-}
-
 /* Timeline content arriving. Applied to the message rows rather than to the
    container so each entry animates once, on its own mount. */
 .chat-messages > .chat-agent-text,

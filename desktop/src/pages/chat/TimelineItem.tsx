@@ -55,7 +55,7 @@ function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean })
       class="chat-inline-event"
       classList={{
         "chat-inline-event-failed": props.item.status === "failed",
-        "chat-inline-event-loading": props.item.status === "running" && !props.agentIdle
+        "chat-inline-event-running": props.item.status === "running" && !props.agentIdle
       }}
     >
       <div class="chat-inline-event-header">

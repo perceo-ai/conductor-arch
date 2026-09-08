@@ -165,4 +165,21 @@ describe("Timeline", () => {
       false,
     ]);
   });
+
+  it("marks a running command without attaching the looping loader", () => {
+    session = { runtime_state: "running", ready: false };
+    items = [
+      projectionItem({
+        id: "cmd",
+        render_class: "command_card",
+        title: "Ran cargo test",
+        body: "",
+        status: "running",
+      }),
+    ];
+
+    const command = mount().querySelector(".chat-inline-event");
+    expect(command?.classList.contains("chat-inline-event-running")).toBe(true);
+    expect(command?.classList.contains("chat-inline-event-loading")).toBe(false);
+  });
 });
