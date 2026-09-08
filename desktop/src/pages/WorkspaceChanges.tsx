@@ -6,6 +6,7 @@ import Diff from "@/components/Diff";
 import Icon from "@/components/Icon";
 import { parseCommitLog, shortSha } from "@/lib/commitLog";
 import { langFromPath } from "@/lib/highlight";
+import { materialFileIcon } from "@/lib/materialFileIcons";
 import { openCommitInCenter, openFileInCenter } from "./openFileBridge";
 
 // Changes views. The scope selector picks which set of changes the panel lists
@@ -42,29 +43,24 @@ function Counts(props: { file: DiffFileSummary }) {
   );
 }
 
-function stateLabel(f: DiffFileSummary): string {
-  if (f.untracked) return "[untracked]";
-  if (f.staged && f.unstaged) return "[staged+unstaged]";
-  if (f.staged) return "[staged]";
-  if (f.unstaged) return "[unstaged]";
-  return "[clean]";
-}
-
 function ChangeRow(props: {
   file: DiffFileSummary;
-  showState: boolean;
   onOpen?: (path: string) => void;
 }) {
+  const icon = () => materialFileIcon(props.file.path);
   return (
     <button
-      class="ws-file-summary-row-content"
+      class="ws-file-row ws-change-row"
       onClick={() => props.onOpen?.(props.file.path)}
     >
-      <Icon name="file-code" class="ws-file-icon" />
+      <img
+        class="ws-material-icon ws-file-kind-icon"
+        src={icon().src}
+        title={icon().title}
+        alt=""
+        loading="lazy"
+      />
       <span class="ws-file-name">{props.file.path}</span>
-      <Show when={props.showState}>
-        <span class="ws-file-summary-state">{stateLabel(props.file)}</span>
-      </Show>
       <Counts file={props.file} />
     </button>
   );
@@ -140,22 +136,21 @@ export function ChangesRows(props: {
           )}
         </Show>
       </div>
-      <Show
-        when={(changes() ?? []).length > 0}
-        fallback={<div class="empty-state">{changes.loading ? "Loading…" : "No changes"}</div>}
-      >
-        <For each={changes()}>
-          {(file) => (
-            <ChangeRow
-              file={file}
-              // staged/unstaged/untracked describe the working tree, so the
-              // label is meaningless for a commit's files.
-              showState={scope() === "uncommitted"}
-              onOpen={(path) => props.openFile?.(path, scope())}
-            />
-          )}
-        </For>
-      </Show>
+      <div class="ws-file-list ws-change-list">
+        <Show
+          when={(changes() ?? []).length > 0}
+          fallback={<div class="empty-state">{changes.loading ? "Loading…" : "No changes"}</div>}
+        >
+          <For each={changes()}>
+            {(file) => (
+              <ChangeRow
+                file={file}
+                onOpen={(path) => props.openFile?.(path, scope())}
+              />
+            )}
+          </For>
+        </Show>
+      </div>
     </div>
   );
 }

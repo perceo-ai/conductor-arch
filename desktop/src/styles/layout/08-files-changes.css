@@ -8,8 +8,7 @@
   min-height: 0;
 }
 .ws-dir-row,
-.ws-file-row,
-.ws-file-summary-row-content {
+.ws-file-row {
   display: flex;
   flex-direction: row;
   align-items: center;
@@ -24,8 +23,7 @@
   font-size: 13px;
 }
 .ws-dir-row:hover,
-.ws-file-row:hover,
-.ws-file-summary-row-content:hover {
+.ws-file-row:hover {
   background: rgba(255, 255, 255, 0.05);
 }
 .ws-folder-toggle,
@@ -44,13 +42,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.ws-file-summary-state {
-  flex: 0 0 auto;
-  color: var(--lc-text-muted, #8a8a8a);
-  font-size: 11px;
-}
 .ws-file-summary-counts {
   flex: 0 0 auto;
+  margin-left: auto;
   color: var(--lc-text-muted, #8a8a8a);
   font-variant-numeric: tabular-nums;
   font-size: 12px;

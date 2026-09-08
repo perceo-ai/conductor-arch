@@ -54,10 +54,27 @@ describe("ChangesTab", () => {
   it("keeps the panel list-only", async () => {
     const host = mount();
 
-    await vi.waitFor(() => expect(host.querySelector(".ws-file-summary-row-content")).toBeTruthy());
+    await vi.waitFor(() => expect(host.querySelector(".ws-change-row")).toBeTruthy());
 
     expect(host.querySelector(".ws-diff-view")).toBeNull();
     expect(send.mock.calls.some(([request]) => request.type === "get_workspace_diff")).toBe(false);
+  });
+
+  it("renders a changed file like a Files row with trailing line counts", async () => {
+    const host = mount();
+
+    const row = await vi.waitFor(() => {
+      const element = host.querySelector<HTMLButtonElement>(".ws-change-row");
+      expect(element).toBeTruthy();
+      return element!;
+    });
+
+    expect(row.classList.contains("ws-file-row")).toBe(true);
+    expect(row.querySelector("img.ws-material-icon.ws-file-kind-icon")).toBeTruthy();
+    expect(row.querySelector(".ws-file-name")?.textContent).toBe("src/main.ts");
+    expect(row.querySelector(".ws-file-summary-state")).toBeNull();
+    expect(row.lastElementChild?.classList.contains("ws-file-summary-counts")).toBe(true);
+    expect(row.lastElementChild?.textContent).toBe("+4-1");
   });
 
   it("opens a changed file in the center with the selected scope", async () => {
@@ -66,7 +83,7 @@ describe("ChangesTab", () => {
     const host = mount();
 
     const row = await vi.waitFor(() => {
-      const element = host.querySelector<HTMLButtonElement>(".ws-file-summary-row-content");
+      const element = host.querySelector<HTMLButtonElement>(".ws-change-row");
       expect(element).toBeTruthy();
       return element!;
     });

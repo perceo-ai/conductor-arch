@@ -1,26 +1,8 @@
 
-.ws-file-summary-panel {
-  gap: 12px;
-}
-
-.ws-file-summary-row-content {
-  min-height: 32px;
-  gap: 8px;
-  padding: 0;
-  border-bottom: 1px solid #252525;
-  border-radius: 0;
-  background: transparent;
-}
-
-.ws-file-summary-row-content:hover {
-  background: transparent;
-}
-
 .ws-file-name {
   color: #d0d0d0;
 }
 
-.ws-file-summary-state,
 .ws-file-summary-counts {
   display: inline-flex;
   align-items: center;
