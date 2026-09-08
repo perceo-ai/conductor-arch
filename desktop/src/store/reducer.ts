@@ -5,6 +5,7 @@ import type {
   ProviderInteractionRecord,
 } from "@/bridge/protocol";
 import { send } from "@/bridge/client";
+import { createRefreshCoalescer } from "@/lib/refreshCoalescer";
 import { chatStore } from "./chat";
 import { terminalStore } from "./terminal";
 import { interactionsStore } from "./interactions";
@@ -82,7 +83,10 @@ async function refreshThreadSnapshot(threadId: number) {
     // no event left to replay, and an unanswered question the user cannot see
     // is a hung agent.
     const [snap, proj, interactions, plan] = await Promise.all([
-      send({ type: "get_chat_snapshot", thread_id: threadId }),
+      // The timeline comes from the projection; the snapshot is only read for
+      // messages, the queue and the live session. Provider events are the bulk
+      // of it and nothing here consumes them.
+      send({ type: "get_chat_snapshot", thread_id: threadId, include_provider_events: false }),
       send({ type: "get_chat_projection", thread_id: threadId }),
       send({ type: "list_provider_interactions", thread_id: threadId, pending_only: true }),
       send({ type: "get_chat_plan", thread_id: threadId }),
@@ -110,15 +114,27 @@ async function refreshThreadSnapshot(threadId: number) {
   }
 }
 
+// A streaming turn emits `session_messages_updated` once per provider event —
+// per token — and each one used to cost a full snapshot + projection pull, so
+// the renderer spent an active turn re-reading the whole thread and got slower
+// the longer the chat ran. Ten pulls a second is still far past the rate a
+// human reads at, and turn boundaries flush immediately.
+const CHAT_REFRESH_INTERVAL_MS = 100;
+
+const chatRefresh = createRefreshCoalescer<number>(
+  (threadId) => void refreshThreadSnapshot(threadId),
+  { intervalMs: CHAT_REFRESH_INTERVAL_MS },
+);
+
 /** Force a fresh snapshot+projection pull (used when a chat tab is opened). */
 export function loadThread(threadId: number): void {
-  void refreshThreadSnapshot(threadId);
+  chatRefresh.flush(threadId);
 }
 
 export function applyEvent(event: ArchcarEvent) {
   switch (event.type) {
     case "session_messages_updated":
-      void refreshThreadSnapshot((event as { thread_id: number }).thread_id);
+      chatRefresh.request((event as { thread_id: number }).thread_id);
       break;
 
     case "chat_plan_updated": {
@@ -129,7 +145,7 @@ export function applyEvent(event: ArchcarEvent) {
     }
 
     case "chat_queue_updated":
-      void refreshThreadSnapshot((event as { thread_id: number }).thread_id);
+      chatRefresh.request((event as { thread_id: number }).thread_id);
       void refreshThreadWorkspace((event as { thread_id: number }).thread_id);
       break;
 
@@ -204,7 +220,8 @@ export function applyEvent(event: ArchcarEvent) {
     case "turn_completed": {
       const e = event as { thread_id: number };
       chatStore.setCompletedTurnAttention(e.thread_id, nav.selectedChatThread() !== e.thread_id);
-      void refreshThreadSnapshot(e.thread_id);
+      // The end of a turn is the state the user reads; never sit on it.
+      chatRefresh.flush(e.thread_id);
       void refreshThreadWorkspace(e.thread_id);
       break;
     }

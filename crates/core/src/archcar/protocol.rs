@@ -174,6 +174,16 @@ pub enum ArchcarRequest {
     },
     GetChatSnapshot {
         thread_id: i64,
+        /// Omit the thread's provider events from the response.
+        ///
+        /// They are the bulk of a snapshot — every row carries both its raw and
+        /// normalized JSON — and the desktop timeline is built from
+        /// `GetChatProjection`, so shipping them turned every refresh during a
+        /// streaming turn into a multi-megabyte transfer nothing read. Absent
+        /// (the CLI, and older clients) still means "include", so the wire
+        /// format stays compatible in both directions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        include_provider_events: Option<bool>,
     },
     QueueChatInput {
         thread_id: i64,
@@ -1790,8 +1800,14 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSessionMessages { thread_id } => {
             format!("get_session_messages thread_id={thread_id}")
         }
-        ArchcarRequest::GetChatSnapshot { thread_id } => {
-            format!("get_chat_snapshot thread_id={thread_id}")
+        ArchcarRequest::GetChatSnapshot {
+            thread_id,
+            include_provider_events,
+        } => {
+            format!(
+                "get_chat_snapshot thread_id={thread_id} include_provider_events={}",
+                include_provider_events.unwrap_or(true)
+            )
         }
         ArchcarRequest::QueueChatInput {
             thread_id,

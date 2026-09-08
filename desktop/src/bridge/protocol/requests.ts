@@ -32,7 +32,7 @@ export type ArchcarRequest =
   | { type: "resize_session"; session_id: number; rows: number; cols: number }
   | { type: "get_session_status"; session_id: number }
   | { type: "get_session_screen"; session_id: number }
-  | { type: "get_chat_snapshot"; thread_id: number }
+  | { type: "get_chat_snapshot"; thread_id: number; include_provider_events?: boolean }
   | {
       type: "queue_chat_input";
       thread_id: number;

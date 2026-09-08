@@ -1,3 +1,4 @@
+pub mod agent_naming;
 pub mod agent_tools;
 pub mod archcar;
 pub mod background_tasks;

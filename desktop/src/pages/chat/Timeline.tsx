@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, on, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
 import {
   chatStore,
   interactionsStore,
@@ -8,9 +8,12 @@ import type {
   ArchcarProjectionItem,
 } from "@/bridge/protocol";
 import {
+  TIMELINE_WINDOW_SIZE,
+  TIMELINE_WINDOW_STEP,
   forkableTurnEndIds,
   isDisplayableTimelineItem,
   showsNewChatIntro,
+  timelineWindow,
   withoutPlanSource,
 } from "@/lib/timeline";
 import { isNearScrollBottom, scrollBottomTop } from "@/lib/chatScroll";
@@ -54,13 +57,33 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     }),
   );
   const forkableItems = createMemo(() => forkableTurnEndIds(items(), generation() === "idle"));
+  // Only the newest rows are mounted; scrolling back extends the window rather
+  // than paying for the whole history up front. Turn boundaries are still
+  // computed over every item, so which rows are forkable does not change.
+  const [visibleCount, setVisibleCount] = createSignal(TIMELINE_WINDOW_SIZE);
+  const windowed = createMemo(() => timelineWindow(items(), visibleCount()));
+  // A different chat starts at the bottom of its own history.
+  createEffect(on(() => props.threadId, () => setVisibleCount(TIMELINE_WINDOW_SIZE), { defer: true }));
+
+  function revealOlder() {
+    const el = scrollRef;
+    // Anchor on distance from the bottom: prepending rows grows scrollHeight,
+    // and keeping scrollTop would slide the reader up into the new content.
+    const anchor = el ? el.scrollHeight - el.scrollTop : null;
+    setVisibleCount((count) => count + TIMELINE_WINDOW_STEP);
+    if (el && anchor != null) {
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight - anchor;
+      });
+    }
+  }
   // The plan card is part of the scrolled content, so its arrival has to move
   // the view the same way a new message does.
   const scrollSignal = createMemo(
     () =>
       `${generation()}|${pendingPlan()?.id ?? ""}|` +
-      items()
-        .map((item) => `${item.id}:${item.status}:${item.stream_state}:${item.body.length}`)
+      windowed()
+        .visible.map((item) => `${item.id}:${item.status}:${item.stream_state}:${item.body.length}`)
         .join("|"),
   );
   // An interrupted (or crashed) turn leaves its command/tool cards marked
@@ -101,7 +124,12 @@ export function Timeline(props: { threadId: number; workspace: string }) {
           when={!showsNewChatIntro(items().length, pendingPlan() != null)}
           fallback={<NewChatIntro workspace={props.workspace} threadId={props.threadId} />}
         >
-          <For each={items()}>
+          <Show when={windowed().hidden > 0}>
+            <button class="chat-timeline-reveal-older" onClick={revealOlder}>
+              Show earlier messages ({windowed().hidden})
+            </button>
+          </Show>
+          <For each={windowed().visible}>
             {(item) => (
               <TimelineItem
                 item={item}

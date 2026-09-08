@@ -93,3 +93,31 @@ export function isDisplayableTimelineItem(item: ArchcarProjectionItem): boolean 
   }
   return true;
 }
+
+/**
+ * How many timeline rows are kept in the DOM.
+ *
+ * Every row renders its body — assistant prose and user bubbles go through
+ * `renderMarkdown` into `innerHTML` — so the cost of a chat was its whole
+ * history, not what was on screen: a 4000-event thread mounted ~3200 rows and
+ * scrolled at ~21fps. Chat is read from the bottom, so keeping a window of the
+ * newest rows and extending it when the user scrolls back caps the DOM without
+ * a measured virtual scroller (which variable-height markdown makes fragile).
+ */
+export const TIMELINE_WINDOW_SIZE = 150;
+
+/** How many older rows each scroll-back reveals. */
+export const TIMELINE_WINDOW_STEP = 150;
+
+export interface TimelineWindow<T> {
+  visible: T[];
+  /** Rows older than the window, still in the thread but not in the DOM. */
+  hidden: number;
+}
+
+/** The newest `visibleCount` rows, plus how many older ones are withheld. */
+export function timelineWindow<T>(items: T[], visibleCount: number): TimelineWindow<T> {
+  const count = Math.max(0, visibleCount);
+  if (items.length <= count) return { visible: items, hidden: 0 };
+  return { visible: items.slice(items.length - count), hidden: items.length - count };
+}

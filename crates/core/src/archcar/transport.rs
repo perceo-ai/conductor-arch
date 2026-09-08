@@ -78,6 +78,46 @@ pub fn connect(endpoint: &Path) -> io::Result<LocalStream> {
     LocalStream::connect(endpoint)
 }
 
+/// Block until `listener` has a connection waiting, or `timeout` elapses.
+///
+/// The accept loops run their listeners non-blocking so they can notice the
+/// shutdown flag, but a non-blocking accept paired with a sleep charges every
+/// client that sleep as latency: at a 50ms tick a `ping` round-tripped in
+/// ~52ms, and the desktop app opens a fresh connection per RPC. Waiting on
+/// readiness instead makes the accept immediate while keeping the timeout that
+/// lets the loop re-check shutdown.
+///
+/// Returns `true` when a connection is ready, `false` when the timeout expired.
+#[cfg(unix)]
+pub fn wait_for_connection<F: std::os::fd::AsFd>(
+    listener: &F,
+    timeout: std::time::Duration,
+) -> io::Result<bool> {
+    use rustix::event::{PollFd, PollFlags};
+
+    let deadline = rustix::fs::Timespec {
+        tv_sec: timeout.as_secs() as _,
+        tv_nsec: timeout.subsec_nanos() as _,
+    };
+    let mut fds = [PollFd::new(listener, PollFlags::IN)];
+    match rustix::event::poll(&mut fds, Some(&deadline)) {
+        Ok(0) => Ok(false),
+        Ok(_) => Ok(true),
+        // A signal (the ctrl-c handler installs one) interrupts the wait; that
+        // is not an error, the caller just re-checks shutdown and waits again.
+        Err(rustix::io::Errno::INTR) => Ok(false),
+        Err(err) => Err(io::Error::from(err)),
+    }
+}
+
+/// Windows listens on a loopback `TcpListener` rather than a unix socket, and
+/// `rustix` is a unix-only dependency here, so that build keeps the sleep tick.
+#[cfg(windows)]
+pub fn wait_for_connection<F>(_listener: &F, timeout: std::time::Duration) -> io::Result<bool> {
+    std::thread::sleep(timeout);
+    Ok(true)
+}
+
 #[cfg(windows)]
 pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     let listener = LocalListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
@@ -204,6 +244,59 @@ mod tests {
         server.join().unwrap().unwrap();
         assert_eq!(received.len(), expected_len + 1);
         assert_eq!(received.last(), Some(&b'\n'));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_connection_reports_a_waiting_client() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-wait-ready.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let _client = connect(&endpoint).unwrap();
+
+        assert!(wait_for_connection(&listener, Duration::from_secs(5)).unwrap());
+        // Readiness must not consume the connection.
+        assert!(accept(&listener, &endpoint).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_connection_wakes_on_a_late_client_rather_than_sleeping_out_the_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-wait-late.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let client_endpoint = endpoint.clone();
+        let client = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            connect(&client_endpoint).unwrap()
+        });
+
+        let started = std::time::Instant::now();
+        let ready = wait_for_connection(&listener, Duration::from_secs(10)).unwrap();
+        let waited = started.elapsed();
+        let _client = client.join().unwrap();
+
+        assert!(ready);
+        // The client connected after ~50ms; returning near the 10s timeout
+        // would mean the wait ignored readiness.
+        assert!(waited < Duration::from_secs(1), "waited {waited:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_connection_times_out_with_no_client() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-wait-idle.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let started = std::time::Instant::now();
+        assert!(!wait_for_connection(&listener, Duration::from_millis(100)).unwrap());
+        assert!(started.elapsed() >= Duration::from_millis(90));
     }
 
     #[cfg(unix)]

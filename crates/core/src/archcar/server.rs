@@ -75,6 +75,12 @@ struct ServerState {
 
 /// How often the daemon advances background development tasks.
 const BACKGROUND_TASK_TICK: Duration = Duration::from_secs(10);
+/// How long an idle accept loop waits before re-checking the shutdown flag.
+/// This is no longer per-connection latency — `wait_for_connection` returns as
+/// soon as a client arrives — so it only bounds shutdown responsiveness.
+const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// How often mid-turn metadata/summary maintenance may run for one thread.
+const MID_TURN_CONTEXT_INTERVAL: Duration = Duration::from_secs(2);
 
 struct QueueDrainGuard {
     state: Arc<Mutex<ServerState>>,
@@ -206,7 +212,15 @@ impl ArchcarServer {
                     }));
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(50));
+                    // Wait on readiness rather than sleeping a fixed tick: the
+                    // sleep was charged to the next client as latency, and the
+                    // desktop opens a connection per RPC.
+                    if let Err(err) =
+                        transport::wait_for_connection(&self.listener, ACCEPT_POLL_INTERVAL)
+                    {
+                        serve_error = Some(anyhow!(err));
+                        break;
+                    }
                 }
                 Err(err) => {
                     serve_error = Some(anyhow!(err));
@@ -275,7 +289,11 @@ fn spawn_remote_listener(
                 }
                 Ok(None) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(50));
+                    if transport::wait_for_connection(&remote.listener, ACCEPT_POLL_INTERVAL)
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Err(err) => {
                     warn!(error = %err, "archcar remote listener accept failed");
@@ -730,7 +748,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             broadcast_naming_changes(state, &db_path, thread_id, before);
             response
         }
-        ArchcarRequest::GetChatSnapshot { thread_id } => {
+        ArchcarRequest::GetChatSnapshot {
+            thread_id,
+            include_provider_events,
+        } => {
             let (db_path, live_session) = {
                 let guard = state.lock().unwrap();
                 (
@@ -739,7 +760,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 )
             };
             let before = thread_naming_snapshot(&db_path, thread_id);
-            let response = match chat_snapshot_for_thread(&db_path, thread_id, live_session) {
+            let response = match chat_snapshot_for_thread(
+                &db_path,
+                thread_id,
+                live_session,
+                include_provider_events.unwrap_or(true),
+            ) {
                 Ok(snapshot) => ArchcarResponse::ChatSnapshot { snapshot },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -3561,6 +3587,7 @@ fn queue_chat_input(
     session_kind: SessionKind,
 ) -> ArchcarResponse {
     let db_path = state.lock().unwrap().db_path.clone();
+    let is_user_input = kind == crate::archcar::protocol::ArchcarInputKind::User;
     let queued = match WorkspaceStore::open_app(&db_path).and_then(|store| {
         let thread = store.get_chat_thread_record(thread_id)?;
         anyhow::ensure!(
@@ -3610,6 +3637,16 @@ fn queue_chat_input(
             };
         }
     };
+    // Name the chat from the request itself, in its own provider call, off the
+    // send path. The user is not kept waiting for it and a failure costs nothing
+    // but the fallback title.
+    if is_user_input {
+        spawn_deterministic_naming(
+            state,
+            thread_id,
+            queued.visible_input.as_deref().unwrap_or(&queued.input),
+        );
+    }
     broadcast(
         &mut state.lock().unwrap(),
         ArchcarEvent::ChatQueueUpdated { thread_id },
@@ -4165,6 +4202,80 @@ fn mark_session_ready_at_turn_boundary(
     }
 }
 
+/// Name a chat and its workspace in a dedicated provider call.
+///
+/// Runs on a background thread: the call takes seconds, and the send it rides on
+/// must return immediately. One run per thread at a time — a second message sent
+/// while the first naming call is still out would otherwise race it and could
+/// rename the workspace twice.
+fn spawn_deterministic_naming(state: &Arc<Mutex<ServerState>>, thread_id: i64, request: &str) {
+    static IN_FLIGHT: std::sync::OnceLock<Mutex<HashSet<i64>>> = std::sync::OnceLock::new();
+    let in_flight = IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()));
+    {
+        let Ok(mut guard) = in_flight.lock() else {
+            return;
+        };
+        if !guard.insert(thread_id) {
+            return;
+        }
+    }
+
+    let db_path = state.lock().unwrap().db_path.clone();
+    let state = Arc::clone(state);
+    let request = request.to_owned();
+    thread::spawn(move || {
+        let outcome = name_chat_deterministically(&db_path, thread_id, &request);
+        if let Err(err) = &outcome {
+            crate::agent_naming::warn_naming_failed(thread_id, err);
+        }
+        if let Ok(mut guard) = in_flight.lock() {
+            guard.remove(&thread_id);
+        }
+        // Only tell clients when something actually moved.
+        if matches!(outcome, Ok(true)) {
+            let before = None;
+            broadcast_naming_changes(&state, &db_path, thread_id, before);
+        }
+    });
+}
+
+/// Returns whether anything was renamed.
+fn name_chat_deterministically(db_path: &Path, thread_id: i64, request: &str) -> Result<bool> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    let Some(context) = store.deterministic_naming_context(thread_id)? else {
+        return Ok(false);
+    };
+    let names = crate::agent_naming::request_names(&crate::agent_naming::NamingCall {
+        provider_key: &context.provider_key,
+        command: &context.command.to_string_lossy(),
+        cwd: &context.cwd,
+        request,
+        wants_workspace_name: context.wants_workspace_name,
+        wants_branch_name: context.wants_branch_name,
+    })?;
+    store.apply_deterministic_names(thread_id, &context, &names)
+}
+
+/// Rate limit for mid-turn context maintenance, keyed by chat thread.
+///
+/// Turn boundaries bypass this entirely; it only throttles the per-token
+/// `SessionMessagesUpdated` stream.
+fn context_maintenance_is_due(thread_id: i64) -> bool {
+    static LAST_RUN: std::sync::OnceLock<Mutex<HashMap<i64, Instant>>> = std::sync::OnceLock::new();
+    let cell = LAST_RUN.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut last_run) = cell.lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    match last_run.get(&thread_id) {
+        Some(previous) if now.duration_since(*previous) < MID_TURN_CONTEXT_INTERVAL => false,
+        _ => {
+            last_run.insert(thread_id, now);
+            true
+        }
+    }
+}
+
 fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
     let drain_thread_id = match &event {
         ArchcarEvent::SessionReady { thread_id, .. }
@@ -4194,9 +4305,19 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
     }
     // Continuous context maintenance: turn boundaries and message updates are
     // the evidence streams behind workspace/current-chat summaries.
+    //
+    // A turn boundary is rare and authoritative, so it always runs. A message
+    // update is emitted once per provider event — per streamed token — and both
+    // passes below re-read the whole thread (the metadata scan rebuilds the full
+    // projection), so running them per token made the daemon's cost quadratic in
+    // the length of the chat whether or not any client was attached. Mid-turn
+    // application only exists to apply names a little sooner, which a couple of
+    // seconds of delay does not harm.
     let refresh_thread_id = match &event {
-        ArchcarEvent::TurnCompleted { thread_id, .. }
-        | ArchcarEvent::SessionMessagesUpdated { thread_id } => Some(*thread_id),
+        ArchcarEvent::TurnCompleted { thread_id, .. } => Some(*thread_id),
+        ArchcarEvent::SessionMessagesUpdated { thread_id } => {
+            context_maintenance_is_due(*thread_id).then_some(*thread_id)
+        }
         _ => None,
     };
     {
@@ -5044,6 +5165,7 @@ fn chat_snapshot_for_thread(
     db_path: &Path,
     thread_id: i64,
     live_session: Option<ArchcarChatLiveSession>,
+    include_provider_events: bool,
 ) -> Result<ArchcarChatSnapshot> {
     let store = WorkspaceStore::open_app(db_path)?;
     let messages = store.list_chat_messages(thread_id)?;
@@ -5053,7 +5175,13 @@ fn chat_snapshot_for_thread(
         .into_iter()
         .map(queued_archcar_input_from_record)
         .collect();
-    let provider_events = ProviderEventStore::new(db_path).list_for_chat_thread(thread_id)?;
+    // Skipped, not filtered afterwards: the read itself is the expensive part,
+    // because every row parses its raw and normalized JSON payloads.
+    let provider_events = if include_provider_events {
+        ProviderEventStore::new(db_path).list_for_chat_thread(thread_id)?
+    } else {
+        Vec::new()
+    };
     Ok(ArchcarChatSnapshot {
         thread_id,
         messages,
@@ -6430,6 +6558,7 @@ mod tests {
         let response = dispatch_request(
             ArchcarRequest::GetChatSnapshot {
                 thread_id: thread.id,
+                include_provider_events: None,
             },
             &state,
         );
@@ -6457,6 +6586,24 @@ mod tests {
             snapshot.queued_inputs[0].visible_input.as_deref(),
             Some("run visible tests")
         );
+        // The desktop builds its timeline from GetChatProjection and never
+        // reads these, so it opts out; everything else must still be present.
+        let trimmed = dispatch_request(
+            ArchcarRequest::GetChatSnapshot {
+                thread_id: thread.id,
+                include_provider_events: Some(false),
+            },
+            &state,
+        );
+        let ArchcarResponse::ChatSnapshot { snapshot: trimmed } = trimmed else {
+            panic!("expected chat snapshot response");
+        };
+        assert!(trimmed.provider_events.is_empty());
+        assert_eq!(trimmed.messages.len(), 1);
+        assert_eq!(trimmed.events.len(), 1);
+        assert_eq!(trimmed.queued_inputs.len(), 1);
+        assert!(trimmed.live_session.is_some());
+
         let live_session = snapshot
             .live_session
             .expect("live session should be projected");

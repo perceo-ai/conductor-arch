@@ -70,7 +70,12 @@ const ARCHDUCTOR_SUMMARY_CLOSE: &str = "</archductor_stored_summary>";
 
 /// How many sends may carry a naming ask before Archductor names things itself.
 /// Two asks is enough for a model that will answer; a third is just tax.
-const CHAT_NAMING_ATTEMPT_LIMIT: i64 = 2;
+/// How many sends a chat waits for a real name before Archductor derives one.
+///
+/// The dedicated naming call normally answers on the first send, so this only
+/// covers the case where that call keeps failing — an uninstalled or logged-out
+/// provider. Waiting forever would leave the workspace on its codename.
+const CHAT_NAMING_ATTEMPT_LIMIT: i64 = 3;
 
 /// User turns in a workspace between summary asks. Every turn would be noise;
 /// never would let the handoff note rot.
@@ -7956,6 +7961,119 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
+    /// Everything a dedicated naming call needs, or `None` when this chat and
+    /// its workspace are already named.
+    ///
+    /// Unlike `chat_naming_request` this records nothing and has no attempt cap:
+    /// the dedicated call is the naming path, so it either has work to do or it
+    /// does not.
+    pub fn deterministic_naming_context(
+        &self,
+        thread_id: i64,
+    ) -> Result<Option<DeterministicNamingContext>> {
+        let thread = self.get_chat_thread(thread_id)?;
+        let workspace = self.get_by_id(thread.workspace_id)?;
+        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let settings = self.repository_settings(&repository.root_path)?;
+
+        let wants_workspace_name = !self.workspace_agent_metadata_applied(workspace.id)?;
+        let wants_branch_name =
+            wants_workspace_name && self.workspace_branch_is_codename_derived(&workspace)?;
+        let wants_chat_title = crate::workspace_intel::is_placeholder_chat_title(&thread.title)
+            || self.chat_title_is_derived(thread_id)?;
+        if !wants_workspace_name && !wants_chat_title {
+            return Ok(None);
+        }
+
+        let provider_key = crate::agent_tools::canonical_provider_key(&thread.provider)
+            .unwrap_or("claude")
+            .to_owned();
+        // Honour the same executable overrides a real session would use, so a
+        // pinned provider binary names the chat too.
+        let command = match provider_key.as_str() {
+            "codex" => settings
+                .providers
+                .codex_executable_path
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("codex")),
+            "claude" => settings
+                .providers
+                .claude_code_executable_path
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("claude")),
+            other => crate::agent_tools::tool_by_provider(other)
+                .map(|tool| PathBuf::from(tool.default_command))
+                .unwrap_or_else(|| PathBuf::from(other)),
+        };
+
+        Ok(Some(DeterministicNamingContext {
+            provider_key,
+            command,
+            cwd: workspace_working_directory(&settings, &workspace)?,
+            observed_branch: workspace.branch.clone(),
+            observed_chat_title: thread.title.clone(),
+            workspace_name: workspace.name,
+            wants_workspace_name,
+            wants_branch_name,
+        }))
+    }
+
+    /// Apply names a dedicated naming call produced, through the same path the
+    /// agent metadata block uses so uniqueness, branch rename and the workspace
+    /// rename all behave identically.
+    /// Apply names a dedicated naming call produced, skipping anything that was
+    /// renamed while the call was out.
+    ///
+    /// The naming call takes seconds. A rename in that window — the user typing
+    /// a better name, another chat's agent naming the same workspace — is an
+    /// explicit choice, and a model answer computed before it must not win.
+    /// Neither `rename` nor `rename_branch` marks the workspace as named, so
+    /// intent alone cannot see this; the check is against the values observed
+    /// when the call was sent.
+    ///
+    /// Returns whether anything was renamed.
+    pub fn apply_deterministic_names(
+        &self,
+        thread_id: i64,
+        context: &DeterministicNamingContext,
+        names: &crate::agent_naming::AgentNames,
+    ) -> Result<bool> {
+        let thread = self.get_chat_thread(thread_id)?;
+        let workspace = self.get_by_id(thread.workspace_id)?;
+
+        // The workspace name and its branch move together, so either both are
+        // still ours to set or neither is.
+        let workspace_untouched = workspace.name == context.workspace_name
+            && workspace.branch == context.observed_branch
+            && !self.workspace_agent_metadata_applied(workspace.id)?;
+        // A title the user typed is theirs; only a placeholder or Archductor's
+        // own fallback is up for grabs.
+        let title_untouched = thread.title == context.observed_chat_title
+            && (crate::workspace_intel::is_placeholder_chat_title(&thread.title)
+                || self.chat_title_is_derived(thread_id)?);
+
+        let directive = ArchductorMetadataDirective {
+            workspace_name: workspace_untouched
+                .then(|| names.workspace_name.clone())
+                .flatten(),
+            branch_name: workspace_untouched
+                .then(|| names.branch_name.clone())
+                .flatten(),
+            chat_title: title_untouched.then(|| names.chat_title.clone()).flatten(),
+            summary: None,
+        };
+        if directive.workspace_name.is_none()
+            && directive.branch_name.is_none()
+            && directive.chat_title.is_none()
+        {
+            return Ok(false);
+        }
+        self.apply_metadata_directive(thread.workspace_id, Some(thread_id), directive)?;
+        Ok(true)
+    }
+
     /// What the agent should still be asked to name on this send, or `None` when
     /// nothing is placeholder any more or the ask has been retried to its cap.
     /// Asking is not a one-shot: a model can ignore the block, and a workspace
@@ -7979,8 +8097,13 @@ mutation($threadId: ID!) {{
         if self.workspace_agent_metadata_applied(workspace.id)? {
             // The workspace is settled; only a chat still wearing its placeholder
             // (or one that has never been asked) needs a title.
-            let wants_title =
-                first_ask || crate::workspace_intel::is_placeholder_chat_title(&thread.title);
+            // A fallback title counts as unnamed. Without this the floor's own
+            // "first few words of the request" title read as a real name and
+            // silenced every later ask, so the agent was given exactly one
+            // chance and the derived name became permanent.
+            let wants_title = first_ask
+                || crate::workspace_intel::is_placeholder_chat_title(&thread.title)
+                || self.chat_title_is_derived(thread_id)?;
             return Ok(wants_title.then_some(ChatNamingRequest::ChatOnly));
         }
         Ok(Some(
@@ -8012,8 +8135,16 @@ mutation($threadId: ID!) {{
     /// Returns `None` when this send needs nothing, so callers pass the original
     /// text through untouched.
     pub fn decorate_chat_input(&self, thread_id: i64, input: &str) -> Result<Option<String>> {
+        // Naming is not asked for in-band any more. A dedicated provider call
+        // names every new chat, and asking the coding agent as well meant two
+        // sources racing for the same fields — which is what made the outcome
+        // unpredictable. The ask is still *computed*, because it paces the
+        // fallback below: once enough sends have gone by with no real name,
+        // Archductor names the workspace itself rather than leaving it on a
+        // codename forever.
+        let naming_pending = self.chat_naming_request(thread_id)?;
         let request = ArchductorContextRequest {
-            naming: self.chat_naming_request(thread_id)?,
+            naming: None,
             summary: self.workspace_summary_ask(thread_id)?,
         };
         // The floor runs whether or not we ask: a chat should never sit on "New
@@ -8024,7 +8155,7 @@ mutation($threadId: ID!) {{
         if request.is_empty() {
             return Ok(None);
         }
-        if request.naming.is_some() {
+        if naming_pending.is_some() {
             self.mark_chat_naming_requested(thread_id)?;
         }
         if request.summary.is_some() {
@@ -8048,7 +8179,7 @@ mutation($threadId: ID!) {{
             if let Some(title) =
                 derived_name_from_request(input).and_then(|derived| normalize_chat_title(&derived))
             {
-                self.update_chat_thread_title(thread_id, &title)?;
+                self.set_derived_chat_thread_title(thread_id, &title)?;
             }
         }
 
@@ -8668,16 +8799,37 @@ mutation($threadId: ID!) {{
     }
 
     pub fn update_chat_thread_title(&self, thread_id: i64, title: &str) -> Result<()> {
+        self.write_chat_thread_title(thread_id, title, false)
+    }
+
+    /// Record Archductor's own fallback title, flagged so the naming ask knows
+    /// it is still standing in for a name the agent has not supplied.
+    fn set_derived_chat_thread_title(&self, thread_id: i64, title: &str) -> Result<()> {
+        self.write_chat_thread_title(thread_id, title, true)
+    }
+
+    fn write_chat_thread_title(&self, thread_id: i64, title: &str, derived: bool) -> Result<()> {
         let title = title.trim();
         anyhow::ensure!(!title.is_empty(), "chat thread title is required");
         let now = timestamp();
         self.conn.execute(
             "UPDATE chat_threads
-             SET title = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![title, now, thread_id],
+             SET title = ?1, title_is_derived = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![title, i64::from(derived), now, thread_id],
         )?;
         Ok(())
+    }
+
+    /// Whether the chat is wearing Archductor's fallback title rather than one
+    /// an agent (or the user) chose.
+    fn chat_title_is_derived(&self, thread_id: i64) -> Result<bool> {
+        let derived: i64 = self.conn.query_row(
+            "SELECT title_is_derived FROM chat_threads WHERE id = ?1",
+            [thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(derived != 0)
     }
 
     pub fn close_chat_thread(&self, thread_id: i64) -> Result<()> {
@@ -11030,6 +11182,22 @@ struct ArchductorMetadataDirective {
 /// Workspaces start on an autogenerated codename and chats on "New chat", so the
 /// first message is the only moment where the agent knows the task and nothing
 /// has been built on the old names yet.
+/// Everything a dedicated naming call needs to run and be applied.
+#[derive(Debug, Clone)]
+pub struct DeterministicNamingContext {
+    pub provider_key: String,
+    pub command: PathBuf,
+    pub cwd: PathBuf,
+    pub workspace_name: String,
+    pub wants_workspace_name: bool,
+    pub wants_branch_name: bool,
+    /// What the names were when the call was sent. The call takes seconds, and
+    /// anyone — the user, another chat's agent — may rename in that window, so
+    /// the answer is only applied to fields that have not moved since.
+    pub observed_branch: String,
+    pub observed_chat_title: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatNamingRequest {
     /// Fresh workspace on a codename-derived branch: everything is up for grabs.
@@ -25109,24 +25277,212 @@ spotlight_testing = true
             .create_chat_thread("berlin", "codex", "New chat", None)
             .unwrap();
 
-        let request = store.chat_naming_request(thread.id).unwrap();
-        assert_eq!(request, Some(ChatNamingRequest::WorkspaceBranchAndChat));
+        // A brand new chat on a codename branch needs all three names, and the
+        // dedicated call is what will produce them.
+        let context = store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .expect("a new chat has nothing named yet");
+        assert!(context.wants_workspace_name);
+        assert!(context.wants_branch_name);
+        assert_eq!(context.provider_key, "codex");
 
+        // The coding turn is no longer asked to name anything, so a first send
+        // that needs no summary carries nothing at all.
         let decorated = store
             .decorate_chat_input(thread.id, "Fix the billing webhook retries")
             .unwrap()
-            .expect("first message should carry the naming instruction");
-        assert!(decorated.starts_with("Fix the billing webhook retries"));
-        assert!(decorated.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_OPEN));
-        assert!(decorated.contains(ARCHDUCTOR_HIDDEN_INSTRUCTION_CLOSE));
-        assert!(decorated.contains("\"workspace_name\""));
-        assert!(decorated.contains("\"branch_name\""));
-        assert!(decorated.contains("\"chat_title\""));
-        // The user never sees the block, so the visible text must survive stripping.
+            .unwrap_or_default();
+        assert!(!decorated.contains("\"workspace_name\""), "{decorated}");
+        assert!(!decorated.contains("\"branch_name\""), "{decorated}");
+        assert!(!decorated.contains("\"chat_title\""), "{decorated}");
+        // Whatever else rides along, the user's own text must survive stripping.
         assert_eq!(
             strip_archductor_metadata_block(&decorated),
             "Fix the billing webhook retries"
         );
+    }
+
+    #[test]
+    fn a_rename_during_the_naming_call_is_not_overwritten_by_it() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix the billing webhook", "user_send")
+            .unwrap();
+
+        // The call goes out against the state as it is now.
+        let context = store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .unwrap();
+
+        // While it is out, the user names all three themselves. Neither rename
+        // marks the workspace as named, so intent still says "unnamed".
+        store.rename_branch("berlin", "lc/payments-hotfix").unwrap();
+        store.rename("berlin", "payments-hotfix").unwrap();
+        store
+            .update_chat_thread_title(thread.id, "Payments Hotfix")
+            .unwrap();
+
+        // The answer was computed before any of that, so it must not land.
+        let applied = store
+            .apply_deterministic_names(
+                thread.id,
+                &context,
+                &crate::agent_naming::AgentNames {
+                    workspace_name: Some("stripe webhook retry".to_owned()),
+                    branch_name: Some("stripe-webhook-retry".to_owned()),
+                    chat_title: Some("Stripe Webhook Retry".to_owned()),
+                },
+            )
+            .unwrap();
+
+        assert!(!applied);
+        let workspace = store.get_by_name("payments-hotfix").unwrap();
+        assert_eq!(workspace.branch, "lc/payments-hotfix");
+        assert_eq!(
+            store.get_chat_thread(thread.id).unwrap().title,
+            "Payments Hotfix"
+        );
+    }
+
+    #[test]
+    fn a_manual_chat_retitle_does_not_block_naming_the_workspace() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix the billing webhook", "user_send")
+            .unwrap();
+        let context = store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .unwrap();
+
+        // Only the title was claimed; the workspace is still on its codename.
+        store
+            .update_chat_thread_title(thread.id, "Payments Hotfix")
+            .unwrap();
+
+        assert!(store
+            .apply_deterministic_names(
+                thread.id,
+                &context,
+                &crate::agent_naming::AgentNames {
+                    workspace_name: Some("stripe webhook retry".to_owned()),
+                    branch_name: Some("stripe-webhook-retry".to_owned()),
+                    chat_title: Some("Stripe Webhook Retry".to_owned()),
+                },
+            )
+            .unwrap());
+
+        // The workspace took the generated name; the typed title survived.
+        assert!(store.get_by_name("stripe-webhook-retry").is_ok());
+        assert_eq!(
+            store.get_chat_thread(thread.id).unwrap().title,
+            "Payments Hotfix"
+        );
+    }
+
+    #[test]
+    fn an_untouched_chat_still_takes_every_generated_name() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix the billing webhook", "user_send")
+            .unwrap();
+        let context = store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .unwrap();
+
+        assert!(store
+            .apply_deterministic_names(
+                thread.id,
+                &context,
+                &crate::agent_naming::AgentNames {
+                    workspace_name: Some("stripe webhook retry".to_owned()),
+                    branch_name: Some("stripe-webhook-retry".to_owned()),
+                    chat_title: Some("Stripe Webhook Retry".to_owned()),
+                },
+            )
+            .unwrap());
+
+        let workspace = store.get_by_name("stripe-webhook-retry").unwrap();
+        assert_eq!(workspace.branch, "lc/stripe-webhook-retry");
+        assert_eq!(
+            store.get_chat_thread(thread.id).unwrap().title,
+            "Stripe Webhook Retry"
+        );
+    }
+
+    #[test]
+    fn a_fallback_title_keeps_the_chat_in_scope_for_naming() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+
+        // First send: the floor puts a readable title on the tab immediately so
+        // it never sits on "New chat" while the naming call is out.
+        store
+            .decorate_chat_input(thread.id, "Fix the billing webhook retries please")
+            .unwrap();
+        assert_eq!(
+            store.get_chat_thread(thread.id).unwrap().title,
+            "Fix the billing webhook retries please"
+        );
+        assert!(store.chat_title_is_derived(thread.id).unwrap());
+
+        // That fallback is not a real name, so the chat is still something the
+        // naming call has work to do on. Without the derived flag this read as
+        // named and the chat kept the fallback forever.
+        assert!(store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .is_some());
+
+        // Once a real name lands, the title is authoritative and there is
+        // nothing left to name.
+        store
+            .append_chat_message(
+                thread.id,
+                "user",
+                "Fix the billing webhook retries",
+                "user_send",
+            )
+            .unwrap();
+        let context = store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .unwrap();
+        store
+            .apply_deterministic_names(
+                thread.id,
+                &context,
+                &crate::agent_naming::AgentNames {
+                    workspace_name: Some("billing webhook retries".to_owned()),
+                    branch_name: Some("billing-webhook-retries".to_owned()),
+                    chat_title: Some("Billing Webhook Retries".to_owned()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.get_chat_thread(thread.id).unwrap().title,
+            "Billing Webhook Retries"
+        );
+        assert!(!store.chat_title_is_derived(thread.id).unwrap());
+        assert!(store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -25143,12 +25499,12 @@ spotlight_testing = true
             store.chat_naming_request(thread.id).unwrap(),
             Some(ChatNamingRequest::WorkspaceAndChat)
         );
-        let decorated = store
-            .decorate_chat_input(thread.id, "Fix the issue")
+        let context = store
+            .deterministic_naming_context(thread.id)
             .unwrap()
             .unwrap();
-        assert!(decorated.contains("\"workspace_name\""));
-        assert!(!decorated.contains("\"branch_name\""));
+        assert!(context.wants_workspace_name);
+        assert!(!context.wants_branch_name);
     }
 
     #[test]
@@ -25175,13 +25531,12 @@ spotlight_testing = true
             store.chat_naming_request(second.id).unwrap(),
             Some(ChatNamingRequest::ChatOnly)
         );
-        let decorated = store
-            .decorate_chat_input(second.id, "Add the dashboard")
+        let context = store
+            .deterministic_naming_context(second.id)
             .unwrap()
-            .unwrap();
-        assert!(decorated.contains("\"chat_title\""));
-        assert!(!decorated.contains("\"workspace_name\""));
-        assert!(!decorated.contains("\"branch_name\""));
+            .expect("a new chat in a named workspace still needs a title");
+        assert!(!context.wants_workspace_name);
+        assert!(!context.wants_branch_name);
     }
 
     #[test]
@@ -25192,25 +25547,35 @@ spotlight_testing = true
             .unwrap();
 
         assert!(store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .is_some_and(|context| context.wants_workspace_name));
+        store
             .decorate_chat_input(thread.id, "Fix billing webhook")
-            .unwrap()
-            .unwrap()
-            .contains("\"workspace_name\""));
+            .unwrap();
 
         // The agent said something, but not the metadata block. The workspace is
         // still on its codename, so the next message asks once more.
-        store.set_chat_metadata_cursor(thread.id, 7).unwrap();
+        let mut cursor = 7;
+        store.set_chat_metadata_cursor(thread.id, cursor).unwrap();
         assert_eq!(
             store.chat_naming_request(thread.id).unwrap(),
             Some(ChatNamingRequest::WorkspaceBranchAndChat)
         );
 
-        // ...and then stops. Two asks is the cap; Archductor names it instead.
-        store
-            .decorate_chat_input(thread.id, "And also the dashboard")
-            .unwrap();
-        store.set_chat_metadata_cursor(thread.id, 9).unwrap();
-        assert_eq!(store.chat_naming_request(thread.id).unwrap(), None);
+        // ...and then stops once the cap is spent; Archductor names it instead.
+        // Driven by the observable state rather than a send count, so tuning the
+        // cap does not silently turn this into a test of nothing.
+        let mut sends = 0;
+        while store.chat_naming_request(thread.id).unwrap().is_some() {
+            sends += 1;
+            assert!(sends <= 20, "the naming ask never stopped");
+            store
+                .decorate_chat_input(thread.id, "And also the dashboard")
+                .unwrap();
+            cursor += 2;
+            store.set_chat_metadata_cursor(thread.id, cursor).unwrap();
+        }
     }
 
     #[test]
@@ -25271,11 +25636,17 @@ spotlight_testing = true
                 "user_send",
             )
             .unwrap();
-        store.set_chat_metadata_cursor(thread.id, 7).unwrap();
-        store.decorate_chat_input(thread.id, "any update?").unwrap();
-        store.set_chat_metadata_cursor(thread.id, 9).unwrap();
-        // Third send: the ask is spent, so Archductor names it from the request.
-        store.decorate_chat_input(thread.id, "any update?").unwrap();
+        // Keep sending, silently. Once the wait is spent Archductor stops hoping
+        // for a real name and derives one from the request.
+        let mut cursor = 7;
+        for _ in 0..20 {
+            store.set_chat_metadata_cursor(thread.id, cursor).unwrap();
+            store.decorate_chat_input(thread.id, "any update?").unwrap();
+            cursor += 2;
+            if store.get_by_name("retry-failed-billing-webhooks").is_ok() {
+                break;
+            }
+        }
 
         let renamed = store.get_by_name("retry-failed-billing-webhooks").unwrap();
         assert_eq!(renamed.branch, "lc/retry-failed-billing-webhooks");

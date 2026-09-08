@@ -17,6 +17,13 @@ Later layers win key by key. Put team decisions in `settings.toml`, put
 absolute paths, personal endpoints, and anything secret in
 `settings.local.toml`.
 
+App shared defaults live in `$XDG_CONFIG_HOME/archductor/settings.toml`
+(`~/.config/archductor/settings.toml`) and apply to every repository on the
+machine. Because the repository layer wins, a key written into
+`.archductor/settings.toml` shadows your machine-wide value — so if a global
+default appears to be ignored, check whether the repository is setting the same
+key.
+
 ```bash
 archductor archcar settings --repository my-app          # effective merged settings, as JSON
 archductor archcar settings-source --repository my-app --layer local
@@ -272,7 +279,8 @@ todo will refuse a merge until you resolve it or opt out.
 [customization.workspace_defaults]
 base_branch = "main"
 workspace_parent = "~/worktrees/my-app"
-branch_prefix = "pk"          # default "lc"
+branch_prefix = "pk"          # default "lc"; set it machine-wide instead if you
+                              # want every repository to use it
 working_directory = "apps/web"
 port_block_size = 20          # default 10
 default_visible_tab = "changes"

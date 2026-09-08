@@ -978,7 +978,13 @@ pub fn default_repository_settings_toml() -> Result<String> {
             },
             workspace_defaults: WorkspaceDefaultSettings {
                 base_branch: Some("main".to_owned()),
-                branch_prefix: Some("lc".to_owned()),
+                // Deliberately absent. Every managed repository gets this file
+                // written on bootstrap, and the repository layer beats the app
+                // layer, so writing the built-in default here made the global
+                // "Branch prefix" setting impossible to apply anywhere — the
+                // whole machine stayed on `lc/`. Leaving it unset means the
+                // global value shows through and the code default (`lc`) still
+                // applies when nobody sets one.
                 port_block_size: Some(10),
                 default_visible_tab: Some("changes".to_owned()),
                 ..WorkspaceDefaultSettings::default()
@@ -3289,6 +3295,60 @@ fn normalize_workspace_tab(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn bootstrapped_repository_lets_a_global_branch_prefix_through() {
+        // Regression: the bootstrap template used to write `branch_prefix = "lc"`
+        // into every managed repository. The repository layer beats the app
+        // layer, so the global setting could never take effect and every branch
+        // on the machine stayed on `lc/`.
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        ensure_repository_config(&repo).unwrap();
+
+        let app_settings = temp.path().join("settings.toml");
+        std::fs::write(
+            &app_settings,
+            "[customization.workspace_defaults]\nbranch_prefix = \"gg\"\n",
+        )
+        .unwrap();
+
+        let effective = load_effective_repository_settings(&repo, &app_settings).unwrap();
+        assert_eq!(
+            effective
+                .customization
+                .workspace_defaults
+                .branch_prefix
+                .as_deref(),
+            Some("gg"),
+        );
+
+        // A repository that sets one explicitly still wins over the global.
+        let shared = repo.join(".archductor/settings.toml");
+        let contents = std::fs::read_to_string(&shared).unwrap();
+        assert!(
+            !contents.contains("branch_prefix"),
+            "bootstrap template must not pin a branch prefix:\n{contents}"
+        );
+        std::fs::write(
+            &shared,
+            contents.replace(
+                "[customization.workspace_defaults]",
+                "[customization.workspace_defaults]\nbranch_prefix = \"repo\"",
+            ),
+        )
+        .unwrap();
+        let effective = load_effective_repository_settings(&repo, &app_settings).unwrap();
+        assert_eq!(
+            effective
+                .customization
+                .workspace_defaults
+                .branch_prefix
+                .as_deref(),
+            Some("repo"),
+        );
+    }
     use super::*;
     use std::fs;
 

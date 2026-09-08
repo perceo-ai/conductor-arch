@@ -166,6 +166,36 @@ describe("Timeline", () => {
     ]);
   });
 
+  it("mounts only the newest rows and reveals the rest on demand", () => {
+    items = Array.from({ length: 400 }, (_, i) =>
+      projectionItem({ id: `m${i}`, body: `message ${i}` }),
+    );
+
+    const el = mount();
+    const rows = () => [...el.querySelectorAll(".chat-agent-text")].map((r) => r.textContent!.trim());
+
+    expect(rows()).toHaveLength(150);
+    // The window holds the end of the thread, which is what the reader is on.
+    expect(rows().at(-1)).toBe("message 399");
+    expect(rows()[0]).toBe("message 250");
+
+    const reveal = el.querySelector<HTMLButtonElement>(".chat-timeline-reveal-older");
+    expect(reveal?.textContent).toContain("250");
+
+    reveal!.click();
+    expect(rows()).toHaveLength(300);
+    expect(rows()[0]).toBe("message 100");
+  });
+
+  it("drops the reveal control once the whole thread is mounted", () => {
+    items = Array.from({ length: 20 }, (_, i) =>
+      projectionItem({ id: `m${i}`, body: `message ${i}` }),
+    );
+    const el = mount();
+    expect(el.querySelectorAll(".chat-agent-text")).toHaveLength(20);
+    expect(el.querySelector(".chat-timeline-reveal-older")).toBeNull();
+  });
+
   it("marks a running command without attaching the looping loader", () => {
     session = { runtime_state: "running", ready: false };
     items = [

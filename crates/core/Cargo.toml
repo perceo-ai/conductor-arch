@@ -22,7 +22,7 @@ vt100 = "0.16"
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs", "event"] }
 
 [dev-dependencies]
 tempfile = "3"
