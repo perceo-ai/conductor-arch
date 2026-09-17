@@ -1,0 +1,259 @@
+/* ── Polish pass: reading comfort ──
+ *
+ * The passes above this one make the app *consistent*. This one is what makes
+ * it feel finished, and it is almost entirely type size, leading, and air.
+ *
+ * Measured against the app it is judged by: a workspace view here rendered chat
+ * prose at 14px/21.7, charged 8px between a paragraph and the tool chips above
+ * it, and listed changed files at 11px in 22px rows. The reference renders the
+ * same three things at roughly 15px/25, ~18px, and 12.5px in 30px rows. None of
+ * that is a different *design* — it is the same design with about a third more
+ * room, and room is most of what reads as quality on a desktop app.
+ *
+ * Nothing here moves a control, renames anything, or changes what is shown. It
+ * costs roughly two list rows per screen; that is the trade being made
+ * deliberately. The density setting still applies on top, so anyone who wants
+ * the old information density has Compact. */
+
+/* ── Chat prose ──
+ *
+ * 15px is the smallest size at which a long agent reply stops feeling like log
+ * output, and 1.7 is the leading that keeps a 72-character measure readable
+ * without the lines drifting apart into a list. */
+.chat-agent-text,
+.chat-agent-row > .markdown-body,
+.markdown-body {
+    font-size: 15px;
+    line-height: 1.7;
+}
+
+.markdown-body p,
+.markdown-body li {
+    line-height: 1.7;
+}
+
+.markdown-body li + li {
+    margin-top: 6px;
+}
+
+.markdown-body p + p,
+.markdown-body p + ul,
+.markdown-body p + ol,
+.markdown-body ul + p,
+.markdown-body ol + p {
+    margin-top: 14px;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+    margin-top: 22px;
+    margin-bottom: 8px;
+    line-height: 1.35;
+}
+
+.chat-reasoning-text {
+    font-size: 14px;
+    line-height: 1.65;
+}
+
+.chat-user-bubble {
+    font-size: 15px;
+    line-height: 1.6;
+    padding: 11px 16px;
+}
+
+/* ── Transcript rhythm ──
+ *
+ * The boundary-charged model from theme/28 is right; the amounts were about
+ * half of what they need to be. A turn should read as a block with space
+ * around it, not as one continuous column of lines. */
+.chat-agent-text:not(:first-child),
+.chat-reasoning-block:not(:first-child),
+.chat-user-row:not(:first-child) {
+    margin-top: 18px;
+}
+
+.chat-inline-event:not(:first-child) {
+    margin-top: 8px;
+}
+
+.chat-inline-event + .chat-agent-text,
+.chat-inline-event + .chat-reasoning-block {
+    margin-top: 18px;
+}
+
+.chat-agent-text + .chat-inline-event,
+.markdown-body + .chat-inline-event {
+    margin-top: 16px;
+}
+
+/* The column's own inset. A wide left margin is what stops a 72ch measure from
+   reading as text pinned to a wall. */
+.chat-messages {
+    padding: 26px 40px 28px;
+}
+
+.markdown-body pre {
+    margin: 16px 0;
+    padding: 14px 16px;
+}
+
+.markdown-body table {
+    margin: 16px 0;
+}
+
+.markdown-body th,
+.markdown-body td {
+    padding: 7px 12px;
+}
+
+/* ── Tool-call rows ──
+ *
+ * These are one-line records and want to stay compact, but 13px text in a 28px
+ * row with a 4px dot was small enough to read as decoration rather than as the
+ * agent's actual work log. */
+.chat-inline-event-header {
+    min-height: 30px;
+    gap: 7px;
+    padding: 3px 8px;
+    margin-left: -8px;
+    font-size: 13px;
+}
+
+.chat-inline-event-chip-label {
+    font-size: 12px;
+}
+
+.chat-inline-event-action {
+    font-size: 12px;
+}
+
+/* ── Composer ──
+ *
+ * The primary input was 93px tall including its toolbar, which leaves about two
+ * lines for the thing the whole app exists to send. */
+.chat-composer-box {
+    padding: 14px 16px 10px;
+    gap: 10px;
+}
+
+.chat-input-view,
+.chat-placeholder {
+    font-size: 15px;
+    line-height: 1.6;
+}
+
+.chat-composer {
+    padding-bottom: 18px;
+}
+
+/* ── Sidebar ──
+ *
+ * Rows go from 34px to 40px — the height at which a 13px label, a status dot
+ * and a diffstat stop crowding each other, and the height the reference uses. */
+.workspace-row-shell {
+    min-height: 40px;
+    padding: 7px 10px;
+}
+
+.sidebar-nav-button {
+    min-height: 34px;
+}
+
+.project-row {
+    min-height: 40px;
+}
+
+.workspace-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+/* ── Right-rail lists ──
+ *
+ * 11px in a 22px row is a density no desktop app needs; a changed-file list is
+ * read, not scanned past. */
+.ws-change-row,
+.ws-file-row,
+.ws-check-row-flat,
+.ws-timeline-row,
+.ws-file-comment-row {
+    min-height: 30px;
+    padding-block: 5px;
+    font-size: 12.5px;
+    gap: 8px;
+}
+
+.ws-file-additions,
+.ws-file-deletions {
+    font-size: 12px;
+}
+
+.ws-tab-panel,
+.command-panel {
+    padding: 16px;
+}
+
+/* ── Right-rail tabs ──
+ *
+ * The reference app renders this strip as a segmented control: compact pills,
+ * left-aligned, the active one filled. That was built here and then reverted —
+ * `panelTabChrome.test.ts` guards the opposite decision ("lets right-panel tabs
+ * fill their strip instead of floating as inset cards"), added deliberately in
+ * #117 when the Code layout's panel chrome was restored. Overwriting a guard to
+ * make a visual change pass is how a fixed bug comes back, so the strip keeps
+ * its full-width tabs and only gains height and a legible label size.
+ *
+ * The truncation this strip shows at narrow widths ("Summ… 2", "Chang… 14")
+ * comes from that same fill-and-hide-overflow decision and is left alone for
+ * the same reason. */
+.ws-right-tabs .nav-button {
+    min-height: 30px;
+    font-size: 12.5px;
+}
+
+/* ── Selection, quieter ──
+ *
+ * The accent gradient introduced in 02-shell was louder than the thing it was
+ * marking: a selected row should read as *raised*, with the accent present as a
+ * thin edge rather than as a wash across the label. */
+.sidebar-nav-button.active,
+.sidebar-nav-button.nav-button-active,
+.workspace-row-shell.selected {
+    background: var(--el-3);
+    box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+/* ── The content pane ──
+ *
+ * A single hairline between navigation and work is the weakest possible
+ * separation. Insetting the pane and rounding the corner it presents to the
+ * sidebar reads as two surfaces at different depths, which is the whole point
+ * of having an elevation ladder. */
+.content-area {
+    border-top-left-radius: 12px;
+    border-left: 1px solid var(--edge-hairline);
+    overflow: hidden;
+}
+
+.sidebar {
+    border-right: none;
+}
+
+/* ── Page chrome ── */
+.ws-topbar {
+    min-height: 46px;
+    padding-inline: 16px;
+}
+
+.page-header {
+    padding-inline: 8px;
+}
+
+.page-body,
+.page-board,
+.kanban-board {
+    padding: 24px 28px;
+}

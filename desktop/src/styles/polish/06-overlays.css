@@ -1,0 +1,201 @@
+/* ── Polish pass: overlays (palette, dialogs, menus, toasts, peek) ──
+ *
+ * An overlay's whole job is to be unmistakably in front. The app's overlays
+ * were drawing a 45%-black scrim over a sharp background and a single wide
+ * drop-shadow, which at this contrast left the page behind competing for
+ * attention with the thing that just opened. Backdrop blur plus the layered
+ * shadow scale fixes both without touching the overlay's contents. */
+
+.cmdk-overlay,
+.modal-scrim,
+.setup-scrim,
+.dialog-scrim {
+    /* Blur is the expensive half of this look: the scrim covers the whole
+       window, so every frame it is up costs a full-surface re-blur. 6px with no
+       `saturate()` reads the same at this opacity and measures back inside the
+       frame budget; the heavier recipe cost 2.5x the frame time with the
+       palette open. The dim does most of the separating work anyway. */
+    background: rgba(6, 6, 6, 0.62);
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+}
+
+.cmdk-panel,
+.setup-modal,
+.modal-body,
+.dialog-panel,
+.settings-panel-modal {
+    border-radius: var(--r-lg);
+    background: var(--el-4);
+    border: 1px solid var(--edge-hairline-strong);
+    box-shadow: var(--edge-lit), var(--sh-4);
+}
+
+/* ── Command palette ──
+ *
+ * The active row was an accent mix over a dark panel, which lands on a muddy
+ * olive for the amber accent. Pairing a lighter surface with an accent rail
+ * reads as selection at every accent, and keeps the label at full contrast. */
+.cmdk-input {
+    font-size: 14px;
+}
+
+.cmdk-item {
+    border-radius: var(--r-sm);
+}
+
+.cmdk-item:hover {
+    background: var(--el-3);
+}
+
+.cmdk-item-active,
+.cmdk-item-active:hover {
+    background: var(--accent-wash);
+    box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+.cmdk-item-group {
+    font-size: 9.5px;
+    font-weight: 650;
+    letter-spacing: 0.07em;
+}
+
+.cmdk-item-shortcut,
+.cmdk-item-hint {
+    font-variant-numeric: tabular-nums;
+}
+
+.cmdk-item-shortcut {
+    padding: 1px 6px;
+    border-radius: var(--r-xs);
+    background: var(--tint-info);
+    color: var(--tint-info-fg);
+}
+
+/* ── Setup modal ──
+ *
+ * The state badges were saturated fills with dark text — the loudest pixels in
+ * the app, on the first screen a new user sees. They become tinted chips at the
+ * same weight as every other chip, and get a fixed column so the four rows'
+ * titles start on one vertical line instead of three. */
+.setup-status-list {
+    border-radius: var(--r-md);
+    border: 1px solid var(--edge-hairline);
+    background: var(--el-1);
+}
+
+/* The row tint was a full green/red wash behind the whole row, which made a
+   four-row list read as a stoplight. State lives in the pill; the row keeps a
+   neutral surface and the state only colours its leading edge. */
+.setup-status-row,
+.setup-status-row.setup-status-ready,
+.setup-status-row.setup-status-missing,
+.setup-status-row.setup-status-missing-required {
+    border-radius: var(--r-sm);
+    background: var(--el-2);
+    border: 1px solid var(--edge-hairline);
+    border-left-width: 3px;
+}
+
+.setup-status-row.setup-status-ready {
+    border-left-color: var(--tint-pos-fg);
+}
+
+.setup-status-row.setup-status-missing {
+    border-left-color: var(--edge-hairline-strong);
+}
+
+.setup-status-row.setup-status-missing-required {
+    border-left-color: var(--tint-neg-fg);
+}
+
+/* A fixed pill width is what puts the four names on one vertical line; without
+   it the title of each row starts wherever its state word happens to end. */
+.setup-status-pill {
+    flex: 0 0 auto;
+    min-width: 66px;
+    text-align: center;
+    justify-content: center;
+    border-radius: var(--r-pill);
+    border: 1px solid transparent;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+}
+
+.setup-pill-ready {
+    background: var(--tint-pos);
+    color: var(--tint-pos-fg);
+}
+
+.setup-pill-action {
+    background: var(--tint-warn);
+    color: var(--tint-warn-fg);
+}
+
+.setup-pill-missing {
+    background: var(--tint-neg);
+    color: var(--tint-neg-fg);
+}
+
+.setup-link {
+    border-radius: var(--r-sm);
+    min-height: 28px;
+    background: var(--el-3);
+    border: 1px solid var(--edge-hairline);
+    color: var(--lc-text);
+}
+
+.setup-link:hover {
+    background: var(--el-4);
+    border-color: var(--edge-hairline-strong);
+}
+
+/* "Recheck" is the modal's only action, so it takes the accent. */
+.setup-actions button {
+    border-radius: var(--r-sm);
+    min-height: 30px;
+    background: var(--lc-accent);
+    color: #1a1204;
+    border: 1px solid transparent;
+    font-weight: 600;
+}
+
+.setup-actions button:hover {
+    background: color-mix(in srgb, var(--lc-accent) 88%, #ffffff);
+}
+
+/* ── Menus and popovers ── */
+.context-menu,
+.layout-menu,
+.compact-select-menu,
+.chat-skill-menu,
+.peek-card {
+    border-radius: var(--r-md);
+    background: var(--el-4);
+    border: 1px solid var(--edge-hairline-strong);
+    box-shadow: var(--edge-lit), var(--sh-3);
+}
+
+.context-menu-item,
+.layout-menu-item,
+.compact-select-option {
+    border-radius: var(--r-xs);
+}
+
+/* ── Toasts ── */
+.toast {
+    border-radius: var(--r-md);
+    background: var(--el-4);
+    border: 1px solid var(--edge-hairline-strong);
+    box-shadow: var(--edge-lit), var(--sh-3);
+}
+
+/* The palette's input has no border of its own — it is a field cut into the
+   panel — so the shared focus ring drew a floating rounded rectangle across
+   the panel's top edge. The panel itself is the focus indicator here. */
+.cmdk-input:focus-visible,
+.cmdk-input:focus {
+    outline: none;
+    box-shadow: none;
+}

@@ -1,0 +1,145 @@
+/* ── Polish pass: dashboard board ──
+ *
+ * The board's columns size to their content, which is right for a sparse board
+ * and wrong for a wide window: five narrow columns left roughly two thirds of
+ * a 1512px viewport as empty black. Letting the columns share the width — with
+ * a floor so they never get too narrow to read a branch name — uses the space
+ * without changing what the board is or how it behaves. */
+
+.kanban-board {
+    gap: 14px;
+}
+
+/* Growing keeps the board one row (a wrapping board loses the left-to-right
+   reading of the pipeline) while letting the columns share whatever width the
+   window has. 200px is the narrowest a card can be and still fit
+   "PR #118 OPEN" on one chip line; five of those plus the gaps fit inside the
+   board at the app's smallest sensible window, so it never scrolls
+   horizontally. The cap stops a two-column board from stretching a card to
+   700px, where the title and its chips drift apart. */
+.kanban-column {
+    flex: 1 1 200px;
+    min-width: 200px;
+    max-width: 420px;
+}
+
+.kanban-column-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--edge-hairline);
+}
+
+/* The count was plain text pushed to the far edge of the column, which made it
+   read as a value in a table rather than as a property of the heading. A pill
+   next to the title binds the two. */
+.column-count {
+    margin-left: auto;
+    min-width: 20px;
+    padding: 1px 7px;
+    border-radius: var(--r-pill);
+    background: var(--tint-info);
+    color: var(--tint-info-fg);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+/* ── Cards ──
+   One radius, one border, one resting elevation, and a hover that lifts rather
+   than just lightening. The lift is what tells you the whole card is the
+   target — the previous hover changed only the fill, which is also what a row
+   does when a child control is hovered. */
+.kanban-column .workspace-card,
+.workspace-card-action .workspace-card {
+    border-radius: var(--r-md);
+    background: var(--el-2);
+    border: 1px solid var(--edge-hairline);
+    /* The status rail is the card's only colour-coded field and the fastest
+       way to read the board; the border shorthand above would flatten it. Its
+       colour comes from an inline style per card. */
+    border-left-width: 3px;
+    box-shadow: var(--edge-lit), var(--sh-1);
+}
+
+.kanban-column .workspace-card:hover,
+.workspace-card-action:hover .workspace-card {
+    background: var(--el-3);
+    border-color: var(--edge-hairline-strong);
+    box-shadow: var(--edge-lit), var(--sh-2);
+}
+
+.workspace-card-action:active .workspace-card {
+    box-shadow: var(--edge-lit), var(--sh-1);
+}
+
+.workspace-card-action:focus-visible .workspace-card {
+    border-color: var(--accent-edge);
+    box-shadow: var(--edge-lit), 0 0 0 3px var(--accent-ring);
+}
+
+/* ── Card chips ──
+   The board was using four chip treatments at once — filled amber, outlined
+   green, plain text, and a bordered pill — for facts of equal importance, so
+   colour carried no meaning. Everything becomes one neutral chip; colour is
+   reserved for the three states that actually need attention. */
+.triage-badge {
+    border-radius: var(--r-pill);
+    border: 1px solid transparent;
+    background: var(--tint-info);
+    color: var(--tint-info-fg);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    padding: 2px 8px;
+    line-height: 1.5;
+}
+
+/* Something is happening right now. */
+.triage-badge-agent,
+.triage-badge-run {
+    background: var(--tint-pos);
+    color: var(--tint-pos-fg);
+}
+
+/* Something is waiting on a person — the only reason to look away from the
+   chat you are in. */
+.triage-badge-task {
+    background: var(--tint-warn);
+    color: var(--tint-warn-fg);
+}
+
+/* Diffstat is a number pair, not a label: tabular figures keep the columns of
+   a card stack aligned as the values change. */
+.workspace-row-diff,
+.workspace-row-additions,
+.workspace-row-deletions,
+.dashboard-card-essentials {
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Empty state ──
+   A centred card with a ghost button reads as a dead end. The card keeps its
+   shape; the call to action becomes the one accent-filled control on screen,
+   which is what makes it look like the next step. */
+.onboarding-card {
+    border-radius: var(--r-lg);
+    background: var(--el-1);
+    border: 1px solid var(--edge-hairline);
+    box-shadow: var(--edge-lit), var(--sh-2);
+}
+
+/* The one button on an otherwise empty screen: nothing else here competes with
+   it, and it is literally the only way forward. The parent selector is load
+   bearing — `.suggested-action` is also on this button and is restyled in
+   05-panels, which comes later, so matching its specificity would lose. */
+.dashboard-onboarding button.onboarding-cta {
+    background: var(--lc-accent);
+    color: #1a1204;
+    border: 1px solid transparent;
+    border-radius: var(--r-sm);
+    font-weight: 600;
+}
+
+.dashboard-onboarding button.onboarding-cta:hover {
+    background: color-mix(in srgb, var(--lc-accent) 88%, #ffffff);
+}

@@ -1,0 +1,164 @@
+/* ── Polish pass: workspace panels (right rail, changes, files, checks) ──
+ *
+ * These panels are read at a glance while the chat has focus, so their job is
+ * to be scannable rather than decorative. Every rule here is about making a
+ * list look like a list: consistent row height, a hover target that covers the
+ * whole row, numbers that line up, and counts that read as counts. */
+
+.ws-tab-panel,
+.command-panel,
+.ws-file-summary-panel {
+    background: var(--el-0);
+}
+
+/* Counts beside a tab label were bare digits at the same weight as the label,
+   which read as part of the word ("Changes 14"). The strip itself is restyled
+   as a segmented control in 09-comfort. */
+.ws-chat-tab-count,
+.nav-button-count,
+.ws-tab-shell .ws-tab-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: var(--r-pill);
+    background: var(--tint-info);
+    color: var(--tint-info-fg);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Rows ──
+ *
+ * One row treatment for changed files, tree entries, timeline events, checks
+ * and todos. The hover bleeds past the panel padding so the target is the full
+ * row rather than the text inside it. */
+.ws-change-row,
+.ws-file-row,
+.ws-check-row-flat,
+.ws-timeline-row,
+.ws-file-comment-row,
+.detail-row {
+    border-radius: var(--r-sm);
+    padding-inline: 8px;
+    margin-inline: -8px;
+}
+
+.ws-change-row:hover,
+.ws-file-row:hover,
+.ws-check-row-flat:hover,
+.ws-timeline-row:hover {
+    background: var(--el-2);
+}
+
+.ws-file-additions,
+.ws-file-deletions,
+.ws-file-summary-counts {
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── Section labels ──
+ *
+ * "Git status", "GitHub Actions", "Checks" were regular-weight text the same
+ * size as the rows beneath them, so the panel read as one undifferentiated
+ * list. Small caps and a muted colour turn them back into headings without
+ * spending vertical space on a rule. */
+.ws-flat-section-label,
+.section-title,
+.detail-label {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 10px;
+    font-weight: 650;
+    color: var(--lc-text-muted);
+}
+
+/* ── Log and prompt surfaces ── */
+.ws-run-prompt,
+.ws-diff-view,
+.ws-file-preview {
+    border-radius: var(--r-md);
+    border: 1px solid var(--edge-hairline);
+    background: var(--el-1);
+}
+
+/* ── PR strip ── */
+.ws-pr-bar,
+.command-center-strip {
+    border-bottom: 1px solid var(--edge-hairline);
+}
+
+/* ── Buttons ──
+ *
+ * Three button roles across the panels — primary, secondary, destructive —
+ * were rendering at three different radii and two heights depending on which
+ * pass last touched them. */
+.suggested-action,
+.secondary-action,
+.ui-button-primary,
+.ui-button-secondary,
+.ui-button-destructive,
+.ws-text-input {
+    border-radius: var(--r-sm);
+    min-height: 28px;
+}
+
+/* Three weights, and only one of them is the accent.
+ *
+ * Accent is reserved for the single action that advances the app's main loop
+ * on the surface you are looking at. `.suggested-action` is used on eleven
+ * panels at once — "Add todo", "Create checkpoint", "Run setup" — so filling
+ * all of them would leave no way to tell the primary one apart, which is the
+ * state the chips on the dashboard were in. It becomes the raised neutral
+ * instead, one step above `.secondary-action`. */
+button.ui-button-primary,
+.ui-button-primary {
+    background: var(--lc-accent);
+    color: #1a1204;
+    border: 1px solid transparent;
+    font-weight: 600;
+}
+
+button.ui-button-primary:hover,
+.ui-button-primary:hover {
+    background: color-mix(in srgb, var(--lc-accent) 88%, #ffffff);
+}
+
+button.suggested-action,
+.suggested-action {
+    background: var(--el-3);
+    border: 1px solid var(--edge-hairline-strong);
+    color: var(--lc-text-strong);
+    font-weight: 550;
+}
+
+button.suggested-action:hover,
+.suggested-action:hover {
+    background: var(--el-4);
+}
+
+.secondary-action,
+button.ui-button-secondary {
+    background: var(--el-2);
+    border: 1px solid var(--edge-hairline);
+    color: var(--lc-text);
+}
+
+.secondary-action:hover,
+button.ui-button-secondary:hover {
+    background: var(--el-3);
+    border-color: var(--edge-hairline-strong);
+}
+
+.ws-text-input {
+    background: var(--el-1);
+    border: 1px solid var(--edge-hairline);
+}
+
+.ws-text-input:focus {
+    border-color: var(--accent-edge);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+    outline: none;
+}

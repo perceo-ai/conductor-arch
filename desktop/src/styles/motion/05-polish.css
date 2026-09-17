@@ -1,0 +1,73 @@
+/* ── Motion for the polish pass ──
+ *
+ * 04-surfaces already covers most of the app: rows stagger in, overlays scale
+ * from their anchor, tabs slide their underline, cards lift on hover. This file
+ * only carries the motion the polish pass newly needs — the properties it
+ * introduced (box-shadow on cards, the composer's focus ring, the new hover
+ * surfaces) would otherwise snap between states while everything beside them
+ * eased.
+ *
+ * Same two rules as 01-tokens: tokens only, never literals, so 99-reduced can
+ * see them. Nothing may be imported after 99-reduced. */
+
+/* The cards' lift is animated in 04-surfaces, but its shadow was static — a
+   card that moves without its shadow changing reads as a sprite sliding over a
+   painted one. */
+.workspace-card,
+.dashboard-card,
+.repo-card {
+    transition:
+        transform var(--mo-fast) var(--mo-out),
+        border-color var(--mo-fast) var(--mo-in-out),
+        background-color var(--mo-fast) var(--mo-in-out),
+        box-shadow var(--mo-base) var(--mo-out);
+}
+
+/* Board cards arrive the way sidebar rows already do. Delay is per column
+   position rather than per card, so five columns filling at once read as one
+   board appearing instead of five independent lists. */
+.kanban-column {
+    animation: mo-rise-in var(--mo-base) var(--mo-out) both;
+}
+
+.kanban-column:nth-child(1) { animation-delay: 0ms; }
+.kanban-column:nth-child(2) { animation-delay: calc(var(--mo-stagger) * 1.5); }
+.kanban-column:nth-child(3) { animation-delay: calc(var(--mo-stagger) * 3); }
+.kanban-column:nth-child(4) { animation-delay: calc(var(--mo-stagger) * 4.5); }
+.kanban-column:nth-child(n + 5) { animation-delay: calc(var(--mo-stagger) * 6); }
+
+/* The composer's focus ring. Instant would be correct for a focus *outline*;
+   this is a glow on the app's primary input, and 140ms is what makes clicking
+   into it feel like the field woke up rather than like it flashed. */
+.chat-composer-box,
+.workspace-search,
+.ws-text-input {
+    transition:
+        border-color var(--mo-fast) var(--mo-in-out),
+        box-shadow var(--mo-fast) var(--mo-out),
+        background-color var(--mo-fast) var(--mo-in-out);
+}
+
+/* Row and chip hovers introduced by the polish pass. */
+.chat-inline-event-header,
+.chat-inline-event-chip,
+.ws-change-row,
+.ws-file-row,
+.ws-check-row-flat,
+.ws-timeline-row,
+.history-row,
+.triage-badge,
+.new-chat-chip {
+    transition:
+        background-color var(--mo-fast) var(--mo-in-out),
+        border-color var(--mo-fast) var(--mo-in-out),
+        color var(--mo-fast) var(--mo-in-out);
+}
+
+/* Deliberately NOT animating the scrim's backdrop-filter.
+
+   Transitioning `backdrop-filter` re-blurs the whole window on every frame of
+   the transition, and the scrim covers the whole window. Measured on the
+   command palette: 16.8ms -> 41.9ms median frame time while open, and 537ms ->
+   1306ms to open. The scrim's own fade (mo-fade-in, in 04-surfaces) already
+   covers the entrance; the blur arrives with it. */

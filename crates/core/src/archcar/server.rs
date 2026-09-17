@@ -4224,19 +4224,42 @@ fn spawn_deterministic_naming(state: &Arc<Mutex<ServerState>>, thread_id: i64, r
     let state = Arc::clone(state);
     let request = request.to_owned();
     thread::spawn(move || {
-        let outcome = name_chat_deterministically(&db_path, thread_id, &request);
+        let outcome = rename_and_announce(&state, &db_path, thread_id, |db_path| {
+            name_chat_deterministically(db_path, thread_id, &request)
+        });
         if let Err(err) = &outcome {
             crate::agent_naming::warn_naming_failed(thread_id, err);
         }
         if let Ok(mut guard) = in_flight.lock() {
             guard.remove(&thread_id);
         }
-        // Only tell clients when something actually moved.
-        if matches!(outcome, Ok(true)) {
-            let before = None;
-            broadcast_naming_changes(&state, &db_path, thread_id, before);
-        }
     });
+}
+
+/// Run a rename and tell clients what moved.
+///
+/// The snapshot has to be taken before `rename` runs: `broadcast_naming_changes`
+/// reports the difference between it and the state it finds afterwards, and it
+/// emits nothing at all when handed `None`. This used to be inlined with a
+/// literal `None`, which renamed the workspace, its branch and the chat in
+/// silence — the desktop kept the name it had open, which no longer existed, so
+/// its top bar sat on the old name and "branch loading" until the workspace was
+/// reselected, and every panel keyed on that name queried a workspace the
+/// daemon had never heard of. Keeping the order inside one function is what
+/// stops that from being re-inlined wrongly.
+fn rename_and_announce(
+    state: &Arc<Mutex<ServerState>>,
+    db_path: &Path,
+    thread_id: i64,
+    rename: impl FnOnce(&Path) -> Result<bool>,
+) -> Result<bool> {
+    let before = thread_naming_snapshot(db_path, thread_id);
+    let outcome = rename(db_path);
+    // Only tell clients when something actually moved.
+    if matches!(outcome, Ok(true)) {
+        broadcast_naming_changes(state, db_path, thread_id, before);
+    }
+    outcome
 }
 
 /// Returns whether anything was renamed.
@@ -6298,6 +6321,101 @@ mod tests {
         };
         assert_eq!(second.input, "and lint");
         assert!(!second.input.contains("<archductor_hidden_instruction>"));
+    }
+
+    #[test]
+    fn deterministic_naming_announces_the_rename_it_performed() {
+        // The deterministic namer renames the workspace, its branch and the
+        // chat on a background thread, then reports what moved by diffing a
+        // snapshot taken *before* the rename against the current state. It used
+        // to hand `broadcast_naming_changes` a literal `None`, which makes that
+        // function return without emitting anything — so the desktop never
+        // learned the workspace it had open had been renamed, and sat on a dead
+        // name showing "branch loading" until it was reselected.
+        //
+        // This drives the store half directly (the real path asks a provider for
+        // the names first, which needs a network call) and asserts the ordering
+        // the caller must keep: snapshot, rename, broadcast.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "chimera".to_owned(),
+                branch: "lc/chimera".to_owned(),
+                base_ref: None,
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("chimera", "codex", "New chat", None)
+            .unwrap();
+
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+        }));
+
+        let context = crate::workspace::DeterministicNamingContext {
+            provider_key: "codex".to_owned(),
+            command: PathBuf::from("codex"),
+            cwd: workspace.path.clone(),
+            workspace_name: "chimera".to_owned(),
+            wants_workspace_name: true,
+            wants_branch_name: true,
+            observed_branch: "lc/chimera".to_owned(),
+            observed_chat_title: "New chat".to_owned(),
+        };
+        let names = crate::agent_naming::AgentNames {
+            workspace_name: Some("verbose config path".to_owned()),
+            branch_name: Some("verbose-config-path".to_owned()),
+            chat_title: Some("Verbose Config Path".to_owned()),
+        };
+        // Drive the real wrapper: it is the thing that has to snapshot before
+        // the rename. Passing the rename in as a closure is exactly how
+        // `spawn_deterministic_naming` calls it.
+        let moved = rename_and_announce(&state, &db_path, thread.id, |_| {
+            store.apply_deterministic_names(thread.id, &context, &names)
+        })
+        .unwrap();
+        assert!(moved, "the names should have been applied");
+
+        let events = subscriber_rx.try_iter().collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::WorkspaceRenamed { old_name, new_name }
+                    if old_name == "chimera" && new_name == "verbose-config-path"
+            )),
+            "no WorkspaceRenamed in {events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::ChatThreadRenamed { thread_id, title }
+                    if *thread_id == thread.id && title == "Verbose Config Path"
+            )),
+            "no ChatThreadRenamed in {events:?}"
+        );
     }
 
     #[test]

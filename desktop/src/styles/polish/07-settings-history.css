@@ -1,0 +1,114 @@
+/* ── Polish pass: settings and history ──
+ *
+ * Settings is already the best-composed surface in the app; it needed only its
+ * controls brought onto the shared scales. History needed more: it renders its
+ * entire page — heading, workspace names, branches, statuses — in the mono
+ * face, which makes a list of six workspaces read like terminal output rather
+ * than like the same workspaces shown in the sidebar beside it. */
+
+/* ── Settings ── */
+.settings-nav-item,
+.settings-nav button {
+    border-radius: var(--r-sm);
+}
+
+.settings-nav button:hover {
+    background: var(--el-2);
+}
+
+.settings-row {
+    border-bottom: 1px solid var(--edge-hairline);
+}
+
+.settings-row select,
+.settings-row input[type="text"],
+.settings-shortcut-input {
+    border-radius: var(--r-sm);
+    background: var(--el-2);
+    border: 1px solid var(--edge-hairline);
+    color: var(--lc-text);
+    min-height: 30px;
+}
+
+.settings-row select:focus,
+.settings-row input:focus,
+.settings-shortcut-input:focus {
+    border-color: var(--accent-edge);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+    outline: none;
+}
+
+/* Segmented controls (Theme, Density). One container, one thumb. */
+.settings-segmented,
+.segmented-control {
+    border-radius: var(--r-pill);
+    background: var(--el-1);
+    border: 1px solid var(--edge-hairline);
+    padding: 2px;
+}
+
+.settings-segmented button,
+.segmented-control button {
+    border-radius: var(--r-pill);
+    min-height: 26px;
+}
+
+.settings-segmented button[aria-pressed="true"],
+.settings-segmented button.active,
+.segmented-control button.active {
+    background: var(--el-3);
+    box-shadow: var(--edge-lit), var(--sh-1);
+    color: var(--lc-text-strong);
+}
+
+/* The four accent swatches overlapped each other, so the row read as one blob
+   rather than as four choices — and the selected one's ring was clipped by its
+   neighbour. The gap has to clear the selection ring, not just the circles. */
+.settings-swatch-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.settings-swatch {
+    border-radius: var(--r-pill);
+    box-shadow: var(--sh-1);
+}
+
+.settings-swatch.active {
+    outline: 2px solid var(--lc-text-strong);
+    outline-offset: 2px;
+}
+
+/* ── History ──
+ *
+ * The page heading and each workspace name go back to the UI face, so the list
+ * reads as the same six workspaces the sidebar is showing beside it rather than
+ * as terminal output. The meta line under each name keeps the mono face: it is
+ * a repository, a branch and a status, and those are literal identifiers —
+ * which is the same split the sidebar and the changes panel already use. */
+.history-view,
+.history-view .page-header,
+.history-row,
+.history-row-head {
+    font-family: var(--ui-font-sans);
+}
+
+.history-row {
+    border-radius: var(--r-md);
+    border: 1px solid transparent;
+    padding: 10px 12px;
+    margin-inline: -12px;
+}
+
+.history-row:hover {
+    background: var(--el-2);
+    border-color: var(--edge-hairline);
+}
+
+.history-row .workspace-row-diff,
+.history-row code,
+.history-branch {
+    font-family: var(--ui-font-mono);
+    font-variant-numeric: tabular-nums;
+}

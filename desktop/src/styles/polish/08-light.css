@@ -1,0 +1,355 @@
+/* ── Polish pass: light theme ──
+ *
+ * The light theme was the app's biggest visual defect. `theme/16-19-light-*`
+ * covers ~230 selectors, but the containers the eye reads first — the sidebar,
+ * the composer, the docked panels, the code surface — are styled from base.css
+ * with unconditional hex literals and were never given a light counterpart.
+ * The result: switching to Light lightened the chat scrollback only, leaving
+ * the sidebar dark with light-grey labels on it (unreadable) and the chat's own
+ * prose grey-on-white (also unreadable).
+ *
+ * This file does two things. First it restates the token scales for light, so
+ * every rule in the polish pass flips by itself. Second it patches the
+ * containers the older light files never reached. It is deliberately a list of
+ * surfaces rather than a clever trick: the durable fix is tokenising the 1,500
+ * hex literals in the four passes below, and this is the part of that work that
+ * pays off immediately. */
+
+body.lc-theme-light {
+    /* In light, raised means *lighter*, so the ladder inverts: the page is the
+       darkest thing on screen and a popover is pure white. */
+    --el-0: #f3f3f5;
+    --el-1: #fafafa;
+    --el-2: #ffffff;
+    --el-3: #eeeef1;
+    --el-4: #ffffff;
+
+    --edge-lit: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    --edge-hairline: rgba(15, 15, 20, 0.1);
+    --edge-hairline-strong: rgba(15, 15, 20, 0.16);
+
+    /* Shadows on white need a fraction of the alpha they need on black, or
+       every card looks like it is floating a foot off the page. */
+    --sh-1: 0 1px 2px rgba(15, 15, 20, 0.07);
+    --sh-2: 0 1px 2px rgba(15, 15, 20, 0.06), 0 6px 16px rgba(15, 15, 20, 0.07);
+    --sh-3: 0 2px 6px rgba(15, 15, 20, 0.07), 0 16px 36px rgba(15, 15, 20, 0.1);
+    --sh-4: 0 4px 12px rgba(15, 15, 20, 0.08), 0 28px 68px rgba(15, 15, 20, 0.14);
+
+    --tint-info: rgba(15, 15, 20, 0.06);
+    --tint-info-fg: #5a5a63;
+    --tint-pos: rgba(22, 143, 79, 0.12);
+    --tint-pos-fg: #16754a;
+    --tint-neg: rgba(190, 48, 48, 0.1);
+    --tint-neg-fg: #b03434;
+    --tint-warn: rgba(180, 115, 10, 0.13);
+    --tint-warn-fg: #96660c;
+
+    /* The existing light files already set text colours per surface; these are
+       the values the *untouched* surfaces fall back to. */
+    --lc-text: #3d3d45;
+    --lc-text-strong: #17171c;
+    --lc-text-muted: #6e6e78;
+    --lc-text-primary: #3d3d45;
+    --lc-text-secondary: #6e6e78;
+    --lc-border: rgba(15, 15, 20, 0.1);
+    --lc-border-strong: rgba(15, 15, 20, 0.16);
+    --lc-bg: #f3f3f5;
+    --lc-surface: #fafafa;
+    --lc-surface-raised: #ffffff;
+    --lc-surface-muted: #f3f3f5;
+    --lc-hover: #eeeef1;
+    --lc-hover-soft: #f4f4f6;
+    --ui-panel: #fafafa;
+    --ui-panel-2: #ffffff;
+    --ui-panel-3: #ffffff;
+    --ui-panel-hover: #eeeef1;
+    --ui-border: rgba(15, 15, 20, 0.1);
+    --ui-border-strong: rgba(15, 15, 20, 0.16);
+
+    /* Code keeps a tinted surface rather than plain white so a fence still
+       reads as a distinct object inside prose. */
+    --code-surface: #f6f6f8;
+    --code-fg: #26262c;
+    --code-gutter-fg: #9a9aa4;
+    --code-line-active: rgba(15, 15, 20, 0.05);
+    --diff-add-bg: #e7f6ec;
+    --diff-del-bg: #fdecec;
+    --diff-add-word: rgba(22, 143, 79, 0.22);
+    --diff-del-word: rgba(190, 48, 48, 0.18);
+    --diff-hunk-bg: #f1f1f4;
+    --diff-header-bg: #f6f6f8;
+    --ui-shadow-popover: 0 16px 40px rgba(15, 15, 20, 0.14);
+}
+
+/* ── Containers the older light pass never reached ── */
+body.lc-theme-light .app-root,
+body.lc-theme-light .content-area,
+body.lc-theme-light .page-shell,
+body.lc-theme-light .ws-command-center,
+body.lc-theme-light .ws-center,
+body.lc-theme-light .ws-tab-panel,
+body.lc-theme-light .ws-file-summary-panel,
+body.lc-theme-light .ws-right-tabs,
+body.lc-theme-light .ws-run-section,
+body.lc-theme-light .ws-run-tab-bar,
+body.lc-theme-light .command-panel,
+body.lc-theme-light .history-view,
+body.lc-theme-light .dashboard {
+    background: var(--el-0);
+    color: var(--lc-text);
+}
+
+body.lc-theme-light .sidebar,
+body.lc-theme-light .ws-topbar,
+body.lc-theme-light .ws-chat-tab-bar,
+body.lc-theme-light .page-header,
+body.lc-theme-light .settings-shell {
+    background: var(--el-1);
+    color: var(--lc-text);
+    border-color: var(--edge-hairline);
+}
+
+body.lc-theme-light .sidebar-nav-label,
+body.lc-theme-light .row-name,
+body.lc-theme-light .project-name,
+body.lc-theme-light .client-switcher-button,
+body.lc-theme-light .sidebar-nav-button,
+body.lc-theme-light .workspace-row-shell,
+body.lc-theme-light .project-row,
+body.lc-theme-light .ws-topbar-title,
+body.lc-theme-light .card-title,
+body.lc-theme-light .column-title {
+    color: var(--lc-text-strong);
+}
+
+body.lc-theme-light .projects-header .title,
+body.lc-theme-light .workspace-search,
+body.lc-theme-light .workspace-search input,
+body.lc-theme-light .sidebar-footer .sidebar-nav-button {
+    color: var(--lc-text-muted);
+}
+
+/* Chat prose was inheriting a dark-theme grey onto white. */
+body.lc-theme-light .chat-surface,
+body.lc-theme-light .chat-timeline-scroll,
+body.lc-theme-light .chat-messages {
+    background: var(--el-2);
+}
+
+body.lc-theme-light .chat-agent-text,
+body.lc-theme-light .markdown-body,
+body.lc-theme-light .markdown-body li,
+body.lc-theme-light .markdown-body p,
+body.lc-theme-light .markdown-body td {
+    color: var(--lc-text);
+}
+
+body.lc-theme-light .markdown-body h1,
+body.lc-theme-light .markdown-body h2,
+body.lc-theme-light .markdown-body h3,
+body.lc-theme-light .markdown-body strong,
+body.lc-theme-light .markdown-body th {
+    color: var(--lc-text-strong);
+}
+
+/* The user's own turn: a tinted card rather than the dark-theme charcoal slab,
+   which on white was the highest-contrast element on the page. */
+body.lc-theme-light .chat-user-bubble {
+    background: var(--el-3);
+    color: var(--lc-text-strong);
+    border-color: var(--edge-hairline);
+}
+
+body.lc-theme-light .chat-composer-box,
+body.lc-theme-light .chat-input-shell {
+    background: var(--el-2);
+    border-color: var(--edge-hairline);
+    color: var(--lc-text);
+}
+
+/* Fences and terminals keep dark syntax colours in the dark theme only; in
+   light they take the light code surface so highlight.js' light palette and
+   the app agree. */
+body.lc-theme-light .markdown-body pre,
+body.lc-theme-light .chat-agent-text pre,
+body.lc-theme-light .ws-run-prompt,
+body.lc-theme-light .ws-diff-view,
+body.lc-theme-light .ws-file-preview {
+    background: var(--code-surface);
+    color: var(--code-fg);
+    border-color: var(--edge-hairline);
+}
+
+body.lc-theme-light .markdown-body pre code,
+body.lc-theme-light .markdown-body pre .hljs {
+    color: var(--code-fg);
+    background: transparent;
+}
+
+body.lc-theme-light .chat-inline-event-chip,
+body.lc-theme-light .new-chat-chip {
+    background: var(--el-3);
+    border-color: var(--edge-hairline);
+}
+
+body.lc-theme-light .cmdk-overlay,
+body.lc-theme-light .modal-scrim,
+body.lc-theme-light .setup-scrim,
+body.lc-theme-light .dialog-scrim {
+    background: rgba(40, 40, 48, 0.28);
+}
+
+/* The accent is a mid-tone amber; on white its foreground has to be dark to
+   stay legible, and the accent itself darkens slightly so a filled button is
+   not brighter than the page around it. */
+body.lc-theme-light .ui-button-primary,
+body.lc-theme-light .suggested-action,
+body.lc-theme-light .chat-send-btn:not(:disabled),
+body.lc-theme-light .onboarding-cta button {
+    background: color-mix(in srgb, var(--lc-accent) 88%, #4a3308);
+    color: #fffaf0;
+}
+
+/* ── Surfaces that were still dark after the sweep above ──
+ *
+ * Found by diffing computed styles in a light-theme render rather than by
+ * reading: each of these inherits a literal from a pass that has no light
+ * counterpart, so nothing but naming the selector reaches them. */
+body.lc-theme-light .app-root,
+body.lc-theme-light {
+    color: var(--lc-text);
+}
+
+body.lc-theme-light .chat-composer,
+body.lc-theme-light .chat-surface > .chat-composer,
+body.lc-theme-light .ws-chat-tab-bar,
+body.lc-theme-light .chat-toolbar {
+    background: var(--el-2);
+}
+
+/* Panel and section headings were set to a dark-theme near-white. */
+body.lc-theme-light .ws-changes-title,
+body.lc-theme-light .ws-file-view-path,
+body.lc-theme-light .ws-check-name,
+body.lc-theme-light .ws-file-name,
+body.lc-theme-light .ws-change-row,
+body.lc-theme-light .new-chat-title,
+body.lc-theme-light .section-title,
+body.lc-theme-light .card-title,
+body.lc-theme-light .detail-value,
+body.lc-theme-light .ws-timeline-row,
+body.lc-theme-light .modal-body,
+body.lc-theme-light .dialog-panel,
+body.lc-theme-light .cmdk-panel,
+body.lc-theme-light .context-menu,
+body.lc-theme-light .peek-card {
+    color: var(--lc-text-strong);
+}
+
+body.lc-theme-light .detail-label,
+body.lc-theme-light .ws-flat-section-label,
+body.lc-theme-light .card-meta,
+body.lc-theme-light .cmdk-item-hint,
+body.lc-theme-light .cmdk-item-group {
+    color: var(--lc-text-muted);
+}
+
+/* The run console keeps a dark surface on purpose — it is a terminal, and a
+   light terminal disagrees with every ANSI palette a command emits — but its
+   frame has to belong to the light panel around it. */
+body.lc-theme-light .ws-run-section,
+body.lc-theme-light .ws-run-tab-bar {
+    background: var(--el-1);
+    border-color: var(--edge-hairline);
+}
+
+/* The window-chrome strip above the sidebar is its own surface (it carries the
+   drag region), so it needs naming separately or the app opens with a dark bar
+   across the top-left corner of a light window. */
+body.lc-theme-light .sidebar-chrome,
+body.lc-theme-light .sidebar-footer,
+body.lc-theme-light .client-switcher-button {
+    background: var(--el-1);
+    color: var(--lc-text);
+    border-color: var(--edge-hairline);
+}
+
+body.lc-theme-light .ui-button-icon {
+    color: var(--lc-text-muted);
+}
+
+body.lc-theme-light .ui-button-icon:hover {
+    background: var(--el-3);
+    color: var(--lc-text-strong);
+}
+
+/* Inactive chat tabs were a dark-theme mid-grey, which on white sits at about
+   2:1 — present, but not readable. */
+body.lc-theme-light .ws-chat-tab-text,
+body.lc-theme-light .ws-tab-label,
+body.lc-theme-light .ws-tab-shell {
+    color: var(--lc-text-muted);
+}
+
+body.lc-theme-light .ws-tab-shell.ws-tab-active,
+body.lc-theme-light .ws-chat-tab-shell.active .ws-chat-tab-text {
+    color: var(--lc-text-strong);
+}
+
+/* The pre-existing light pass gives each triage tone its own outlined colour —
+   blue for a PR, purple for todos, amber for files — which is the multi-colour
+   chip row the dark theme just stopped doing. Restate the single chip scale
+   here so both themes read the same way. */
+body.lc-theme-light .triage-badge {
+    background: var(--tint-info);
+    color: var(--tint-info-fg);
+    border-color: transparent;
+}
+
+body.lc-theme-light .triage-badge-agent,
+body.lc-theme-light .triage-badge-run {
+    background: var(--tint-pos);
+    color: var(--tint-pos-fg);
+}
+
+body.lc-theme-light .triage-badge-task {
+    background: var(--tint-warn);
+    color: var(--tint-warn-fg);
+}
+
+/* ── Control labels ──
+ *
+ * The polish pass gives buttons light surfaces in this theme, but their text
+ * colour is still whatever the dark pass set — which on white is white. Every
+ * control class needs its foreground named here, or "Create PR" and "Run Setup"
+ * render as empty pills. */
+body.lc-theme-light button.suggested-action,
+body.lc-theme-light .suggested-action,
+body.lc-theme-light button.ui-button-secondary,
+body.lc-theme-light .ui-button-secondary,
+body.lc-theme-light .secondary-action,
+body.lc-theme-light .ws-pr-action-button,
+body.lc-theme-light .ws-run-tab-btn,
+body.lc-theme-light .setup-link,
+body.lc-theme-light .chat-send-btn:disabled,
+body.lc-theme-light .nav-button {
+    color: var(--lc-text-strong);
+}
+
+body.lc-theme-light .nav-button:not(.nav-button-active) {
+    color: var(--lc-text-muted);
+}
+
+/* The workspace-search field and any other recessed input sits *below* the
+   panel in light, not above it. */
+body.lc-theme-light .workspace-search {
+    background: var(--el-3);
+    border-color: var(--edge-hairline);
+}
+
+body.lc-theme-light .compact-select-trigger,
+body.lc-theme-light .ws-changes-scope,
+body.lc-theme-light .chat-toolbar button,
+body.lc-theme-light .ws-topbar button {
+    color: var(--lc-text);
+}
