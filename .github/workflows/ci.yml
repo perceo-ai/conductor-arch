@@ -803,9 +803,28 @@ jobs:
         if: matrix.family == 'arch'
         run: pacman -Syu --noconfirm --needed ca-certificates curl git gcc glibc pkgconf
 
+      # `dup` before `install`, because a pinned Tumbleweed digest plus rolling
+      # repositories is a mixed system the moment anything is installed:
+      # `install curl` pulls today's libcurl, while its dependencies stay at
+      # whatever the image baked in. That is not a conflict the resolver can
+      # see — the dependency is on the soname, and `libngtcp2.so.16` was
+      # satisfied — so it installed libcurl 8.22.0 against libngtcp2 1.22.1 and
+      # git's https helper died on a missing symbol:
+      #
+      #   /usr/libexec/git/git-remote-https: symbol lookup error:
+      #   /lib64/libcurl.so.4: undefined symbol:
+      #   ngtcp2_conn_get_tls_early_data_rejected2
+      #
+      # That broke `actions/checkout` itself, so the job failed before reaching
+      # any of this repository's code. `dup` is the documented way to move a
+      # rolling release as a set; it costs ~90s and makes the image
+      # self-consistent with the repos it installs from.
       - name: Install openSUSE dependencies
         if: matrix.family == 'opensuse'
-        run: zypper --non-interactive install bash ca-certificates cargo curl git gcc glibc-devel pkg-config rust
+        run: |
+          zypper --non-interactive refresh
+          zypper --non-interactive dup --no-allow-vendor-change
+          zypper --non-interactive install bash ca-certificates cargo curl git gcc glibc-devel pkg-config rust
 
       - name: Install Alpine dependencies
         if: matrix.family == 'alpine'
