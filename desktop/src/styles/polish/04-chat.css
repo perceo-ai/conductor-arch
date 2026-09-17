@@ -1,0 +1,196 @@
+/* ── Polish pass: chat surface ──
+ *
+ * The chat is where the app is used, so it gets the most attention and the
+ * least licence: nothing here moves an element, renames a control, or changes
+ * what is shown. The complaints this answers are all about weight — a user
+ * turn that looks like a system banner, tool calls that vanish into the
+ * background, and a composer that reads as a hole in the page rather than the
+ * thing you type into. */
+
+/* ── User turns ──
+ *
+ * The bubble was a full-strength light grey at the same radius as a dialog,
+ * which made a long question read as an alert bar across the column. It keeps
+ * its alignment and its wrapping; it gets a softer fill, a hairline, and an
+ * asymmetric corner on the side it is anchored to, which is the cheapest way
+ * to say "this came from you" without a label or an avatar. */
+.chat-user-bubble {
+    background: var(--el-3);
+    border: 1px solid var(--edge-hairline);
+    border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
+    box-shadow: var(--edge-lit);
+    color: var(--lc-text-strong);
+}
+
+/* ── Reasoning ──
+ *
+ * Reasoning already sits on a narrower measure than the answer, on purpose
+ * (--chat-measure-secondary). What it lacked was an edge: dim prose with no
+ * boundary reads as an answer someone forgot to finish. A rail on the leading
+ * edge marks it as an aside, and costs no horizontal space that the narrower
+ * measure was not already giving up. */
+.chat-reasoning-block {
+    border-left: 2px solid var(--edge-hairline);
+    padding-left: 12px;
+}
+
+.chat-reasoning-text {
+    font-style: normal;
+}
+
+/* ── Inline events (Ran / Read / Edited / Used) ──
+ *
+ * These are the app's record of what the agent actually did, and they were the
+ * quietest thing in the timeline: an 18px expander, a 4px dot, an 11px verb,
+ * and a 3px-radius chip at #191919 on #0f0f0f. Three changes, no relayout:
+ * the whole header becomes one hoverable band so the row has a target, the
+ * expander reaches 24px, and the chip gets the same chip treatment used
+ * everywhere else in the app. */
+.chat-inline-event-header {
+    border-radius: var(--r-sm);
+    padding: 2px 6px;
+    margin-left: -6px;
+}
+
+.chat-inline-event-header:hover {
+    background: var(--el-2);
+}
+
+.chat-inline-event-expander {
+    min-width: 24px;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--r-xs);
+}
+
+.chat-inline-event-dot {
+    background: var(--edge-hairline-strong);
+}
+
+.chat-inline-event-chip {
+    border: 1px solid var(--edge-hairline);
+    border-radius: var(--r-xs);
+    background: var(--el-2);
+    padding: 1px 6px;
+}
+
+.chat-inline-event-header:hover .chat-inline-event-chip {
+    border-color: var(--edge-hairline-strong);
+    background: var(--el-3);
+}
+
+.chat-inline-event-chip-label {
+    color: var(--lc-text);
+}
+
+/* ── Code ──
+ *
+ * Fences were a flat rectangle with a square-ish corner and no edge, so a
+ * block of code and a block of quoted output looked identical. The scrollbar
+ * on an overflowing fence was also invisible until you found it with the
+ * pointer, which at narrow window widths hid the fact that a line continued. */
+.markdown-body pre,
+.chat-agent-text pre {
+    border-radius: var(--r-md);
+    border: 1px solid var(--edge-hairline);
+    box-shadow: var(--edge-lit);
+    overflow-x: auto;
+}
+
+.markdown-body pre::-webkit-scrollbar {
+    height: 8px;
+}
+
+.markdown-body :not(pre) > code {
+    border-radius: var(--r-xs);
+}
+
+/* Tables read as data, so their figures line up and their header separates. */
+.markdown-body table {
+    border-radius: var(--r-sm);
+    overflow: hidden;
+    font-variant-numeric: tabular-nums;
+}
+
+.markdown-body thead th {
+    background: var(--el-2);
+}
+
+/* ── Composer ──
+ *
+ * The composer is the app's primary input and was styled like a disabled
+ * textarea: same fill as the page, a grey hairline, no focus response at all.
+ * Raising it onto the elevation ladder and giving focus an accent ring is the
+ * single highest-value change on this surface — it is the one control the user
+ * returns to after every turn. */
+.chat-composer-box {
+    border-radius: var(--r-lg);
+    border: 1px solid var(--edge-hairline);
+    background: var(--el-2);
+    box-shadow: var(--edge-lit), var(--sh-2);
+}
+
+.chat-composer-box:focus-within {
+    border-color: var(--accent-edge);
+    box-shadow: var(--edge-lit), var(--sh-2), 0 0 0 3px var(--accent-ring);
+}
+
+/* Toolbar controls under the input: one height, one radius, one hover. They
+   were 26px tall in three different shapes. */
+.chat-toolbar .compact-select-trigger,
+.chat-toolbar .chat-plan-toggle,
+.chat-toolbar > * > button {
+    min-height: 28px;
+    border-radius: var(--r-pill);
+}
+
+.chat-toolbar .compact-select-trigger:hover,
+.chat-toolbar .chat-plan-toggle:hover {
+    background: var(--el-3);
+}
+
+/* Send is the only accent-filled control in the chat column, which is what
+   makes it findable without a label. */
+.chat-send-btn {
+    border-radius: var(--r-pill);
+}
+
+.chat-send-btn:not(:disabled) {
+    background: var(--lc-accent);
+    color: #1a1204;
+    border-color: transparent;
+}
+
+.chat-send-btn:not(:disabled):hover {
+    background: color-mix(in srgb, var(--lc-accent) 88%, #ffffff);
+}
+
+.chat-context-usage {
+    font-variant-numeric: tabular-nums;
+    /* Was 4.36:1 at 11px — under the 4.5 floor for body-size text, and this is
+       the one number in the composer that changes as a turn runs. */
+    color: var(--lc-text);
+}
+
+/* ── Chat tabs ── */
+.ws-chat-tab-shell {
+    border-radius: var(--r-sm) var(--r-sm) 0 0;
+}
+
+.ws-tab-close-button {
+    min-width: 20px;
+    min-height: 20px;
+    border-radius: var(--r-xs);
+}
+
+/* ── New-chat intro ── */
+.new-chat-chip {
+    border-radius: var(--r-pill);
+    border: 1px solid var(--edge-hairline);
+    background: var(--el-2);
+}
+
+.new-chat-chip:hover {
+    background: var(--el-3);
+    border-color: var(--edge-hairline-strong);
+}

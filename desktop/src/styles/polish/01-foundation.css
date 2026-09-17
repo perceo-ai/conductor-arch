@@ -1,0 +1,253 @@
+/* ── Polish pass: foundation ──
+ *
+ * The fifth pass over base.css (layout -> charcoal -> neutral -> final ->
+ * polish). It exists because the four passes below it settled the app's
+ * *structure* but never its *scale*: the built bundle carries 405 distinct hex
+ * literals against 78 custom properties, 18 border-radius values, and 16
+ * one-off box-shadow recipes. Nothing there is wrong on its own; together they
+ * read as a surface that was assembled rather than designed.
+ *
+ * This pass adds the scales, and only the scales. It changes no layout, no
+ * copy, and no interaction — every rule below is colour, radius, shadow,
+ * border, or motion. The passes above keep their behaviour; this one makes
+ * their output agree with itself.
+ */
+
+:root {
+    /* ── Elevation ladder ──
+       Dark surfaces read as depth only if the steps are perceptually even and
+       few. Four is enough for this app: page, panel, raised card, popover.
+       Each step is +3-4 on the L axis, which is the smallest difference that
+       survives a dim display without becoming a visible band. */
+    --el-0: #0e0e0e; /* app background, furthest away */
+    --el-1: #141414; /* panels, sidebar, docked regions */
+    --el-2: #191919; /* cards and rows resting on a panel */
+    --el-3: #1f1f1f; /* hover / selected rows */
+    --el-4: #242424; /* popovers, dialogs, menus — nearest the viewer */
+
+    /* The lit top edge of a raised surface. One hairline of white at 4-5%
+       turns a flat rectangle into something with a thickness, which is what
+       separates a card from a differently-coloured area of the page. */
+    --edge-lit: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    --edge-hairline: rgba(255, 255, 255, 0.07);
+    --edge-hairline-strong: rgba(255, 255, 255, 0.12);
+
+    /* ── Radius scale ──
+       Five steps, assigned by element size rather than by taste: the smaller
+       the element, the tighter the corner, so curvature looks constant. */
+    --r-xs: 5px; /* chips, inline code, tiny badges */
+    --r-sm: 7px; /* buttons, inputs, list rows */
+    --r-md: 10px; /* cards, code blocks, panels */
+    --r-lg: 14px; /* dialogs, popovers, the composer */
+    --r-pill: 999px;
+
+    /* ── Shadow scale ──
+       Two layers each: a tight contact shadow that anchors the element, and a
+       wide ambient one that gives it a room to sit in. A single large blur
+       (what most of the one-off recipes used) reads as a drop-shadow filter;
+       two layers read as light. */
+    --sh-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --sh-2:
+        0 2px 4px rgba(0, 0, 0, 0.32), 0 8px 20px rgba(0, 0, 0, 0.34);
+    --sh-3:
+        0 4px 10px rgba(0, 0, 0, 0.36), 0 20px 48px rgba(0, 0, 0, 0.46);
+    --sh-4:
+        0 8px 18px rgba(0, 0, 0, 0.4), 0 36px 88px rgba(0, 0, 0, 0.56);
+
+    /* Accent-derived surfaces. Derived, not hand-picked, so the four accent
+       choices in Settings all produce a coherent selected state instead of
+       only amber doing so. */
+    --accent-wash: color-mix(in srgb, var(--lc-accent) 14%, transparent);
+    --accent-wash-soft: color-mix(in srgb, var(--lc-accent) 8%, transparent);
+    --accent-edge: color-mix(in srgb, var(--lc-accent) 42%, transparent);
+    --accent-ring: color-mix(in srgb, var(--lc-accent) 32%, transparent);
+
+    /* Semantic tints for chips and status rows, at one strength so a screen
+       full of them has a single visual weight. */
+    --tint-pos: rgba(108, 197, 138, 0.14);
+    --tint-pos-fg: #86d3a3;
+    --tint-neg: rgba(224, 111, 111, 0.14);
+    --tint-neg-fg: #ed9393;
+    --tint-warn: rgba(245, 158, 11, 0.14);
+    --tint-warn-fg: #e9b563;
+    --tint-info: rgba(255, 255, 255, 0.07);
+    --tint-info-fg: #b8b8b8;
+}
+
+/* ── Retiring the near-duplicate greys ──
+ *
+ * The passes below this one already route *some* surfaces through named
+ * tokens; those tokens were just each defined as their own literal, so
+ * --ui-panel, --ui-panel-2, --lc-surface and --lc-surface-raised landed on
+ * four greys within six points of one another. Repointing them at the ladder
+ * moves every rule that already asks for a token onto the scale for free, and
+ * leaves the ladder as the only place a surface colour is chosen.
+ *
+ * Borders become translucent white rather than an opaque grey: a 1px #262626
+ * line is invisible on #242424 and heavy on #0e0e0e, and the same hairline has
+ * to work on both. */
+:root {
+    --lc-bg: var(--el-0);
+    --lc-surface-base: var(--el-0);
+    --lc-surface-muted: var(--el-0);
+    --lc-surface: var(--el-1);
+    --lc-surface-raised: var(--el-2);
+    --lc-surface-selected: var(--el-3);
+    --lc-hover-soft: var(--el-2);
+    --lc-hover: var(--el-3);
+    --lc-border: var(--edge-hairline);
+    --lc-border-subtle: var(--edge-hairline);
+    --lc-border-strong: var(--edge-hairline-strong);
+    --lc-border-active: var(--edge-hairline-strong);
+
+    --ui-panel: var(--el-1);
+    --ui-panel-2: var(--el-2);
+    --ui-panel-3: var(--el-2);
+    --ui-panel-hover: var(--el-3);
+    --ui-border: var(--edge-hairline);
+    --ui-border-strong: var(--edge-hairline-strong);
+    --ui-radius: var(--r-sm);
+    --ui-shadow-popover: var(--sh-3);
+}
+
+/* ── Native control theming ──
+ *
+ * The app had no `color-scheme` anywhere, so <select>, <input>, the caret,
+ * autofill, and any scrollbar the app does not paint itself all followed the
+ * *operating system's* preference rather than the app's. On a macOS in Light
+ * Appearance the dark app renders white form fields. Binding the property to
+ * the theme class fixes every one of those at once. */
+body.lc-theme-dark,
+body.lc-theme-dark .app-root {
+    color-scheme: dark;
+}
+
+body.lc-theme-light,
+body.lc-theme-light .app-root {
+    color-scheme: light;
+}
+
+:root {
+    accent-color: var(--lc-accent);
+}
+
+/* ── Focus visibility ──
+ *
+ * 17 selectors had a :focus-visible style; the other ~50 focusable controls in
+ * a single workspace view had none, so keyboard focus simply vanished. One
+ * default, overridable by the specific rules above it. */
+:where(button, a, summary, [role="button"], [role="tab"], [tabindex]):focus-visible {
+    outline: 2px solid var(--lc-accent);
+    outline-offset: 2px;
+    border-radius: var(--r-sm);
+}
+
+:where(input, textarea, select, [contenteditable="true"]):focus-visible {
+    outline: 2px solid var(--accent-edge);
+    outline-offset: 1px;
+}
+
+/* Never show the ring for pointer interaction — it is a keyboard affordance,
+   and drawing it on click is what makes people turn outlines off. */
+:where(button, a, [role="button"]):focus:not(:focus-visible) {
+    outline: none;
+}
+
+/* ── Selection and scrollbars ── */
+::selection {
+    background: color-mix(in srgb, var(--lc-accent) 32%, transparent);
+    color: var(--lc-text-strong);
+}
+
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.12);
+    border: 3px solid transparent;
+    background-clip: padding-box;
+    border-radius: var(--r-pill);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.22);
+    background-clip: padding-box;
+}
+
+/* ── The surfaces the tokens did not reach ──
+ *
+ * Repointing the token definitions above moves every rule that *asks* for a
+ * token; the list below is what was left after that — surfaces whose colour is
+ * written as a literal in one of the four passes. Each is named here at the
+ * ladder step it was already approximating, which is why none of them move by
+ * more than a few points. Measured on a workspace view, this takes the count of
+ * distinct painted backgrounds on one screen from 19 to 10 — five ladder
+ * steps, two translucent tints, a status dot, and the three exceptions below.
+ *
+ * Two deliberate exceptions keep their own colour: the syntax-highlight surface
+ * under `.md-code` (it belongs to the highlight theme, not to this app's
+ * chrome) and `.ws-run-console` (a terminal, which wants to be darker than the
+ * panel holding it so ANSI colours keep their contrast). */
+.sidebar-chrome,
+.ws-chat-tab-bar,
+.workbench-tablist {
+    background: var(--el-1);
+}
+
+.chat-surface,
+.chat-timeline-scroll,
+.chat-composer,
+.ws-run-section,
+.ws-run-tab-bar {
+    background: var(--el-0);
+}
+
+.chat-context-usage,
+.compact-select-trigger,
+.ws-open-menu-button {
+    background: var(--el-2);
+}
+
+/* `button.ui-button-secondary` in theme/08-controls carries an element
+   qualifier, so the bare class loses to it; matching its specificity is the
+   whole reason this selector is written out. */
+button.ui-button-secondary,
+.ui-button-secondary,
+.ws-run-tab-btn,
+.chat-send-btn,
+.ws-pr-action-button {
+    background: var(--el-3);
+}
+
+/* `.nav-button` is the panel-tab element, so it is a tab first and a button
+   second: resting state is transparent and only the selected one is filled. */
+.nav-button {
+    background: transparent;
+}
+
+.nav-button:hover:not(.nav-button-active) {
+    background: var(--el-2);
+}
+
+.nav-button-active {
+    background: var(--el-3);
+}
+
+/* A count beside a label is a chip wherever else it appears in the app. */
+.nav-button-count {
+    background: var(--tint-info);
+    color: var(--tint-info-fg);
+    border-radius: var(--r-pill);
+    font-variant-numeric: tabular-nums;
+}

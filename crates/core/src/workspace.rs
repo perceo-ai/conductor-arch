@@ -11463,7 +11463,7 @@ pub fn strip_archductor_metadata_block(content: &str) -> String {
     extract_archductor_metadata_directive(content).0
 }
 
-fn strip_archductor_hidden_instruction_blocks(content: &str) -> String {
+pub(crate) fn strip_archductor_hidden_instruction_blocks(content: &str) -> String {
     let mut remaining = content;
     let mut cleaned = String::with_capacity(content.len());
     let mut removed = false;

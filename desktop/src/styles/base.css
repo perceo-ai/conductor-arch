@@ -10,6 +10,9 @@
  *   charcoal/  "professional charcoal" — late normalization onto shared tokens
  *   neutral/   "neutral charcoal" — retints the tokens, then the surfaces
  *   final/     last-word overrides that must beat everything above
+ *   polish/    the shared scales (elevation, radius, shadow, focus) the
+ *              four passes above never had, applied last so a component
+ *              rule anywhere above can still opt out by being more specific
  *
  * ORDER IS LOAD-BEARING, both between groups and inside them: a later rule
  * overrides an earlier one at equal specificity purely by source position.
@@ -69,3 +72,16 @@
 @import "./final/03-sync-dialog.css";
 @import "./final/04-modular-workbench.css";
 @import "./final/05-peek-and-keyboard.css";
+
+/* polish */
+@import "./polish/01-foundation.css";
+@import "./polish/02-shell.css";
+@import "./polish/03-dashboard.css";
+@import "./polish/04-chat.css";
+@import "./polish/05-panels.css";
+@import "./polish/06-overlays.css";
+@import "./polish/07-settings-history.css";
+@import "./polish/08-light.css";
+@import "./polish/09-comfort.css";
+@import "./polish/10-fit-and-finish.css";
+@import "./polish/11-rail-and-board.css";

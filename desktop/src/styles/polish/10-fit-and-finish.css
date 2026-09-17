@@ -1,0 +1,125 @@
+/* ── Polish pass: fit and finish ──
+ *
+ * The specific misfits a measuring pass turned up on the built bundle, each
+ * with the number that found it. Nothing here is a judgement call about the
+ * design; it is all "these two things were supposed to line up and did not". */
+
+/* ── The page's left edge ──
+ *
+ * The header and the body below it were indented by different amounts — the
+ * heading and filter tabs started at x=289, the first board column at x=303 —
+ * so the page had two left edges 14px apart. One inset, named once, used by
+ * both. */
+:root {
+    --page-inset: 22px;
+}
+
+.page-header,
+.page-body,
+.page-board,
+.kanban-board,
+.history-view .page-body {
+    padding-inline: var(--page-inset);
+}
+
+/* ── Filter tabs size to their label ──
+ *
+ * Every tab was a fixed 132px slot holding a 112px label box, so "All" and
+ * "conductor-arch" occupied identical space and the active tab's underline ran
+ * four times the width of the word above it. */
+.project-tabs .ws-tab-shell,
+.project-tabs button.ws-tab-shell {
+    flex: 0 0 auto;
+    /* `min-width: 176px` from the workspace tab strip is zeroed for these by
+       charcoal, but the element keeps a resolved width far wider than its
+       label; `fit-content` is what actually makes the box the size of the word. */
+    width: fit-content;
+    min-width: 0;
+    max-width: none;
+}
+
+.project-tabs .ws-tab-label {
+    width: auto;
+    min-width: 0;
+    flex: 0 0 auto;
+}
+
+/* ── Accent swatches are circles ──
+ *
+ * They rendered 28x34: a pill radius on a box stretched to the row height, so
+ * the four "circles" were ellipses and the selected one wore an elliptical
+ * ring. Fixing the box fixes both. */
+.settings-swatch-row {
+    align-items: center;
+}
+
+.settings-swatch,
+button.settings-swatch {
+    /* The row stretches its items, so the height has to be pinned on the item
+       itself — `height` alone lost to the stretch. */
+    flex: 0 0 22px;
+    align-self: center;
+    width: 22px;
+    height: 22px;
+    min-height: 22px;
+    max-height: 22px;
+    padding: 0;
+    border: 1px solid var(--edge-hairline-strong);
+}
+
+/* Selection is a ring *outside* the swatch, drawn with box-shadow rather than
+   `outline`: an outline here is indistinguishable from the keyboard focus ring,
+   and the two would stack on the same element. */
+.settings-swatch.active {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--el-0), 0 0 0 4px var(--lc-text-strong);
+}
+
+.settings-swatch:focus-visible {
+    outline: 2px solid var(--lc-accent);
+    outline-offset: 3px;
+}
+
+/* ── One control height per settings row ──
+ *
+ * Inputs and selects were 30px, segmented controls 32px, the swatch row 34px,
+ * so the right-hand column stepped up and down the page. */
+.settings-row-control {
+    align-items: center;
+    min-height: 32px;
+}
+
+.settings-row select.settings-control,
+.settings-row input.settings-control,
+.settings-shortcut-input,
+.settings-segmented,
+.segmented-control {
+    height: 32px;
+    min-height: 32px;
+}
+
+.settings-segmented button,
+.segmented-control button {
+    min-height: 26px;
+}
+
+/* Chat tab close buttons are deliberately left at 18px.
+ *
+ * They look undersized against the 24px floor the rest of the chrome keeps, but
+ * `final/01-chat-tabs.css` pairs that size with `opacity: 0` — it is a
+ * hover-revealed glyph inside a 30px rail, not a standing control, and growing
+ * it crowds the label it sits beside. Noted here so the next measuring pass
+ * does not "fix" it twice. */
+
+/* ── Tool-call rows keep their hover bleed inside the column ──
+ *
+ * The header is pulled 8px left of its parent so the hover band covers the
+ * whole row rather than starting at the text. That is deliberate, but it has to
+ * be paid for with matching room or the band hangs off the measure. */
+.chat-inline-event {
+    padding-left: 8px;
+}
+
+.chat-inline-event-header {
+    margin-left: -8px;
+}
