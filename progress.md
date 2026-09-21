@@ -52,11 +52,38 @@ safe on Tailscale, WireGuard, or a trusted LAN. See
 ask for explicit acknowledgement, and the token field opts out of iOS password
 AutoFill so it is never offered to iCloud Keychain.
 
-Not done, and specced for later phases in
-`docs/superpowers/specs/2026-09-20-ios-mobile-app-design.md`: chat and agent
-control (P1), review and PRs (P2), workspace operations (P3), terminal and
-files (P4), APNs push and TestFlight (P5). Views currently use system styling
-with the desktop palette only partly applied.
+## iOS client, phase 1 (2026-09-21)
+
+Chat works from the phone. Drill into a workspace, create or open a chat, watch
+the projected timeline, queue turns, interrupt a running one, and answer what
+an agent is blocked on.
+
+- `ChatStore` mirrors `WorkspacesStore`: events say what changed, projections
+  are refetched, and events for other threads are dropped rather than
+  refetched — on a phone only one conversation is on screen.
+- Timeline rows follow core's render classes: user and assistant bubbles, and
+  a collapsed card for everything else (command, diff, reasoning, …) with a
+  fallback so a class core adds later still renders.
+- Provider interactions — permission prompts, question batches, plan approvals
+  — share one screen, including "approve for this session", which on a phone is
+  the difference between one tap and twenty.
+- The Chats tab lists every chat on the daemon with the ones needing a human
+  first, built from the inventory snapshot so it costs no extra round trips.
+
+Verified against a live daemon: a UI test creates a thread on the daemon and
+opens it, and a second renders a seeded transcript (bubbles plus a command
+card). Streaming against a real provider is unverified — that needs an
+authenticated codex/claude on the daemon's machine.
+
+Not done: the model/effort/permission-mode pickers, which need session
+capabilities typed first — the supported values are per provider, and guessing
+the list would send modes the daemon rejects.
+
+Still specced for later phases in
+`docs/superpowers/specs/2026-09-20-ios-mobile-app-design.md`: review and PRs
+(P2), workspace operations (P3), terminal and files (P4), APNs push and
+TestFlight (P5). Views currently use system styling with the desktop palette
+only partly applied.
 
 ## Archductor UX Strategy Alignment (2026-08-12)
 

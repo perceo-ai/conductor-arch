@@ -38,9 +38,9 @@ xcodebuild -project Archductor.xcodeproj -scheme Archductor \
   -destination 'platform=iOS Simulator,name=iPhone 17' test
 ```
 
-`LiveDaemonUITests` pairs the real app with a real daemon and reads its
-workspace list back. It skips unless you point it at one; `xcodebuild` only
-forwards variables prefixed with `TEST_RUNNER_`:
+`LiveDaemonUITests` pairs the real app with a real daemon, creates a chat on
+it, and renders a transcript. It skips unless you point it at one; `xcodebuild`
+only forwards variables prefixed with `TEST_RUNNER_`:
 
 ```sh
 TEST_RUNNER_ARCHDUCTOR_UITEST_ADDRESS=127.0.0.1:17420 \
@@ -50,6 +50,12 @@ xcodebuild -project Archductor.xcodeproj -scheme Archductor \
   -destination 'platform=iOS Simulator,name=iPhone 17' \
   -only-testing:ArchductorUITests/LiveDaemonUITests test
 ```
+
+The transcript test needs a seeded conversation. Rather than run a real agent,
+insert `provider_events` rows straight into the daemon's database — the
+projection reads them the same way either route — and pass
+`TEST_RUNNER_ARCHDUCTOR_UITEST_CHAT`, `…_USER_LINE`, and `…_CARD_TITLE` to
+match what you seeded.
 
 ## Security
 

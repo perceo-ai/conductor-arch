@@ -102,6 +102,40 @@ final class LiveDaemonUITests: XCTestCase {
         add(shot)
     }
 
+    /// Renders a transcript that already exists on the daemon.
+    ///
+    /// Seeded provider events stand in for an agent run, which keeps the test
+    /// deterministic and free of provider auth while still exercising the real
+    /// projection: bubbles for chat, a card for everything else.
+    func testRendersAnExistingTranscript() throws {
+        let config = try liveConfig()
+        let environment = ProcessInfo.processInfo.environment
+        guard let chatTitle = environment["ARCHDUCTOR_UITEST_CHAT"],
+              let userLine = environment["ARCHDUCTOR_UITEST_USER_LINE"],
+              let cardTitle = environment["ARCHDUCTOR_UITEST_CARD_TITLE"] else {
+            throw XCTSkip("No seeded transcript configured for this run.")
+        }
+        let app = pair(XCUIApplication(), with: config)
+
+        XCTAssertTrue(app.staticTexts[config.workspace].waitForExistence(timeout: 20))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", config.workspace))
+            .firstMatch.tap()
+
+        XCTAssertTrue(app.staticTexts[chatTitle].waitForExistence(timeout: 15))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", chatTitle))
+            .firstMatch.tap()
+
+        // The user turn and the agent's reply are bubbles; a command is a
+        // collapsed card, so its body stays hidden until it is opened.
+        XCTAssertTrue(app.staticTexts[userLine].waitForExistence(timeout: 15))
+        XCTAssertTrue(app.staticTexts[cardTitle].exists)
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "transcript-live"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testPairsWithALiveDaemonAndListsItsWorkspaces() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["ARCHDUCTOR_UITEST_ADDRESS"],
