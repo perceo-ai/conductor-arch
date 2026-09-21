@@ -53,13 +53,32 @@ private func event(_ json: String) throws -> ArchcarEvent {
 }
 
 @Test func keepsHeavyPayloadsAsRawJSON() throws {
-    let decoded = try event(#"{"id":"e5","payload":{"type":"provider_interaction_requested","interaction":{"id":9,"kind":"permission"}}}"#)
-    guard case .providerInteractionRequested(let raw) = decoded else {
-        Issue.record("expected provider_interaction_requested")
+    let decoded = try event(#"{"id":"e5","payload":{"type":"background_task_updated","task":{"id":9,"status":"running"}}}"#)
+    guard case .backgroundTaskUpdated(let raw) = decoded else {
+        Issue.record("expected background_task_updated")
         return
     }
     let object = try #require(try JSONSerialization.jsonObject(with: raw.data) as? [String: Any])
     #expect(object["id"] as? Int == 9)
+}
+
+@Test func decodesBlockedAgentInteractionEvent() throws {
+    // The event a phone exists for: an agent has stopped and is waiting on a
+    // human, so it arrives typed rather than as an opaque blob.
+    let json = """
+    {"id":"e7","payload":{"type":"provider_interaction_requested","interaction":\
+    {"id":"i1","provider_key":"claude","workspace":"columbia","thread_id":7,"session_id":3,\
+    "native_id":"n","kind":"permission","title":"Run tests?","detail":"cargo test",\
+    "questions":[],"native_request":{},"request_fingerprint":"f","status":"pending",\
+    "created_at":"1"}}}
+    """
+    guard case .providerInteractionRequested(let interaction) = try event(json) else {
+        Issue.record("expected provider_interaction_requested")
+        return
+    }
+    #expect(interaction.id == "i1")
+    #expect(interaction.kind == .permission)
+    #expect(interaction.threadID == 7)
 }
 
 @Test func unknownEventTypeDoesNotThrow() throws {

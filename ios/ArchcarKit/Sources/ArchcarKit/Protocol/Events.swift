@@ -2,8 +2,8 @@ import Foundation
 
 /// A JSON subtree kept verbatim.
 ///
-/// Some events carry rich records (`BackgroundTask`, `ProviderInteractionRecord`)
-/// that P0 has no views for. Holding the bytes means the phase that adds those
+/// Some events carry rich records (`BackgroundTask`, session capabilities)
+/// that no view reads yet. Holding the bytes means the phase that adds those
 /// views types them without changing the event plumbing, and means an
 /// unfamiliar field never fails the decode.
 public struct RawJSON: Decodable, Sendable, Equatable {
@@ -71,8 +71,8 @@ public enum ArchcarEvent: Sendable {
     case chatPlanUpdated(threadID: Int64, planMode: Bool, planPath: String?)
     case sessionExited(sessionID: Int64, exitCode: Int?)
     case sessionError(sessionID: Int64?, threadID: Int64?, message: String)
-    case providerInteractionRequested(RawJSON)
-    case providerInteractionResolved(RawJSON)
+    case providerInteractionRequested(ProviderInteraction)
+    case providerInteractionResolved(ProviderInteraction)
     case backgroundTaskUpdated(RawJSON)
     case summaryUpdated(workspace: String, summaryID: Int64, scopeType: String, scopeID: Int64)
     case taskUpdated(workspace: String, taskID: Int64, status: String)
@@ -152,9 +152,11 @@ extension ArchcarEvent: Decodable {
                 threadID: try c.decodeIfPresent(Int64.self, forKey: .threadID),
                 message: try c.decode(String.self, forKey: .message))
         case "provider_interaction_requested":
-            self = .providerInteractionRequested(try c.decode(RawJSON.self, forKey: .interaction))
+            self = .providerInteractionRequested(
+                try c.decode(ProviderInteraction.self, forKey: .interaction))
         case "provider_interaction_resolved":
-            self = .providerInteractionResolved(try c.decode(RawJSON.self, forKey: .interaction))
+            self = .providerInteractionResolved(
+                try c.decode(ProviderInteraction.self, forKey: .interaction))
         case "background_task_updated":
             self = .backgroundTaskUpdated(try c.decode(RawJSON.self, forKey: .task))
         case "summary_updated":
