@@ -1,0 +1,60 @@
+name: Archductor
+options:
+  bundleIdPrefix: ai.perceo
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+packages:
+  ArchcarKit:
+    path: ArchcarKit
+targets:
+  Archductor:
+    type: application
+    platform: iOS
+    sources:
+      - Archductor
+    info:
+      path: Archductor/Info.plist
+      properties:
+        CFBundleDisplayName: Archductor
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Reaching a daemon on the same LAN needs this, or iOS drops the
+        # connection without telling the app why.
+        NSLocalNetworkUsageDescription: Archductor connects to the archcar daemon running on your machine.
+        NSCameraUsageDescription: Scan the pairing code shown by the Archductor desktop app.
+    dependencies:
+      - package: ArchcarKit
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_BUNDLE_IDENTIFIER: ai.perceo.archductor
+        SWIFT_STRICT_CONCURRENCY: complete
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+  ArchductorUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - ArchductorUITests
+    dependencies:
+      - target: Archductor
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        PRODUCT_BUNDLE_IDENTIFIER: ai.perceo.archductor.uitests
+        # The app target ships a hand-written Info.plist; the test bundle has
+        # nothing to say in one, so let Xcode generate it.
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Archductor:
+    build:
+      targets:
+        Archductor: all
+        ArchductorUITests: [test]
+    test:
+      targets:
+        - ArchductorUITests
