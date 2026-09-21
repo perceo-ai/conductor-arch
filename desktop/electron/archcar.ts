@@ -573,14 +573,32 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
     // not up yet
   }
   // Spawn detached; it binds the endpoint itself.
-  const child = spawn(archcarBinary(), [], {
+  const binary = archcarBinary();
+  const child = spawn(binary, [], {
     detached: true,
     stdio: "ignore",
     env: spawnEnv(),
   });
+  // A spawn that cannot find its binary reports asynchronously, via an 'error'
+  // event. Node turns an EventEmitter 'error' with no listener into an uncaught
+  // exception, and in the Electron main process that is the native "A
+  // JavaScript error occurred in the main process" dialog followed by an exit —
+  // so on any machine where archcar is neither bundled nor on PATH the app died
+  // on launch rather than opening and saying what was missing. Every other
+  // spawn and socket in this file already attaches one; this is the hole.
+  //
+  // Held in an object because TypeScript narrows a `let` assigned only inside a
+  // callback to its initial value at every later read.
+  const spawned: { failure?: NodeJS.ErrnoException } = {};
+  child.once("error", (err: NodeJS.ErrnoException) => {
+    spawned.failure = err;
+  });
   child.unref();
 
   for (let i = 0; i < STARTUP_ATTEMPTS; i++) {
+    // Nothing is going to bind the socket once the spawn itself failed, so stop
+    // waiting out the full two seconds before reporting it.
+    if (spawned.failure) throw daemonSpawnError(binary, spawned.failure);
     if (fs.existsSync(endpoint)) {
       try {
         const s = await connectOnce(endpoint);
@@ -592,7 +610,25 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
     }
     await new Promise((r) => setTimeout(r, STARTUP_POLL_MS));
   }
+  if (spawned.failure) throw daemonSpawnError(binary, spawned.failure);
   throw new Error(`archcar did not come up at ${endpoint}`);
+}
+
+/**
+ * Turn a failed daemon spawn into something the user can act on.
+ *
+ * The old message named the socket the daemon never bound, which describes the
+ * symptom rather than the cause: the daemon was never installed.
+ */
+export function daemonSpawnError(binary: string, err: NodeJS.ErrnoException): Error {
+  if (err.code !== "ENOENT") {
+    return new Error(`could not start the archcar daemon (${binary}): ${err.message}`);
+  }
+  const hint =
+    binary === "archcar"
+      ? "Install it with `cargo build --workspace --release` and put target/release/archcar on PATH, or set ARCHDUCTOR_ARCHCAR_BIN to its path."
+      : "Set ARCHDUCTOR_ARCHCAR_BIN to an existing archcar binary, or unset it to use the bundled sidecar.";
+  return new Error(`the archcar daemon was not found at '${binary}'. ${hint}`);
 }
 
 /** Read newline-delimited JSON envelopes off a socket, invoking `onLine` per line. */

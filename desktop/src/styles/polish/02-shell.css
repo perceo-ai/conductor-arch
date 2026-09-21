@@ -1,0 +1,129 @@
+/* ── Polish pass: app shell (sidebar, chrome, topbar) ──
+ *
+ * The shell is the only thing on screen in every state of the app, so it sets
+ * the reading of everything else. Two changes: put the sidebar on the
+ * elevation ladder instead of its own grey, and give selection an accent-
+ * derived treatment so the four accent options in Settings each produce a
+ * coherent app rather than only amber doing so. */
+
+.app-root,
+.content-area {
+    background: var(--el-0);
+}
+
+.sidebar {
+    background: var(--el-1);
+    border-right: 1px solid var(--edge-hairline);
+}
+
+/* The one boundary the eye uses to separate navigation from work. A hairline
+   of light on the panel's own edge reads as a seam rather than as a drawn
+   line, which is what keeps a 1px border from looking like a table. */
+.sidebar-chrome {
+    border-bottom: 1px solid var(--edge-hairline);
+}
+
+.sidebar-footer {
+    border-top: 1px solid var(--edge-hairline);
+}
+
+/* ── Rows: nav, workspaces, projects ──
+   One selected treatment, three places. Accent bar on the leading edge, a wash
+   behind it, and a slightly brighter label; hover is the wash at half strength
+   with no bar, so hover never gets mistaken for selection. */
+.sidebar-nav-button,
+.workspace-row-shell,
+.project-row {
+    border-radius: var(--r-sm);
+}
+
+.sidebar-nav-button:hover,
+.workspace-row-shell:hover,
+.project-row:hover {
+    background: var(--el-2);
+}
+
+.sidebar-nav-button.active,
+.sidebar-nav-button.nav-button-active,
+.workspace-row-shell.selected {
+    background: linear-gradient(
+        90deg,
+        var(--accent-wash) 0%,
+        var(--accent-wash-soft) 38%,
+        transparent 100%
+    );
+    box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+/* ── Project group header ──
+   The single letter standing in for a repository avatar was bare text at the
+   same weight as the name beside it. Giving it a tinted tile makes it read as
+   an identifier rather than as a stray character. */
+.project-avatar-fallback {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--r-xs);
+    background: var(--tint-info);
+    /* The muted text colour lands at 3.4:1 inside the tile; the tile is small
+       and the glyph is a single letter, so it needs the stronger value. */
+    color: var(--lc-text);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.project-avatar {
+    border-radius: var(--r-xs);
+}
+
+/* ── Search field ──
+   An input the same colour as the panel it sits in is not an input. Recess it
+   one step below the panel and let focus raise it back with an accent ring. */
+.workspace-search {
+    background: var(--el-0);
+    border: 1px solid var(--edge-hairline);
+    border-radius: var(--r-sm);
+}
+
+.workspace-search:focus-within {
+    background: var(--el-2);
+    border-color: var(--accent-edge);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+/* ── Top bar ── */
+.ws-topbar {
+    background: var(--el-1);
+    border-bottom: 1px solid var(--edge-hairline);
+}
+
+.page-header {
+    border-bottom: 1px solid var(--edge-hairline);
+}
+
+/* ── Icon buttons ──
+   28px is the smallest square that stays comfortably clickable at this
+   density; several of these were rendering under that. */
+.ui-button-icon {
+    min-width: 28px;
+    min-height: 28px;
+    border-radius: var(--r-sm);
+    color: var(--lc-text-muted);
+}
+
+.ui-button-icon:hover {
+    background: var(--el-3);
+    color: var(--lc-text-strong);
+}
+
+/* ── Page tab strips (Dashboard / History filters) ──
+   The active underline was a flat 2px bar the full width of the label. Insetting
+   it and rounding the cap makes the indicator read as a marker rather than as a
+   border on a table cell. */
+.project-tabs button[aria-selected="true"]::after,
+.page-header .ws-tab-shell.ws-tab-active::after {
+    border-radius: var(--r-pill);
+}

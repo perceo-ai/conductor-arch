@@ -154,12 +154,39 @@ function logLine(category: string, message: string, data?: unknown): void {
     if (!logStream) {
       fs.mkdirSync(logDir(), { recursive: true });
       logStream = fs.createWriteStream(LOG_PATH, { flags: "a" });
+      // A stream reports failures asynchronously, so the try/catch around its
+      // creation cannot see them, and an unlistened 'error' is an uncaught
+      // exception. Drop the stream and keep the console line.
+      logStream.on("error", () => {
+        logStream = null;
+      });
     }
     logStream.write(line + "\n");
   } catch {
     // logging must never crash the app
   }
 }
+
+// --- Last-resort error handling -------------------------------------------
+//
+// With no `uncaughtException` listener, Electron's default handler shows the
+// native "A JavaScript error occurred in the main process" dialog and, with no
+// window up yet, exits — so a single unhandled async error anywhere in main
+// (a spawn that cannot find its binary, a log stream that cannot be written, a
+// socket that errors between listeners) is indistinguishable from the app
+// being broken.
+//
+// None of those should take the app down: the window's whole job is to explain
+// what is missing. Log and keep running; the renderer surfaces the failing RPC
+// through its own error path.
+process.on("uncaughtException", (err) => {
+  logLine("error", `uncaught exception: ${err?.stack ?? String(err)}`);
+});
+
+process.on("unhandledRejection", (reason) => {
+  const detail = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  logLine("error", `unhandled rejection: ${detail}`);
+});
 
 // On Linux the Chromium zygote fails to fork child processes on some
 // kernel/sandbox combos (kernel 7.x + Electron 33), cascading into GPU and
@@ -754,7 +781,9 @@ ipcMain.on("window:toggle-maximize", () => {
 });
 ipcMain.on("window:close", () => win?.close());
 
-app.whenReady().then(createWindow);
+app.whenReady().then(createWindow, (err: Error) => {
+  logLine("error", `window creation failed: ${err?.stack ?? String(err)}`);
+});
 
 app.on("window-all-closed", () => {
   bridge.close();

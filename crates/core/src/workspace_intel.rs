@@ -10,7 +10,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Row};
+use rusqlite::{params, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use crate::workspace::{timestamp, WorkspaceStore};
@@ -34,6 +34,10 @@ pub const CONTEXT_KINDS: [&str; 5] = ["note", "summary", "context_pack", "file",
 /// and leaves it alone.
 pub const AGENT_SUMMARY_SOURCE_REF: &str = "archductor:agent";
 
+/// Source ref the auto-refresh stamps on the drafts it writes. It is also the
+/// permission it gives itself to overwrite them later.
+pub const SUMMARY_REFRESH_SOURCE_REF: &str = "archductor:refresh";
+
 /// How much agent summary we store. The summary is a handoff note, not a
 /// transcript, and it rides back into the next session's context on every
 /// staleness prompt — so the ceiling is a budget, not just tidiness.
@@ -45,6 +49,84 @@ pub fn summary_is_agent_authored(summary: &Summary) -> bool {
         .source_refs
         .iter()
         .any(|source| source == AGENT_SUMMARY_SOURCE_REF)
+}
+
+/// True when the auto-refresh may replace this summary's body.
+///
+/// Only what the refresh wrote itself. The mechanical draft is a seed for the
+/// empty case; anything with an author — an agent's handoff note, or a human's
+/// text typed into the Summary tab and saved with its own source ref — is
+/// theirs. Guarding `archductor:agent` alone meant the desktop's Save (which
+/// sends `human:desktop`) survived until the next Refresh click sitting beside
+/// it, and then silently did not.
+pub fn summary_is_refresh_authored(summary: &Summary) -> bool {
+    summary.source_refs.is_empty()
+        || summary
+            .source_refs
+            .iter()
+            .all(|source| source == SUMMARY_REFRESH_SOURCE_REF)
+}
+
+/// Budgets for the per-chat summary. It sits in a right-hand panel under the
+/// workspace summary, so it has to read at a glance; past this the reader is
+/// better served by opening the chat.
+const SESSION_SUMMARY_REQUEST_CHARS: usize = 220;
+const SESSION_SUMMARY_ANSWER_CHARS: usize = 420;
+const SESSION_SUMMARY_MAX_FILES: usize = 4;
+
+/// Flatten chat text into summary prose: strip Archductor's own control blocks,
+/// drop fenced code and the markdown that only makes sense laid out, collapse
+/// whitespace, and cut to a budget on a word boundary.
+fn condense_chat_text(text: &str, budget: usize) -> Option<String> {
+    let text = crate::workspace::strip_archductor_hidden_instruction_blocks(text);
+    let text = crate::workspace::strip_archductor_metadata_block(&text);
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence || trimmed.is_empty() {
+            continue;
+        }
+        // Table rows and horizontal rules carry no meaning once flattened.
+        if trimmed.starts_with('|') || trimmed.chars().all(|c| c == '-' || c == '=') {
+            continue;
+        }
+        kept.push(trimmed);
+    }
+    let joined = kept.join(" ");
+    let collapsed = joined.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapsed.trim();
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= budget {
+        return Some(collapsed.to_owned());
+    }
+    let clipped: String = collapsed.chars().take(budget).collect();
+    let cut = clipped.rfind(' ').unwrap_or(clipped.len());
+    Some(format!(
+        "{}…",
+        clipped[..cut].trim_end_matches([',', '.', ';'])
+    ))
+}
+
+/// "Add a flag" -> "add a flag", so it reads on from "Asked to". Left alone when
+/// the first word is an identifier or acronym that owns its capital.
+fn lead_with_lowercase(text: &str) -> String {
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else {
+        return text.to_owned();
+    };
+    let rest = chars.as_str();
+    let second_is_upper = rest.chars().next().is_some_and(char::is_uppercase);
+    if !first.is_uppercase() || second_is_upper {
+        return text.to_owned();
+    }
+    format!("{}{rest}", first.to_lowercase())
 }
 
 /// Trim agent prose to the stored budget, cutting on a character boundary and
@@ -895,6 +977,15 @@ impl WorkspaceStore {
     }
 
     /// Draft a per-session handoff summary from what that session actually did.
+    /// Draft the per-chat summary: what this chat was asked to do and where the
+    /// agent got to.
+    ///
+    /// Deliberately not a form. The Summary tab renders the chat's title,
+    /// harness and status as its own rows directly above this body, and the
+    /// files it touched have two tabs of their own, so restating them here left
+    /// a block that was always present and never informative. This follows the
+    /// rule the workspace summary hands the agent: prose about the work, no
+    /// file lists, no session lists, no status.
     pub fn draft_session_summary(&self, workspace_name: &str, session_id: i64) -> Result<String> {
         let contribution = self
             .session_contributions(workspace_name)?
@@ -902,44 +993,106 @@ impl WorkspaceStore {
             .find(|contribution| contribution.session_id == session_id)
             .with_context(|| format!("session {session_id} not found in {workspace_name}"))?;
 
-        let mut out = String::new();
-        out.push_str(&format!("# {}\n\n", contribution.title));
-        out.push_str(&format!(
-            "- Harness: {}\n- Status: {}\n",
-            contribution.provider, contribution.status
-        ));
-        if let Some(task_title) = &contribution.task_title {
-            out.push_str(&format!(
-                "- Task: #{} {}\n",
-                contribution.task_id.unwrap_or_default(),
-                task_title
-            ));
+        let (request, answer) = self.chat_highlights(session_id)?;
+        let mut parts: Vec<String> = Vec::new();
+
+        if let Some(request) = request {
+            parts.push(format!("Asked to {}", lead_with_lowercase(&request)));
         }
-        out.push('\n');
-
-        out.push_str("## Files touched\n\n");
-        if contribution.files_touched.is_empty() {
-            out.push_str("- None recorded\n");
-        } else {
-            for path in &contribution.files_touched {
-                let marker = if contribution.still_present.contains(path) {
-                    " (still changed in branch)"
-                } else {
-                    ""
-                };
-                out.push_str(&format!("- {path}{marker}\n"));
-            }
+        if let Some(answer) = answer {
+            parts.push(answer);
         }
-        out.push('\n');
 
-        out.push_str("## Handoff\n\n");
-        out.push_str(if contribution.still_present.is_empty() {
-            "- No outstanding uncommitted changes from this session\n"
-        } else {
-            "- Review this session's changes before committing\n"
-        });
+        if parts.is_empty() {
+            // Said plainly rather than with empty headings: a chat nobody has
+            // spoken in has nothing to hand over.
+            return Ok("Nothing has been asked in this chat yet.".to_owned());
+        }
 
-        Ok(out)
+        // The one piece of session bookkeeping that is genuinely handoff
+        // material: work this chat left in the branch for someone to finish or
+        // review. A plain list of everything it ever opened is the Files tab's
+        // job, not this one's.
+        if !contribution.still_present.is_empty() {
+            let mut files = contribution.still_present.clone();
+            files.sort();
+            let shown = files
+                .iter()
+                .take(SESSION_SUMMARY_MAX_FILES)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rest = files.len().saturating_sub(SESSION_SUMMARY_MAX_FILES);
+            parts.push(if rest > 0 {
+                format!("Still uncommitted from this chat: {shown} (+{rest} more).")
+            } else {
+                format!("Still uncommitted from this chat: {shown}.")
+            });
+        }
+
+        Ok(parts.join("\n\n"))
+    }
+
+    /// The request that opened a chat and the agent's most recent answer.
+    ///
+    /// Read from both stores on purpose: TUI providers write the conversation
+    /// to `chat_messages`, while managed ones (Codex app-server, Claude
+    /// stream-json) only emit provider events, so a summary that consulted one
+    /// of them would be blank for half the providers.
+    fn chat_highlights(&self, thread_id: i64) -> Result<(Option<String>, Option<String>)> {
+        let first_message = |role: &str, newest: bool| -> Result<Option<String>> {
+            let order = if newest { "DESC" } else { "ASC" };
+            let sql = format!(
+                "SELECT content FROM chat_messages
+                  WHERE thread_id = ?1 AND role = ?2 AND TRIM(content) <> ''
+                  ORDER BY id {order} LIMIT 1"
+            );
+            Ok(self
+                .conn
+                .query_row(&sql, params![thread_id, role.to_owned()], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()?)
+        };
+        let first_event = |kind: &str, newest: bool| -> Result<Option<String>> {
+            let order = if newest { "DESC" } else { "ASC" };
+            let sql = format!(
+                "SELECT normalized_payload_json FROM provider_events
+                  WHERE chat_thread_id = ?1 AND kind = ?2
+                  ORDER BY received_sequence {order} LIMIT 1"
+            );
+            let payload = self
+                .conn
+                .query_row(&sql, params![thread_id, kind.to_owned()], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()?;
+            Ok(payload.and_then(|raw| {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("body")
+                            .and_then(|body| body.as_str())
+                            .map(str::to_owned)
+                    })
+                    .filter(|body| !body.trim().is_empty())
+            }))
+        };
+
+        let request = match first_message("user", false)? {
+            Some(text) => Some(text),
+            None => first_event("user_input", false)?,
+        };
+        let answer = match first_message("agent", true)? {
+            Some(text) => Some(text),
+            None => first_event("assistant_output", true)?,
+        };
+
+        Ok((
+            request.and_then(|text| condense_chat_text(&text, SESSION_SUMMARY_REQUEST_CHARS)),
+            answer.and_then(|text| condense_chat_text(&text, SESSION_SUMMARY_ANSWER_CHARS)),
+        ))
     }
 
     /// Draft an operational summary for one task: status, linked sessions, and
@@ -1014,12 +1167,13 @@ impl WorkspaceStore {
 
         let existing_state = self.summary_refresh_state(workspace.id, scope_type, scope_id)?;
         let existing_summary = self.get_summary(workspace_name, scope_type, Some(scope_id))?;
-        // Agent prose wins. The mechanical draft is a seed for the empty case,
-        // so once an agent has written the summary the daemon stops rewriting it
-        // — otherwise every file change would erase the handoff note.
+        // Authored prose wins. The mechanical draft is a seed for the empty
+        // case, so once anyone — an agent, or a human typing in the Summary tab
+        // — has written the summary, the daemon stops rewriting it; otherwise
+        // every file change would erase the handoff note.
         if let Some(summary) = existing_summary
             .as_ref()
-            .filter(|summary| summary_is_agent_authored(summary))
+            .filter(|summary| !summary_is_refresh_authored(summary))
         {
             let state = match &existing_state {
                 Some(state) => state.clone(),
@@ -1058,7 +1212,7 @@ impl WorkspaceStore {
             scope_type,
             Some(scope_id),
             body,
-            &["archductor:refresh".to_owned()],
+            &[SUMMARY_REFRESH_SOURCE_REF.to_owned()],
         )?;
         self.record_summary_refresh_state(
             workspace.id,
@@ -2418,6 +2572,76 @@ mod tests {
     }
 
     #[test]
+    fn refresh_keeps_a_hand_written_summary() {
+        // The Summary tab's Save sends its own source ref ("human:desktop"),
+        // and Refresh sits next to it in the same panel. Refresh used to guard
+        // only `archductor:agent`, so one click after typing a handoff note
+        // replaced it with the mechanical draft — the exact data loss the
+        // "agent prose wins" rule was written to prevent, for the one author
+        // who cannot regenerate their text.
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+
+        let saved = store
+            .save_summary(
+                "berlin",
+                "workspace",
+                None,
+                "# Handoff\n\nDeploy needs the migration run first.",
+                &["human:desktop".to_owned()],
+            )
+            .unwrap();
+
+        let refreshed = store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+
+        assert!(
+            !refreshed.changed,
+            "refresh must not rewrite a hand-written summary"
+        );
+        assert_eq!(refreshed.summary.body_markdown, saved.body_markdown);
+        assert_eq!(refreshed.summary.source_refs, saved.source_refs);
+
+        // And it stays gone-proof across a second refresh, which is where the
+        // evidence-hash shortcut would otherwise hide the bug.
+        store.create_task("berlin", "New goal", "", &[]).unwrap();
+        let again = store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+        assert!(!again.changed);
+        assert_eq!(again.summary.body_markdown, saved.body_markdown);
+    }
+
+    #[test]
+    fn refresh_still_rewrites_its_own_earlier_draft() {
+        // The seed case has to keep working: a summary the refresh itself wrote
+        // is the one thing it may replace.
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+
+        let first = store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+        assert!(first.changed);
+
+        store.create_task("berlin", "New goal", "", &[]).unwrap();
+        let second = store
+            .refresh_summary(SummaryRefreshScope::Workspace {
+                workspace: "berlin".to_owned(),
+            })
+            .unwrap();
+        assert!(second.changed);
+        assert!(second.summary.body_markdown.contains("New goal"));
+    }
+
+    #[test]
     fn refresh_current_chat_summary_is_session_scoped() {
         let temp = tempfile::tempdir().unwrap();
         let store = store_with_workspace(&temp);
@@ -2434,10 +2658,83 @@ mod tests {
 
         assert_eq!(refreshed.summary.scope_type, "session");
         assert_eq!(refreshed.summary.scope_id, thread.id);
-        assert!(refreshed
-            .summary
-            .body_markdown
-            .contains("Investigate summary tab"));
+        // The chat title is rendered above this body by the Summary tab, so the
+        // summary no longer repeats it; with no conversation yet it says that.
+        assert!(
+            refreshed
+                .summary
+                .body_markdown
+                .to_lowercase()
+                .contains("nothing"),
+            "{}",
+            refreshed.summary.body_markdown
+        );
+    }
+
+    #[test]
+    fn session_summary_reports_the_conversation_not_the_metadata() {
+        // The per-chat summary used to be a form: the chat title, the harness,
+        // the status, a file list and a canned handoff line — every one of which
+        // the Summary tab already renders as its own row or has a dedicated tab
+        // for. It told a reader nothing about what the chat was for. It should
+        // say what was asked and where the agent got to, which is the same rule
+        // the workspace summary gives the agent: no file lists, no session
+        // lists, no status.
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Investigate summary tab", None)
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "user",
+                "Add a --verbose flag that prints the resolved config path before running.",
+                "test",
+            )
+            .unwrap();
+        store
+            .append_chat_message(
+                thread.id,
+                "agent",
+                "Added the flag behind the existing config loader and a test covering the \
+                 printed path. The parser change is in src/cli.rs.",
+                "test",
+            )
+            .unwrap();
+
+        let body = store.draft_session_summary("berlin", thread.id).unwrap();
+
+        assert!(
+            body.contains("--verbose flag"),
+            "the request should lead the summary: {body}"
+        );
+        assert!(
+            body.contains("Added the flag"),
+            "the agent's latest answer should be in the summary: {body}"
+        );
+        // The boilerplate the panel already shows beside it.
+        assert!(!body.contains("Harness:"), "{body}");
+        assert!(!body.contains("Status:"), "{body}");
+        assert!(!body.contains("## Files touched"), "{body}");
+        assert!(!body.contains("None recorded"), "{body}");
+    }
+
+    #[test]
+    fn session_summary_says_so_when_the_chat_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store_with_workspace(&temp);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+
+        let body = store.draft_session_summary("berlin", thread.id).unwrap();
+
+        assert!(
+            body.to_lowercase().contains("nothing"),
+            "an empty chat should say so plainly: {body}"
+        );
+        assert!(!body.contains("Harness:"), "{body}");
     }
 
     #[test]

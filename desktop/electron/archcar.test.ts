@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -393,5 +394,61 @@ describe("sshFailureHint", () => {
 
   it("invents no advice for an unrecognized failure", () => {
     expect(sshFailureHint("Connection reset by peer", "buildbox", null)).toBeNull();
+  });
+});
+
+describe("local daemon spawn", () => {
+  // The daemon is never up when the app launches, so every start runs
+  // `spawn(archcarBinary())`. On a machine where archcar is neither bundled in
+  // `resources/bin` nor on PATH that spawn emits `'error'` with ENOENT — and
+  // with no listener attached Node turns an EventEmitter 'error' into an
+  // uncaught exception, which in the Electron main process means the native
+  // "A JavaScript error occurred in the main process" dialog and an immediate
+  // exit. The app died on launch instead of opening its window and saying what
+  // was missing.
+  //
+  // In vitest the same unhandled 'error' surfaces as an unhandled error that
+  // fails the file, so this test covers the crash as well as the message.
+  it("reports a missing archcar binary instead of raising an unhandled error", async () => {
+    const saved = {
+      bin: process.env.ARCHDUCTOR_ARCHCAR_BIN,
+      remote: process.env.ARCHDUCTOR_ARCHCAR_REMOTE,
+      token: process.env.ARCHDUCTOR_ARCHCAR_TOKEN,
+      state: process.env.XDG_STATE_HOME,
+    };
+    // A remote profile on the developer's machine would take a different code
+    // path entirely, so point the profile lookup at an empty directory.
+    process.env.XDG_STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "archcar-spawn-"));
+    delete process.env.ARCHDUCTOR_ARCHCAR_REMOTE;
+    delete process.env.ARCHDUCTOR_ARCHCAR_TOKEN;
+    process.env.ARCHDUCTOR_ARCHCAR_BIN = path.join(
+      process.env.XDG_STATE_HOME,
+      "archcar-does-not-exist",
+    );
+
+    try {
+      const bridge = new ArchcarBridge(
+        path.join(process.env.XDG_STATE_HOME, "archcar.sock"),
+      );
+      const failure = await bridge
+        .request({ type: "list_workspaces" })
+        .then(() => null, (err: Error) => err);
+
+      expect(failure).toBeInstanceOf(Error);
+      // Naming the binary is the point: "archcar did not come up at <socket>"
+      // describes a symptom the user cannot act on.
+      expect(failure!.message).toContain("archcar-does-not-exist");
+      expect(failure!.message).toMatch(/not found/i);
+    } finally {
+      for (const [key, value] of [
+        ["ARCHDUCTOR_ARCHCAR_BIN", saved.bin],
+        ["ARCHDUCTOR_ARCHCAR_REMOTE", saved.remote],
+        ["ARCHDUCTOR_ARCHCAR_TOKEN", saved.token],
+        ["XDG_STATE_HOME", saved.state],
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });

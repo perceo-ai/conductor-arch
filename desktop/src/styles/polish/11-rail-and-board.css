@@ -1,0 +1,133 @@
+/* ── Polish pass: the right rail and the dashboard board ──
+ *
+ * Two surfaces that measured worse than they look, both for the same reason:
+ * several things that sit in one column were each given their own inset, so the
+ * column has no left edge, and containers were drawn in a different shape
+ * language from the things inside them. */
+
+/* ── One left edge down the right rail ──
+ *
+ * Measured across a 468px rail: the PR strip started its content at x=1046
+ * (padding 0 2px), the file rows at 1050 (a row bleed of -8px inside padding
+ * 5px 8px), and the panel header at 1054 (padding 8px 10px). Three insets, none
+ * of them agreeing, stacked vertically where the eye reads them as one column.
+ *
+ * The row bleed stays — hover has to cover the whole row — so the inset is
+ * applied to the rail and the rows give it back with their own negative
+ * margin, which is the only arrangement where hover reaches the edge *and* the
+ * text lines up with the headings above it. */
+:root {
+    /* 10px, because that is what `.ws-changes-header` and the other panel
+       headings already use; moving the headings instead would have meant
+       fighting their own shorthand padding in three files. */
+    --rail-inset: 10px;
+}
+
+.ws-right-tabs,
+.ws-pr-bar,
+.command-center-strip,
+.ws-changes-header,
+.ws-file-view-header,
+.ws-checks-panel-flat,
+.ws-flat-section,
+.ws-tab-panel,
+.command-panel {
+    padding-inline: var(--rail-inset);
+}
+
+/* The list carries the inset; the rows bleed it back out and pad it in again,
+   which lands their text on the same line as the heading above while letting
+   hover reach the panel edge. The list's own 6px was what put the row text 4px
+   left of the heading. */
+.ws-file-list,
+.ws-change-list,
+.ws-flat-section-body,
+.ws-check-list {
+    padding-inline: var(--rail-inset);
+}
+
+.ws-change-row,
+.ws-file-row,
+.ws-check-row-flat,
+.ws-timeline-row,
+.ws-file-comment-row {
+    /* The width is spelled out rather than left to the negative margins: as a
+       flex child the row did not stretch to cover the right bleed, so its
+       diffstat column stopped 20px short of the panel control above it. */
+    box-sizing: border-box;
+    width: calc(100% + var(--rail-inset) * 2);
+    padding-inline: var(--rail-inset);
+    margin-inline: calc(var(--rail-inset) * -1);
+}
+
+/* The last tab was flush against the panel edge with nowhere to breathe. */
+.ws-right-tabs {
+    padding-right: var(--rail-inset);
+}
+
+/* ── The diffstat is a column, not a suffix ──
+ *
+ * Every row sized its own `+n −n` block, so the plus signs landed at five
+ * different x positions down the list and the filename truncated at a
+ * different point on each line. A reserved column fixes both, and 12px of gap
+ * stops a truncated path from touching its own numbers (it was 8px). */
+.ws-file-summary-counts {
+    flex: 0 0 auto;
+    min-width: 96px;
+    display: inline-flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-left: 12px;
+    font-variant-numeric: tabular-nums;
+}
+
+.ws-file-additions,
+.ws-file-deletions {
+    min-width: 34px;
+    text-align: right;
+}
+
+.ws-file-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── The board is cards, not table cells ──
+ *
+ * Each column was a square-cornered box with an opaque 1px #2b2b2b border
+ * wrapped around cards with 10px corners and a translucent hairline — a shape
+ * language the rest of the app stopped using. It also shrink-wrapped its
+ * contents, so the five columns measured 152 / 70 / 179 / 179 / 70px tall and
+ * read as mismatched boxes rather than as columns of one board.
+ *
+ * Dropping the box solves both: the cards are the only objects, the header rule
+ * does the separating, and there is no container left to mismatch. That keeps
+ * the original intent too — columns were deliberately content-sized so a sparse
+ * board shows no tall empty voids. */
+/* `.dashboard .kanban-column` in theme/09 carries the box, so the bare class
+   loses to it. */
+.dashboard .kanban-column,
+.kanban-column {
+    border: none;
+    background: transparent;
+    padding: 0;
+}
+
+.kanban-column-header {
+    border-bottom: 1px solid var(--edge-hairline);
+    padding-bottom: 8px;
+    margin-bottom: 10px;
+}
+
+/* An empty column is a sentence, not a stub box: give it the card's own inset
+   so it starts on the same line the cards would. */
+.column-empty {
+    padding: 2px 2px 8px;
+    color: var(--lc-text-muted);
+    /* It carried a card-coloured fill, which is invisible on the dark theme and
+       reads as an empty clickable card on the light one. */
+    background: transparent;
+    border: none;
+}
