@@ -587,6 +587,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
     ensure_column(
         conn,
         "chat_threads",
+        "approval_mode",
+        "ALTER TABLE chat_threads ADD COLUMN approval_mode TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "chat_threads",
         "model",
         "ALTER TABLE chat_threads ADD COLUMN model TEXT",
     )?;

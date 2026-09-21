@@ -7533,6 +7533,32 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
+    /// Whether this chat asks before running tools, and in which mode.
+    ///
+    /// `None` is the default: the session runs unattended under
+    /// `bypassPermissions`, which is what every thread did before the opt-in
+    /// existed.
+    pub fn chat_thread_approval_mode(&self, thread_id: i64) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT approval_mode FROM chat_threads WHERE id = ?1",
+                [thread_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    pub fn set_chat_thread_approval_mode(&self, thread_id: i64, mode: Option<&str>) -> Result<()> {
+        let now = timestamp();
+        self.conn.execute(
+            "UPDATE chat_threads SET approval_mode = ?2, updated_at = ?3 WHERE id = ?1",
+            params![thread_id, mode, now],
+        )?;
+        Ok(())
+    }
+
     /// The plan this chat is working from, once one has been approved or
     /// written.
     pub fn chat_thread_plan_path(&self, thread_id: i64) -> Result<Option<String>> {
@@ -14294,6 +14320,29 @@ branch_prefix = "team"
             .unwrap();
         let full = Path::new(&ws_path).join(&saved.relative_path);
         assert_eq!(fs::read_to_string(full).unwrap(), "a very long pasted blob");
+    }
+
+    #[test]
+    fn chat_thread_approval_mode_defaults_to_unset_and_round_trips() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+
+        assert_eq!(store.chat_thread_approval_mode(thread.id).unwrap(), None);
+
+        store
+            .set_chat_thread_approval_mode(thread.id, Some("default"))
+            .unwrap();
+        assert_eq!(
+            store.chat_thread_approval_mode(thread.id).unwrap(),
+            Some("default".to_owned())
+        );
+
+        store
+            .set_chat_thread_approval_mode(thread.id, None)
+            .unwrap();
+        assert_eq!(store.chat_thread_approval_mode(thread.id).unwrap(), None);
     }
 
     #[test]

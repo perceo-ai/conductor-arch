@@ -126,6 +126,14 @@ impl RuntimeSessionStore {
         self.open()?.chat_thread_plan_mode(thread_id)
     }
 
+    pub fn chat_thread_approval_mode(&self, thread_id: i64) -> Result<Option<String>> {
+        self.open()?.chat_thread_approval_mode(thread_id)
+    }
+
+    pub fn set_chat_thread_approval_mode(&self, thread_id: i64, mode: Option<&str>) -> Result<()> {
+        self.open()?.set_chat_thread_approval_mode(thread_id, mode)
+    }
+
     /// Write a plan into the workspace checkout and return its workspace-
     /// relative path. `.context` is the workspace's scratch area, so plans live
     /// beside the other agent artifacts instead of in the provider's own state
