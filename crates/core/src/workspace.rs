@@ -27374,6 +27374,45 @@ spotlight_testing = true
         (temp, store)
     }
 
+    #[test]
+    fn claude_permission_mode_prefers_plan_then_opt_in_then_bypass() {
+        use crate::archcar::session::{
+            claude_permission_mode_for_thread, CLAUDE_DEFAULT_PERMISSION_MODE,
+            CLAUDE_PLAN_PERMISSION_MODE,
+        };
+
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let id = thread.id;
+
+        // Nothing set: today's behavior, unattended.
+        assert_eq!(
+            claude_permission_mode_for_thread(&store, id),
+            CLAUDE_DEFAULT_PERMISSION_MODE
+        );
+
+        // Opted in: the thread asks before tools.
+        store
+            .set_chat_thread_approval_mode(id, Some("default"))
+            .unwrap();
+        assert_eq!(claude_permission_mode_for_thread(&store, id), "default");
+
+        // Plan mode outranks the opt-in while it is on.
+        store.set_chat_thread_plan_mode(id, true).unwrap();
+        assert_eq!(
+            claude_permission_mode_for_thread(&store, id),
+            CLAUDE_PLAN_PERMISSION_MODE
+        );
+
+        // Leaving plan mode returns to the opt-in, NOT to bypass. This is the
+        // regression: resetting to bypass here silently drops the user's
+        // supervision mid-thread, with no restart to notice.
+        store.set_chat_thread_plan_mode(id, false).unwrap();
+        assert_eq!(claude_permission_mode_for_thread(&store, id), "default");
+    }
+
     fn process_record_for_thread(store: &WorkspaceStore, thread_id: i64) -> ProcessRecord {
         store
             .record_session_process_for_thread(

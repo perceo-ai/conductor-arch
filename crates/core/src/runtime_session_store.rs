@@ -134,6 +134,16 @@ impl RuntimeSessionStore {
         self.open()?.set_chat_thread_approval_mode(thread_id, mode)
     }
 
+    /// The permission mode a Claude session for this thread should run in.
+    /// Thin pass-through to the single source of truth so callers that only
+    /// hold a `RuntimeSessionStore` don't open a `WorkspaceStore` inline.
+    pub fn claude_permission_mode_for_thread(&self, thread_id: i64) -> Result<String> {
+        Ok(crate::archcar::session::claude_permission_mode_for_thread(
+            &self.open()?,
+            thread_id,
+        ))
+    }
+
     /// Write a plan into the workspace checkout and return its workspace-
     /// relative path. `.context` is the workspace's scratch area, so plans live
     /// beside the other agent artifacts instead of in the provider's own state

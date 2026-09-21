@@ -3955,12 +3955,9 @@ fn set_chat_plan_mode(
     for kind in [SessionKind::CLAUDE, SessionKind::CODEX] {
         if let Some(handle) = live_session_handle_for_thread(state, thread_id, kind) {
             let mode = match kind {
-                SessionKind::CLAUDE if plan_mode => {
-                    Some(crate::archcar::session::CLAUDE_PLAN_PERMISSION_MODE.to_owned())
-                }
-                SessionKind::CLAUDE => {
-                    Some(crate::archcar::session::CLAUDE_DEFAULT_PERMISSION_MODE.to_owned())
-                }
+                SessionKind::CLAUDE => Some(
+                    crate::archcar::session::claude_permission_mode_for_thread(&store, thread_id),
+                ),
                 // Codex carries plan mode as a read-only sandbox on the turns
                 // it starts; the adapter only needs to know which mode it is in.
                 SessionKind::CODEX if plan_mode => Some(
