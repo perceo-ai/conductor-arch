@@ -3258,7 +3258,7 @@ fn run_cli() -> Result<()> {
             }
             McpCommand::Register { client, full } => {
                 let clients = mcp_clients(client.as_deref())?;
-                let exe = std::env::current_exe()?;
+                let exe = archductor_core::mcp::resolve_archductor_cli()?;
                 print_mcp_registrations(archductor_core::mcp::register_archductor_mcp(
                     &exe, &clients, !full,
                 ));
