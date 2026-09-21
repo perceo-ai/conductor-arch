@@ -87,16 +87,42 @@ no mock could:
 The lesson generalises: the mock agreed with whatever the client assumed, so
 the protocol tests that matter are the ones against the daemon and a provider.
 
-Not done: the model/effort/permission-mode pickers, which need session
-capabilities typed first — the supported values are per provider, and guessing
-the list would send modes the daemon rejects. Attachments and `@`-mentions in
-the composer are also absent.
+## iOS client, phases 2-4 (2026-09-21)
 
-Still specced for later phases in
-`docs/superpowers/specs/2026-09-20-ios-mobile-app-design.md`: review and PRs
-(P2), workspace operations (P3), terminal and files (P4), APNs push and
-TestFlight (P5). Views currently use system styling with the desktop palette
-only partly applied.
+The phone now covers the desktop's main loop.
+
+- **Repositories and workspaces**: the list is grouped by repository, with
+  add/clone, create (task, branch, issue, PR), archive, and restore. A
+  workspace whose repository is missing gets its own section instead of
+  vanishing.
+- **Review**: changed files with a scope picker, a coloured unified diff,
+  checks and CI runs, todos, commit, push, and pull request create/merge using
+  the daemon's own drafted title and body.
+- **Files**: browse the tree (derived on the phone from one flat list), read
+  and edit, save back.
+- **Terminal**: the daemon's rendered VT100 screen plus a `^C` button, since a
+  phone keyboard has no control key.
+- **Model and effort pickers** mirror `desktop/src/lib/models.ts`, with a test
+  that reads that file so the tables cannot drift. The chat provider list comes
+  from `list_agent_providers`.
+
+Bugs the live daemon and a real agent caught, all of which a mock had agreed
+with:
+
+- `WorkspaceChangeScope` is externally tagged, not `{"type": …}`. A request
+  that fails to deserialize gets no response at all — the daemon closes the
+  connection — which the client had been reporting as an auth failure.
+- `DaemonSession` handed every observer the same `AsyncStream`, which splits
+  events between consumers rather than broadcasting them.
+- `spawn_session` answers `session_spawn_queued` with no id, so the shell is
+  resolved from the processes report rather than by racing the event stream.
+
+Not done: permission-mode control (the desktop exposes none either, and the
+valid values are per provider), composer attachments and `@`-mentions,
+background tasks, checkpoints, settings editing, and APNs push with TestFlight
+signing (P5 in the spec). The bundle id is `ai.perceo.archductor.ios`, distinct
+from the Electron app's, because one Apple account cannot hold the same App ID
+for two platforms.
 
 ## Archductor UX Strategy Alignment (2026-08-12)
 
