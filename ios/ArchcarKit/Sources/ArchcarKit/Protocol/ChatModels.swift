@@ -77,6 +77,41 @@ public struct ProjectionItem: Decodable, Sendable, Identifiable, Hashable {
     /// a cursor rather than treating it as settled text.
     public var isStreaming: Bool { streamState == "streaming" }
 
+    /// How a row should read. Core keeps growing render classes as providers
+    /// grow features, so anything that is not a chat bubble renders as a card
+    /// rather than disappearing from the transcript.
+    public enum Presentation: Sendable, Equatable {
+        case userMessage
+        case assistantMessage
+        case card
+    }
+
+    public var presentation: Presentation {
+        switch renderClass {
+        case "user_chat": .userMessage
+        case "assistant_chat": .assistantMessage
+        default: .card
+        }
+    }
+
+    /// SF Symbol for a card row.
+    public var symbolName: String {
+        switch renderClass {
+        case "command_card", "process_card": "terminal"
+        case "diff_card": "plusminus"
+        case "file_card": "doc.text"
+        case "reasoning_card": "brain"
+        case "error_card": "exclamationmark.triangle"
+        case "plan_card": "list.bullet.clipboard"
+        case "tool_card", "skill_card", "plugin_card": "wrench.and.screwdriver"
+        case "subagent_card", "nested_transcript_card": "person.2"
+        case "background_card": "clock.arrow.circlepath"
+        case "hook_card": "link"
+        case "image_card": "photo"
+        default: "square.text.square"
+        }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id, sequence, title, body, status
         case renderClass = "render_class"

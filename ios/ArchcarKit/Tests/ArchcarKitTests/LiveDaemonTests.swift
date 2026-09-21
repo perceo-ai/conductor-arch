@@ -55,7 +55,7 @@ struct LiveDaemonTests {
 
         let session = try await connect(daemon)
         let response = try await session.request(GetInventorySnapshotRequest())
-        guard case .inventorySnapshot(let repositories, let workspaces) = response else {
+        guard case .inventorySnapshot(let repositories, let workspaces, _) = response else {
             Issue.record("expected inventory_snapshot, got \(response)")
             return
         }

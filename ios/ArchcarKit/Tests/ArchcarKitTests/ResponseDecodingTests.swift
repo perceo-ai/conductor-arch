@@ -60,7 +60,7 @@ private let workspacesLine = """
     "remote_name":"origin","active_workspaces":3,"total_workspaces":9}],\
     "workspaces":[],"chat_threads":{}}}
     """
-    guard case .inventorySnapshot(let repositories, let workspaces) = try decode(line).payload else {
+    guard case .inventorySnapshot(let repositories, let workspaces, _) = try decode(line).payload else {
         Issue.record("expected inventory_snapshot")
         return
     }

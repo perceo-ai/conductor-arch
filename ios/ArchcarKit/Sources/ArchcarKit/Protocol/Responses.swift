@@ -9,7 +9,10 @@ public enum ArchcarResponse: Sendable {
     case ack
     case workspaces([WorkspaceSummary])
     case repositories([RepositorySummary])
-    case inventorySnapshot(repositories: [RepositorySummary], workspaces: [WorkspaceSummary])
+    case inventorySnapshot(
+        repositories: [RepositorySummary],
+        workspaces: [WorkspaceSummary],
+        chatThreads: [String: [ChatThread]])
     case remoteAccess(listen: String?, token: String)
     case chatThreads(workspace: String, threads: [ChatThread])
     case chatThreadCreated(ChatThread)
@@ -35,6 +38,7 @@ extension ArchcarResponse: Decodable {
         case planPath = "plan_path"
         case planMarkdown = "plan_markdown"
         case input
+        case chatThreads = "chat_threads"
     }
 
     public init(from decoder: Decoder) throws {
@@ -50,7 +54,11 @@ extension ArchcarResponse: Decodable {
         case "inventory_snapshot":
             self = .inventorySnapshot(
                 repositories: try container.decode([RepositorySummary].self, forKey: .repositories),
-                workspaces: try container.decode([WorkspaceSummary].self, forKey: .workspaces)
+                workspaces: try container.decode([WorkspaceSummary].self, forKey: .workspaces),
+                // Keyed by workspace name. This is what makes a cross-workspace
+                // "which chats are live" view one request instead of N.
+                chatThreads: try container.decodeIfPresent(
+                    [String: [ChatThread]].self, forKey: .chatThreads) ?? [:]
             )
         case "remote_access":
             self = .remoteAccess(
