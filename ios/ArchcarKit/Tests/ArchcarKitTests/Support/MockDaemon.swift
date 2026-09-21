@@ -99,10 +99,23 @@ actor MockDaemon {
                 continue
             }
             receivedLines.append(text)
-            if let reply = matcher?(text) {
+            if let reply = matcher?(text) ?? Self.handshakeProbeReply(to: text) {
                 connection.send(content: Data((reply + "\n").utf8), completion: .idempotent)
             }
         }
+    }
+}
+
+extension MockDaemon {
+    /// `DaemonSession.connect` proves its token with a `list_repositories`
+    /// round trip, so a mock that never answers one would hang every connect.
+    /// The real daemon always answers it; this keeps the stand-in honest.
+    static func handshakeProbeReply(to line: String) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = object["id"] as? String,
+              let payload = object["payload"] as? [String: Any],
+              payload["type"] as? String == "list_repositories" else { return nil }
+        return #"{"id":"\#(id)","payload":{"type":"repositories","repositories":[]}}"#
     }
 }
 
