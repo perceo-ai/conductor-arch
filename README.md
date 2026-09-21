@@ -2,6 +2,10 @@
 
 A desktop control plane for running coding agents across isolated Git worktree workspaces.
 
+[![Archductor — 22-second tour: nine workspaces in flight, one window](brag-output/brag.jpg)](brag-output/brag.mp4)
+
+<sub>▶ **[Watch the 22-second tour](brag-output/brag.mp4)** — the board, a live agent session, the diff, and the PR. Every frame is the real app.</sub>
+
 ## About
 
 When one codebase has several streams of work in flight, context-switching between branches, stashes, and half-finished agent runs is where time goes to die. Archductor gives each task its own isolated worktree, branch, and running environment, so you can create a workspace, run Codex or Claude Code, review the diff, open or merge a GitHub PR, and archive the workspace — without leaving the app or trampling parallel work.
