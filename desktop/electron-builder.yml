@@ -62,8 +62,19 @@ rpm:
 
 # AppImage is fully self-contained (bundles its own libs); ideal for "runs on
 # any Linux PC" with minimal external deps.
+#
+# Named from the package rather than from `productName`. These installers are
+# attached to the same GitHub release as the CLI's own Linux artifacts, and
+# release asset names are unique case-insensitively, so
+# `Archductor-<version>-x86_64.AppImage` collided with the CLI's
+# `archductor-<version>-x86_64.AppImage`: the upload failed with
+# "ReleaseAsset.name already exists", and `gh release upload --clobber` could
+# not help, because it looks for an exact-case match to replace and finds none.
+# The deb and rpm never collided — they already take their name from the package
+# (`archductor-desktop_<version>_amd64.deb`), which is the same rule
+# `executableName` follows, so the AppImage now matches them.
 appImage:
-  artifactName: ${productName}-${version}-${arch}.AppImage
+  artifactName: archductor-desktop-${version}-${arch}.AppImage
 
 mac:
   target:
