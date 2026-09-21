@@ -50,5 +50,6 @@ export interface ChatSnapshot {
   provider_events: ProviderEventRecord[];
   queued_inputs: QueuedArchcarInput[];
   live_session?: ChatLiveSession;
+  approval_mode?: string;
 }
 

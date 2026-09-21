@@ -36,6 +36,8 @@ export interface ChatSlice {
   /// The chat is planning rather than building.
   planMode: boolean;
   planPath: string | null;
+  /// The thread is opted into asking before tool calls (as opposed to bypass).
+  approvalMode: boolean;
 }
 
 function emptySlice(): ChatSlice {
@@ -49,6 +51,7 @@ function emptySlice(): ChatSlice {
     completedTurnAttention: false,
     planMode: false,
     planPath: null,
+    approvalMode: false,
   };
 }
 
@@ -116,6 +119,7 @@ export const chatStore = {
           completedTurnAttention: chat[snap.thread_id]?.completedTurnAttention ?? false,
           planMode: chat[snap.thread_id]?.planMode ?? false,
           planPath: chat[snap.thread_id]?.planPath ?? null,
+          approvalMode: (snap.approval_mode ?? null) !== null,
         },
         { key: "id", merge: false },
       ),
@@ -168,6 +172,12 @@ export const chatStore = {
     ensure(threadId);
     setChat(threadId, "planPath", planPath);
     recordUpdate(`chat.planPath.${threadId}`);
+  },
+
+  setApprovalMode(threadId: number, approvalMode: boolean) {
+    ensure(threadId);
+    setChat(threadId, "approvalMode", approvalMode);
+    recordUpdate(`chat.approvalMode.${threadId}`);
   },
 
   setCompletedTurnAttention(threadId: number, value: boolean) {

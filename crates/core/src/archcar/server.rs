@@ -5287,6 +5287,7 @@ fn chat_snapshot_for_thread(
         provider_events,
         queued_inputs,
         live_session,
+        approval_mode: store.chat_thread_approval_mode(thread_id).ok().flatten(),
     })
 }
 

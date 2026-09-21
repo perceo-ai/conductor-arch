@@ -1482,6 +1482,8 @@ pub struct ArchcarChatSnapshot {
     pub queued_inputs: Vec<QueuedArchcarInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_session: Option<ArchcarChatLiveSession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3148,6 +3150,22 @@ mod tests {
     };
     use crate::codex_tui::{CodexContextUsage, CodexInlineEvent, CodexToolCall};
     use crate::provider_interactions::ProviderInteractionStatus;
+
+    #[test]
+    fn chat_snapshot_round_trips_an_absent_approval_mode() {
+        let json = serde_json::json!({
+            "thread_id": 1,
+            "messages": [],
+            "events": [],
+            "provider_events": [],
+            "queued_inputs": []
+        });
+
+        let snapshot: ArchcarChatSnapshot = serde_json::from_value(json).unwrap();
+
+        // Older daemons omit the field entirely; that must still deserialize.
+        assert_eq!(snapshot.approval_mode, None);
+    }
 
     #[test]
     fn protocol_round_trips_spawn_event() {
