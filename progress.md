@@ -70,14 +70,27 @@ an agent is blocked on.
 - The Chats tab lists every chat on the daemon with the ones needing a human
   first, built from the inventory snapshot so it costs no extra round trips.
 
-Verified against a live daemon: a UI test creates a thread on the daemon and
-opens it, and a second renders a seeded transcript (bubbles plus a command
-card). Streaming against a real provider is unverified — that needs an
-authenticated codex/claude on the daemon's machine.
+Verified against a live daemon *and* a real agent: a UI test types a turn on
+the simulator, an authenticated Claude session answers, and the reply lands in
+the transcript. Pointing the app at a real provider is what caught three bugs
+no mock could:
+
+- `ensure_chat_thread_session` answers `session_spawn_queued` when the spawn is
+  asynchronous — the normal case for a cold provider. The store treated that as
+  a failure and dropped the turn.
+- Assistant replies carry an `<archductor_metadata>` block that core keeps in
+  the projection body and each surface strips at render time.
+- The timeline is a strict allowlist (`isRenderableClass`): hook cards — six of
+  them at Claude startup — are dropped, and assistant prose renders only once
+  finalized.
+
+The lesson generalises: the mock agreed with whatever the client assumed, so
+the protocol tests that matter are the ones against the daemon and a provider.
 
 Not done: the model/effort/permission-mode pickers, which need session
 capabilities typed first — the supported values are per provider, and guessing
-the list would send modes the daemon rejects.
+the list would send modes the daemon rejects. Attachments and `@`-mentions in
+the composer are also absent.
 
 Still specced for later phases in
 `docs/superpowers/specs/2026-09-20-ios-mobile-app-design.md`: review and PRs
