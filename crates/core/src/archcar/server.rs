@@ -698,11 +698,32 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             session_id,
             fast_mode,
         } => send_session_control(state, session_id, HarnessControl::SetFastMode(fast_mode)),
-        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => send_session_control(
-            state,
-            session_id,
-            HarnessControl::SetPermissionMode(Some(mode)),
-        ),
+        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => {
+            // Persist first so the choice survives the next restart; the
+            // control below only reaches the process running right now.
+            if let Ok(Some(handle)) = load_or_restore_session_handle(state, session_id) {
+                let thread_id = handle.snapshot.lock().unwrap().thread_id;
+                let store = {
+                    let guard = state.lock().unwrap();
+                    crate::runtime_session_store::RuntimeSessionStore::new(guard.db_path.clone())
+                };
+                if let Err(err) =
+                    store.set_chat_thread_approval_mode(thread_id, stored_approval_mode(&mode))
+                {
+                    warn!(
+                        session_id,
+                        thread_id,
+                        error = %format!("{err:#}"),
+                        "could not persist the thread's approval mode"
+                    );
+                }
+            }
+            send_session_control(
+                state,
+                session_id,
+                HarnessControl::SetPermissionMode(Some(mode)),
+            )
+        }
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -4434,6 +4455,21 @@ fn live_session_snapshot_for_thread(
     })
 }
 
+/// What belongs in `chat_threads.approval_mode` for a requested mode.
+///
+/// Bypass is the absence of an opt-in rather than a value, so it stores as
+/// `None` and the column can never disagree with the default. Plan mode is
+/// transient and already lives in `plan_mode`; persisting it here would
+/// outlive the plan.
+fn stored_approval_mode(mode: &str) -> Option<&str> {
+    use crate::archcar::session::{CLAUDE_DEFAULT_PERMISSION_MODE, CLAUDE_PLAN_PERMISSION_MODE};
+    if mode == CLAUDE_DEFAULT_PERMISSION_MODE || mode == CLAUDE_PLAN_PERMISSION_MODE {
+        None
+    } else {
+        Some(mode)
+    }
+}
+
 fn send_session_control(
     state: &Arc<Mutex<ServerState>>,
     session_id: i64,
@@ -6064,6 +6100,7 @@ mod tests {
         ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
     };
     use crate::archcar::protocol::{ArchcarInputDelivery, ArchcarInputKind};
+    use crate::archcar::session::{CLAUDE_DEFAULT_PERMISSION_MODE, CLAUDE_PLAN_PERMISSION_MODE};
     use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
     use std::fs;
     #[cfg(unix)]
@@ -6077,6 +6114,17 @@ mod tests {
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessStatus};
     use serde_json::json;
+
+    #[test]
+    fn only_a_real_opt_in_is_stored_as_the_threads_approval_mode() {
+        // Bypass is the absence of an opt-in, not a value to store, so the two
+        // can never disagree.
+        assert_eq!(stored_approval_mode(CLAUDE_DEFAULT_PERMISSION_MODE), None);
+        // Plan mode is transient and already has its own column.
+        assert_eq!(stored_approval_mode(CLAUDE_PLAN_PERMISSION_MODE), None);
+        assert_eq!(stored_approval_mode("default"), Some("default"));
+        assert_eq!(stored_approval_mode("acceptEdits"), Some("acceptEdits"));
+    }
 
     #[test]
     fn clone_command_prefers_gh_for_github_remotes() {
