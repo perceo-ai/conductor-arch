@@ -14,6 +14,7 @@ import {
   upsertClient,
 } from "./archcar.js";
 import { parseGithubRepos } from "./githubRepos.js";
+import { buildPairingPayload, renderPairingQr } from "./pairing.js";
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
 
@@ -356,6 +357,36 @@ ipcMain.handle("archcar:subscribe", async () => {
 // The profile file is shared with the CLI (`archductor remote connect`), so
 // either surface can point this machine at a server-hosted archcar. The token
 // never crosses to the renderer on read.
+
+// Pairing code for the iOS app. The token is read here and rendered to SVG
+// here; only markup crosses to the renderer, so the same rule that keeps saved
+// client tokens in main holds for this too.
+ipcMain.handle("pairing:qr", async () => {
+  try {
+    const status = (await bridge.requestLocal({ type: "get_service_status" } as never)) as {
+      type?: string;
+      status?: { listen?: string | null };
+    };
+    const access = (await bridge.requestLocal({ type: "get_remote_access" } as never)) as {
+      type?: string;
+      listen?: string | null;
+      token?: string;
+    };
+    const built = buildPairingPayload({
+      label: os.hostname(),
+      // GetRemoteAccess reports the listener the daemon is actually serving;
+      // the service status is the fallback for a daemon started by hand.
+      listen: access.listen ?? status.status?.listen ?? null,
+      token: access.token ?? "",
+      fallbackHost: os.hostname(),
+    });
+    if (!built.ok) return built;
+    logLine("pairing", `rendered a pairing code for ${built.address}`);
+    return { ok: true, svg: await renderPairingQr(built.payload), address: built.address };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
 
 ipcMain.handle("archcar:remote-get", async () => {
   try {

@@ -67,6 +67,10 @@ interface ArchductorApi {
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
   >;
+  /** QR pairing code for the iOS app; SVG markup only, never the token. */
+  pairingQr(): Promise<
+    { ok: true; svg: string; address: string } | { ok: false; error: string }
+  >;
   remoteGet(): Promise<
     | { ok: true; address: string | null; source: "environment" | "profile" | null }
     | { ok: false; error: string }

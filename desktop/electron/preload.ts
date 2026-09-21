@@ -99,6 +99,14 @@ const api = {
   openWorkspaceApp: (opts: { rootPath: string; appId: "cursor" | "vscode" }): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("shell:open-workspace-app", opts),
 
+  /**
+   * A QR code that pairs the iOS app with this machine's daemon. Main builds
+   * the payload and rasterizes it, so the token itself never reaches here.
+   */
+  pairingQr: (): Promise<
+    { ok: true; svg: string; address: string } | { ok: false; error: string }
+  > => ipcRenderer.invoke("pairing:qr"),
+
   /** Current remote-daemon connection (address only; the token stays in main). */
   remoteGet: (): Promise<
     { ok: true; address: string | null; source: "environment" | "profile" | null } | { ok: false; error: string }

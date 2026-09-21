@@ -18,6 +18,22 @@ export function RemoteDaemonCard() {
 
   const busy = () => clientsStore.state.busy;
 
+  // Pairing code for the iOS app. Main builds and renders it, so the token
+  // never arrives here — this only ever holds SVG markup.
+  const [pairingCode, setPairingCode] = createSignal<{ svg: string; address: string } | null>(null);
+  const [pairingError, setPairingError] = createSignal("");
+
+  async function showPairingCode() {
+    setPairingError("");
+    const result = await window.archductor.pairingQr();
+    if (result.ok) {
+      setPairingCode({ svg: result.svg, address: result.address });
+    } else {
+      setPairingCode(null);
+      setPairingError(result.error);
+    }
+  }
+
   async function add() {
     const addr = address().trim();
     const tok = token().trim();
@@ -172,6 +188,35 @@ export function RemoteDaemonCard() {
         </div>
         <Show when={feedback()}>
           <div class="settings-status">{feedback()}</div>
+        </Show>
+
+        <div class="settings-field-title">Pair a phone</div>
+        <div class="settings-action-row">
+          <button class="ui-button-secondary" onClick={() => void showPairingCode()}>
+            Show pairing code
+          </button>
+          <Show when={pairingCode()}>
+            <button class="ui-button-secondary" onClick={() => setPairingCode(null)}>
+              Hide
+            </button>
+          </Show>
+        </div>
+        <Show when={pairingError()}>
+          <div class="settings-status">{pairingError()}</div>
+        </Show>
+        <Show when={pairingCode()}>
+          {(code) => (
+            <div class="pairing-code">
+              {/* The code carries a live token, so it is shown only on request
+                  and can be dismissed rather than left on a shared screen. */}
+              <div class="settings-status settings-hint">
+                Anyone who scans this gains full control of this machine. Hide it when the phone
+                has paired; `archductor service token --rotate` revokes it.
+              </div>
+              <div class="pairing-code-image" innerHTML={code().svg} />
+              <div class="settings-status">{code().address}</div>
+            </div>
+          )}
         </Show>
       </Show>
     </div>
