@@ -11,6 +11,7 @@ are actually trying to get something done.
 | [Configuring a repository](repository-settings.md) | New workspaces need setup, ports, secrets, checks, or house rules. |
 | [Agent sessions](agent-sessions.md) | You want to drive agents well: queueing, steering, plan mode, background tasks, MCP. |
 | [Running the daemon on a server](remote-daemon.md) | The machine that should run the agents is not the machine in front of you. |
+| [Reach Archductor from your phone](phone-access.md) | You want the iOS app pointed at your daemon. |
 | [CLI cookbook](cli.md) | You know what you want and need the command. |
 
 Two conventions used throughout:

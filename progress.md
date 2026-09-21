@@ -27,6 +27,37 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## iOS client, phase 0 (2026-09-20)
+
+`ios/` holds a native SwiftUI client for archcar. P0 is in: pair with a daemon
+by QR or by hand, and see that daemon's workspaces live.
+
+- `ios/ArchcarKit` (SwiftPM) carries transport, protocol, pairing, and stores.
+  It builds for macOS too, so `make ios-test` runs the logic suite on the host
+  in under a second — including four tests that boot a real `archcar` over TCP.
+- Two connection shapes, because that is what the daemon does: every request is
+  its own short-lived connection (`handle_connection` reads one line, answers,
+  closes), and only `Subscribe` holds a socket open for events.
+- Status vocabulary is ported field-for-field from
+  `desktop/src/lib/workspaceStatus.ts`, so a workspace cannot read Running on
+  one surface and Blocked on another.
+- Design tokens are generated from the desktop's *computed* CSS bundle by
+  `ios/tools/generate-theme.mjs` (`make ios-theme`), not transcribed by hand.
+- The desktop gained a "Pair a phone" QR in Settings → Clients. No new daemon
+  RPC: `GetRemoteAccess`, `GetServiceStatus`, and `InstallService` covered it.
+
+The transport is a shared bearer token in cleartext, by decision: it is only
+safe on Tailscale, WireGuard, or a trusted LAN. See
+`docs/guides/phone-access.md`. The pairing screen makes a non-loopback daemon
+ask for explicit acknowledgement, and the token field opts out of iOS password
+AutoFill so it is never offered to iCloud Keychain.
+
+Not done, and specced for later phases in
+`docs/superpowers/specs/2026-09-20-ios-mobile-app-design.md`: chat and agent
+control (P1), review and PRs (P2), workspace operations (P3), terminal and
+files (P4), APNs push and TestFlight (P5). Views currently use system styling
+with the desktop palette only partly applied.
+
 ## Archductor UX Strategy Alignment (2026-08-12)
 
 `docs/2026-08-12-archductor-ux-backend-strategy.md` defines the product shape:

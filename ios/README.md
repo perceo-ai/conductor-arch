@@ -30,6 +30,27 @@ The live-daemon suite boots `target/debug/archcar` against a temporary
 fails loudly if that binary is missing rather than skipping, because it is the
 protocol-drift guard.
 
+UI tests run on a simulator:
+
+```sh
+cd ios && xcodegen generate
+xcodebuild -project Archductor.xcodeproj -scheme Archductor \
+  -destination 'platform=iOS Simulator,name=iPhone 17' test
+```
+
+`LiveDaemonUITests` pairs the real app with a real daemon and reads its
+workspace list back. It skips unless you point it at one; `xcodebuild` only
+forwards variables prefixed with `TEST_RUNNER_`:
+
+```sh
+TEST_RUNNER_ARCHDUCTOR_UITEST_ADDRESS=127.0.0.1:17420 \
+TEST_RUNNER_ARCHDUCTOR_UITEST_TOKEN=smoke-token \
+TEST_RUNNER_ARCHDUCTOR_UITEST_WORKSPACE=phone-check \
+xcodebuild -project Archductor.xcodeproj -scheme Archductor \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -only-testing:ArchductorUITests/LiveDaemonUITests test
+```
+
 ## Security
 
 The transport sends a bearer token in cleartext and every client shares one
