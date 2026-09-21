@@ -573,6 +573,26 @@ export function Composer(props: {
     }
   }
 
+  const approvalMode = () => chatStore.slice(props.threadId).approvalMode;
+
+  async function toggleApprovalMode() {
+    const next = !approvalMode();
+    const sessionId = chatStore.slice(props.threadId).session?.session_id;
+    chatStore.setApprovalMode(props.threadId, next);
+    if (sessionId == null) return; // persists at next start
+    try {
+      const res = await send({
+        type: "set_session_permission_mode",
+        session_id: sessionId,
+        mode: next ? "default" : "bypassPermissions",
+      });
+      if (res.type === "error") throw new Error(res.message);
+    } catch (err) {
+      chatStore.setApprovalMode(props.threadId, !next);
+      chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
+    }
+  }
+
   async function approvePlan() {
     const plan = pendingPlan();
     if (!plan) return;
@@ -703,6 +723,19 @@ export function Composer(props: {
                 planMode() ? "Planning — approve a plan to start building" : "Plan before building"
               }
               onClick={() => void togglePlanMode()}
+            />
+            {/* Routes tool calls through claude's can_use_tool, which archcar
+                turns into the approval banner above the composer. */}
+            <ComposerToggle
+              on={approvalMode()}
+              icon="circle-help"
+              label="Ask"
+              title={
+                approvalMode()
+                  ? "Asking before each tool call"
+                  : "Running tools without asking"
+              }
+              onClick={() => void toggleApprovalMode()}
             />
           </div>
           <div class="chat-toolbar-right">
