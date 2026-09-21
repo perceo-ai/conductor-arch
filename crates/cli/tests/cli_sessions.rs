@@ -912,15 +912,7 @@ fn claude_hook_hidden_command_prints_single_json_object() {
     let stdout = String::from_utf8(output).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
 
-    assert_eq!(
-        parsed,
-        json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "defer"
-            }
-        })
-    );
+    assert_eq!(parsed, json!({}));
     assert_eq!(stdout.trim_end_matches('\n').lines().count(), 1);
 }
 
