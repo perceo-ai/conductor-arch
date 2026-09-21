@@ -1,0 +1,11 @@
+{
+  "name": "archductor-ios-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate-theme": "node generate-theme.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
