@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
+
 use crate::settings::RepositorySettings;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,6 +354,51 @@ pub fn register_archductor_mcp(
         .collect()
 }
 
+/// The MCP server is `archductor mcp serve`, so a registration must name the
+/// `archductor` CLI. Resolving it from the running executable matters because
+/// the desktop app registers through the archcar daemon, whose `current_exe`
+/// is `archcar` - a binary that takes no arguments and only ever binds the
+/// daemon socket. Registering that instead produces an MCP entry that exits
+/// immediately with `CONNECTION_CLOSED`.
+pub fn archductor_cli_beside(running_exe: &Path) -> Option<PathBuf> {
+    if running_exe.file_stem()? == archductor_file_stem() {
+        return Some(running_exe.to_path_buf());
+    }
+    let sibling = running_exe.with_file_name(archductor_file_name());
+    sibling.exists().then_some(sibling)
+}
+
+/// Locate the `archductor` CLI: the running executable if it is already the
+/// CLI, then a sibling of it, then `PATH`.
+pub fn resolve_archductor_cli() -> anyhow::Result<PathBuf> {
+    let running = std::env::current_exe()?;
+    if let Some(path) = archductor_cli_beside(&running) {
+        return Ok(path);
+    }
+    let path_var = std::env::var_os("PATH").context("PATH is not set")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(archductor_file_name()))
+        .find(|candidate| candidate.exists())
+        .with_context(|| {
+            format!(
+                "could not find the archductor CLI next to {} or on PATH",
+                running.display()
+            )
+        })
+}
+
+fn archductor_file_name() -> &'static str {
+    if cfg!(windows) {
+        "archductor.exe"
+    } else {
+        "archductor"
+    }
+}
+
+fn archductor_file_stem() -> &'static str {
+    "archductor"
+}
+
 /// Remove the registration from each client that has one.
 pub fn unregister_archductor_mcp(clients: &[McpClientKind]) -> Vec<McpRegistrationOutcome> {
     clients
@@ -492,5 +539,33 @@ mod tests {
         } else {
             std::env::remove_var(key);
         }
+    }
+
+    #[test]
+    fn archductor_cli_resolves_from_the_daemon_binary_beside_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path();
+        let cli = bin.join(super::archductor_file_name());
+        std::fs::write(&cli, b"").unwrap();
+        let daemon = bin.join(if cfg!(windows) {
+            "archcar.exe"
+        } else {
+            "archcar"
+        });
+        std::fs::write(&daemon, b"").unwrap();
+
+        // The daemon must hand out the CLI beside it, never itself.
+        assert_eq!(super::archductor_cli_beside(&daemon), Some(cli.clone()));
+        // The CLI registering itself keeps working.
+        assert_eq!(super::archductor_cli_beside(&cli), Some(cli));
+    }
+
+    #[test]
+    fn archductor_cli_is_not_guessed_when_no_sibling_exists() {
+        let temp = tempfile::tempdir().unwrap();
+        let daemon = temp.path().join("archcar");
+        std::fs::write(&daemon, b"").unwrap();
+
+        assert_eq!(super::archductor_cli_beside(&daemon), None);
     }
 }
