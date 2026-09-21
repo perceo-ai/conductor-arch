@@ -166,15 +166,14 @@ persistence buys.
   error.
 - **Non-Claude provider:** persist; the adapter's existing `Unsupported`
   plan is surfaced the same way plan mode's is today.
-- **Stored mode is unreadable at launch:** fall back to
-  `CLAUDE_DEFAULT_PERMISSION_MODE` so the session still starts, *and* surface
-  it in the thread. Not `HarnessEffect::Fatal`, which marks the whole provider
-  session failed (`session.rs:769`) — too severe for a session that is still
-  usable, just unsupervised. Use `append_runtime_provider_event`
-  (`session.rs:610`), the same path other archcar-originated notices take, so
-  the user sees in the timeline that supervision did not engage. Silently
-  continuing unsupervised is precisely the failure the user opted in to avoid,
-  so it must not be quiet.
+- **Stored mode is unreadable:** fall back to
+  `CLAUDE_DEFAULT_PERMISSION_MODE` so the session still starts, and log a
+  warning. The spec previously called for surfacing this in the thread
+  timeline via `append_runtime_provider_event`; that is not reachable from
+  the helper, which runs at launch and resume before a session exists to
+  attach an event to. A read failure of this column means the database is
+  unavailable, in which case session startup fails on its own path and is
+  reported there — so the warning is not the only signal the user gets.
 - **App closed with a prompt pending:** unchanged from today's behavior for
   plan approvals. The interaction row stays `Pending`, the banner returns on
   reopen, and the CLI is still blocked on its `control_request`. A known
