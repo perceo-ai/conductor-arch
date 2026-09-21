@@ -38,6 +38,7 @@ public enum ArchcarResponse: Sendable {
     case workspaceUpdated(name: String)
     case workspaceRemoved(name: String)
     case repositoryAdded(name: String)
+    case agentProviders([AgentProvider])
     case providerInteraction(ProviderInteraction)
     case providerInteractions([ProviderInteraction])
     case error(String)
@@ -54,6 +55,7 @@ extension ArchcarResponse: Decodable {
         case planPath = "plan_path"
         case planMarkdown = "plan_markdown"
         case input, files, todos, todo, summary, diff, text, title, body, output, name
+        case providers
         case chatThreads = "chat_threads"
     }
 
@@ -157,6 +159,8 @@ extension ArchcarResponse: Decodable {
             self = .workspaceRemoved(name: try container.decode(String.self, forKey: .name))
         case "repository_added":
             self = .repositoryAdded(name: try container.decode(String.self, forKey: .name))
+        case "agent_providers":
+            self = .agentProviders(try container.decode([AgentProvider].self, forKey: .providers))
         case "provider_interaction":
             self = .providerInteraction(
                 try container.decode(ProviderInteraction.self, forKey: .interaction))

@@ -28,9 +28,49 @@ struct ChatView: View {
                     Toggle("Plan mode", isOn: Binding(
                         get: { store.planMode },
                         set: { enabled in Task { await store.setPlanMode(enabled) } }))
+
                     if let thread = store.selectedThread {
-                        Section(thread.provider) {
-                            if let model = thread.model { Text(model) }
+                        // Model and effort switch on the live session, so they
+                        // need one to exist; before that the menu says so
+                        // rather than offering a control that cannot work.
+                        let models = AgentModels.models(for: thread.provider)
+                        if !models.isEmpty {
+                            Menu("Model") {
+                                ForEach(models, id: \.self) { model in
+                                    Button {
+                                        Task { await store.setModel(model) }
+                                    } label: {
+                                        if model == thread.model {
+                                            Label(AgentModels.label(model), systemImage: "checkmark")
+                                        } else {
+                                            Text(AgentModels.label(model))
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(!store.hasLiveSession)
+
+                            Menu("Effort") {
+                                ForEach(AgentModels.efforts, id: \.self) { effort in
+                                    Button {
+                                        Task { await store.setEffort(effort) }
+                                    } label: {
+                                        if effort == thread.effortMode {
+                                            Label(effort.capitalized, systemImage: "checkmark")
+                                        } else {
+                                            Text(effort.capitalized)
+                                        }
+                                    }
+                                }
+                            }
+                            .disabled(!store.hasLiveSession)
+                        }
+
+                        Section {
+                            Text(thread.model.map(AgentModels.label) ?? thread.provider)
+                            if !store.hasLiveSession {
+                                Text("Send a turn to start the session")
+                            }
                         }
                     }
                 } label: {

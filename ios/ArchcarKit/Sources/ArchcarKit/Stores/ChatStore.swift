@@ -173,6 +173,30 @@ public final class ChatStore {
         await refreshQueue()
     }
 
+    /// Switches the model on the live session. Both providers accept it
+    /// mid-session, so this takes effect on the turn after it.
+    public func setModel(_ model: String) async {
+        guard let sessionID else {
+            composerError = "Start the chat before switching model."
+            return
+        }
+        _ = await request(SetSessionModelRequest(sessionID: sessionID, model: model))
+        await refreshThreads()
+    }
+
+    public func setEffort(_ effort: String) async {
+        guard let sessionID else {
+            composerError = "Start the chat before switching effort."
+            return
+        }
+        _ = await request(SetSessionEffortRequest(sessionID: sessionID, effort: effort))
+        await refreshThreads()
+    }
+
+    /// True once a session is backing this chat, which is what the model and
+    /// effort controls need.
+    public var hasLiveSession: Bool { sessionID != nil }
+
     public func setPlanMode(_ enabled: Bool) async {
         guard let threadID = selectedThreadID else { return }
         _ = await request(SetChatPlanModeRequest(threadID: threadID, planMode: enabled))

@@ -136,21 +136,34 @@ struct ChatThreadRow: View {
 struct NewChatSheet: View {
     let store: ChatStore
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppModel.self) private var model
     @State private var provider = "codex"
     @State private var title = ""
     @State private var working = false
-
-    /// The providers the daemon can drive as managed chat sessions. A shell has
-    /// no turn model, so it is not offered here.
-    private let providers = ["codex", "claude"]
+    @State private var providers: [AgentProvider] = []
 
     var body: some View {
         NavigationStack {
             Form {
                 Picker("Agent", selection: $provider) {
-                    ForEach(providers, id: \.self) { Text($0).tag($0) }
+                    // The registry comes from the daemon, so an agent added
+                    // there shows up here without an app update.
+                    ForEach(providers) { agent in
+                        Text(agent.displayName).tag(agent.providerKey)
+                    }
                 }
                 TextField("Title", text: $title)
+                if let guidance = providers.first(where: { $0.providerKey == provider })?.authGuidance,
+                   !guidance.isEmpty {
+                    Text(guidance).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .task {
+                guard providers.isEmpty, let session = model.session else { return }
+                providers = await AgentProviderCatalog.launchable(session: session)
+                if let first = providers.first, !providers.contains(where: { $0.providerKey == provider }) {
+                    provider = first.providerKey
+                }
             }
             .navigationTitle("New chat")
             .navigationBarTitleDisplayMode(.inline)
