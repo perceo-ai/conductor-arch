@@ -96,6 +96,28 @@ final class LiveDaemon {
         """
     }
 
+    /// Registers a repository with the daemon, without creating a workspace.
+    func seedRepository() throws {
+        let repo = root.appendingPathComponent("repo")
+        let parent = root.appendingPathComponent("ws")
+        guard !FileManager.default.fileExists(atPath: repo.path) else { return }
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        try run(git: ["init", "-q", "--initial-branch", "main", repo.path])
+        try run(git: ["-C", repo.path, "-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-q", "--allow-empty", "-m", "init"])
+        try runCLI(["repo", "add", repo.path, "--name", "demo",
+                    "--default-branch", "main", "--workspace-parent", parent.path])
+    }
+
+    /// Writes a file inside a created workspace's worktree, so a diff has
+    /// something real to report.
+    func writeInWorkspace(_ workspace: String, path: String, contents: String) throws {
+        let file = root.appendingPathComponent("ws").appendingPathComponent(workspace)
+            .appendingPathComponent(path)
+        try contents.write(to: file, atomically: true, encoding: .utf8)
+    }
+
     /// Adds a repository and a workspace so chat tests have somewhere to live.
     /// Returns the workspace name.
     @discardableResult

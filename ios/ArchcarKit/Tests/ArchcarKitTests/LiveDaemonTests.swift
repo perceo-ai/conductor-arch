@@ -141,6 +141,117 @@ struct LiveDaemonTests {
         await session.disconnect()
     }
 
+    /// Repository and workspace lifecycle against the daemon: create a
+    /// workspace, see it in the inventory, read its (empty) changes and checks,
+    /// then archive it.
+    @Test func workspaceLifecycleOverTheRealProtocol() async throws {
+        let daemon = try LiveDaemon.start()
+        defer { daemon.stop() }
+        let session: DaemonSession
+        do {
+            session = try await connect(daemon)
+        } catch {
+            Issue.record("connect failed: \(error)\n\(daemon.diagnostics())")
+            return
+        }
+        do {
+            try daemon.seedRepository()
+        } catch {
+            Issue.record("seedRepository failed: \(error)")
+            return
+        }
+
+        let repositories: ArchcarResponse
+        do {
+            repositories = try await session.request(ListRepositoriesRequest())
+        } catch {
+            Issue.record("list_repositories failed: \(error)\n\(daemon.diagnostics())")
+            return
+        }
+        guard case .repositories(let repos) = repositories else {
+            Issue.record("expected repositories, got \(repositories)")
+            return
+        }
+        #expect(repos.map(\.name) == ["demo"])
+
+        let created: ArchcarResponse
+        do {
+            created = try await session.request(
+                CreateWorkspaceRequest(
+                    repository: "demo", name: "from-phone", branch: "feat/from-phone"))
+        } catch {
+            Issue.record("create_workspace failed: \(error)\n\(daemon.diagnostics())")
+            return
+        }
+        guard case .workspaceCreated(let name) = created else {
+            Issue.record("expected workspace_created, got \(created)")
+            return
+        }
+        #expect(name == "from-phone")
+
+        let changes = try await session.request(GetWorkspaceChangesRequest(workspace: name))
+        guard case .workspaceChanges(_, let files) = changes else {
+            Issue.record("expected workspace_changes, got \(changes)")
+            return
+        }
+        // A fresh worktree carries the .context directory archductor writes.
+        #expect(files.allSatisfy { !$0.path.isEmpty })
+
+        let checks = try await session.request(GetChecksSummaryRequest(workspace: name))
+        guard case .checksSummary(_, let summary) = checks else {
+            Issue.record("expected checks_summary, got \(checks)")
+            return
+        }
+        #expect(summary.workspace == name)
+
+        let todos = try await session.request(ListTodosRequest(workspace: name))
+        guard case .todos(_, let list) = todos else {
+            Issue.record("expected todos, got \(todos)")
+            return
+        }
+        #expect(list.isEmpty)
+
+        let archived = try await session.request(
+            ArchiveWorkspaceRequest(workspace: name, removeWorktree: false))
+        guard case .workspaceUpdated = archived else {
+            Issue.record("expected workspace_updated, got \(archived)")
+            return
+        }
+        await session.disconnect()
+    }
+
+    /// The diff of a real edit, over the wire.
+    @Test func workspaceDiffOverTheRealProtocol() async throws {
+        let daemon = try LiveDaemon.start()
+        defer { daemon.stop() }
+        let session = try await connect(daemon)
+        try daemon.seedRepository()
+
+        let created = try await session.request(
+            CreateWorkspaceRequest(repository: "demo", name: "diff-check", branch: "feat/diff-check"))
+        guard case .workspaceCreated(let name) = created else {
+            Issue.record("expected workspace_created")
+            return
+        }
+        try daemon.writeInWorkspace(name, path: "hello.txt", contents: "hello from the phone\n")
+
+        let changes = try await session.request(GetWorkspaceChangesRequest(workspace: name))
+        guard case .workspaceChanges(_, let files) = changes else {
+            Issue.record("expected workspace_changes")
+            return
+        }
+        #expect(files.contains { $0.path == "hello.txt" })
+
+        let diff = try await session.request(
+            GetWorkspaceDiffRequest(workspace: name, path: "hello.txt"))
+        guard case .workspaceDiff(_, let text) = diff else {
+            Issue.record("expected workspace_diff")
+            return
+        }
+        #expect(text.contains("hello from the phone"))
+        await session.disconnect()
+    }
+
     @Test func subscribeStaysOpenAndCommandsStillWork() async throws {
         let daemon = try LiveDaemon.start()
         defer { daemon.stop() }

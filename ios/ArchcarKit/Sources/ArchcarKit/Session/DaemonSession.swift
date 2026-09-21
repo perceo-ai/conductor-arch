@@ -12,6 +12,7 @@ public enum DaemonSessionError: Error, Equatable, Sendable {
     case authenticationFailed
     case disconnected
     case timedOut
+    case closedWithoutResponse
 }
 
 /// One daemon, as the app talks to it.
@@ -93,9 +94,10 @@ public actor DaemonSession {
         try await connection.send(try RequestEnvelope(id: id, body: body).encodedLine())
 
         guard let line = try await firstLine(of: lines) else {
-            // The daemon closes without answering only when it rejected the
-            // token before reading the request.
-            throw DaemonSessionError.authenticationFailed
+            // Closed without answering. A rejected token is reported as an
+            // `auth` error line, so it is not this; this is the daemon dying,
+            // restarting, or the link dropping mid-request.
+            throw DaemonSessionError.closedWithoutResponse
         }
         let envelope = try JSONDecoder().decode(ResponseEnvelope.self, from: line)
         switch envelope.payload {

@@ -31,7 +31,10 @@ targets:
     settings:
       base:
         SWIFT_VERSION: "6.0"
-        PRODUCT_BUNDLE_IDENTIFIER: ai.perceo.archductor
+        # Distinct from the Electron desktop app, which is also
+        # ai.perceo.archductor: one Apple developer account cannot hold the
+        # same App ID for two platforms, and TestFlight would collide.
+        PRODUCT_BUNDLE_IDENTIFIER: ai.perceo.archductor.ios
         SWIFT_STRICT_CONCURRENCY: complete
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -45,7 +48,7 @@ targets:
     settings:
       base:
         SWIFT_VERSION: "6.0"
-        PRODUCT_BUNDLE_IDENTIFIER: ai.perceo.archductor.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: ai.perceo.archductor.ios.uitests
         # The app target ships a hand-written Info.plist; the test bundle has
         # nothing to say in one, so let Xcode generate it.
         GENERATE_INFOPLIST_FILE: YES
