@@ -39,24 +39,40 @@ async function read(themeClass) {
       document.body.className = themeClass;
       const style = getComputedStyle(document.body);
 
-      // getComputedStyle hands back a custom property as *declared*, so a token
-      // written as color-mix(...) or var(...) arrives unresolved and useless to
-      // Swift. Assigning it to a real colour property forces the engine to
-      // resolve it; a sentinel tells resolution apart from silent rejection.
-      const SENTINEL = "rgb(1, 2, 3)";
+      // getComputedStyle hands back a custom property as *declared*, so a
+      // token written as color-mix(...) or var(...) arrives unresolved and
+      // useless to Swift. Assigning it to a real colour property forces the
+      // engine to resolve it.
+      //
+      // The catch: a token that is not a colour at all — a duration, a radius,
+      // a font stack — makes that declaration invalid at computed-value time,
+      // and `color` then *inherits* rather than keeping the value it had. So
+      // every token is probed twice against two different inherited colours;
+      // one that tracks the parent did not resolve, and its declared value is
+      // kept instead.
       const probe = document.createElement("div");
-      document.body.appendChild(probe);
+      const parent = document.createElement("div");
+      parent.appendChild(probe);
+      document.body.appendChild(parent);
+
+      function resolvedColour(name, inherited) {
+        parent.style.color = inherited;
+        probe.style.color = "";
+        probe.style.color = `var(${name})`;
+        return getComputedStyle(probe).color;
+      }
 
       const out = {};
       for (const name of names) {
         const declared = style.getPropertyValue(name).trim();
         if (!declared) continue;
-        probe.style.color = SENTINEL;
-        probe.style.color = `var(${name})`;
-        const resolved = getComputedStyle(probe).color;
-        out[name] = resolved && resolved !== SENTINEL ? resolved : declared;
+        const first = resolvedColour(name, "rgb(1, 2, 3)");
+        const second = resolvedColour(name, "rgb(4, 5, 6)");
+        const isColour =
+          first === second && first !== "rgb(1, 2, 3)" && second !== "rgb(4, 5, 6)";
+        out[name] = isColour ? first : declared;
       }
-      probe.remove();
+      parent.remove();
       return out;
     },
     [names, themeClass],

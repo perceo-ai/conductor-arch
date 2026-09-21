@@ -67,10 +67,12 @@ interface ArchductorApi {
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
   >;
-  /** QR pairing code for the iOS app; SVG markup only, never the token. */
-  pairingQr(): Promise<
-    { ok: true; svg: string; address: string } | { ok: false; error: string }
-  >;
+  /**
+   * Opens the pairing QR in its own isolated window and reports the address it
+   * encodes. The code itself never enters this process: it is the daemon token
+   * in a form a camera can read.
+   */
+  pairingQr(): Promise<{ ok: true; address: string } | { ok: false; error: string }>;
   remoteGet(): Promise<
     | { ok: true; address: string | null; source: "environment" | "profile" | null }
     | { ok: false; error: string }

@@ -14,7 +14,7 @@ import {
   upsertClient,
 } from "./archcar.js";
 import { parseGithubRepos } from "./githubRepos.js";
-import { buildPairingPayload, renderPairingQr } from "./pairing.js";
+import { buildPairingPayload, pairingWindowHtml, renderPairingQr } from "./pairing.js";
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
 
@@ -202,6 +202,9 @@ if (process.platform === "linux") {
 const DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL;
 
 let win: BrowserWindow | null = null;
+/// The isolated window that displays a pairing QR. It holds a live credential
+/// on screen, so it is kept separate from the app's own renderer.
+let pairingWindow: BrowserWindow | null = null;
 
 // Send to the renderer only when the frame is alive. Window events (focus/blur)
 // and async daemon events can fire while the render frame is being disposed
@@ -381,8 +384,42 @@ ipcMain.handle("pairing:qr", async () => {
       fallbackHost: os.hostname(),
     });
     if (!built.ok) return built;
-    logLine("pairing", `rendered a pairing code for ${built.address}`);
-    return { ok: true, svg: await renderPairingQr(built.payload), address: built.address };
+
+    const svg = await renderPairingQr(built.payload);
+    // The QR encodes the daemon token, so it is shown in a window that runs no
+    // application code rather than returned to the renderer: sandboxed, no
+    // preload, no node integration, and a data URL it cannot navigate away
+    // from. The renderer only learns the address.
+    if (pairingWindow && !pairingWindow.isDestroyed()) pairingWindow.close();
+    pairingWindow = new BrowserWindow({
+      width: 340,
+      height: 430,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      title: "Pair a phone",
+      parent: win ?? undefined,
+      webPreferences: {
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true,
+        devTools: false,
+      },
+    });
+    pairingWindow.removeMenu?.();
+    pairingWindow.on("closed", () => {
+      pairingWindow = null;
+    });
+    await pairingWindow.loadURL(
+      `data:text/html;charset=utf-8;base64,${Buffer.from(
+        pairingWindowHtml(svg, built.address),
+        "utf8",
+      ).toString("base64")}`,
+    );
+    logLine("pairing", `showed a pairing code for ${built.address}`);
+    return { ok: true, address: built.address };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
   }

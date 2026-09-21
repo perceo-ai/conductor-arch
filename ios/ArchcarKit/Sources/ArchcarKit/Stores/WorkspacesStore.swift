@@ -109,26 +109,49 @@ public final class WorkspacesStore {
         return name
     }
 
-    public func archive(_ workspace: WorkspaceSummary, removeWorktree: Bool) async {
-        isMutating = true
-        defer { isMutating = false }
-        _ = await send(
-            ArchiveWorkspaceRequest(workspace: workspace.name, removeWorktree: removeWorktree))
-        await refresh()
+    @discardableResult
+    public func archive(_ workspace: WorkspaceSummary, removeWorktree: Bool) async -> Bool {
+        await mutate(
+            ArchiveWorkspaceRequest(workspace: workspace.name, removeWorktree: removeWorktree),
+            failure: "Could not archive \(workspace.name).")
     }
 
-    public func restore(_ workspace: WorkspaceSummary) async {
-        isMutating = true
-        defer { isMutating = false }
-        _ = await send(RestoreWorkspaceRequest(workspace: workspace.name))
-        await refresh()
+    @discardableResult
+    public func restore(_ workspace: WorkspaceSummary) async -> Bool {
+        await mutate(
+            RestoreWorkspaceRequest(workspace: workspace.name),
+            failure: "Could not restore \(workspace.name).")
     }
 
-    public func rename(_ workspace: WorkspaceSummary, to name: String) async {
+    @discardableResult
+    public func rename(_ workspace: WorkspaceSummary, to name: String) async -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed != workspace.name else { return }
-        _ = await send(RenameWorkspaceRequest(workspace: workspace.name, name: trimmed))
-        await refresh()
+        guard !trimmed.isEmpty, trimmed != workspace.name else { return false }
+        return await mutate(
+            RenameWorkspaceRequest(workspace: workspace.name, name: trimmed),
+            failure: "Could not rename \(workspace.name).")
+    }
+
+    /// Runs a lifecycle request and only refreshes when the daemon confirmed it.
+    ///
+    /// Refreshing regardless would hide the failure twice over: the row would
+    /// come back unchanged with no explanation, and the successful refresh
+    /// would clear the error the failed request had just set.
+    private func mutate<Body: ArchcarRequestBody>(_ body: Body, failure: String) async -> Bool {
+        isMutating = true
+        defer { isMutating = false }
+        let response = await send(body)
+        switch response {
+        case .workspaceUpdated, .workspaceRemoved, .workspaceCreated, .ack:
+            await refresh()
+            return true
+        case .none:
+            // `send` already recorded why.
+            return false
+        case .some(let other):
+            lastError = "\(failure) The daemon answered \(other)."
+            return false
+        }
     }
 
     public func addRepository(path: String, name: String?) async -> Bool {

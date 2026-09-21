@@ -34,6 +34,22 @@ import Testing
     #expect(Set(Theme.dark.tokens.keys) == Set(Theme.light.tokens.keys))
 }
 
+@Test func nonColourTokensKeepTheirDeclaredValues() throws {
+    // Probing every token as a colour used to record the *inherited* colour for
+    // durations, radii, and font stacks, because an invalid `color` declaration
+    // inherits rather than keeping its previous value.
+    #expect(Theme.dark.raw("--ui-radius")?.hasSuffix("px") == true)
+    #expect(Theme.dark.raw("--mo-base")?.hasSuffix("s") == true)
+    #expect(Theme.dark.raw("--ui-font-sans")?.contains("sans-serif") == true)
+    // And they are not colours, so asking for one returns nothing.
+    #expect(Theme.dark.color("--ui-radius") == nil)
+    #expect(Theme.dark.color("--ui-font-sans") == nil)
+
+    // Colours still resolve, including ones written as color-mix().
+    #expect(Theme.dark.color("--el-0") != nil)
+    #expect(Theme.dark.color("--accent-wash") != nil)
+}
+
 @Test func themeTokensDifferBetweenTones() throws {
     // If these matched, the generator read the same tone twice and the light
     // theme would silently ship as dark.

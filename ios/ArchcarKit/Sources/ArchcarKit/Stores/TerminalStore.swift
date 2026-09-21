@@ -36,10 +36,13 @@ public final class TerminalStore {
 
     /// Attaches to this workspace's shell, starting one if it has none.
     ///
-    /// `spawn_session` answers `session_spawn_queued` with no id, and the
-    /// `session_started` event can land before anything is listening, so the id
-    /// is resolved by asking the daemon what is running rather than by racing
-    /// the event stream.
+    /// `spawn_session` answers `session_spawn_queued` with no id, so the
+    /// session has to be identified afterwards. The authoritative answer is the
+    /// `session_started` event, which names the workspace *and* the kind, and
+    /// this subscribes before spawning so the event cannot be missed. The
+    /// processes report is only a fallback, and it is filtered to shells:
+    /// agent sessions appear in the same list, and sending raw keystrokes into
+    /// a running Codex or Claude session would be worse than showing nothing.
     public func start() async {
         guard sessionID == nil else { return }
         isStarting = true
@@ -50,6 +53,9 @@ public final class TerminalStore {
             await refreshScreen()
             return
         }
+
+        // Subscribe first: the event can land before the spawn call returns.
+        let events = await session.events
 
         do {
             let response = try await session.request(
@@ -64,32 +70,56 @@ public final class TerminalStore {
             return
         }
 
-        // Queued: poll briefly for the session the daemon is bringing up.
-        for _ in 0..<30 {
-            try? await Task.sleep(for: .milliseconds(200))
-            if let id = await runningShellSessionID() {
-                sessionID = id
-                await refreshScreen()
-                return
-            }
+        var resolved = await awaitSpawnedShell(on: events)
+        if resolved == nil { resolved = await runningShellSessionID() }
+        if let id = resolved {
+            sessionID = id
+            await refreshScreen()
+            return
         }
         lastError = "The daemon did not report a shell for this workspace."
     }
 
-    /// The newest running shell in this workspace, read out of the processes
-    /// report the daemon renders.
+    /// Waits for the `session_started` that belongs to this workspace's shell.
+    private func awaitSpawnedShell(on events: AsyncStream<ArchcarEvent>) async -> Int64? {
+        let workspace = workspace
+        return await withTaskGroup(of: Int64?.self) { group in
+            group.addTask {
+                for await event in events {
+                    if case .sessionStarted(let id, _, let eventWorkspace, let kind, _) = event,
+                       eventWorkspace == workspace, kind == .shell {
+                        return id
+                    }
+                }
+                return nil
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(10))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// The newest running *shell* in this workspace, from the processes report.
     private func runningShellSessionID() async -> Int64? {
         guard case .workspaceProcesses(_, let text)? = try? await session.request(
             GetWorkspaceProcessesRequest(workspace: workspace)) else { return nil }
-        return TerminalStore.newestRunningSession(in: text)
+        return TerminalStore.newestRunningShell(in: text)
     }
 
-    /// Parses the `Sessions` block of the processes report.
+    /// Commands that count as a shell in the processes report. Agent sessions
+    /// are listed the same way and must not be attached to.
+    private nonisolated static let shellCommands: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh"]
+
+    /// Parses the `Sessions` block and returns the newest running shell.
     ///
     /// Lines look like `#2 /bin/zsh running pid=32518 exit=- started=…`. The
-    /// daemon has no structured listing for this, so the text is the interface;
+    /// daemon has no structured session listing, so the text is the interface;
     /// a line that does not parse is skipped rather than failing the lookup.
-    public nonisolated static func newestRunningSession(in report: String) -> Int64? {
+    public nonisolated static func newestRunningShell(in report: String) -> Int64? {
         var inSessions = false
         var newest: Int64?
         for rawLine in report.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -99,15 +129,17 @@ public final class TerminalStore {
                 continue
             }
             if !inSessions { continue }
-            // Another section heading ends the block.
             if !line.hasPrefix("#") && !line.isEmpty && !line.contains("pid=") { break }
-            guard line.hasPrefix("#"), line.contains("running") else { continue }
-            let identifier = line.dropFirst().prefix { $0.isNumber }
-            guard let value = Int64(identifier) else { continue }
+            guard line.hasPrefix("#"), line.contains(" running ") else { continue }
+            let fields = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard fields.count >= 2, let value = Int64(fields[0].dropFirst()) else { continue }
+            let command = fields[1].split(separator: "/").last.map(String.init) ?? String(fields[1])
+            guard shellCommands.contains(command) else { continue }
             newest = max(newest ?? value, value)
         }
         return newest
     }
+
 
     /// Test seam: attaches to a known session without spawning one.
     public func attachForTesting(sessionID: Int64) {

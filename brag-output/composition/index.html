@@ -4,7 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=1920, height=1080" />
     <title>Archductor — brag</title>
-    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <!-- Vendored, not fetched: a composition must render deterministically with
+         no network access, so the pinned GSAP build ships as a local asset. -->
+    <script src="assets/vendor/gsap-3.14.2.min.js"></script>
     <style>
       /* Palette lifted verbatim from desktop/src/styles/theme/01-tokens.css so the
          overlays and the real UI screenshots share one identity. */
@@ -551,6 +553,9 @@
         }
       })();
 
+      // The host runtime may not have created the registry yet, and assigning
+      // into an undefined object throws before the timeline is ever registered.
+      window.__timelines = window.__timelines || {};
       window.__timelines["main"] = tl;
       tl.seek(0);
     </script>

@@ -131,3 +131,50 @@ private func store(_ daemon: MockDaemon) async throws -> (DaemonSession, Workspa
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func archiveReportsDaemonRejection() async throws {
+    let daemon = try await MockDaemon()
+    // The daemon refuses — a dirty worktree, a missing branch, anything.
+    await daemon.respond { line in
+        guard let id = replyID(line), let type = requestType(line) else { return nil }
+        if type == "get_inventory_snapshot" {
+            return #"{"id":"\#(id)","payload":\#(inventory)}"#
+        }
+        if type == "list_repositories" {
+            return #"{"id":"\#(id)","payload":{"type":"repositories","repositories":[]}}"#
+        }
+        if type == "archive_workspace" {
+            return #"{"id":"\#(id)","payload":{"type":"error","message":"worktree has changes"}}"#
+        }
+        return nil
+    }
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = WorkspacesStore(session: session)
+    await store.refresh()
+    let workspace = try #require(store.workspaces.first)
+
+    let ok = await store.archive(workspace, removeWorktree: false)
+
+    // Refreshing on failure would clear the error and leave the row unchanged
+    // with nothing to explain it.
+    #expect(ok == false)
+    #expect(store.lastError?.contains("worktree has changes") == true)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func archiveSucceedsAndClearsTheError() async throws {
+    let daemon = try await MockDaemon()
+    let (session, workspaces) = try await store(daemon)
+    let workspace = try #require(workspaces.workspaces.first)
+
+    #expect(await workspaces.archive(workspace, removeWorktree: false))
+    #expect(workspaces.lastError == nil)
+
+    await session.disconnect()
+    await daemon.stop()
+}

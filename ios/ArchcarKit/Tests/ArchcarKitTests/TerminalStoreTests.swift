@@ -21,7 +21,25 @@ Sessions
 @Test func findsTheNewestRunningShell() {
     // The daemon has no structured session listing, so this text is the
     // interface; an exited session must not be attached to.
-    #expect(TerminalStore.newestRunningSession(in: report) == 2)
+    #expect(TerminalStore.newestRunningShell(in: report) == 2)
+}
+
+@Test func ignoresAgentSessions() {
+    // Agents are listed in the same block. Attaching to one would send raw
+    // keystrokes into a running Codex or Claude session.
+    let mixed = """
+    Sessions
+    #9 /Users/me/.local/bin/claude running pid=5 exit=- started=3 log=/tmp/c.log
+    #8 /usr/local/bin/codex running pid=4 exit=- started=2 log=/tmp/x.log
+    #3 /bin/zsh running pid=3 exit=- started=1 log=/tmp/z.log
+    """
+    #expect(TerminalStore.newestRunningShell(in: mixed) == 3)
+
+    let agentsOnly = """
+    Sessions
+    #9 /usr/local/bin/codex running pid=4 exit=- started=2 log=/tmp/x.log
+    """
+    #expect(TerminalStore.newestRunningShell(in: agentsOnly) == nil)
 }
 
 @Test func returnsNothingWhenNoSessionRuns() {
@@ -29,9 +47,9 @@ Sessions
     Sessions
     #1 /bin/zsh exited pid=1 exit=0 started=1 log=/tmp/a.log
     """
-    #expect(TerminalStore.newestRunningSession(in: quiet) == nil)
-    #expect(TerminalStore.newestRunningSession(in: "Sessions\nNo sessions recorded.") == nil)
-    #expect(TerminalStore.newestRunningSession(in: "") == nil)
+    #expect(TerminalStore.newestRunningShell(in: quiet) == nil)
+    #expect(TerminalStore.newestRunningShell(in: "Sessions\nNo sessions recorded.") == nil)
+    #expect(TerminalStore.newestRunningShell(in: "") == nil)
 }
 
 @Test func ignoresSessionsBeforeTheSessionsHeading() {
@@ -43,7 +61,7 @@ Sessions
     Sessions
     #7 /bin/zsh running pid=2 exit=- started=1
     """
-    #expect(TerminalStore.newestRunningSession(in: noisy) == 7)
+    #expect(TerminalStore.newestRunningShell(in: noisy) == 7)
 }
 
 @MainActor

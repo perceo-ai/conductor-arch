@@ -57,3 +57,63 @@ export function buildPairingPayload(input: PairingInput): PairingResult {
 export function renderPairingQr(payload: string): Promise<string> {
   return QRCode.toString(payload, { type: "svg", errorCorrectionLevel: "M", margin: 1 });
 }
+
+/**
+ * The page shown in the isolated pairing window.
+ *
+ * A QR code *is* the token, just in a form a camera can read, so handing the
+ * SVG to the app's renderer would put a credential that grants shell and
+ * repository access inside the process most exposed to hostile content. The
+ * markup therefore never leaves main except into a dedicated window that runs
+ * no application code: no preload, no node integration, sandboxed, and loaded
+ * from a data URL.
+ */
+export function pairingWindowHtml(svg: string, address: string): string {
+  const safeAddress = address.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case '"':
+        return "&quot;";
+      default:
+        return "&#39;";
+    }
+  });
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:" />
+    <title>Pair a phone</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px;
+        font: 13px -apple-system, "Segoe UI", sans-serif;
+        background: #f3f3f5;
+        color: #1c1c1e;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+      }
+      .code { width: 260px; height: 260px; padding: 10px; background: #fff; border-radius: 10px; }
+      .code svg { width: 100%; height: 100%; display: block; }
+      .address { font-family: ui-monospace, monospace; }
+      .warning { max-width: 300px; text-align: center; color: #8a5a00; }
+    </style>
+  </head>
+  <body>
+    <div class="code">${svg}</div>
+    <div class="address">${safeAddress}</div>
+    <div class="warning">
+      Anyone who scans this gains full control of this machine. Close this
+      window once the phone has paired.
+    </div>
+  </body>
+</html>`;
+}

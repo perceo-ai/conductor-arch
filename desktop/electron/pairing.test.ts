@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPairingPayload, renderPairingQr } from "./pairing";
+import { buildPairingPayload, pairingWindowHtml, renderPairingQr } from "./pairing";
 
 describe("buildPairingPayload", () => {
   it("uses the daemon's own listen address when it has one", () => {
@@ -93,5 +93,26 @@ describe("renderPairingQr", () => {
     );
     expect(svg).toContain("<svg");
     expect(svg).toContain("</svg>");
+  });
+});
+
+describe("pairingWindowHtml", () => {
+  it("embeds the code and the address", async () => {
+    const svg = await renderPairingQr(
+      JSON.stringify({ v: 1, label: "x", address: "h:1", token: "t" }),
+    );
+    const html = pairingWindowHtml(svg, "10.0.0.4:7420");
+    expect(html).toContain("<svg");
+    expect(html).toContain("10.0.0.4:7420");
+    expect(html).toContain("full control of this machine");
+  });
+
+  it("locks the page down and escapes the address", () => {
+    const html = pairingWindowHtml("<svg></svg>", '10.0.0.4:7420"><script>alert(1)</script>');
+    // The window renders a live credential, so it gets no scripts, no network,
+    // and an address that cannot break out of its element.
+    expect(html).toContain("default-src 'none'");
+    expect(html).not.toContain("<script>alert(1)</script>");
+    expect(html).toContain("&lt;script&gt;");
   });
 });
