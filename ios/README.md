@@ -57,6 +57,21 @@ projection reads them the same way either route — and pass
 `TEST_RUNNER_ARCHDUCTOR_UITEST_CHAT`, `…_USER_LINE`, and `…_CARD_TITLE` to
 match what you seeded.
 
+## Putting it on a phone
+
+```sh
+xcrun devicectl list devices            # UDID of the plugged-in phone
+make ios-device DEVICE=<udid> TEAM=<team-id>
+```
+
+The phone must be unlocked for the install to launch, and a personal (free)
+Apple team signs builds that expire after seven days — re-run the same command
+to refresh. First launch may need the developer trusted under
+Settings → General → VPN & Device Management.
+
+The app is useless until it can reach a daemon, which means the daemon needs a
+listener it can dial: see `docs/guides/phone-access.md`.
+
 ## Security
 
 The transport sends a bearer token in cleartext and every client shares one
