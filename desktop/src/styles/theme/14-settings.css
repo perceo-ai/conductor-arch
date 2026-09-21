@@ -326,3 +326,27 @@
 .settings-shell .checkbutton {
     color: #e4e4e4;
 }
+
+/* ── Phone pairing code ── */
+.pairing-code {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.pairing-code-image {
+    width: 208px;
+    height: 208px;
+    padding: 8px;
+    border-radius: 8px;
+    /* A QR needs a light quiet zone to scan reliably; on the dark theme the
+       code itself has to carry that background rather than inherit one. */
+    background: #ffffff;
+}
+
+.pairing-code-image svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}

@@ -27,6 +27,103 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## iOS client, phase 0 (2026-09-20)
+
+`ios/` holds a native SwiftUI client for archcar. P0 is in: pair with a daemon
+by QR or by hand, and see that daemon's workspaces live.
+
+- `ios/ArchcarKit` (SwiftPM) carries transport, protocol, pairing, and stores.
+  It builds for macOS too, so `make ios-test` runs the logic suite on the host
+  in under a second — including four tests that boot a real `archcar` over TCP.
+- Two connection shapes, because that is what the daemon does: every request is
+  its own short-lived connection (`handle_connection` reads one line, answers,
+  closes), and only `Subscribe` holds a socket open for events.
+- Status vocabulary is ported field-for-field from
+  `desktop/src/lib/workspaceStatus.ts`, so a workspace cannot read Running on
+  one surface and Blocked on another.
+- Design tokens are generated from the desktop's *computed* CSS bundle by
+  `ios/tools/generate-theme.mjs` (`make ios-theme`), not transcribed by hand.
+- The desktop gained a "Pair a phone" QR in Settings → Clients. No new daemon
+  RPC: `GetRemoteAccess`, `GetServiceStatus`, and `InstallService` covered it.
+
+The transport is a shared bearer token in cleartext, by decision: it is only
+safe on Tailscale, WireGuard, or a trusted LAN. See
+`docs/guides/phone-access.md`. The pairing screen makes a non-loopback daemon
+ask for explicit acknowledgement, and the token field opts out of iOS password
+AutoFill so it is never offered to iCloud Keychain.
+
+## iOS client, phase 1 (2026-09-21)
+
+Chat works from the phone. Drill into a workspace, create or open a chat, watch
+the projected timeline, queue turns, interrupt a running one, and answer what
+an agent is blocked on.
+
+- `ChatStore` mirrors `WorkspacesStore`: events say what changed, projections
+  are refetched, and events for other threads are dropped rather than
+  refetched — on a phone only one conversation is on screen.
+- Timeline rows follow core's render classes: user and assistant bubbles, and
+  a collapsed card for everything else (command, diff, reasoning, …) with a
+  fallback so a class core adds later still renders.
+- Provider interactions — permission prompts, question batches, plan approvals
+  — share one screen, including "approve for this session", which on a phone is
+  the difference between one tap and twenty.
+- The Chats tab lists every chat on the daemon with the ones needing a human
+  first, built from the inventory snapshot so it costs no extra round trips.
+
+Verified against a live daemon *and* a real agent: a UI test types a turn on
+the simulator, an authenticated Claude session answers, and the reply lands in
+the transcript. Pointing the app at a real provider is what caught three bugs
+no mock could:
+
+- `ensure_chat_thread_session` answers `session_spawn_queued` when the spawn is
+  asynchronous — the normal case for a cold provider. The store treated that as
+  a failure and dropped the turn.
+- Assistant replies carry an `<archductor_metadata>` block that core keeps in
+  the projection body and each surface strips at render time.
+- The timeline is a strict allowlist (`isRenderableClass`): hook cards — six of
+  them at Claude startup — are dropped, and assistant prose renders only once
+  finalized.
+
+The lesson generalises: the mock agreed with whatever the client assumed, so
+the protocol tests that matter are the ones against the daemon and a provider.
+
+## iOS client, phases 2-4 (2026-09-21)
+
+The phone now covers the desktop's main loop.
+
+- **Repositories and workspaces**: the list is grouped by repository, with
+  add/clone, create (task, branch, issue, PR), archive, and restore. A
+  workspace whose repository is missing gets its own section instead of
+  vanishing.
+- **Review**: changed files with a scope picker, a coloured unified diff,
+  checks and CI runs, todos, commit, push, and pull request create/merge using
+  the daemon's own drafted title and body.
+- **Files**: browse the tree (derived on the phone from one flat list), read
+  and edit, save back.
+- **Terminal**: the daemon's rendered VT100 screen plus a `^C` button, since a
+  phone keyboard has no control key.
+- **Model and effort pickers** mirror `desktop/src/lib/models.ts`, with a test
+  that reads that file so the tables cannot drift. The chat provider list comes
+  from `list_agent_providers`.
+
+Bugs the live daemon and a real agent caught, all of which a mock had agreed
+with:
+
+- `WorkspaceChangeScope` is externally tagged, not `{"type": …}`. A request
+  that fails to deserialize gets no response at all — the daemon closes the
+  connection — which the client had been reporting as an auth failure.
+- `DaemonSession` handed every observer the same `AsyncStream`, which splits
+  events between consumers rather than broadcasting them.
+- `spawn_session` answers `session_spawn_queued` with no id, so the shell is
+  resolved from the processes report rather than by racing the event stream.
+
+Not done: permission-mode control (the desktop exposes none either, and the
+valid values are per provider), composer attachments and `@`-mentions,
+background tasks, checkpoints, settings editing, and APNs push with TestFlight
+signing (P5 in the spec). The bundle id is `ai.perceo.archductor.ios`, distinct
+from the Electron app's, because one Apple account cannot hold the same App ID
+for two platforms.
+
 ## Archductor UX Strategy Alignment (2026-08-12)
 
 `docs/2026-08-12-archductor-ux-backend-strategy.md` defines the product shape:

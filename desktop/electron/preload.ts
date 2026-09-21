@@ -99,6 +99,17 @@ const api = {
   openWorkspaceApp: (opts: { rootPath: string; appId: "cursor" | "vscode" }): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("shell:open-workspace-app", opts),
 
+  /**
+   * Shows a pairing QR for the iOS app in its own isolated window.
+   *
+   * The code encodes the daemon token, so neither it nor the rendered SVG is
+   * returned here — a renderer that could read the markup could decode the
+   * credential. Only the address comes back.
+   */
+  pairingQr: (): Promise<
+    { ok: true; address: string } | { ok: false; error: string }
+  > => ipcRenderer.invoke("pairing:qr"),
+
   /** Current remote-daemon connection (address only; the token stays in main). */
   remoteGet: (): Promise<
     { ok: true; address: string | null; source: "environment" | "profile" | null } | { ok: false; error: string }

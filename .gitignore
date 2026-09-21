@@ -9,3 +9,11 @@
 docs/superpowers/plans/
 .archductor/dev-instances/
 .archductor/settings.local.toml*
+
+# The brag video's music bed. The track ships with the /brag skill and its
+# license terms are documented there as unverified, so the repo distributes the
+# rendered video but not the source audio. Restore before re-rendering:
+#   cp "$BRAG_SKILL/assets/music/happy-beats-business-moves-vol-12-by-ende-dot-app.mp3" \
+#      brag-output/composition/assets/music/
+brag-output/composition/assets/music/
+brag-output/composition/snapshots/

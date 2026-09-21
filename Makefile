@@ -7,7 +7,8 @@ DEV_ENV := C:/msys64/usr/bin/bash.exe scripts/dev-instance-env.sh
 endif
 
 .PHONY: help dev-env archcar cli build build-release check release tag publish-tag \
-	desktop-install desktop-dev desktop-build desktop-package desktop-package-linux
+	desktop-install desktop-dev desktop-build desktop-package desktop-package-linux \
+	ios-test ios-theme ios-device
 
 help:
 	@printf '%s\n' \
@@ -80,3 +81,27 @@ desktop-package: build-release
 
 desktop-package-linux: build-release
 	cd desktop && pnpm run dist:linux
+
+# ArchcarKit carries the iOS app's protocol/transport/state logic and builds for
+# macOS too, so its tests run on the host. The live-daemon suite in it needs the
+# debug archcar binary, which is why this builds it first.
+ios-test:
+	cargo build -p archcar
+	cd ios/ArchcarKit && swift test
+
+# Regenerates ios Theme.swift from the desktop's computed CSS tokens. Needs a
+# built desktop bundle (make desktop-build).
+ios-theme:
+	cd ios/tools && pnpm install && node generate-theme.mjs
+
+# Builds and installs on a plugged-in iPhone. DEVICE is the UDID from
+# `xcrun devicectl list devices`; TEAM is your Apple developer team id
+# (`security find-certificate -c "Apple Development" -p | openssl x509 -noout -subject`
+# prints it as OU=...).
+ios-device:
+	cd ios && xcodegen generate
+	cd ios && xcodebuild -project Archductor.xcodeproj -scheme Archductor \
+		-destination 'platform=iOS,id=$(DEVICE)' -derivedDataPath build/device \
+		-allowProvisioningUpdates DEVELOPMENT_TEAM=$(TEAM) CODE_SIGN_STYLE=Automatic build
+	xcrun devicectl device install app --device $(DEVICE) \
+		ios/build/device/Build/Products/Debug-iphoneos/Archductor.app

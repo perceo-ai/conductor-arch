@@ -1,0 +1,3 @@
+Archductor: a desktop control plane for running coding agents across isolated Git worktree workspaces.
+Every task gets its own worktree, its own branch, and its own agent — review the diff and open the PR without ever switching branches or stashing anything.
+Rust daemon, Electron UI, local-first, and the recommended remote mode opens no port at all.
