@@ -4,41 +4,67 @@ import Testing
 @testable import ArchcarKit
 
 private func summary(
-    id: Int64 = 1, name: String = "w", awaitingInput: Bool = false,
+    id: Int64 = 1, name: String = "w", status: String = "active", awaitingInput: Bool = false,
     blockedTasks: Int = 0, activeSessions: Int = 0, runRunning: Bool = false,
-    prState: String? = nil, updatedAt: String = "1000"
+    changedFiles: Int = 0, prNumber: Int64? = nil, prState: String? = nil,
+    updatedAt: String = "1000"
 ) throws -> WorkspaceSummary {
-    let pr = prState.map { "\"pull_request_state\":\"\($0)\"," } ?? ""
+    let pr = (prState.map { "\"pull_request_state\":\"\($0)\"," } ?? "")
+        + (prNumber.map { "\"pull_request_number\":\($0)," } ?? "")
     let json = """
     {"id":\(id),"name":"\(name)","repository_name":"r","path":"/p","branch":"b",
-    "base_ref":"main","status":"active","open_todos":0,"blocked_tasks":\(blockedTasks),
+    "base_ref":"main","status":"\(status)","open_todos":0,"blocked_tasks":\(blockedTasks),
     "active_sessions":\(activeSessions),"awaiting_input":\(awaitingInput),
-    "run_running":\(runRunning),"changed_files":0,"diff_additions":0,"diff_deletions":0,
+    "run_running":\(runRunning),"changed_files":\(changedFiles),"diff_additions":0,"diff_deletions":0,
     \(pr)"updated_at":"\(updatedAt)"}
     """
     return try JSONDecoder().decode(WorkspaceSummary.self, from: Data(json.utf8))
 }
 
-@Test func blockedOutranksRunning() throws {
-    let workspace = try summary(awaitingInput: true, activeSessions: 2)
-    #expect(WorkspaceStatusDot.dot(for: workspace) == .blocked)
+@Test func blockedTaskOutranksRunning() throws {
+    let workspace = try summary(blockedTasks: 1, activeSessions: 2, runRunning: true)
+    #expect(WorkspaceStatusKind.kind(for: workspace) == .blocked)
 }
 
-@Test func blockedTasksAlsoMeanBlocked() throws {
-    #expect(WorkspaceStatusDot.dot(for: try summary(blockedTasks: 1)) == .blocked)
+@Test func archivedOutranksEverything() throws {
+    #expect(WorkspaceStatusKind.kind(for: try summary(status: "archived", blockedTasks: 3)) == .archived)
 }
 
 @Test func runningBeatsReview() throws {
-    let workspace = try summary(activeSessions: 1, prState: "open")
-    #expect(WorkspaceStatusDot.dot(for: workspace) == .running)
+    let workspace = try summary(activeSessions: 1, prNumber: 4, prState: "open")
+    #expect(WorkspaceStatusKind.kind(for: workspace) == .running)
 }
 
 @Test func openPullRequestWithoutAgentsIsReview() throws {
-    #expect(WorkspaceStatusDot.dot(for: try summary(prState: "open")) == .review)
+    #expect(WorkspaceStatusKind.kind(for: try summary(prNumber: 4, prState: "open")) == .review)
+}
+
+@Test func uncommittedWorkIsChanges() throws {
+    #expect(WorkspaceStatusKind.kind(for: try summary(changedFiles: 3)) == .changes)
 }
 
 @Test func quietWorkspaceIsIdle() throws {
-    #expect(WorkspaceStatusDot.dot(for: try summary()) == .idle)
+    #expect(WorkspaceStatusKind.kind(for: try summary()) == .idle)
+}
+
+@Test func statusColoursMatchTheDesktopTable() {
+    // Same hex values as desktop/src/lib/workspaceStatus.ts STATUS_COLOR.
+    #expect(WorkspaceStatusKind.blocked.colorHex == "#d97706")
+    #expect(WorkspaceStatusKind.running.colorHex == "#3fb27f")
+    #expect(WorkspaceStatusKind.review.colorHex == "#5b8def")
+    #expect(WorkspaceStatusKind.changes.colorHex == "#c39b50")
+    #expect(WorkspaceStatusKind.idle.colorHex == "#6a6a6a")
+    #expect(WorkspaceStatusKind.archived.colorHex == "#4a4a4a")
+    #expect(WorkspaceStatusKind.review.label == "In review")
+}
+
+@Test func activityCountsAgentsAndRunScript() throws {
+    #expect(WorkspaceActivity.activity(for: try summary()) == nil)
+    let busy = try #require(WorkspaceActivity.activity(for: try summary(activeSessions: 2, runRunning: true)))
+    #expect(busy.count == 3)
+    #expect(busy.title == "2 agent sessions and run script running")
+    let single = try #require(WorkspaceActivity.activity(for: try summary(activeSessions: 1)))
+    #expect(single.title == "1 agent session running")
 }
 
 @Test func formatsEpochSecondStrings() {
