@@ -13,14 +13,18 @@ final class LiveDaemon {
     private let process: Process
     private let root: URL
     private let logPath: URL
+    private let binaryDirectory: URL
 
     enum StartError: Error, CustomStringConvertible {
         case binaryMissing(String)
+        case seedFailed(command: String, status: Int32, output: String)
 
         var description: String {
             switch self {
             case .binaryMissing(let path):
                 return "archcar not built at \(path). Run `cargo build -p archcar` (or `make ios-test`)."
+            case .seedFailed(let command, let status, let output):
+                return "seed step `\(command)` exited \(status): \(output)"
             }
         }
     }
@@ -62,6 +66,7 @@ final class LiveDaemon {
         let port = UInt16.random(in: 20000...39000)
         address = DaemonAddress(host: "127.0.0.1", port: port)
 
+        binaryDirectory = binary.deletingLastPathComponent()
         process = Process()
         process.executableURL = binary
         var environment = ProcessInfo.processInfo.environment
@@ -89,6 +94,69 @@ final class LiveDaemon {
         stderr: \(stderr.suffix(2000))
         log: \(file.suffix(2000))
         """
+    }
+
+    /// Adds a repository and a workspace so chat tests have somewhere to live.
+    /// Returns the workspace name.
+    @discardableResult
+    func seedWorkspace(named name: String = "phone-check") throws -> String {
+        let repo = root.appendingPathComponent("repo")
+        let parent = root.appendingPathComponent("ws")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        try run(git: ["init", "-q", "--initial-branch", "main", repo.path])
+        try run(git: ["-C", repo.path, "-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-q", "--allow-empty", "-m", "init"])
+        try runCLI(["repo", "add", repo.path, "--name", "demo",
+                    "--default-branch", "main", "--workspace-parent", parent.path])
+        // A workspace needs an explicit branch unless it comes from an issue,
+        // a PR, or a Linear ticket.
+        try runCLI(["workspace", "create", "demo", "--name", name, "--branch", "feat/\(name)"])
+        return name
+    }
+
+    private func run(git arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git"] + arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw StartError.seedFailed(
+                command: "git \(arguments.joined(separator: " "))",
+                status: process.terminationStatus,
+                output: String(decoding: output, as: UTF8.self))
+        }
+    }
+
+    private func runCLI(_ arguments: [String]) throws {
+        let cli = binaryDirectory.appendingPathComponent("archductor")
+        guard FileManager.default.isExecutableFile(atPath: cli.path) else {
+            throw StartError.binaryMissing(cli.path)
+        }
+        let process = Process()
+        process.executableURL = cli
+        process.arguments = arguments
+        var environment = ProcessInfo.processInfo.environment
+        environment["XDG_DATA_HOME"] = root.appendingPathComponent("data").path
+        environment["XDG_STATE_HOME"] = root.appendingPathComponent("state").path
+        process.environment = environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        try process.run()
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw StartError.seedFailed(
+                command: "archductor \(arguments.joined(separator: " "))",
+                status: process.terminationStatus,
+                output: String(decoding: output, as: UTF8.self))
+        }
     }
 
     func stop() {

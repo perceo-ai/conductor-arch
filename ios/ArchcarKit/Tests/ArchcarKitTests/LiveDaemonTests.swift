@@ -76,6 +76,71 @@ struct LiveDaemonTests {
         }
     }
 
+    /// The chat surface, against the daemon that actually implements it: a
+    /// thread created here must come back in the thread list, project an empty
+    /// timeline, and accept a queued turn — the protocol P1's UI is built on.
+    @Test func chatThreadLifecycleOverTheRealProtocol() async throws {
+        let daemon = try LiveDaemon.start()
+        defer { daemon.stop() }
+        let session = try await connect(daemon)
+        let workspace = try daemon.seedWorkspace(named: "chat-check")
+
+        let created = try await session.request(
+            CreateChatThreadRequest(workspace: workspace, provider: "codex", title: "From phone"))
+        guard case .chatThreadCreated(let thread) = created else {
+            Issue.record("expected chat_thread_created, got \(created)")
+            return
+        }
+        #expect(thread.title == "From phone")
+        #expect(thread.sessionKind == .codex)
+
+        let listed = try await session.request(ListChatThreadsRequest(workspace: workspace))
+        guard case .chatThreads(_, let threads) = listed else {
+            Issue.record("expected chat_threads, got \(listed)")
+            return
+        }
+        #expect(threads.contains { $0.id == thread.id })
+
+        let projected = try await session.request(GetChatProjectionRequest(threadID: thread.id))
+        guard case .chatProjection(let threadID, let items) = projected else {
+            Issue.record("expected chat_projection, got \(projected)")
+            return
+        }
+        #expect(threadID == thread.id)
+        #expect(items.isEmpty)
+
+        _ = try await session.request(
+            QueueChatInputRequest(threadID: thread.id, input: "ship it", sessionKind: .codex))
+        let queued = try await session.request(ListQueuedChatInputsRequest(threadID: thread.id))
+        guard case .queuedChatInputs(_, let inputs) = queued else {
+            Issue.record("expected queued_chat_inputs, got \(queued)")
+            return
+        }
+        #expect(inputs.map(\.displayText) == ["ship it"])
+
+        if let first = inputs.first {
+            _ = try await session.request(RemoveQueuedChatInputRequest(queueID: first.id))
+        }
+        await session.disconnect()
+    }
+
+    /// No agent is running in a fresh workspace, so the pending list is empty —
+    /// what this pins is that the request and the response shape agree with the
+    /// daemon, since the blocked-agent path cannot be staged without a provider.
+    @Test func pendingInteractionsDecodeFromTheRealDaemon() async throws {
+        let daemon = try LiveDaemon.start()
+        defer { daemon.stop() }
+        let session = try await connect(daemon)
+
+        let response = try await session.request(ListProviderInteractionsRequest(pendingOnly: true))
+        guard case .providerInteractions(let interactions) = response else {
+            Issue.record("expected provider_interactions, got \(response)")
+            return
+        }
+        #expect(interactions.isEmpty)
+        await session.disconnect()
+    }
+
     @Test func subscribeStaysOpenAndCommandsStillWork() async throws {
         let daemon = try LiveDaemon.start()
         defer { daemon.stop() }
