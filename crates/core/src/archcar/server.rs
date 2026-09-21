@@ -2609,7 +2609,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         } => match mcp_clients_from_names(&clients) {
             Ok(clients) => {
                 let outcomes = if register {
-                    match std::env::current_exe() {
+                    // Not `current_exe`: this runs inside the archcar daemon,
+                    // and the MCP server is `archductor mcp serve`.
+                    match crate::mcp::resolve_archductor_cli() {
                         Ok(executable) => crate::mcp::register_archductor_mcp(
                             &executable,
                             &clients,
