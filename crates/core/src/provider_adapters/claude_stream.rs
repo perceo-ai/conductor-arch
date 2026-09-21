@@ -571,11 +571,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                 Some(ClaudeLifecycleSignal::UserInputReplayed { text }) => {
                     self.tracker.note_replayed_user(&text, &mut effects);
                 }
-                Some(ClaudeLifecycleSignal::TurnFinished {
-                    status,
-                    stop_reason,
-                }) => {
-                    let _ = stop_reason;
+                Some(ClaudeLifecycleSignal::TurnFinished { status, .. }) => {
                     if let Some(message) = claude_terminal_failure_message(&event) {
                         effects.push(HarnessEffect::Fatal(message));
                     }
@@ -589,9 +585,10 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                         effects.push(HarnessEffect::Ready);
                     }
                 }
-                Some(ClaudeLifecycleSignal::DeferredTool { tool_use }) => {
-                    let _ = tool_use;
-                }
+                // Nothing to do until the hook can register a pending
+                // interaction and resume the tool; the event is still
+                // persisted for the timeline.
+                Some(ClaudeLifecycleSignal::DeferredTool { .. }) => {}
                 None => {}
             }
 
