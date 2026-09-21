@@ -1,0 +1,175 @@
+# Opt-in tool approval for Claude threads
+
+Date: 2026-09-21
+Status: approved, not yet implemented
+
+## Problem
+
+Archductor ships a complete tool-approval UI that never appears. Every
+Claude agent runs fully unattended, and a user who wants to supervise one
+thread has no way to ask for it.
+
+The approval loop itself is already built and conformance-tested:
+
+- `claude_stream.rs:503` turns a `can_use_tool` control request into
+  `HarnessEffect::InteractionRequested`.
+- `session.rs:735` stores the interaction and emits
+  `ProviderInteractionRequested`.
+- `Interactions.tsx` renders `InteractionBanner` above the composer with
+  approve / deny / answer actions.
+- Resolving sends `control_response_for` back down the same stdio channel
+  (`claude_stream.rs:668`).
+
+What keeps it dark is the launch configuration. `harness.rs` hardcodes
+`claude_permission_mode()` to `bypassPermissions`, always adds
+`--dangerously-skip-permissions`, and `normalize_agent_harness_options`
+overwrites any requested `approval_mode` with `FORCED_APPROVAL_MODE`
+("never"). Under `bypassPermissions` the CLI never raises `can_use_tool`,
+so the loop has nothing to carry.
+
+A separate PreToolUse hook (`claude_hooks.rs`) was a second, redundant
+implementation of the same feature. It answered `defer` to every tool call
+with no channel to ever resolve the deferral, which killed the turn on its
+first tool call. PR #126 removed that answer; this design does not revive
+it. The hook was a dead end, not a foundation.
+
+## Decisions
+
+Two product calls were made during design:
+
+- **Bypass stays the default.** Nothing changes for an existing workspace
+  unless its user opts in. Supervision is per thread, opt-in.
+- **The choice persists per thread.** A user who asks to supervise a thread
+  stays supervising it across session restart, model switch, effort switch
+  and app relaunch, until they turn it off.
+
+## Verification that shaped the design
+
+Probed against the real `claude` CLI (fable-5, isolated settings file):
+
+- Launched with `--permission-mode bypassPermissions
+  --dangerously-skip-permissions`, an in-band `set_permission_mode` to
+  `default` is **accepted**, `can_use_tool` then fires for a
+  non-allowlisted Bash command, and answering it with a `control_response`
+  completes the turn (`stop_reason=end_turn`, zero permission denials).
+- Without the in-band switch, the same prompt runs the tool with no ask.
+
+This is why no launch-argument change is needed. The risky, load-bearing
+part of the configuration stays untouched.
+
+## Approach
+
+Re-apply the stored mode in-band after every harness init, rather than
+threading it through launch arguments.
+
+Every restart path — first start, crash restart, model switch, effort
+switch, app relaunch — passes through `HarnessEffect::Initialized`, so one
+hook point covers all of them. It is the same mechanism plan mode already
+uses in production, and the probe above shows it works regardless of how
+the process was launched.
+
+Two approaches were rejected:
+
+- **Launch arguments.** Correct at startup, but a mid-session toggle still
+  needs the in-band path, so both mechanisms have to be maintained. It also
+  requires touching `--dangerously-skip-permissions`, which every existing
+  unattended workspace depends on.
+- **Hybrid** (launch args initially, in-band for changes). Same two
+  mechanisms, more branching, no benefit given the probe result.
+
+## Design
+
+### Data model
+
+One column on `chat_threads`, following the `plan_mode` precedent at
+`storage.rs:562`:
+
+```
+ensure_column(conn, "chat_threads", "approval_mode",
+    "ALTER TABLE chat_threads ADD COLUMN approval_mode TEXT")
+```
+
+`NULL` means unset, which is today's behavior (`bypassPermissions`). Every
+existing row reads as unset, so there is no backfill and no behavior change.
+
+The column stores the Claude mode string rather than a boolean, so
+`acceptEdits` can be exposed later without a second migration. The UI
+exposes only on/off for now.
+
+`approval_mode` stays separate from `plan_mode`. They are orthogonal — plan
+mode governs whether the agent builds, this governs who approves tools — and
+merging them would rework a path that currently works.
+
+### Backend
+
+1. **Persist.** `SetSessionPermissionMode` (`server.rs:3973`) already
+   forwards to the harness. Write `chat_threads.approval_mode` for the
+   session's thread before forwarding. This is the only change to the
+   existing RPC.
+2. **Re-apply.** In `HarnessEffect::Initialized` (`session.rs:643`), where
+   the native session id is already recorded, read the thread's
+   `approval_mode`; if set, issue `HarnessControl::SetPermissionMode`. The
+   adapter turns it into the in-band control request with no restart
+   (`claude_stream.rs:652`).
+3. **Nothing else.** The rest of the loop already exists.
+
+Claude-only to start. `SetPermissionMode` is `Unsupported` on the ACP
+adapter (`acp.rs:518`) and means something different on Codex; threads on
+those providers ignore the column. One provider that works beats a leaky
+abstraction across three.
+
+### UI
+
+A toggle in `Composer.tsx` beside the existing plan-mode toggle (`:699`),
+using the same component and the same shape. It reads
+`chatStore.slice(threadId).approvalMode` and sends
+`set_session_permission_mode` with
+`chatStore.slice(threadId).session.session_id`.
+
+Two states: off is `bypassPermissions`, on is `default`. Labeled "Ask before
+tools". Off by default.
+
+When a thread has no running session the toggle still flips and persists to
+the thread; it takes effect at next start. That is what per-thread
+persistence buys.
+
+### Error handling
+
+- **No live session:** persist the column, skip the harness control, do not
+  error.
+- **Non-Claude provider:** persist; the adapter's existing `Unsupported`
+  plan is surfaced the same way plan mode's is today.
+- **Re-apply fails at init:** log a warning and leave the session in bypass
+  rather than killing it, *and* surface it in the thread. Not
+  `HarnessEffect::Fatal`, which marks the whole provider session failed
+  (`session.rs:769`) — that is too severe for a session that is still usable,
+  just unsupervised. Use `append_runtime_provider_event` (`session.rs:610`),
+  the same path other archcar-originated notices take, so the user sees in
+  the timeline that supervision did not engage. Silently continuing
+  unsupervised is precisely the failure the user opted in to avoid, so it
+  must not be quiet.
+- **App closed with a prompt pending:** unchanged from today's behavior for
+  plan approvals. The interaction row stays `Pending`, the banner returns on
+  reopen, and the CLI is still blocked on its `control_request`. A known
+  rough edge, explicitly out of scope here.
+
+### Testing
+
+- **Unit:** the migration adds the column defaulting to NULL;
+  `SetSessionPermissionMode` writes it; init re-applies a stored mode and
+  skips a NULL one.
+- **Adapter:** `SetPermissionMode` produces the `set_permission_mode`
+  control request — extends the existing test at `claude_stream.rs:2555`.
+- **Integration:** drive a real session through a dev-home daemon
+  (`scripts/dev-instance-env.sh` with `ARCHDUCTOR_DEV_HOME`), toggle on,
+  send a prompt that needs a tool, assert a `ProviderInteractionRequested`
+  appears and that resolving it lets the turn finish. This is the test that
+  would have caught the original class of bug, where unit tests all passed
+  while every thread died.
+
+## Out of scope
+
+- Reviving the PreToolUse hook or building hook-to-daemon IPC.
+- Approval support for Codex, ACP, or other providers.
+- A risk-tiered policy (ask only for network or destructive commands).
+- Resolving an interaction while the app is closed.
