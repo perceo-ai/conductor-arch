@@ -240,6 +240,47 @@ final class LiveDaemonUITests: XCTestCase {
         add(shot)
     }
 
+    /// Files and the terminal, against the daemon: open a file, then run a
+    /// real command in a real shell and read its output off the screen.
+    func testBrowsesFilesAndRunsAShellCommand() throws {
+        let config = try liveConfig()
+        let app = pair(XCUIApplication(), with: config)
+
+        XCTAssertTrue(app.staticTexts[config.workspace].waitForExistence(timeout: 20))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", config.workspace))
+            .firstMatch.tap()
+
+        app.buttons["Files"].tap()
+        XCTAssertTrue(app.staticTexts["main.rs"].waitForExistence(timeout: 20))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "main.rs"))
+            .firstMatch.tap()
+        // The editor has to hold the file's real contents, not an empty box.
+        let editor = app.textViews["file-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 20))
+        let contents = editor.value as? String ?? ""
+        XCTAssertTrue(contents.contains("fn main"), "file contents never loaded: \(contents)")
+
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["Terminal"].tap()
+
+        let input = app.textFields["terminal-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 20))
+        input.tap()
+        input.typeText("echo phone-terminal-works")
+        app.buttons["Run"].tap()
+
+        // A real shell, spawned by the daemon, echoing into a screen the phone
+        // renders.
+        let output = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS %@", "phone-terminal-works")).firstMatch
+        XCTAssertTrue(output.waitForExistence(timeout: 60), "shell output never appeared")
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "terminal-live"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testPairsWithALiveDaemonAndListsItsWorkspaces() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["ARCHDUCTOR_UITEST_ADDRESS"],

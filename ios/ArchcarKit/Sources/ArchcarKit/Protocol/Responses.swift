@@ -39,6 +39,11 @@ public enum ArchcarResponse: Sendable {
     case workspaceRemoved(name: String)
     case repositoryAdded(name: String)
     case agentProviders([AgentProvider])
+    case workspaceFiles(workspace: String, files: [String])
+    case workspaceFileContent(workspace: String, path: String, content: String)
+    case workspaceFileWritten(workspace: String, path: String)
+    case sessionScreen(sessionID: Int64, screen: String)
+    case workspaceProcesses(workspace: String, text: String)
     case providerInteraction(ProviderInteraction)
     case providerInteractions([ProviderInteraction])
     case error(String)
@@ -55,7 +60,7 @@ extension ArchcarResponse: Decodable {
         case planPath = "plan_path"
         case planMarkdown = "plan_markdown"
         case input, files, todos, todo, summary, diff, text, title, body, output, name
-        case providers
+        case providers, content, screen, path
         case chatThreads = "chat_threads"
     }
 
@@ -159,6 +164,27 @@ extension ArchcarResponse: Decodable {
             self = .workspaceRemoved(name: try container.decode(String.self, forKey: .name))
         case "repository_added":
             self = .repositoryAdded(name: try container.decode(String.self, forKey: .name))
+        case "workspace_files":
+            self = .workspaceFiles(
+                workspace: try container.decode(String.self, forKey: .workspace),
+                files: try container.decode([String].self, forKey: .files))
+        case "workspace_file_content":
+            self = .workspaceFileContent(
+                workspace: try container.decode(String.self, forKey: .workspace),
+                path: try container.decode(String.self, forKey: .path),
+                content: try container.decode(String.self, forKey: .content))
+        case "workspace_file_written":
+            self = .workspaceFileWritten(
+                workspace: try container.decode(String.self, forKey: .workspace),
+                path: try container.decode(String.self, forKey: .path))
+        case "session_screen":
+            self = .sessionScreen(
+                sessionID: try container.decode(Int64.self, forKey: .sessionID),
+                screen: try container.decode(String.self, forKey: .screen))
+        case "workspace_processes":
+            self = .workspaceProcesses(
+                workspace: try container.decode(String.self, forKey: .workspace),
+                text: try container.decode(String.self, forKey: .text))
         case "agent_providers":
             self = .agentProviders(try container.decode([AgentProvider].self, forKey: .providers))
         case "provider_interaction":

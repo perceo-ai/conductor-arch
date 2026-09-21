@@ -29,8 +29,13 @@ public actor DaemonSession {
     private let requestTimeout: Duration
 
     private var eventConnection: ArchcarConnection?
-    private var eventContinuation: AsyncStream<ArchcarEvent>.Continuation?
-    private var eventStream: AsyncStream<ArchcarEvent>?
+    /// One continuation per subscriber.
+    ///
+    /// A single shared `AsyncStream` would *split* events between consumers
+    /// rather than broadcasting: each value goes to exactly one waiting
+    /// iterator. With a chat, a review panel, and a terminal all observing, two
+    /// of the three would silently miss everything.
+    private var eventContinuations: [UUID: AsyncStream<ArchcarEvent>.Continuation] = [:]
     private var eventTask: Task<Void, Never>?
     private var backoff = Backoff()
 
@@ -42,12 +47,19 @@ public actor DaemonSession {
         self.requestTimeout = requestTimeout
     }
 
+    /// A fresh stream per caller. Every subscriber sees every event.
     public var events: AsyncStream<ArchcarEvent> {
-        if let eventStream { return eventStream }
+        let id = UUID()
         let (stream, continuation) = AsyncStream<ArchcarEvent>.makeStream()
-        eventStream = stream
-        eventContinuation = continuation
+        eventContinuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeSubscriber(id) }
+        }
         return stream
+    }
+
+    private func removeSubscriber(_ id: UUID) {
+        eventContinuations.removeValue(forKey: id)
     }
 
     /// Proves the token, then opens the event stream.
@@ -136,8 +148,9 @@ public actor DaemonSession {
 
     private func handleEventLine(_ line: Data) {
         guard let envelope = try? JSONDecoder().decode(EventEnvelope.self, from: line) else { return }
-        _ = events
-        eventContinuation?.yield(envelope.payload)
+        for continuation in eventContinuations.values {
+            continuation.yield(envelope.payload)
+        }
     }
 
     private func handleEventStreamEnded() {

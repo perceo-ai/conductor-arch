@@ -13,6 +13,8 @@ struct WorkspaceDetailView: View {
     @State private var panel: Panel = .chat
     @State private var store: ChatStore?
     @State private var review: ReviewStore?
+    @State private var files: FilesStore?
+    @State private var terminal: TerminalStore?
     @State private var creating = false
 
     enum Panel: String, CaseIterable, Identifiable {
@@ -20,17 +22,34 @@ struct WorkspaceDetailView: View {
         case changes = "Changes"
         case checks = "Checks"
         case todos = "Todos"
+        case files = "Files"
+        case terminal = "Terminal"
         var id: String { rawValue }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Panel", selection: $panel) {
-                ForEach(Panel.allCases) { panel in Text(panel.rawValue).tag(panel) }
+            // Six panels do not fit a phone's width as a segmented control.
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(Panel.allCases) { item in
+                        Button {
+                            panel = item
+                        } label: {
+                            Text(item.rawValue)
+                                .font(.subheadline.weight(panel == item ? .semibold : .regular))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    panel == item ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.10),
+                                    in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
 
             switch panel {
             case .chat:
@@ -41,6 +60,10 @@ struct WorkspaceDetailView: View {
                 if let review { ChecksPanel(store: review) } else { ProgressView() }
             case .todos:
                 if let review { TodosPanel(store: review) } else { ProgressView() }
+            case .files:
+                if let files { FilesPanel(store: files) } else { ProgressView() }
+            case .terminal:
+                if let terminal { TerminalPanel(store: terminal) } else { ProgressView() }
             }
         }
         .navigationTitle(workspace.name)
@@ -51,6 +74,10 @@ struct WorkspaceDetailView: View {
             self.store = store
             let review = ReviewStore(session: session, workspace: workspace.name)
             self.review = review
+            files = FilesStore(session: session, workspace: workspace.name)
+            // The shell is only spawned when the Terminal panel is opened; a
+            // workspace should not gain a process because someone looked at it.
+            terminal = TerminalStore(session: session, workspace: workspace.name)
             await store.refreshThreads()
             await review.refreshAll()
         }
