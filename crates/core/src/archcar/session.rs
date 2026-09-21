@@ -1081,16 +1081,7 @@ fn claude_stream_session_launch(
         // plan mode has no way to ask or to hand a plan back.
         permission_prompt_tool: Some("stdio".to_owned()),
         resume: thread_record.native_thread_id.clone(),
-        permission_mode: Some(
-            if store
-                .chat_thread_plan_mode(thread_record.id)
-                .unwrap_or(false)
-            {
-                CLAUDE_PLAN_PERMISSION_MODE.to_owned()
-            } else {
-                CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()
-            },
-        ),
+        permission_mode: Some(claude_permission_mode_for_thread(store, thread_record.id)),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
         // The standing contract: what Archductor is, what the workspace summary
@@ -1261,6 +1252,34 @@ fn non_interactive_harness_metadata(
 pub(crate) const CLAUDE_PLAN_PERMISSION_MODE: &str = "plan";
 pub(crate) const CLAUDE_DEFAULT_PERMISSION_MODE: &str = "bypassPermissions";
 
+/// The permission mode a Claude session for this thread should run in.
+///
+/// Read this everywhere the mode is decided — launch, resume, and the
+/// plan-mode toggle — so the three cannot drift. Leaving plan mode in
+/// particular used to reset straight to `CLAUDE_DEFAULT_PERMISSION_MODE`,
+/// which silently dropped an opted-in thread back to running unattended
+/// without a restart to make it visible.
+pub(crate) fn claude_permission_mode_for_thread(store: &WorkspaceStore, thread_id: i64) -> String {
+    if store.chat_thread_plan_mode(thread_id).unwrap_or(false) {
+        return CLAUDE_PLAN_PERMISSION_MODE.to_owned();
+    }
+    match store.chat_thread_approval_mode(thread_id) {
+        Ok(mode) => mode.unwrap_or_else(|| CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+        // Falling back keeps the session startable, but a thread that asked to
+        // be supervised must never go unsupervised quietly - that is the exact
+        // failure the user opted in to avoid.
+        Err(err) => {
+            warn!(
+                thread_id,
+                error = %format!("{err:#}"),
+                fallback = CLAUDE_DEFAULT_PERMISSION_MODE,
+                "could not read the thread's approval mode; running unsupervised"
+            );
+            CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()
+        }
+    }
+}
+
 fn claude_stream_effort_mode(harness: &SessionHarnessOptions) -> Option<String> {
     sanitize_harness_text(harness.effort_mode.as_deref()).or_else(|| {
         if harness.fast_mode {
@@ -1284,6 +1303,7 @@ fn claude_stream_connection_effort(connection: &ProviderProcessConnection) -> Op
 fn restart_claude_stream_connection(
     connection: &mut ProviderProcessConnection,
     thread_id: i64,
+    permission_mode: String,
 ) -> Result<u32> {
     let native_thread_id = connection
         .native_thread_id
@@ -1297,7 +1317,7 @@ fn restart_claude_stream_connection(
         replay_user_messages: true,
         permission_prompt_tool: Some("stdio".to_owned()),
         resume: Some(native_thread_id),
-        permission_mode: Some(CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+        permission_mode: Some(permission_mode),
         model: connection.model.clone(),
         effort: claude_stream_connection_effort(connection),
         append_system_prompt: None,
@@ -2921,7 +2941,23 @@ fn run_claude_stream_session_loop(
         }
 
         if pending_restart && adapter.tracker.ready() {
-            match restart_claude_stream_connection(&mut connection, started.thread_id) {
+            match restart_claude_stream_connection(
+                &mut connection,
+                started.thread_id,
+                runtime_store
+                    .claude_permission_mode_for_thread(started.thread_id)
+                    .unwrap_or_else(|err| {
+                        warn!(
+                            session_id = started.session_id,
+                            thread_id = started.thread_id,
+                            error = %format!("{err:#}"),
+                            fallback = CLAUDE_DEFAULT_PERMISSION_MODE,
+                            "could not read the thread's approval mode on restart; \
+                             running unsupervised"
+                        );
+                        CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()
+                    }),
+            ) {
                 Ok(pid) => {
                     pending_restart = false;
                     adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
@@ -4788,7 +4824,12 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             pending_recovery_context: None,
         };
 
-        restart_claude_stream_connection(&mut connection, 99).unwrap();
+        restart_claude_stream_connection(
+            &mut connection,
+            99,
+            CLAUDE_DEFAULT_PERMISSION_MODE.to_owned(),
+        )
+        .unwrap();
 
         let mut args = Vec::new();
         for _ in 0..20 {

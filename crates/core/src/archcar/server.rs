@@ -698,11 +698,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             session_id,
             fast_mode,
         } => send_session_control(state, session_id, HarnessControl::SetFastMode(fast_mode)),
-        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => send_session_control(
-            state,
-            session_id,
-            HarnessControl::SetPermissionMode(Some(mode)),
-        ),
+        ArchcarRequest::SetSessionPermissionMode { session_id, mode } => {
+            set_session_permission_mode(state, session_id, mode)
+        }
         ArchcarRequest::ResizeSession {
             session_id,
             rows,
@@ -2484,6 +2482,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             thread_id,
             plan_mode,
         } => set_chat_plan_mode(state, thread_id, plan_mode),
+        ArchcarRequest::SetChatApprovalMode { thread_id, mode } => {
+            set_chat_approval_mode(state, thread_id, &mode)
+        }
         ArchcarRequest::GetChatPlan { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|store| {
@@ -3955,12 +3956,9 @@ fn set_chat_plan_mode(
     for kind in [SessionKind::CLAUDE, SessionKind::CODEX] {
         if let Some(handle) = live_session_handle_for_thread(state, thread_id, kind) {
             let mode = match kind {
-                SessionKind::CLAUDE if plan_mode => {
-                    Some(crate::archcar::session::CLAUDE_PLAN_PERMISSION_MODE.to_owned())
-                }
-                SessionKind::CLAUDE => {
-                    Some(crate::archcar::session::CLAUDE_DEFAULT_PERMISSION_MODE.to_owned())
-                }
+                SessionKind::CLAUDE => Some(
+                    crate::archcar::session::claude_permission_mode_for_thread(&store, thread_id),
+                ),
                 // Codex carries plan mode as a read-only sandbox on the turns
                 // it starts; the adapter only needs to know which mode it is in.
                 SessionKind::CODEX if plan_mode => Some(
@@ -3992,6 +3990,48 @@ fn set_chat_plan_mode(
         plan_path,
         plan_markdown: None,
     }
+}
+
+/// Opt a thread in to (or out of) approving each tool call.
+///
+/// Thread-scoped, because the choice has to stick for a thread with no session
+/// running - a brand-new chat, or any thread after an app relaunch. Persisting
+/// is the whole point; telling a live session is the optional half.
+fn set_chat_approval_mode(
+    state: &Arc<Mutex<ServerState>>,
+    thread_id: i64,
+    mode: &str,
+) -> ArchcarResponse {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let store = match WorkspaceStore::open_app(&db_path) {
+        Ok(store) => store,
+        Err(err) => {
+            return ArchcarResponse::Error {
+                message: err.to_string(),
+            }
+        }
+    };
+    // Persist before touching the harness so the column is the source of truth
+    // the mode below is computed from, and so a failure to reach the session
+    // still leaves the thread opted in for its next start.
+    if let Err(err) = store.set_chat_thread_approval_mode(thread_id, stored_approval_mode(mode)) {
+        return ArchcarResponse::Error {
+            message: err.to_string(),
+        };
+    }
+    // Only Claude understands these modes; other providers keep the column as
+    // an inert record until they grow their own support.
+    if let Some(handle) = live_session_handle_for_thread(state, thread_id, SessionKind::CLAUDE) {
+        // Not the requested mode: plan mode outranks the opt-in, and sending
+        // the raw request here would drop a planning thread out of plan mode
+        // while the Plan toggle stayed lit.
+        let effective =
+            crate::archcar::session::claude_permission_mode_for_thread(&store, thread_id);
+        let _ = handle.command_tx.send(SessionCommand::ApplyControl(
+            crate::archcar::harness_contract::HarnessControl::SetPermissionMode(Some(effective)),
+        ));
+    }
+    ArchcarResponse::Ack
 }
 
 /// Read a plan back out of the workspace checkout.
@@ -4435,6 +4475,82 @@ fn live_session_snapshot_for_thread(
             capabilities: snapshot.capabilities,
         })
     })
+}
+
+/// What belongs in `chat_threads.approval_mode` for a requested mode.
+///
+/// Bypass is the absence of an opt-in rather than a value, so it stores as
+/// `None` and the column can never disagree with the default. Plan mode is
+/// transient and already lives in `plan_mode`; persisting it here would
+/// outlive the plan.
+fn stored_approval_mode(mode: &str) -> Option<&str> {
+    use crate::archcar::session::{CLAUDE_DEFAULT_PERMISSION_MODE, CLAUDE_PLAN_PERMISSION_MODE};
+    if mode == CLAUDE_DEFAULT_PERMISSION_MODE || mode == CLAUDE_PLAN_PERMISSION_MODE {
+        None
+    } else {
+        Some(mode)
+    }
+}
+
+/// Change a live session's permission mode.
+///
+/// Session-keyed because the CLI drives it that way. For a Claude session the
+/// change is also recorded on the thread so it survives the next restart, and
+/// the mode actually sent is the thread's resolved mode rather than the raw
+/// request - otherwise asking for approvals on a planning thread would take
+/// the CLI out of plan mode while `plan_mode` stayed true.
+fn set_session_permission_mode(
+    state: &Arc<Mutex<ServerState>>,
+    session_id: i64,
+    mode: String,
+) -> ArchcarResponse {
+    use crate::archcar::session::CLAUDE_PLAN_PERMISSION_MODE;
+
+    let mut effective = mode.clone();
+    // A request for plan mode itself is not an approval opt-in; it is left to
+    // flow through untouched so `archcar permission-mode <id> plan` still works.
+    if mode != CLAUDE_PLAN_PERMISSION_MODE {
+        if let Ok(Some(handle)) = load_or_restore_session_handle(state, session_id) {
+            let (thread_id, kind) = {
+                let snapshot = handle.snapshot.lock().unwrap();
+                (snapshot.thread_id, snapshot.kind)
+            };
+            if kind == SessionKind::CLAUDE {
+                let db_path = state.lock().unwrap().db_path.clone();
+                match WorkspaceStore::open_app(&db_path) {
+                    Ok(store) => {
+                        match store
+                            .set_chat_thread_approval_mode(thread_id, stored_approval_mode(&mode))
+                        {
+                            Ok(()) => {
+                                effective =
+                                    crate::archcar::session::claude_permission_mode_for_thread(
+                                        &store, thread_id,
+                                    )
+                            }
+                            Err(err) => warn!(
+                                session_id,
+                                thread_id,
+                                error = %format!("{err:#}"),
+                                "could not persist the thread's approval mode"
+                            ),
+                        }
+                    }
+                    Err(err) => warn!(
+                        session_id,
+                        thread_id,
+                        error = %format!("{err:#}"),
+                        "could not open the workspace store to persist the thread's approval mode"
+                    ),
+                }
+            }
+        }
+    }
+    send_session_control(
+        state,
+        session_id,
+        HarnessControl::SetPermissionMode(Some(effective)),
+    )
 }
 
 fn send_session_control(
@@ -5254,6 +5370,19 @@ fn chat_snapshot_for_thread(
         provider_events,
         queued_inputs,
         live_session,
+        approval_mode: match store.chat_thread_approval_mode(thread_id) {
+            Ok(mode) => mode,
+            // Swallowing this would render the toggle as off with no trace,
+            // which is exactly the silent downgrade the opt-in exists to avoid.
+            Err(err) => {
+                warn!(
+                    thread_id,
+                    error = %format!("{err:#}"),
+                    "could not read the thread's approval mode for its snapshot; reporting it as unset"
+                );
+                None
+            }
+        },
     })
 }
 
@@ -6067,6 +6196,7 @@ mod tests {
         ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
     };
     use crate::archcar::protocol::{ArchcarInputDelivery, ArchcarInputKind};
+    use crate::archcar::session::{CLAUDE_DEFAULT_PERMISSION_MODE, CLAUDE_PLAN_PERMISSION_MODE};
     use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
     use std::fs;
     #[cfg(unix)]
@@ -6080,6 +6210,97 @@ mod tests {
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::workspace::{CreateWorkspace, ProcessStatus};
     use serde_json::json;
+
+    #[test]
+    fn only_a_real_opt_in_is_stored_as_the_threads_approval_mode() {
+        // Bypass is the absence of an opt-in, not a value to store, so the two
+        // can never disagree.
+        assert_eq!(stored_approval_mode(CLAUDE_DEFAULT_PERMISSION_MODE), None);
+        // Plan mode is transient and already has its own column.
+        assert_eq!(stored_approval_mode(CLAUDE_PLAN_PERMISSION_MODE), None);
+        assert_eq!(stored_approval_mode("default"), Some("default"));
+        assert_eq!(stored_approval_mode("acceptEdits"), Some("acceptEdits"));
+    }
+
+    #[test]
+    fn set_chat_approval_mode_persists_without_a_live_session() {
+        // The failure this covers: a brand-new chat, or any thread after an app
+        // relaunch, has no session. If the opt-in only reaches a live harness
+        // it is lost, the next launch reads NULL, and the agent runs
+        // unsupervised while the toggle still looks on.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+        }));
+
+        let on = dispatch_request(
+            ArchcarRequest::SetChatApprovalMode {
+                thread_id: thread.id,
+                mode: "default".to_owned(),
+            },
+            &state,
+        );
+        assert!(matches!(on, ArchcarResponse::Ack));
+        assert_eq!(
+            store
+                .chat_thread_approval_mode(thread.id)
+                .unwrap()
+                .as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            crate::archcar::session::claude_permission_mode_for_thread(&store, thread.id),
+            "default"
+        );
+
+        // Turning it back off clears the column rather than storing bypass, so
+        // an unset thread and an opted-out thread are the same row.
+        let off = dispatch_request(
+            ArchcarRequest::SetChatApprovalMode {
+                thread_id: thread.id,
+                mode: CLAUDE_DEFAULT_PERMISSION_MODE.to_owned(),
+            },
+            &state,
+        );
+        assert!(matches!(off, ArchcarResponse::Ack));
+        assert_eq!(store.chat_thread_approval_mode(thread.id).unwrap(), None);
+        assert_eq!(
+            crate::archcar::session::claude_permission_mode_for_thread(&store, thread.id),
+            CLAUDE_DEFAULT_PERMISSION_MODE
+        );
+    }
 
     #[test]
     fn clone_command_prefers_gh_for_github_remotes() {

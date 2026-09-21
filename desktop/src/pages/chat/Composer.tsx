@@ -38,6 +38,7 @@ import {
 import { inlineFileMentionAt } from "@/lib/chatAttachments";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { providerToKind } from "./providerKind";
+import { applyApprovalMode, supportsApprovalMode } from "./approvalMode";
 import {
   ComposerErrorBanner,
   ComposerQueue,
@@ -573,6 +574,20 @@ export function Composer(props: {
     }
   }
 
+  const approvalMode = () => chatStore.slice(props.threadId).approvalMode;
+  const canAskBeforeTools = () => supportsApprovalMode(props.provider);
+
+  async function toggleApprovalMode() {
+    await applyApprovalMode({
+      threadId: props.threadId,
+      ask: !approvalMode(),
+      send,
+      setApprovalMode: (threadId, on) => chatStore.setApprovalMode(threadId, on),
+      onError: (err) =>
+        chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) }),
+    });
+  }
+
   async function approvePlan() {
     const plan = pendingPlan();
     if (!plan) return;
@@ -704,6 +719,23 @@ export function Composer(props: {
               }
               onClick={() => void togglePlanMode()}
             />
+            {/* Routes tool calls through claude's can_use_tool, which archcar
+                turns into the approval banner above the composer. Claude-only:
+                the other providers read these mode strings differently or not
+                at all. */}
+            <Show when={canAskBeforeTools()}>
+              <ComposerToggle
+                on={approvalMode()}
+                icon="circle-help"
+                label="Ask"
+                title={
+                  approvalMode()
+                    ? "Asking before each tool call"
+                    : "Running tools without asking"
+                }
+                onClick={() => void toggleApprovalMode()}
+              />
+            </Show>
           </div>
           <div class="chat-toolbar-right">
             <ComposerStatus

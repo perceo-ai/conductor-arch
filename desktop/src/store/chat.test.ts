@@ -131,3 +131,39 @@ describe("chatStore optimistic messages", () => {
     ]);
   });
 });
+
+describe("chatStore approval mode", () => {
+  it("reads an unset column as off, which is every thread before the opt-in", async () => {
+    const { chatStore } = await freshChatStore();
+
+    chatStore.applySnapshot(emptySnapshot(7));
+    expect(chatStore.slice(7).approvalMode).toBe(false);
+
+    chatStore.applySnapshot({ ...emptySnapshot(7), approval_mode: undefined });
+    expect(chatStore.slice(7).approvalMode).toBe(false);
+  });
+
+  it("reads any stored mode as on", async () => {
+    const { chatStore } = await freshChatStore();
+
+    chatStore.applySnapshot({ ...emptySnapshot(7), approval_mode: "default" });
+    expect(chatStore.slice(7).approvalMode).toBe(true);
+
+    // The column stores a mode string so acceptEdits can land later without a
+    // migration; the toggle is on for anything that is not unset.
+    chatStore.applySnapshot({ ...emptySnapshot(7), approval_mode: "acceptEdits" });
+    expect(chatStore.slice(7).approvalMode).toBe(true);
+  });
+
+  it("lets a snapshot turn the toggle back off", async () => {
+    const { chatStore } = await freshChatStore();
+
+    chatStore.setApprovalMode(7, true);
+    expect(chatStore.slice(7).approvalMode).toBe(true);
+
+    // The snapshot is the source of truth: an optimistic flip that never
+    // reached the database must not survive the next refresh.
+    chatStore.applySnapshot(emptySnapshot(7));
+    expect(chatStore.slice(7).approvalMode).toBe(false);
+  });
+});

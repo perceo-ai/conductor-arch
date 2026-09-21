@@ -205,6 +205,18 @@ pub enum ArchcarRequest {
         thread_id: i64,
         plan_mode: bool,
     },
+    /// Opt a chat in to (or out of) approving each tool call.
+    ///
+    /// Thread-scoped rather than session-scoped on purpose: the choice is a
+    /// property of the thread and has to persist for a thread that has no
+    /// session running yet, which is the common case for a brand-new chat or
+    /// any thread after an app relaunch.
+    SetChatApprovalMode {
+        thread_id: i64,
+        /// The Claude permission mode to run in: `default` to ask,
+        /// `bypassPermissions` to go back to running unattended.
+        mode: String,
+    },
     /// The plan a chat is working from, with its markdown.
     GetChatPlan {
         thread_id: i64,
@@ -1482,6 +1494,8 @@ pub struct ArchcarChatSnapshot {
     pub queued_inputs: Vec<QueuedArchcarInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_session: Option<ArchcarChatLiveSession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1831,6 +1845,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             thread_id,
             plan_mode,
         } => format!("set_chat_plan_mode thread_id={thread_id} plan_mode={plan_mode}"),
+        ArchcarRequest::SetChatApprovalMode { thread_id, mode } => {
+            format!("set_chat_approval_mode thread_id={thread_id} mode={mode}")
+        }
         ArchcarRequest::GetChatPlan { thread_id } => {
             format!("get_chat_plan thread_id={thread_id}")
         }
@@ -3150,6 +3167,22 @@ mod tests {
     use crate::provider_interactions::ProviderInteractionStatus;
 
     #[test]
+    fn chat_snapshot_round_trips_an_absent_approval_mode() {
+        let json = serde_json::json!({
+            "thread_id": 1,
+            "messages": [],
+            "events": [],
+            "provider_events": [],
+            "queued_inputs": []
+        });
+
+        let snapshot: ArchcarChatSnapshot = serde_json::from_value(json).unwrap();
+
+        // Older daemons omit the field entirely; that must still deserialize.
+        assert_eq!(snapshot.approval_mode, None);
+    }
+
+    #[test]
     fn protocol_round_trips_spawn_event() {
         let envelope = RpcEnvelope {
             id: "1".to_owned(),
@@ -3334,6 +3367,22 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
             permission
+        );
+
+        // Thread-scoped, so it reaches a thread with no session running.
+        let approval = ArchcarRequest::SetChatApprovalMode {
+            thread_id: 12,
+            mode: "default".to_owned(),
+        };
+        assert_eq!(
+            archcar_request_summary(&approval),
+            "set_chat_approval_mode thread_id=12 mode=default"
+        );
+        let json = serde_json::to_string(&approval).unwrap();
+        assert!(json.contains("\"type\":\"set_chat_approval_mode\""));
+        assert_eq!(
+            serde_json::from_str::<ArchcarRequest>(&json).unwrap(),
+            approval
         );
     }
 

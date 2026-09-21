@@ -195,7 +195,7 @@ export function ComposerSendButton(props: {
 export function ComposerToggle(props: {
   on: boolean;
   title: string;
-  icon: "bolt" | "file-text";
+  icon: "bolt" | "file-text" | "circle-help";
   label: string;
   onClick: () => void;
 }) {
