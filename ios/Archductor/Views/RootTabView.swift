@@ -8,12 +8,7 @@ struct RootTabView: View {
         TabView {
             WorkspacesView()
                 .tabItem { Label("Workspaces", systemImage: "square.stack.3d.up") }
-            // Chats and Review arrive in P1 and P2. The tabs exist now so the
-            // shell's navigation is the one those phases fill in, rather than a
-            // layout that shifts under the user later.
-            PlaceholderTab(
-                title: "Chats",
-                detail: "Driving agents from the phone lands in the next phase.")
+            ChatsTabView()
                 .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
             PlaceholderTab(
                 title: "Review",

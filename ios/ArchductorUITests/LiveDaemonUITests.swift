@@ -10,6 +10,98 @@ import XCTest
 ///   ARCHDUCTOR_UITEST_WORKSPACE=phone-check \
 ///   xcodebuild … test
 final class LiveDaemonUITests: XCTestCase {
+    private struct LiveConfig {
+        let address: String
+        let token: String
+        let workspace: String
+    }
+
+    private func liveConfig() throws -> LiveConfig {
+        let environment = ProcessInfo.processInfo.environment
+        guard let address = environment["ARCHDUCTOR_UITEST_ADDRESS"],
+              let token = environment["ARCHDUCTOR_UITEST_TOKEN"],
+              let workspace = environment["ARCHDUCTOR_UITEST_WORKSPACE"] else {
+            throw XCTSkip("No live daemon configured for this run.")
+        }
+        return LiveConfig(address: address, token: token, workspace: workspace)
+    }
+
+    /// Pairs the app with the daemon and leaves it on the Workspaces tab.
+    @discardableResult
+    private func pair(_ app: XCUIApplication, with config: LiveConfig) -> XCUIApplication {
+        app.launchArguments = ["--uitest-reset"]
+        app.launch()
+
+        app.tabBars.buttons["More"].tap()
+        app.buttons["Pair a daemon…"].tap()
+
+        let addressField = app.textFields["Address (host or host:port)"]
+        XCTAssertTrue(addressField.waitForExistence(timeout: 10))
+        addressField.tap()
+        addressField.typeText(config.address)
+
+        let tokenField = app.secureTextFields["Token"]
+        tokenField.tap()
+        tokenField.typeText(config.token)
+        app.buttons["dismiss-keyboard"].tap()
+
+        let acknowledgement = app.switches["cleartext-acknowledgement"]
+        if acknowledgement.waitForExistence(timeout: 2) {
+            acknowledgement.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+        }
+        app.buttons["Save"].tap()
+
+        let workspacesTab = app.tabBars.buttons["Workspaces"]
+        XCTAssertTrue(workspacesTab.waitForExistence(timeout: 10))
+        for _ in 0..<5 where !workspacesTab.isSelected {
+            workspacesTab.tap()
+            _ = workspacesTab.waitForExistence(timeout: 1)
+        }
+        return app
+    }
+
+    /// Drills into a workspace, creates a chat, and opens it — the P1 path that
+    /// only means anything against a daemon that can actually make a thread.
+    func testCreatesAndOpensAChatOnALiveDaemon() throws {
+        let config = try liveConfig()
+        let app = pair(XCUIApplication(), with: config)
+
+        XCTAssertTrue(app.staticTexts[config.workspace].waitForExistence(timeout: 20))
+        // The row is a navigation link whose accessibility children are
+        // combined, so the label text itself is not the tappable element.
+        let workspaceRow = app.buttons
+            .containing(NSPredicate(format: "label CONTAINS %@", config.workspace))
+            .firstMatch
+        XCTAssertTrue(workspaceRow.waitForExistence(timeout: 5))
+        workspaceRow.tap()
+
+        XCTAssertTrue(app.buttons["New chat"].waitForExistence(timeout: 10))
+        app.buttons["New chat"].tap()
+
+        let titleField = app.textFields["Title"]
+        XCTAssertTrue(titleField.waitForExistence(timeout: 5))
+        titleField.tap()
+        titleField.typeText("Phone chat")
+        app.buttons["Create"].tap()
+
+        // The thread must come back from the daemon and land in the list.
+        XCTAssertTrue(
+            app.staticTexts["Phone chat"].waitForExistence(timeout: 15),
+            "created chat never appeared")
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Phone chat"))
+            .firstMatch.tap()
+
+        // An empty conversation still has a composer: that is the difference
+        // between a chat you can drive and a transcript you can only read.
+        XCTAssertTrue(app.textFields["chat-composer"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["No messages yet"].exists)
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "chat-live"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testPairsWithALiveDaemonAndListsItsWorkspaces() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["ARCHDUCTOR_UITEST_ADDRESS"],

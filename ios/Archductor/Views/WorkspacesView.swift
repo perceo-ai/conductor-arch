@@ -51,7 +51,11 @@ struct WorkspaceList: View {
                     .foregroundStyle(.secondary)
             }
             ForEach(store.workspaces) { workspace in
-                WorkspaceRow(workspace: workspace)
+                NavigationLink {
+                    WorkspaceDetailView(workspace: workspace)
+                } label: {
+                    WorkspaceRow(workspace: workspace)
+                }
             }
         }
         .listStyle(.plain)
