@@ -3,3 +3,8 @@ allowBuilds:
   esbuild: true
 patchedDependencies:
   vite-plugin-electron@0.29.1: patches/vite-plugin-electron@0.29.1.patch
+# js-yaml 4.3.0 carries two HIGH advisories (CVE-2026-84375,
+# GHSA-5p4m-2wfm-xmqj), both fixed in 4.3.2. It reaches us only through
+# electron-builder, so an override is the whole fix.
+overrides:
+  js-yaml: ^4.3.2
