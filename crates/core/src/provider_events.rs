@@ -462,7 +462,7 @@ impl ProviderEventStore {
     pub fn upsert_event(&self, draft: &ProviderEventDraft) -> Result<ProviderEventRecord> {
         let mut conn = self.open()?;
         let identity_key = draft.identity_key();
-        let tx = conn.transaction()?;
+        let tx = crate::storage::begin_write_transaction(&mut conn)?;
         upsert_event_in_tx(&tx, draft)?;
         tx.commit()?;
         self.get_by_identity_key(&identity_key)?
@@ -514,7 +514,7 @@ impl ProviderEventStore {
         reason: &str,
     ) -> Result<usize> {
         let mut conn = self.open()?;
-        let tx = conn.transaction()?;
+        let tx = crate::storage::begin_write_transaction(&mut conn)?;
         let events = tx
             .prepare(provider_event_select_sql("WHERE process_id = ?1").as_str())?
             .query_map([process_id], row_to_provider_event)?
@@ -1586,5 +1586,49 @@ mod tests {
 
         assert_eq!(timeline[0].kind, ProviderEventKind::Tool);
         assert_ne!(timeline[0].kind, ProviderEventKind::AssistantOutput);
+    }
+
+    #[test]
+    fn upsert_event_waits_for_a_concurrent_writer_instead_of_failing_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = ProviderEventStore::new(&db_path);
+        create_parent_rows(&store, temp.path());
+        store
+            .upsert_event(&draft(ProviderEventKind::Turn, ProviderEventPhase::Started))
+            .unwrap();
+
+        // Hold a write transaction on another connection, exactly as a second
+        // archcar writer would. `upsert_event` reads four times (sequence
+        // allocation, timeline lookup, payload merge) before its first write,
+        // so under BEGIN DEFERRED the upgrade loses the snapshot and SQLite
+        // returns SQLITE_BUSY *without* consulting the busy handler.
+        let mut blocker = Connection::open(&db_path).unwrap();
+        let held = blocker
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        held.execute(
+            "INSERT INTO chat_threads (
+                id, workspace_id, provider, title, status, created_at, updated_at
+             ) VALUES (8, 1, 'codex', 'Second', 'active', '1', '1')",
+            [],
+        )
+        .unwrap();
+
+        let writer_path = db_path.clone();
+        let writer = std::thread::spawn(move || {
+            let store = ProviderEventStore::new(writer_path);
+            let mut event = draft(ProviderEventKind::Turn, ProviderEventPhase::Completed);
+            event.provider_item_id = Some("concurrent".to_owned());
+            store.upsert_event(&event)
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        held.commit().unwrap();
+
+        writer
+            .join()
+            .unwrap()
+            .expect("concurrent upsert should wait for the lock, not fail");
     }
 }

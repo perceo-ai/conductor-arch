@@ -89,7 +89,7 @@ impl ProviderInteractionStore {
 
     pub fn register(&self, draft: ProviderInteractionDraft) -> Result<ProviderInteractionRecord> {
         let mut conn = self.open()?;
-        let tx = conn.transaction()?;
+        let tx = crate::storage::begin_write_transaction(&mut conn)?;
         let fingerprint = request_fingerprint(&draft);
         if let Some(existing) = find_pending_by_fingerprint(&tx, &fingerprint)? {
             return Ok(existing);
