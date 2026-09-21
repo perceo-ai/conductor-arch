@@ -2239,6 +2239,20 @@ mod tests {
     }
 
     #[test]
+    fn claude_stream_launches_supervised_without_the_skip_permissions_flag() {
+        // An opted-in thread asks for approvals, which the flag would suppress.
+        let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
+            permission_mode: Some("default".to_owned()),
+            ..ClaudeStreamLaunchConfig::default()
+        });
+
+        assert!(args
+            .windows(2)
+            .any(|v| v == ["--permission-mode", "default"]));
+        assert!(!args.iter().any(|v| v == "--dangerously-skip-permissions"));
+    }
+
+    #[test]
     fn claude_stream_contract_omits_replay_without_persistent_input() {
         let args = build_claude_stream_args(&ClaudeStreamLaunchConfig {
             persistent_input: false,

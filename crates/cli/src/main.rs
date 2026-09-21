@@ -380,6 +380,15 @@ enum ArchcarCommand {
         #[arg(long)]
         off: bool,
     },
+    /// Ask before each tool call on a Claude chat, or go back to running
+    /// tools unattended. Persists on the thread, so it survives a restart.
+    ApprovalMode {
+        thread_id: i64,
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+        #[arg(long)]
+        off: bool,
+    },
     /// Show the plan a chat is working from.
     Plan {
         thread_id: i64,
@@ -1649,6 +1658,16 @@ fn run_cli() -> Result<()> {
                     match client.send(ArchcarRequest::SetChatPlanMode {
                         thread_id,
                         plan_mode,
+                    })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::ApprovalMode { thread_id, on, off } => {
+                    let ask = if off { false } else { on || !off };
+                    match client.send(ArchcarRequest::SetChatApprovalMode {
+                        thread_id,
+                        mode: if ask { "default" } else { "bypassPermissions" }.to_owned(),
                     })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),

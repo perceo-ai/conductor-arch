@@ -126,14 +126,6 @@ impl RuntimeSessionStore {
         self.open()?.chat_thread_plan_mode(thread_id)
     }
 
-    pub fn chat_thread_approval_mode(&self, thread_id: i64) -> Result<Option<String>> {
-        self.open()?.chat_thread_approval_mode(thread_id)
-    }
-
-    pub fn set_chat_thread_approval_mode(&self, thread_id: i64, mode: Option<&str>) -> Result<()> {
-        self.open()?.set_chat_thread_approval_mode(thread_id, mode)
-    }
-
     /// The permission mode a Claude session for this thread should run in.
     /// Thin pass-through to the single source of truth so callers that only
     /// hold a `RuntimeSessionStore` don't open a `WorkspaceStore` inline.
