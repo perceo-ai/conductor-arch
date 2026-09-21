@@ -80,7 +80,11 @@ public final class ChatStore {
         guard let threadID = selectedThreadID else { return }
         guard case .chatProjection(_, let items)? = await request(
             GetChatProjectionRequest(threadID: threadID)) else { return }
-        self.items = items.sorted { $0.sequence < $1.sequence }
+        // The same allowlist the desktop applies: only known text and activity
+        // classes render, and assistant prose only once it is finalized.
+        self.items = items
+            .filter(ChatFormat.isDisplayable)
+            .sorted { $0.sequence < $1.sequence }
     }
 
     public func refreshQueue() async {
@@ -125,14 +129,25 @@ public final class ChatStore {
         defer { isSending = false }
 
         if sessionID == nil {
-            guard case .sessionSpawned(let sessionID, _, _, _)? = await request(
+            // The daemon answers either way depending on whether it could spawn
+            // immediately: `session_spawned` carries the id, `session_spawn_queued`
+            // does not and the id arrives later on the event stream. Treating the
+            // queued answer as a failure would drop the turn on the floor, which
+            // is exactly what it did before a real agent was pointed at this.
+            switch await request(
                 EnsureChatThreadSessionRequest(
-                    workspace: workspace, threadID: thread.id, kind: thread.sessionKind))
-            else {
+                    workspace: workspace, threadID: thread.id, kind: thread.sessionKind)) {
+            case .sessionSpawned(let sessionID, _, _, _):
+                self.sessionID = sessionID
+            case .sessionSpawnQueued:
+                break
+            case .none:
                 composerError = composerError ?? "Could not start a \(thread.provider) session."
                 return
+            case .some(let other):
+                composerError = "Unexpected answer starting the session: \(other)"
+                return
             }
-            self.sessionID = sessionID
         }
 
         guard await request(

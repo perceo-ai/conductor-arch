@@ -136,6 +136,52 @@ final class LiveDaemonUITests: XCTestCase {
         add(shot)
     }
 
+    /// The whole point of the app, against a real agent: type a turn on the
+    /// phone, and watch the provider's answer arrive in the transcript.
+    ///
+    /// Needs an authenticated provider on the daemon's machine, so it is opt-in
+    /// via ARCHDUCTOR_UITEST_AGENT_CHAT.
+    func testSendsATurnToARealAgent() throws {
+        let config = try liveConfig()
+        let environment = ProcessInfo.processInfo.environment
+        guard let chatTitle = environment["ARCHDUCTOR_UITEST_AGENT_CHAT"],
+              let prompt = environment["ARCHDUCTOR_UITEST_PROMPT"],
+              let expected = environment["ARCHDUCTOR_UITEST_EXPECTED"] else {
+            throw XCTSkip("No authenticated agent configured for this run.")
+        }
+        let app = pair(XCUIApplication(), with: config)
+
+        XCTAssertTrue(app.staticTexts[config.workspace].waitForExistence(timeout: 20))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", config.workspace))
+            .firstMatch.tap()
+
+        XCTAssertTrue(app.staticTexts[chatTitle].waitForExistence(timeout: 15))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", chatTitle))
+            .firstMatch.tap()
+
+        let composer = app.textFields["chat-composer"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.tap()
+        composer.typeText(prompt)
+        app.buttons["chat-send"].tap()
+
+        // The turn has to reach the daemon, start a provider session, run, and
+        // come back through the event stream into the projection. A real model
+        // is slow, hence the generous window.
+        // Exact match, not CONTAINS: the prompt bubble contains the word too,
+        // so a loose predicate passes the moment the turn is sent and proves
+        // nothing about the agent answering.
+        let answer = app.staticTexts[expected]
+        XCTAssertTrue(
+            answer.waitForExistence(timeout: 180),
+            "the agent's answer never reached the transcript")
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "agent-turn-live"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testPairsWithALiveDaemonAndListsItsWorkspaces() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["ARCHDUCTOR_UITEST_ADDRESS"],

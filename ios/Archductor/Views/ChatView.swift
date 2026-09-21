@@ -186,12 +186,9 @@ struct TimelineRow: View {
         HStack {
             if alignment == .trailing { Spacer(minLength: 40) }
             VStack(alignment: .leading, spacing: 4) {
-                Text(item.body)
+                Text(item.displayBody)
                     .font(.callout)
                     .textSelection(.enabled)
-                if item.isStreaming {
-                    ProgressView().controlSize(.mini)
-                }
             }
             .padding(10)
             .background(background, in: RoundedRectangle(cornerRadius: 14))
@@ -201,16 +198,24 @@ struct TimelineRow: View {
 
     private var card: some View {
         DisclosureGroup {
-            Text(item.body)
+            Text(item.displayBody)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: item.symbolName)
-                Text(item.title.isEmpty ? item.roleLabel : item.title)
-                    .font(.caption.weight(.medium))
-                    .lineLimit(1)
+                // Verb plus what it acted on, the same split the desktop makes,
+                // so "Ran cargo test" does not read as "Ran Ran cargo test".
+                let label = ChatFormat.verbChip(renderClass: item.renderClass, title: item.title)
+                Text(label.verb)
+                    .font(.caption.weight(.semibold))
+                if !label.chip.isEmpty {
+                    Text(label.chip)
+                        .font(.caption.monospaced())
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 if item.isStreaming { ProgressView().controlSize(.mini) }
             }
         }

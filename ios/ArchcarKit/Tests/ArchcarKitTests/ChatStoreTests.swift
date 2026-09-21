@@ -19,7 +19,8 @@ private func replyID(_ line: String) -> String? {
 private func chatResponder(
     projectionBody: String = "on it",
     queued: [String] = [],
-    pendingInteraction: Bool = false
+    pendingInteraction: Bool = false,
+    spawnIsQueued: Bool = false
 ) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
@@ -34,7 +35,7 @@ private func chatResponder(
             return """
             {"id":"\(id)","payload":{"type":"chat_projection","thread_id":7,"items":[\
             {"id":"a","sequence":1,"render_class":"assistant_chat","role_label":"assistant",\
-            "title":"","body":"\(projectionBody)","status":"complete","stream_state":"final"}]}}
+            "title":"","body":"\(projectionBody)","status":"complete","stream_state":"complete"}]}}
             """
         case "list_queued_chat_inputs":
             let inputs = queued.enumerated().map { index, text in
@@ -58,10 +59,12 @@ private func chatResponder(
             "runtime_state":"streaming","ready":false,"pending_interactions":0}}
             """
         case "ensure_chat_thread_session":
-            return """
-            {"id":"\(id)","payload":{"type":"session_spawned","session_id":3,"thread_id":7,\
-            "workspace":"w","kind":"codex"}}
-            """
+            return spawnIsQueued
+                ? #"{"id":"\#(id)","payload":{"type":"session_spawn_queued","workspace":"w","kind":"codex"}}"#
+                : """
+                {"id":"\(id)","payload":{"type":"session_spawned","session_id":3,"thread_id":7,\
+                "workspace":"w","kind":"codex"}}
+                """
         case "queue_chat_input":
             return """
             {"id":"\(id)","payload":{"type":"queued_chat_input","input":\
@@ -118,6 +121,27 @@ private func connectedStore(
     let ensureIndex = try #require(sent.firstIndex(of: "ensure_chat_thread_session"))
     let queueIndex = try #require(sent.firstIndex(of: "queue_chat_input"))
     #expect(ensureIndex < queueIndex)
+    #expect(store.composerError == nil)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func queuedSpawnStillQueuesTheTurn() async throws {
+    // The daemon answers `session_spawn_queued` whenever it cannot spawn
+    // immediately, which is the normal case for a cold provider. Treating that
+    // as a failure silently drops the user's turn.
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(
+        daemon, responder: chatResponder(spawnIsQueued: true))
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+
+    await store.send("ship it")
+
+    let sent = await daemon.receivedLines.compactMap(requestType)
+    #expect(sent.contains("queue_chat_input"))
     #expect(store.composerError == nil)
 
     await session.disconnect()

@@ -94,6 +94,10 @@ public struct ProjectionItem: Decodable, Sendable, Identifiable, Hashable {
         }
     }
 
+    /// The body as a human should read it: Archductor's own blocks removed.
+    /// `body` keeps the raw text for diagnostics.
+    public var displayBody: String { ChatFormat.displayText(body) }
+
     /// SF Symbol for a card row.
     public var symbolName: String {
         switch renderClass {

@@ -22,6 +22,9 @@ public enum ArchcarResponse: Sendable {
     case chatPlan(threadID: Int64, planMode: Bool, planPath: String?, planMarkdown: String?)
     case sessionStatus(SessionStatus)
     case sessionSpawned(sessionID: Int64, threadID: Int64, workspace: String, kind: SessionKind)
+    /// The spawn was accepted but has not happened yet, so there is no session
+    /// id to report. The `session_started` event carries it when it lands.
+    case sessionSpawnQueued(workspace: String, kind: SessionKind)
     case providerInteraction(ProviderInteraction)
     case providerInteractions([ProviderInteraction])
     case error(String)
@@ -89,6 +92,10 @@ extension ArchcarResponse: Decodable {
                 planMarkdown: try container.decodeIfPresent(String.self, forKey: .planMarkdown))
         case "session_status":
             self = .sessionStatus(try SessionStatus(from: decoder))
+        case "session_spawn_queued":
+            self = .sessionSpawnQueued(
+                workspace: try container.decode(String.self, forKey: .workspace),
+                kind: try container.decode(SessionKind.self, forKey: .kind))
         case "session_spawned":
             self = .sessionSpawned(
                 sessionID: try container.decode(Int64.self, forKey: .sessionID),
