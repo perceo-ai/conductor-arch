@@ -44,6 +44,12 @@ struct PairDaemonView: View {
                         .focused($focusedField, equals: .address)
                     SecureField("Token", text: $token)
                         .focused($focusedField, equals: .token)
+                        // Opt out of password AutoFill. iOS otherwise offers to
+                        // save this into the (iCloud-synced) keychain, which
+                        // would push a daemon token onto every device on the
+                        // account -- the opposite of the device-only storage
+                        // the app deliberately uses for it.
+                        .textContentType(.oneTimeCode)
                 }
 
                 if needsAcknowledgement {
