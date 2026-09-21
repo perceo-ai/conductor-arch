@@ -1680,6 +1680,15 @@ fn rate_limit_is_terminal(value: &Value) -> bool {
     !rate_limit_is_allowed(value)
 }
 
+fn claude_result_defers_a_tool(value: &Value) -> bool {
+    value
+        .get("deferred_tool_use")
+        .is_some_and(|tool| !tool.is_null())
+        || ["stop_reason", "terminal_reason"]
+            .iter()
+            .any(|key| string_at(value, &[key]).is_some_and(|reason| reason == "tool_deferred"))
+}
+
 fn claude_result_status_from_json(value: &Value) -> ClaudeResultStatus {
     let subtype = value
         .get("subtype")
@@ -1689,7 +1698,11 @@ fn claude_result_status_from_json(value: &Value) -> ClaudeResultStatus {
         ClaudeResultStatus::Interrupted
     } else if matches!(subtype, "declined" | "denied" | "rejected") {
         ClaudeResultStatus::Declined
-    } else if matches!(subtype, "deferred" | "tool_deferred") {
+    } else if matches!(subtype, "deferred" | "tool_deferred") || claude_result_defers_a_tool(value)
+    {
+        // A turn that ends on a deferred tool carries `subtype: "success"` and
+        // `is_error: false`; only `stop_reason`/`terminal_reason` (or the
+        // `deferred_tool_use` payload) says the turn is paused, not finished.
         ClaudeResultStatus::Deferred
     } else if value
         .get("is_error")
@@ -3929,5 +3942,50 @@ mod tests {
             crate::provider_events::ProviderEventKind::Unknown
         );
         assert_eq!(canonical.raw_json["value"], 42);
+    }
+
+    const DEFERRED_TOOL_RESULT_FIXTURE: &str = r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"tool_deferred","terminal_reason":"tool_deferred","session_id":"deferred-session","uuid":"deferred-result","result":"","num_turns":1,"deferred_tool_use":{"id":"toolu_deferred","name":"Bash","input":{"command":"git log --oneline -10"}}}"#;
+
+    #[test]
+    fn claude_result_deferring_a_tool_is_not_reported_as_success() {
+        let event = parse_claude_stream_json_lines(DEFERRED_TOOL_RESULT_FIXTURE)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(event.kind, ClaudeProviderEventKind::Result);
+        assert_eq!(event.result_status(), Some(ClaudeResultStatus::Deferred));
+        assert!(matches!(
+            event.lifecycle_signal(),
+            Some(ClaudeLifecycleSignal::TurnFinished {
+                status: ClaudeResultStatus::Deferred,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn claude_deferred_result_maps_to_deferred_turn_status() {
+        let event = parse_claude_stream_json_lines(DEFERRED_TOOL_RESULT_FIXTURE)
+            .unwrap()
+            .pop()
+            .unwrap();
+
+        assert_eq!(
+            claude_result_to_harness_status(event.result_status().unwrap()),
+            HarnessTurnStatus::Deferred
+        );
+    }
+
+    #[test]
+    fn claude_plain_success_result_stays_success() {
+        let event = parse_claude_stream_json_lines(
+            r#"{"type":"result","subtype":"success","is_error":false,"stop_reason":"end_turn","session_id":"s","uuid":"r","result":"done"}"#,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+
+        assert_eq!(event.result_status(), Some(ClaudeResultStatus::Success));
     }
 }
