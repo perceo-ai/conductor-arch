@@ -100,8 +100,9 @@ private func requestType(_ line: String) -> String? {
     try await session.connect()
     let events = await session.events
 
-    // Two sockets: one for commands, one held open by subscribe, because the
-    // daemon refuses subscribe on a connection that does anything else.
+    // The daemon serves one request per connection, so the handshake probe
+    // used a connection of its own and the only one still open is the
+    // subscriber.
     #expect(await daemon.connectionCount == 2)
 
     await daemon.push(#"{"id":"e1","payload":{"type":"inventory_changed","scope":"workspace","workspace":"columbia"}}"#)

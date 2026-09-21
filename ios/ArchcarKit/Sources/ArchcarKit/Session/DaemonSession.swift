@@ -11,36 +11,34 @@ public enum DaemonSessionError: Error, Equatable, Sendable {
     case daemon(String)
     case authenticationFailed
     case disconnected
+    case timedOut
 }
 
 /// One daemon, as the app talks to it.
 ///
-/// Two sockets, because `Subscribe` occupies its connection for as long as it
-/// lives: the command socket carries request/response traffic, the event socket
-/// sends `subscribe` once and then only reads. Requests are correlated by
-/// envelope id, so several can be in flight at once.
+/// The daemon serves exactly one request per connection: `handle_connection`
+/// reads a single line after the token, answers it, and closes. So a request
+/// here is a short-lived connection of its own, and the only long-lived socket
+/// is the one holding `Subscribe` open for the event stream. This mirrors the
+/// desktop client, which frames its traffic the same way.
 public actor DaemonSession {
     public let address: DaemonAddress
     private let token: String
+    /// A request that gets no answer must not hold a screen on a spinner.
+    private let requestTimeout: Duration
 
-    private var commandConnection: ArchcarConnection?
     private var eventConnection: ArchcarConnection?
-    private var pending: [String: CheckedContinuation<ArchcarResponse, Error>] = [:]
     private var eventContinuation: AsyncStream<ArchcarEvent>.Continuation?
     private var eventStream: AsyncStream<ArchcarEvent>?
-    private var readerTask: Task<Void, Never>?
     private var eventTask: Task<Void, Never>?
     private var backoff = Backoff()
-    /// Set when the daemon rejects our token. A rejection arrives as one
-    /// unsolicited line and is followed immediately by the socket closing, so
-    /// without this the close would be reported as a plain disconnect.
-    private var sawAuthenticationFailure = false
 
     public private(set) var connectionState: ConnectionState = .disconnected
 
-    public init(address: DaemonAddress, token: String) {
+    public init(address: DaemonAddress, token: String, requestTimeout: Duration = .seconds(20)) {
         self.address = address
         self.token = token
+        self.requestTimeout = requestTimeout
     }
 
     public var events: AsyncStream<ArchcarEvent> {
@@ -51,27 +49,23 @@ public actor DaemonSession {
         return stream
     }
 
+    /// Proves the token, then opens the event stream.
+    ///
+    /// The token check is a real round trip because a rejected token is only
+    /// visible as a reply — without it the app would draw a connected daemon
+    /// and discover the problem on the first request the user cares about.
     public func connect() async throws {
         guard connectionState != .connected else { return }
         connectionState = .connecting
-        sawAuthenticationFailure = false
         do {
-            let command = ArchcarConnection(address: address, token: token)
-            try await command.open()
-            commandConnection = command
-            startReading(command)
-
-            // Prove the token before reporting a connection. A bad one is only
-            // visible as a reply, so without a round trip here the first real
-            // request is where the user would find out — and by then the app
-            // has already drawn a connected daemon.
-            try await withHandshakeTimeout { try await self.request(ListRepositoriesRequest()) }
+            _ = try await request(ListRepositoriesRequest())
 
             let events = ArchcarConnection(address: address, token: token)
             try await events.open()
-            eventConnection = events
+            let lines = await events.lines
             try await events.send(try RequestEnvelope(body: SubscribeRequest()).encodedLine())
-            startStreaming(events)
+            eventConnection = events
+            startStreaming(lines)
 
             connectionState = .connected
             backoff.reset()
@@ -82,69 +76,59 @@ public actor DaemonSession {
     }
 
     public func disconnect() async {
-        readerTask?.cancel()
         eventTask?.cancel()
-        readerTask = nil
         eventTask = nil
-        await commandConnection?.close()
         await eventConnection?.close()
-        commandConnection = nil
         eventConnection = nil
-        failPending(with: .disconnected)
         connectionState = .disconnected
     }
 
+    /// Sends one request on its own connection and returns its response.
     public func request<Body: ArchcarRequestBody>(_ body: Body) async throws -> ArchcarResponse {
-        if sawAuthenticationFailure { throw DaemonSessionError.authenticationFailed }
-        guard let connection = commandConnection else { throw DaemonSessionError.disconnected }
+        let connection = ArchcarConnection(address: address, token: token)
+        defer { Task { await connection.close() } }
+        try await connection.open()
+        let lines = await connection.lines
         let id = UUID().uuidString
-        let line = try RequestEnvelope(id: id, body: body).encodedLine()
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[id] = continuation
-            Task {
-                do {
-                    try await connection.send(line)
-                } catch {
-                    await resume(id: id, with: .failure(error))
-                }
-            }
+        try await connection.send(try RequestEnvelope(id: id, body: body).encodedLine())
+
+        guard let line = try await firstLine(of: lines) else {
+            // The daemon closes without answering only when it rejected the
+            // token before reading the request.
+            throw DaemonSessionError.authenticationFailed
+        }
+        let envelope = try JSONDecoder().decode(ResponseEnvelope.self, from: line)
+        switch envelope.payload {
+        case .error(let message) where envelope.id == "auth" && message.contains("authentication failed"):
+            throw DaemonSessionError.authenticationFailed
+        case .error(let message):
+            throw DaemonSessionError.daemon(message)
+        case let payload:
+            return payload
         }
     }
 
-    private func startReading(_ connection: ArchcarConnection) {
-        readerTask = Task { [weak self] in
-            for await line in await connection.lines {
-                await self?.handleResponseLine(line)
+    private func firstLine(of lines: AsyncStream<Data>) async throws -> Data? {
+        try await withThrowingTaskGroup(of: Data?.self) { group in
+            group.addTask {
+                for await line in lines { return line }
+                return nil
             }
-            await self?.handleDisconnect()
+            group.addTask { [requestTimeout] in
+                try await Task.sleep(for: requestTimeout)
+                throw DaemonSessionError.timedOut
+            }
+            defer { group.cancelAll() }
+            return try await group.next() ?? nil
         }
     }
 
-    private func startStreaming(_ connection: ArchcarConnection) {
+    private func startStreaming(_ lines: AsyncStream<Data>) {
         eventTask = Task { [weak self] in
-            for await line in await connection.lines {
+            for await line in lines {
                 await self?.handleEventLine(line)
             }
-        }
-    }
-
-    private func handleResponseLine(_ line: Data) {
-        guard let envelope = try? JSONDecoder().decode(ResponseEnvelope.self, from: line) else { return }
-        // The daemon answers a failed handshake with id "auth" — a line no
-        // request asked for, which is how a bad token is told apart from a
-        // rejected request.
-        if envelope.id == "auth", case .error(let message) = envelope.payload,
-           message.contains("authentication failed") {
-            sawAuthenticationFailure = true
-            failPending(with: .authenticationFailed)
-            connectionState = .failed(message)
-            return
-        }
-        switch envelope.payload {
-        case .error(let message):
-            resume(id: envelope.id, with: .failure(DaemonSessionError.daemon(message)))
-        case let payload:
-            resume(id: envelope.id, with: .success(payload))
+            await self?.handleEventStreamEnded()
         }
     }
 
@@ -154,37 +138,9 @@ public actor DaemonSession {
         eventContinuation?.yield(envelope.payload)
     }
 
-    private func handleDisconnect() {
-        commandConnection = nil
+    private func handleEventStreamEnded() {
+        eventConnection = nil
         if connectionState == .connected { connectionState = .disconnected }
-        failPending(with: sawAuthenticationFailure ? .authenticationFailed : .disconnected)
-    }
-
-    private func resume(id: String, with result: Result<ArchcarResponse, Error>) {
-        guard let continuation = pending.removeValue(forKey: id) else { return }
-        continuation.resume(with: result)
-    }
-
-    private func failPending(with error: DaemonSessionError) {
-        let waiting = pending
-        pending.removeAll()
-        for (_, continuation) in waiting { continuation.resume(throwing: error) }
-    }
-
-    /// A daemon that accepts the TCP connection and then says nothing must not
-    /// leave the app on a spinner forever.
-    private func withHandshakeTimeout(
-        _ operation: @escaping @Sendable () async throws -> ArchcarResponse
-    ) async throws {
-        try await withThrowingTaskGroup(of: ArchcarResponse.self) { group in
-            group.addTask { try await operation() }
-            group.addTask {
-                try await Task.sleep(for: .seconds(10))
-                throw ArchcarTransportError.connectionFailed("daemon did not answer the handshake")
-            }
-            defer { group.cancelAll() }
-            _ = try await group.next()
-        }
     }
 
     /// How long to wait before the next reconnect attempt. The caller owns the
