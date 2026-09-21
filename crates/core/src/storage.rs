@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::time::Duration;
 
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -8,6 +8,22 @@ pub(crate) fn configure_workspace_db(conn: &Connection) -> Result<()> {
     conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     conn.execute_batch("PRAGMA foreign_keys = ON")?;
     Ok(())
+}
+
+/// Begin a transaction that will write.
+///
+/// `Connection::transaction` is `BEGIN DEFERRED`: the write lock is only taken
+/// at the first write statement. A transaction that reads first - to allocate a
+/// sequence, or to merge an existing row - pins a read snapshot, and if another
+/// connection commits in between, the upgrade fails with `SQLITE_BUSY`
+/// immediately. SQLite cannot invoke the busy handler there, because retrying
+/// would silently change what the earlier reads saw, so `busy_timeout` does not
+/// apply and the caller sees "database is locked" under ordinary contention.
+///
+/// `BEGIN IMMEDIATE` takes the write lock up front, where the busy handler does
+/// apply and waits.
+pub(crate) fn begin_write_transaction(conn: &mut Connection) -> Result<Transaction<'_>> {
+    Ok(conn.transaction_with_behavior(TransactionBehavior::Immediate)?)
 }
 
 pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
