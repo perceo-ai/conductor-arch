@@ -38,6 +38,7 @@ import {
 import { inlineFileMentionAt } from "@/lib/chatAttachments";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { providerToKind } from "./providerKind";
+import { applyApprovalMode, supportsApprovalMode } from "./approvalMode";
 import {
   ComposerErrorBanner,
   ComposerQueue,
@@ -574,23 +575,17 @@ export function Composer(props: {
   }
 
   const approvalMode = () => chatStore.slice(props.threadId).approvalMode;
+  const canAskBeforeTools = () => supportsApprovalMode(props.provider);
 
   async function toggleApprovalMode() {
-    const next = !approvalMode();
-    const sessionId = chatStore.slice(props.threadId).session?.session_id;
-    chatStore.setApprovalMode(props.threadId, next);
-    if (sessionId == null) return; // persists at next start
-    try {
-      const res = await send({
-        type: "set_session_permission_mode",
-        session_id: sessionId,
-        mode: next ? "default" : "bypassPermissions",
-      });
-      if (res.type === "error") throw new Error(res.message);
-    } catch (err) {
-      chatStore.setApprovalMode(props.threadId, !next);
-      chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) });
-    }
+    await applyApprovalMode({
+      threadId: props.threadId,
+      ask: !approvalMode(),
+      send,
+      setApprovalMode: (threadId, on) => chatStore.setApprovalMode(threadId, on),
+      onError: (err) =>
+        chatStore.setPhase(props.threadId, { kind: "failed", message: sendErrorText(err) }),
+    });
   }
 
   async function approvePlan() {
@@ -725,18 +720,22 @@ export function Composer(props: {
               onClick={() => void togglePlanMode()}
             />
             {/* Routes tool calls through claude's can_use_tool, which archcar
-                turns into the approval banner above the composer. */}
-            <ComposerToggle
-              on={approvalMode()}
-              icon="circle-help"
-              label="Ask"
-              title={
-                approvalMode()
-                  ? "Asking before each tool call"
-                  : "Running tools without asking"
-              }
-              onClick={() => void toggleApprovalMode()}
-            />
+                turns into the approval banner above the composer. Claude-only:
+                the other providers read these mode strings differently or not
+                at all. */}
+            <Show when={canAskBeforeTools()}>
+              <ComposerToggle
+                on={approvalMode()}
+                icon="circle-help"
+                label="Ask"
+                title={
+                  approvalMode()
+                    ? "Asking before each tool call"
+                    : "Running tools without asking"
+                }
+                onClick={() => void toggleApprovalMode()}
+              />
+            </Show>
           </div>
           <div class="chat-toolbar-right">
             <ComposerStatus

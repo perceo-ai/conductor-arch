@@ -48,6 +48,7 @@ export type ArchcarRequest =
   | { type: "resolve_provider_interaction"; interaction_id: string; resolution: ProviderInteractionResolution }
   | { type: "list_provider_interactions"; thread_id?: number; pending_only: boolean }
   | { type: "set_chat_plan_mode"; thread_id: number; plan_mode: boolean }
+  | { type: "set_chat_approval_mode"; thread_id: number; mode: string }
   | { type: "get_chat_plan"; thread_id: number }
   | { type: "kill_session"; session_id: number }
   | { type: "get_inventory_snapshot" }
