@@ -59,23 +59,49 @@ part of the configuration stays untouched.
 
 ## Approach
 
-Re-apply the stored mode in-band after every harness init, rather than
-threading it through launch arguments.
+Compute the permission mode from one helper, consulted everywhere a Claude
+session's mode is decided.
 
-Every restart path — first start, crash restart, model switch, effort
-switch, app relaunch — passes through `HarnessEffect::Initialized`, so one
-hook point covers all of them. It is the same mechanism plan mode already
-uses in production, and the probe above shows it works regardless of how
-the process was launched.
+Three sites decide that mode today:
+
+| Site | Today |
+| --- | --- |
+| `session.rs:1084` launch args | `plan_mode ? "plan" : "bypassPermissions"` |
+| `session.rs:1300` resume args | always `"bypassPermissions"` |
+| `server.rs:3959` plan-mode toggle | `SessionKind::CLAUDE => "bypassPermissions"` |
+
+The managed-session path already computes the mode dynamically — that is how
+plan mode works — so this needs no change to argument building and no change
+to `harness.rs`.
+
+The third site is why a re-apply-after-init approach is not enough. Leaving
+plan mode sets the session straight back to `bypassPermissions` without a
+restart, so an init hook never fires and the user's supervision is silently
+switched off mid-thread. A shared helper closes that hole because every site
+re-reads the same source of truth.
+
+```rust
+// plan mode wins; then the thread's opt-in; then today's default
+fn claude_permission_mode_for_thread(store: &RuntimeSessionStore, thread_id: i64) -> String
+```
+
+This also removes `--dangerously-skip-permissions` for an opted-in thread
+without touching argument code: `build_claude_stream_args:913` adds that flag
+only when the mode is `bypassPermissions`.
 
 Two approaches were rejected:
 
-- **Launch arguments.** Correct at startup, but a mid-session toggle still
-  needs the in-band path, so both mechanisms have to be maintained. It also
-  requires touching `--dangerously-skip-permissions`, which every existing
-  unattended workspace depends on.
-- **Hybrid** (launch args initially, in-band for changes). Same two
-  mechanisms, more branching, no benefit given the probe result.
+- **Re-apply in-band after every harness init.** Covers start, restart, model
+  switch and relaunch, but not the plan-mode exit above, which changes the
+  mode with no restart. It also adds a second mechanism alongside the launch
+  computation that already exists.
+- **Hybrid** (launch args initially, in-band for changes). Same gap, more
+  branching.
+
+Probe evidence that both the launch path and the in-band path work is in
+"Verification that shaped the design" above; the helper uses the launch path,
+and the existing `SetSessionPermissionMode` RPC continues to serve
+mid-session toggles.
 
 ## Design
 
@@ -102,21 +128,22 @@ merging them would rework a path that currently works.
 
 ### Backend
 
-1. **Persist.** `SetSessionPermissionMode` (`server.rs:3973`) already
-   forwards to the harness. Write `chat_threads.approval_mode` for the
-   session's thread before forwarding. This is the only change to the
-   existing RPC.
-2. **Re-apply.** In `HarnessEffect::Initialized` (`session.rs:643`), where
-   the native session id is already recorded, read the thread's
-   `approval_mode`; if set, issue `HarnessControl::SetPermissionMode`. The
-   adapter turns it into the in-band control request with no restart
-   (`claude_stream.rs:652`).
-3. **Nothing else.** The rest of the loop already exists.
+1. **One helper.** `claude_permission_mode_for_thread(store, thread_id)` in
+   `archcar::session`, beside the existing `CLAUDE_PLAN_PERMISSION_MODE` and
+   `CLAUDE_DEFAULT_PERMISSION_MODE` constants. Order: plan mode wins, then the
+   thread's `approval_mode`, then `CLAUDE_DEFAULT_PERMISSION_MODE`.
+2. **Three call sites** use it: launch args (`session.rs:1084`), resume args
+   (`session.rs:1300`), and the plan-mode toggle (`server.rs:3959`).
+3. **Persist.** `SetSessionPermissionMode` (`server.rs:701`) currently only
+   forwards `HarnessControl::SetPermissionMode` to the harness. Write
+   `chat_threads.approval_mode` for the session's thread before forwarding, so
+   a mid-session toggle survives the next restart.
+4. **Nothing else.** The rest of the loop already exists.
 
-Claude-only to start. `SetPermissionMode` is `Unsupported` on the ACP
-adapter (`acp.rs:518`) and means something different on Codex; threads on
-those providers ignore the column. One provider that works beats a leaky
-abstraction across three.
+Claude-only to start. `SetPermissionMode` is `Unsupported` on the ACP adapter
+(`acp.rs:518`) and means something different on Codex; threads on those
+providers ignore the column. One provider that works beats a leaky abstraction
+across three.
 
 ### UI
 
@@ -139,15 +166,15 @@ persistence buys.
   error.
 - **Non-Claude provider:** persist; the adapter's existing `Unsupported`
   plan is surfaced the same way plan mode's is today.
-- **Re-apply fails at init:** log a warning and leave the session in bypass
-  rather than killing it, *and* surface it in the thread. Not
-  `HarnessEffect::Fatal`, which marks the whole provider session failed
-  (`session.rs:769`) — that is too severe for a session that is still usable,
-  just unsupervised. Use `append_runtime_provider_event` (`session.rs:610`),
-  the same path other archcar-originated notices take, so the user sees in
-  the timeline that supervision did not engage. Silently continuing
-  unsupervised is precisely the failure the user opted in to avoid, so it
-  must not be quiet.
+- **Stored mode is unreadable at launch:** fall back to
+  `CLAUDE_DEFAULT_PERMISSION_MODE` so the session still starts, *and* surface
+  it in the thread. Not `HarnessEffect::Fatal`, which marks the whole provider
+  session failed (`session.rs:769`) — too severe for a session that is still
+  usable, just unsupervised. Use `append_runtime_provider_event`
+  (`session.rs:610`), the same path other archcar-originated notices take, so
+  the user sees in the timeline that supervision did not engage. Silently
+  continuing unsupervised is precisely the failure the user opted in to avoid,
+  so it must not be quiet.
 - **App closed with a prompt pending:** unchanged from today's behavior for
   plan approvals. The interaction row stays `Pending`, the banner returns on
   reopen, and the CLI is still blocked on its `control_request`. A known
@@ -156,8 +183,11 @@ persistence buys.
 ### Testing
 
 - **Unit:** the migration adds the column defaulting to NULL;
-  `SetSessionPermissionMode` writes it; init re-applies a stored mode and
-  skips a NULL one.
+  `SetSessionPermissionMode` writes it; `claude_permission_mode_for_thread`
+  returns plan mode ahead of the opt-in, the opt-in ahead of the default, and
+  the default when the column is NULL.
+- **Regression for the plan-exit hole:** leaving plan mode on an opted-in
+  thread resolves to the opt-in mode, not `bypassPermissions`.
 - **Adapter:** `SetPermissionMode` produces the `set_permission_mode`
   control request — extends the existing test at `claude_stream.rs:2555`.
 - **Integration:** drive a real session through a dev-home daemon
