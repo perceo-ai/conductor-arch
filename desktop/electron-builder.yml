@@ -15,6 +15,19 @@ directories:
   output: release
   buildResources: build
 
+# Update feed for electron-updater. CI still packages with `--publish never`;
+# this block exists so electron-builder *generates* the update metadata
+# (latest.yml / latest-linux.yml, *.blockmap) and bakes app-update.yml into the
+# package. Without it the in-app updater has no feed to read.
+#
+# Only the Windows nsis build and the Linux AppImage actually self-install —
+# deb/rpm belong to the system package manager and the macOS build is unsigned,
+# so both are told about a release instead. See desktop/electron/updater.ts.
+publish:
+  provider: github
+  owner: perceo-ai
+  repo: conductor-arch
+
 # Renderer + main/preload bundles produced by `vite build`.
 files:
   - dist/**/*

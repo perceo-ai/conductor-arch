@@ -100,6 +100,29 @@ make desktop-package-linux   # build sidecars + Linux installers
 
 Tagged releases build `archductor-<version>-windows-x86_64.zip` with the CLI and archcar sidecar. Install prerequisites with `winget install --id Git.Git --id GitHub.cli`. Source builds use the MSYS2 UCRT64 toolchain and the `x86_64-pc-windows-gnu` target; the CI workflow is the canonical recipe.
 
+### Staying up to date
+
+A packaged desktop app checks GitHub for a newer release on launch and every
+six hours. Where it can update itself — the Windows installer and the Linux
+AppImage — it downloads in the background and offers **Restart to update**;
+elsewhere (macOS, and the deb/rpm packages your package manager owns) the same
+prompt offers **Download** and opens the release page. Either way the prompt
+waits until no agent session and no run script is active, so an update never
+interrupts work in progress. Dismiss it and it stays quiet until the next
+release — though a download that already finished still applies the next time
+you quit the app. Settings → Advanced → Updates has the same controls plus a manual
+check.
+
+The CLI prints a one-line notice on stderr when its release is behind:
+
+```
+update available: v0.6.2 → v0.7.0 — https://github.com/perceo-ai/conductor-arch/releases/latest
+```
+
+The daemon refreshes that check in the background, so the CLI never waits on
+the network. Set `ARCHDUCTOR_NO_UPDATE_NOTICE=1` to silence it. Builds from
+source say nothing: they have no release version to compare.
+
 ## Requirements
 
 | Tool | Required for |

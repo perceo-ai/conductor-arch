@@ -17,8 +17,21 @@ import { parseGithubRepos } from "./githubRepos.js";
 import { buildPairingPayload, pairingWindowHtml, renderPairingQr } from "./pairing.js";
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
+// CommonJS package: the named export is not reachable through ESM interop.
+import electronUpdater from "electron-updater";
+import {
+  checkLatestRelease,
+  scheduleUpdateChecks,
+  updateMode,
+  type UpdateReady,
+} from "./updater.js";
+
+const { autoUpdater } = electronUpdater;
 
 const execFileP = promisify(execFile);
+
+/** Fallback download page for the platforms that cannot self-install. */
+const RELEASES_PAGE_URL = "https://github.com/perceo-ai/conductor-arch/releases/latest";
 
 // GUI apps launched from a desktop entry (not a terminal) inherit a minimal
 // PATH that often omits gh/git — spawns then fail with ENOENT. Resolve the
@@ -105,26 +118,6 @@ async function listWorkspaceFilesLocal(rootPath: string, cap = 400): Promise<str
     listFilesRecursive(root, root, files, cap);
     return files.sort().slice(0, cap);
   }
-}
-
-function normalizeVersion(value: string): number[] {
-  return value
-    .trim()
-    .replace(/^v/i, "")
-    .split(/[.-]/)
-    .slice(0, 3)
-    .map((part) => Number.parseInt(part, 10))
-    .map((part) => (Number.isFinite(part) ? part : 0));
-}
-
-function compareVersions(left: string, right: string): number {
-  const a = normalizeVersion(left);
-  const b = normalizeVersion(right);
-  for (let i = 0; i < 3; i += 1) {
-    const diff = (a[i] ?? 0) - (b[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -812,34 +805,100 @@ ipcMain.handle("shell:open-workspace-app", async (_evt, opts: { rootPath?: strin
 });
 
 ipcMain.handle("app:check-for-updates", async () => {
-  const currentVersion = app.getVersion();
-  try {
-    const response = await fetch("https://api.github.com/repos/perceo-ai/conductor-arch/releases/latest", {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": `Archductor/${currentVersion}`,
+  const result = await checkLatestRelease(app.getVersion());
+  if (!result.ok) logLine("error", `update check failed: ${result.error}`);
+  return result;
+});
+
+// --- Auto-update ----------------------------------------------------------
+// Where an in-place install is possible we download in the background and the
+// renderer only ever sees "a new version is ready"; where it is not (unsigned
+// macOS, deb/rpm) the same signal carries the release URL instead. See
+// updater.ts for why the platforms differ.
+
+const UPDATE_FIRST_CHECK_MS = 10_000;
+const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
+const currentUpdateMode = updateMode({
+  platform: process.platform,
+  packaged: app.isPackaged,
+  env: process.env,
+});
+
+/** Last "ready" signal, replayed to a renderer that mounted after it fired —
+ *  without this the toast is lost whenever a check wins the startup race. */
+let pendingUpdate: UpdateReady | null = null;
+let cancelUpdateChecks: (() => void) | null = null;
+
+function announceUpdate(ready: UpdateReady): void {
+  if (pendingUpdate?.version === ready.version) return;
+  pendingUpdate = ready;
+  logLine("info", `update ready: ${ready.version} (${ready.mode})`);
+  win?.webContents.send("app:update-ready", ready);
+}
+
+function startUpdater(): void {
+  if (currentUpdateMode === "disabled" || cancelUpdateChecks) return;
+
+  if (currentUpdateMode === "open") {
+    cancelUpdateChecks = scheduleUpdateChecks({
+      initialDelayMs: UPDATE_FIRST_CHECK_MS,
+      intervalMs: UPDATE_INTERVAL_MS,
+      run: () => {
+        void checkLatestRelease(app.getVersion()).then((result) => {
+          if (result.ok && result.updateAvailable && result.latestVersion) {
+            announceUpdate({
+              version: result.latestVersion,
+              mode: "open",
+              releaseUrl: result.releaseUrl ?? RELEASES_PAGE_URL,
+            });
+          } else if (!result.ok) {
+            logLine("error", `update check failed: ${result.error}`);
+          }
+        });
       },
     });
-    if (!response.ok) {
-      return { ok: false, currentVersion, error: `GitHub returned ${response.status}` };
-    }
-    const release = (await response.json()) as {
-      tag_name?: string;
-      html_url?: string;
-    };
-    const latestVersion = release.tag_name?.trim();
-    if (!latestVersion) return { ok: false, currentVersion, error: "latest release has no tag" };
-    return {
-      ok: true,
-      currentVersion,
-      latestVersion,
-      updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
-      releaseUrl: release.html_url,
-    };
-  } catch (err) {
-    logLine("error", `update check failed: ${(err as Error).message}`);
-    return { ok: false, currentVersion, error: (err as Error).message };
+    return;
   }
+
+  // electron-updater resolves the feed from the `publish` block baked into the
+  // packaged app by electron-builder.
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = null;
+  autoUpdater.on("update-downloaded", (info: { version: string }) => {
+    announceUpdate({ version: `v${info.version.replace(/^v/i, "")}`, mode: "install" });
+  });
+  // An unreachable feed is normal (offline, a release without metadata yet) and
+  // must not surface as a dialog.
+  autoUpdater.on("error", (err: Error) => {
+    logLine("error", `auto-update failed: ${err.message}`);
+  });
+  cancelUpdateChecks = scheduleUpdateChecks({
+    initialDelayMs: UPDATE_FIRST_CHECK_MS,
+    intervalMs: UPDATE_INTERVAL_MS,
+    run: () => {
+      void autoUpdater.checkForUpdates()?.catch((err: Error) => {
+        logLine("error", `auto-update check failed: ${err.message}`);
+      });
+    },
+  });
+}
+
+ipcMain.handle("app:update-state", () => pendingUpdate);
+
+ipcMain.handle("app:install-update", async () => {
+  if (!pendingUpdate) return { ok: false, error: "no update is ready" };
+  if (pendingUpdate.mode === "open") {
+    // The URL comes from the GitHub API, but this opens a browser, so hold it
+    // to the same rule as any other external target.
+    const target = pendingUpdate.releaseUrl ?? RELEASES_PAGE_URL;
+    await shell.openExternal(isExternalOpenTarget(target) ? target : RELEASES_PAGE_URL);
+    return { ok: true };
+  }
+  // Let the IPC reply reach the renderer before the app goes away.
+  setTimeout(() => autoUpdater.quitAndInstall(), 0);
+  return { ok: true };
 });
 
 ipcMain.on("window:minimize", () => win?.minimize());
@@ -849,7 +908,10 @@ ipcMain.on("window:toggle-maximize", () => {
 });
 ipcMain.on("window:close", () => win?.close());
 
-app.whenReady().then(createWindow, (err: Error) => {
+app.whenReady().then(() => {
+  createWindow();
+  startUpdater();
+}, (err: Error) => {
   logLine("error", `window creation failed: ${err?.stack ?? String(err)}`);
 });
 
@@ -858,6 +920,11 @@ app.on("window-all-closed", () => {
   logStream?.end();
   logStream = null;
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  cancelUpdateChecks?.();
+  cancelUpdateChecks = null;
 });
 
 app.on("activate", () => {

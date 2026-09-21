@@ -31,6 +31,16 @@ archductor archcar providers         # every agent this build knows, and how far
 archductor archcar inventory-snapshot  # repositories, workspaces, and active chats in one request
 ```
 
+A release build prints one line to stderr when it is behind the latest tag:
+
+```
+update available: v0.6.2 → v0.7.0 — https://github.com/perceo-ai/conductor-arch/releases/latest
+```
+
+The daemon refreshes that answer every six hours, so the command itself never
+touches the network and works offline. `ARCHDUCTOR_NO_UPDATE_NOTICE=1` turns it
+off; builds from source never print it, having no release version to compare.
+
 There is no "start the daemon" command, because you never need one: the client
 spawns `archcar` itself when it cannot reach a running daemon. Any `archcar`
 subcommand therefore doubles as a liveness check — `archductor archcar

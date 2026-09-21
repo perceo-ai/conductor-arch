@@ -45,7 +45,9 @@ use std::time::{Duration, Instant};
 // With a daemon on every machine, "which build is this box running?" is a
 // question the CLI has to be able to answer — version skew between a client and
 // its remote daemon is otherwise invisible.
-#[command(version)]
+// The crate version is not bumped per release; the release pipeline stamps the
+// tag into the binary instead, so report that when it is present.
+#[command(version = archductor_core::update_check::current_version())]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -1430,6 +1432,33 @@ fn main() -> Result<()> {
     run_cli()
 }
 
+/// Environment opt-out for the behind-latest notice. Scripts that parse CLI
+/// output should not need it — the notice goes to stderr — but a CI log full
+/// of upgrade nags is still noise someone will want gone.
+const UPDATE_NOTICE_OPT_OUT: &str = "ARCHDUCTOR_NO_UPDATE_NOTICE";
+
+/// Tell the user, once per command, that this build is behind the latest
+/// release. Reads the cache the daemon refreshes; never touches the network,
+/// so it costs nothing and works offline.
+///
+/// stderr, not stdout: several commands emit JSON that a caller parses.
+fn print_update_notice(paths: &AppPaths) {
+    // A dev build has no release version to compare against, so it would
+    // otherwise nag on every command.
+    if !archductor_core::update_check::is_release_build() {
+        return;
+    }
+    if archductor_core::env_flags::enabled(UPDATE_NOTICE_OPT_OUT) {
+        return;
+    }
+    if let Some(notice) = archductor_core::update_check::cached_update_notice(
+        paths,
+        archductor_core::update_check::current_version(),
+    ) {
+        eprintln!("{notice}");
+    }
+}
+
 fn run_cli() -> Result<()> {
     if handle_archcar_claude_hook()? {
         return Ok(());
@@ -1441,6 +1470,8 @@ fn run_cli() -> Result<()> {
     }
     let cli = Cli::parse();
     let paths = AppPaths::from_env();
+
+    print_update_notice(&paths);
 
     // These commands read this machine's SQLite database directly. Pointed at a
     // remote daemon they would quietly maintain a second, divergent inventory

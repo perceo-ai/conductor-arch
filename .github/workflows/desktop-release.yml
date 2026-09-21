@@ -174,6 +174,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends rpm fuse libfuse2 git
 
       - name: Build Rust sidecars (release)
+        env:
+          # Crate versions are not bumped per release; stamp the tag so the
+          # bundled CLI reports the same version as the app around it.
+          ARCHDUCTOR_RELEASE_VERSION: ${{ needs.version.outputs.version }}
         run: cargo build --release --locked --bin archcar --bin archductor
 
       - name: Setup pnpm
@@ -212,6 +216,8 @@ jobs:
             desktop/release/*.rpm
             desktop/release/*.dmg
             desktop/release/*.exe
+            desktop/release/latest*.yml
+            desktop/release/*.blockmap
           if-no-files-found: warn
 
       - name: Attach to release
@@ -224,7 +230,10 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.exe)
+          # latest*.yml and the blockmaps are the update feed the in-app
+          # updater reads; without them on the release, a packaged app can see
+          # no new version even though the installers are right there.
+          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.exe desktop/release/latest*.yml desktop/release/*.blockmap)
           if [ ${#files[@]} -eq 0 ]; then
             echo "no installers produced on $MATRIX_OS" >&2
             exit 0

@@ -13,6 +13,9 @@ export interface Toast {
   kind: "error" | "info";
   message: string;
   action?: ToastAction;
+  /** Called once when the toast goes away, however it went away. Lets a
+   *  caller remember "the user answered this" without owning the stack. */
+  onDismiss?: () => void;
   /** Dismissed, but still mounted so its exit animation can play. Nothing else
    *  should treat a leaving toast as live — see `dismiss`. */
   leaving?: boolean;
@@ -29,9 +32,15 @@ const [state, setState] = createStore<{ items: Toast[] }>({ items: [] });
 export const toastsStore = {
   state,
 
-  push(message: string, kind: Toast["kind"] = "info", ttlMs = 6000, action?: ToastAction): number {
+  push(
+    message: string,
+    kind: Toast["kind"] = "info",
+    ttlMs = 6000,
+    action?: ToastAction,
+    onDismiss?: () => void,
+  ): number {
     const id = seq++;
-    setState("items", (items) => [...items, { id, kind, message, action }]);
+    setState("items", (items) => [...items, { id, kind, message, action, onDismiss }]);
     if (ttlMs > 0) setTimeout(() => toastsStore.dismiss(id), ttlMs);
     return id;
   },
@@ -46,6 +55,7 @@ export const toastsStore = {
   dismiss(id: number): void {
     const toast = state.items.find((t) => t.id === id);
     if (!toast || toast.leaving) return;
+    toast.onDismiss?.();
     setState("items", (items) => items.map((t) => (t.id === id ? { ...t, leaving: true } : t)));
     setTimeout(() => {
       setState("items", (items) => items.filter((t) => t.id !== id));

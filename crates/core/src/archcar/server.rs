@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::archcar::harness::{managed_harness_for_kind, provider_name};
@@ -75,6 +75,10 @@ struct ServerState {
 
 /// How often the daemon advances background development tasks.
 const BACKGROUND_TASK_TICK: Duration = Duration::from_secs(10);
+/// How often the update-check refresher wakes. The refresh itself is rate
+/// limited to `update_check::REFRESH_INTERVAL`; this only bounds how fast the
+/// thread notices shutdown.
+const UPDATE_CHECK_TICK: Duration = Duration::from_secs(60);
 /// How long an idle accept loop waits before re-checking the shutdown flag.
 /// This is no longer per-connection latency — `wait_for_connection` returns as
 /// soon as a client arrives — so it only bounds shutdown responsiveness.
@@ -191,6 +195,7 @@ impl ArchcarServer {
         let shutdown = Arc::new(AtomicBool::new(false));
         spawn_queued_input_startup_sweep(&self.state);
         spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
+        spawn_update_check_refresher(Arc::clone(&shutdown));
         if let Some(remote) = self.remote.take() {
             spawn_remote_listener(remote, &self.state, Arc::clone(&shutdown));
         }
@@ -401,6 +406,41 @@ fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: A
                 }
                 Ok(_) => {}
                 Err(err) => warn!(error = %err, "background task tick failed"),
+            }
+        }
+    });
+}
+
+/// Keep the "is this machine behind the latest release?" cache warm.
+///
+/// The daemon owns this because it is the only always-on process: a CLI
+/// command is too short-lived to pay for a GitHub round trip, so it reads the
+/// cache this thread writes. Failures are silent by design — see
+/// `update_check`.
+fn spawn_update_check_refresher(shutdown: Arc<AtomicBool>) {
+    // Nothing consumes the cache in a dev build, so don't poll GitHub from
+    // every developer machine either.
+    if !crate::update_check::is_release_build() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let paths = AppPaths::from_env();
+        while !shutdown.load(Ordering::SeqCst) {
+            if let Some(cache) = crate::update_check::refresh_if_stale(
+                &paths,
+                crate::update_check::now_epoch_seconds(),
+            ) {
+                debug!(latest_tag = %cache.latest_tag, "update check cache refreshed");
+            }
+            // Sleep in short slices so shutdown is not delayed by the long
+            // refresh interval.
+            let mut waited = Duration::ZERO;
+            while waited < crate::update_check::REFRESH_INTERVAL {
+                if shutdown.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(UPDATE_CHECK_TICK);
+                waited += UPDATE_CHECK_TICK;
             }
         }
     });

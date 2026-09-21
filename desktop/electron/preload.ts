@@ -3,6 +3,14 @@ import { contextBridge, ipcRenderer } from "electron";
 // Typed, isolated bridge exposed to the renderer as window.archductor.
 // The renderer never touches the socket or Node APIs directly.
 
+/** Mirrors `UpdateReady` in updater.ts — duplicated rather than imported so
+ *  the preload bundle stays free of main-process code. */
+export interface UpdateReady {
+  version: string;
+  mode: "install" | "open";
+  releaseUrl?: string;
+}
+
 /** One saved daemon, as the renderer sees it — no token. */
 export interface ClientSummary {
   id: string;
@@ -147,6 +155,22 @@ const api = {
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
   > => ipcRenderer.invoke("app:check-for-updates"),
+
+  /** The version this build can move to, if a check already found one. Polled
+   *  once at startup because the check can land before the renderer mounts. */
+  updateState: (): Promise<UpdateReady | null> => ipcRenderer.invoke("app:update-state"),
+
+  /** Apply a downloaded update (restarts), or open the download page on the
+   *  platforms that cannot self-install. */
+  installUpdate: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("app:install-update"),
+
+  /** Register a listener for "a new version is ready". Returns an unsubscribe fn. */
+  onUpdateReady: (cb: (ready: UpdateReady) => void): (() => void) => {
+    const handler = (_e: unknown, ready: UpdateReady) => cb(ready);
+    ipcRenderer.on("app:update-ready", handler);
+    return () => ipcRenderer.off("app:update-ready", handler);
+  },
 
   window: {
     minimize: () => ipcRenderer.send("window:minimize"),

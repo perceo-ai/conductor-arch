@@ -23,7 +23,15 @@ export default defineConfig({
         // Main process.
         entry: "electron/main.ts",
         vite: {
-          build: { outDir: "dist-electron" },
+          build: {
+            outDir: "dist-electron",
+            rollupOptions: {
+              // electron-updater resolves its own providers and reads the
+              // packaged app-update.yml by path; bundling it breaks both, and
+              // electron-builder ships `dependencies` into the asar anyway.
+              external: ["electron", "electron-updater"],
+            },
+          },
         },
       },
       {
