@@ -1263,11 +1263,21 @@ pub(crate) fn claude_permission_mode_for_thread(store: &WorkspaceStore, thread_i
     if store.chat_thread_plan_mode(thread_id).unwrap_or(false) {
         return CLAUDE_PLAN_PERMISSION_MODE.to_owned();
     }
-    store
-        .chat_thread_approval_mode(thread_id)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| CLAUDE_DEFAULT_PERMISSION_MODE.to_owned())
+    match store.chat_thread_approval_mode(thread_id) {
+        Ok(mode) => mode.unwrap_or_else(|| CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+        // Falling back keeps the session startable, but a thread that asked to
+        // be supervised must never go unsupervised quietly - that is the exact
+        // failure the user opted in to avoid.
+        Err(err) => {
+            warn!(
+                thread_id,
+                error = %format!("{err:#}"),
+                fallback = CLAUDE_DEFAULT_PERMISSION_MODE,
+                "could not read the thread's approval mode; running unsupervised"
+            );
+            CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()
+        }
+    }
 }
 
 fn claude_stream_effort_mode(harness: &SessionHarnessOptions) -> Option<String> {
@@ -2936,7 +2946,17 @@ fn run_claude_stream_session_loop(
                 started.thread_id,
                 runtime_store
                     .claude_permission_mode_for_thread(started.thread_id)
-                    .unwrap_or_else(|_| CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()),
+                    .unwrap_or_else(|err| {
+                        warn!(
+                            session_id = started.session_id,
+                            thread_id = started.thread_id,
+                            error = %format!("{err:#}"),
+                            fallback = CLAUDE_DEFAULT_PERMISSION_MODE,
+                            "could not read the thread's approval mode on restart; \
+                             running unsupervised"
+                        );
+                        CLAUDE_DEFAULT_PERMISSION_MODE.to_owned()
+                    }),
             ) {
                 Ok(pid) => {
                     pending_restart = false;
