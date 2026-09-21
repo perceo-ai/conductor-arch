@@ -124,6 +124,39 @@ signing (P5 in the spec). The bundle id is `ai.perceo.archductor.ios`, distinct
 from the Electron app's, because one Apple account cannot hold the same App ID
 for two platforms.
 
+## App auto-update (2026-09-21)
+
+The packaged desktop app now checks for a newer release on launch and every six
+hours, and offers it as a sticky toast — but only once every agent session and
+run script has stopped. Restarting under a running agent is the one thing the
+prompt must not cause.
+
+- `desktop/electron/updater.ts` holds the policy. Only the Windows nsis build
+  and a Linux AppImage can install in place (`mode: "install"`,
+  electron-updater, background download, `quitAndInstall`). deb/rpm belong to
+  the package manager and the macOS dmg is unsigned, so both get
+  `mode: "open"`: same prompt, opens the release page.
+- macOS self-update stays blocked until there is an Apple Developer identity to
+  sign and notarize with. Squirrel.Mac refuses an unsigned bundle; adding the
+  zip target alone would not help.
+- `electron-builder.yml` gained a `publish` block so the build *generates*
+  `latest*.yml` + blockmaps and bakes `app-update.yml` in; the release workflow
+  uploads them. CI still packages with `--publish never`.
+- The idle gate reads the workspace inventory, and an *unloaded* inventory is
+  not idle — an empty store looked exactly like a quiet machine and raced the
+  toast in ahead of a running agent (caught in the fake-bridge UI smoke, fixed
+  with `workspacesStore.loaded()`).
+- CLI parity: `crates/core/src/update_check.rs`. The daemon refreshes a cache
+  every six hours (`gh api`, falling back to `curl`); the CLI only reads it and
+  prints one line to stderr. `ARCHDUCTOR_NO_UPDATE_NOTICE=1` silences it.
+- Crate versions are not bumped per release, so the release workflows now stamp
+  `ARCHDUCTOR_RELEASE_VERSION` from the tag. That is also what `archductor
+  --version` reports now; unstamped dev builds neither nag nor poll GitHub.
+
+Not verified locally: the generated `latest.yml` / `latest-linux.yml`, which
+need a Windows or Linux packaging run (no Docker or wine on this machine). The
+config is by inspection; CI is the first real check.
+
 ## Archductor UX Strategy Alignment (2026-08-12)
 
 `docs/2026-08-12-archductor-ux-backend-strategy.md` defines the product shape:

@@ -1,3 +1,4 @@
+import { createSignal } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import { recordUpdate } from "./metrics";
 import { send } from "@/bridge/client";
@@ -40,6 +41,10 @@ interface WorkspacesState {
 }
 
 const [state, setState] = createStore<WorkspacesState>({ byName: {}, order: [] });
+/** False until the first inventory load lands. An empty store is otherwise
+ *  indistinguishable from "no workspaces", which reads as "nothing running"
+ *  to anything gating on activity. */
+const [loaded, setLoaded] = createSignal(false);
 
 function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
   return {
@@ -70,6 +75,7 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
 
 export const workspacesStore = {
   state,
+  loaded,
 
   /** Full inventory replace — reconcile keeps unchanged rows stable. */
   setAll(rows: WorkspaceRow[]) {
@@ -77,6 +83,7 @@ export const workspacesStore = {
     for (const r of rows) byName[r.name] = r;
     setState("byName", reconcile(byName));
     setState("order", reconcile(rows.map((r) => r.name)));
+    setLoaded(true);
     recordUpdate("workspaces.setAll");
     logState("workspaces.setAll", { count: rows.length });
   },

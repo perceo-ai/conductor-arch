@@ -24,6 +24,7 @@ export { terminalStore } from "./terminal";
 export { interactionsStore } from "./interactions";
 export { newChatContextStore } from "./newChatContext";
 export { toastsStore } from "./toasts";
+export { updateStore } from "./update";
 export type { Toast } from "./toasts";
 export { prefsStore } from "./prefs";
 export type { Prefs } from "./prefs";

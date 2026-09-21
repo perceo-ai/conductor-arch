@@ -1,11 +1,12 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
-import { repositoriesStore, prefsStore, nav } from "@/store";
+import { repositoriesStore, prefsStore, nav, updateStore } from "@/store";
 import { ACCENT_HEX } from "@/store/prefs";
-import { checkForUpdates, openExternal, send } from "@/bridge/client";
+import { checkForUpdates, installUpdate, openExternal, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS, modelLabel, providerLabel } from "@/lib/models";
 import { DEFAULT_SHORTCUTS, parseKeybindingOverrides } from "@/lib/shortcuts";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 import { updateStatusText, type UpdateStatus } from "@/lib/update";
+import { updateToastCopy } from "@/store/update";
 import { SetupReadinessCard } from "@/components/SetupReadiness";
 import Icon, {  } from "@/components/Icon";
 import {
@@ -711,6 +712,21 @@ export function SettingsPage() {
           <div class="settings-content-narrow">
             <h1>Advanced</h1>
             <SettingsSectionBlock title="Updates">
+              {/* The app checks on its own every few hours; this row is the
+                  non-toast way to act on what it found. */}
+              <Show when={updateStore.ready()}>
+                {(ready) => (
+                  <SettingsRow
+                    title="Update ready"
+                    description={updateToastCopy(ready()).message}
+                    control={
+                      <button class="ui-button-primary" onClick={() => void installUpdate()}>
+                        {updateToastCopy(ready()).label}
+                      </button>
+                    }
+                  />
+                )}
+              </Show>
               <SettingsRow
                 title="App updates"
                 description={updateStatus() ? updateStatusText(updateStatus()!) : "Check GitHub releases for a newer build."}

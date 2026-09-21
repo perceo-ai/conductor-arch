@@ -42,6 +42,7 @@ pub mod skills;
 pub mod storage;
 pub mod terminal_logs;
 pub mod todos;
+pub mod update_check;
 pub mod workflow_actions;
 pub mod workspace;
 pub mod workspace_intel;

@@ -25,6 +25,7 @@ import {
   workspacesStore,
   repositoriesStore,
   layoutStore,
+  updateStore,
 } from "./store";
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
@@ -118,6 +119,28 @@ export default function App() {
       body.classList.toggle(`lc-density-${d}`, prefsStore.state.density === d);
     }
     document.documentElement.style.setProperty("--lc-accent", ACCENT_HEX[prefsStore.state.accent]);
+  });
+
+  // Offer an app update only once every agent has stopped, so a download that
+  // lands mid-run surfaces the moment the last agent finishes rather than
+  // interrupting it.
+  //
+  // The reads below are deliberate, not decorative: `evaluate` returns early
+  // when there is no pending update and would then never have touched the
+  // session counts, leaving this effect subscribed to nothing.
+  createEffect(() => {
+    updateStore.ready();
+    workspacesStore.loaded();
+    for (const name of workspacesStore.state.order) {
+      const row = workspacesStore.state.byName[name];
+      void row?.activeSessions;
+      void row?.runRunning;
+    }
+    updateStore.evaluate();
+  });
+
+  onMount(() => {
+    void updateStore.start();
   });
 
   onMount(() => {

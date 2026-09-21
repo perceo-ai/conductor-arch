@@ -20,6 +20,14 @@ export interface GithubWorkItem {
   author: string;
 }
 
+/** A newer version the app can move to. `install` means a restart applies it;
+ *  `open` means this install form cannot self-update (see electron/updater.ts). */
+export interface UpdateReady {
+  version: string;
+  mode: "install" | "open";
+  releaseUrl?: string;
+}
+
 /** One saved daemon, as the renderer sees it — the token never leaves main. */
 export interface ClientSummary {
   id: string;
@@ -67,6 +75,9 @@ interface ArchductorApi {
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
   >;
+  updateState(): Promise<UpdateReady | null>;
+  installUpdate(): Promise<{ ok: boolean; error?: string }>;
+  onUpdateReady(cb: (ready: UpdateReady) => void): () => void;
   /**
    * Opens the pairing QR in its own isolated window and reports the address it
    * encodes. The code itself never enters this process: it is the daemon token
@@ -172,3 +183,12 @@ export const openWorkspaceApp = (opts: { rootPath: string; appId: WorkspaceOpenA
 
 /** Check GitHub releases for a newer packaged Archductor build. */
 export const checkForUpdates = () => api().checkForUpdates();
+
+/** A version this build can move to, if the main process already found one. */
+export const updateState = () => api().updateState();
+
+/** Restart into the downloaded update, or open the download page. */
+export const installUpdate = () => api().installUpdate();
+
+/** Subscribe to "a new version is ready". Returns an unsubscribe fn. */
+export const onUpdateReady = (cb: (ready: UpdateReady) => void) => api().onUpdateReady(cb);

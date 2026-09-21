@@ -46,9 +46,6 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Build
-        run: cargo build --workspace --release --locked
-
       - name: Derive version
         id: version
         env:
@@ -64,6 +61,14 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        env:
+          # Crate versions are not bumped per release; this stamps the tag into
+          # the binaries so `archductor --version` and the behind-latest notice
+          # know which release they are.
+          ARCHDUCTOR_RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: cargo build --workspace --release --locked
 
       - name: Create dist directory
         run: mkdir -p dist
@@ -267,6 +272,8 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Build Windows binaries
+        env:
+          ARCHDUCTOR_RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: cargo build --workspace --release --target x86_64-pc-windows-gnu --locked
 
       - name: Assemble portable Windows bundle

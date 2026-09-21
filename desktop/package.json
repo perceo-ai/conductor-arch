@@ -21,6 +21,7 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "anser": "^2.3.5",
+    "electron-updater": "^6.8.9",
     "highlight.js": "^11.11.1",
     "marked": "^18.0.7",
     "material-icon-theme": "5.37.0",
