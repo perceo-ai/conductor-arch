@@ -233,9 +233,21 @@ pub fn encode_claude_hook_resolution(
     }
 }
 
-pub fn handle_claude_hook_json(_thread_id: i64, stdin: &str) -> Value {
-    let request = serde_json::from_str::<Value>(stdin).unwrap_or(Value::Null);
-    encode_claude_hook_defer(&classify_claude_hook_request(&request))
+/// Decide a single Claude Code hook invocation.
+///
+/// This used to answer `defer` for every request, but nothing ever resolved
+/// the deferral: the hook process has no channel back to archcar, so no
+/// pending `provider_interaction` was ever created and the turn ended with
+/// `stop_reason: "tool_deferred"` and the tool unexecuted. Until the
+/// defer -> approve -> resume loop exists (`encode_claude_hook_resolution` is
+/// the resolution half, still unused), emit no decision and let Claude Code
+/// apply its own permission mode - sessions launch with
+/// `--permission-mode bypassPermissions`, so tools run as before archductor
+/// installed the hook.
+pub fn handle_claude_hook_json(thread_id: i64, stdin: &str) -> Value {
+    let _ = thread_id;
+    let _ = stdin;
+    json!({})
 }
 
 fn encode_updated_input(event_name: &str, request: &Value, answers: Value) -> Value {
@@ -299,6 +311,29 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn claude_hook_does_not_defer_tool_calls_it_cannot_resolve() {
+        for input in [
+            json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "cargo test"}
+            }),
+            json!({
+                "hook_event_name": "PermissionRequest",
+                "tool_name": "Bash"
+            }),
+            json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "ExitPlanMode",
+                "tool_input": {"plan": "Do work"}
+            }),
+        ] {
+            let output = handle_claude_hook_json(7, &input.to_string());
+            assert_eq!(output, json!({}), "{input}");
+        }
     }
 
     #[test]
