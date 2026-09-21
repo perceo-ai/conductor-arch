@@ -102,7 +102,8 @@
 .ui-button-destructive,
 .ws-text-input {
     border-radius: var(--r-sm);
-    min-height: 28px;
+    /* The unified 28px height floor lives in 09-comfort.css, scoped to the
+       Comfortable density — at default density buttons keep their prior size. */
 }
 
 /* Three weights, and only one of them is the accent.

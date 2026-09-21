@@ -148,7 +148,12 @@ describe("panel tab chrome", () => {
     expect(flex).toBe("1 1 0");
   });
 
-  it("lets right-panel tabs fill their strip instead of floating as inset cards", () => {
+  it("renders right-panel tabs as inset rounded segments, not flush squares", () => {
+    // Reversal of the earlier fill-the-strip decision, on user direction
+    // (2026-09-21): the flush, square-cornered, full-height tabs read as a
+    // foreign element in an app whose every other control is rounded. The
+    // strip keeps an inset and the tabs keep a radius; the even flex split
+    // (asserted above) is what still prevents the original ellipsis bug.
     const stripRules = rulesFor(".ws-right-tabs");
     const stripPadding = stripRules
       .filter((rule) => rule.selector === ".ws-right-tabs")
@@ -165,8 +170,8 @@ describe("panel tab chrome", () => {
       })
       .at(-1);
 
-    expect(stripPadding).toBe("0");
-    expect(tabRadius).toBe("0");
+    expect(stripPadding).toBe("5px 8px");
+    expect(tabRadius).toBe("var(--r-sm, 7px)");
   });
 
   it("keeps an xterm host inside a narrow terminal dock", () => {

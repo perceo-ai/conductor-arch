@@ -37,6 +37,15 @@
     border-radius: var(--r-sm);
 }
 
+/* theme/34-refinements paints `.project-row` with `--lc-surface-muted`, which
+   01-foundation remaps to `--el-0` (near-black) — on the `--el-1` sidebar that
+   rendered every repository header as a black band. A project header is a
+   label, not a card: it sits flat on the sidebar and only hover paints it. */
+.project-row {
+    background: transparent;
+    border-color: transparent;
+}
+
 .sidebar-nav-button:hover,
 .workspace-row-shell:hover,
 .project-row:hover {
