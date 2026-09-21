@@ -3,12 +3,32 @@ import SwiftUI
 
 struct WorkspacesView: View {
     @Environment(AppModel.self) private var model
+    @State private var creatingIn: RepositorySummary?
+    @State private var addingRepository = false
 
     var body: some View {
         NavigationStack {
             content
                 .navigationTitle(model.activeDaemon?.label ?? "Archductor")
                 .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    if model.workspaces != nil {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button {
+                                addingRepository = true
+                            } label: {
+                                Image(systemName: "folder.badge.plus")
+                            }
+                            .accessibilityLabel("Add repository")
+                        }
+                    }
+                }
+                .sheet(item: $creatingIn) { repository in
+                    NewWorkspaceSheet(repository: repository)
+                }
+                .sheet(isPresented: $addingRepository) {
+                    AddRepositorySheet()
+                }
         }
     }
 
@@ -31,7 +51,7 @@ struct WorkspacesView: View {
                 }
             }
         } else if let store = model.workspaces {
-            WorkspaceList(store: store)
+            WorkspaceList(store: store, creatingIn: $creatingIn)
         } else {
             ProgressView("Connecting…")
         }
@@ -40,31 +60,73 @@ struct WorkspacesView: View {
 
 struct WorkspaceList: View {
     let store: WorkspacesStore
+    @Binding var creatingIn: RepositorySummary?
 
     var body: some View {
         List {
             if store.isStale {
-                // Last-known rows stay visible; this banner is what stops them
-                // from being read as current.
                 Label("Showing last known state — not connected", systemImage: "wifi.slash")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            ForEach(store.workspaces) { workspace in
-                NavigationLink {
-                    WorkspaceDetailView(workspace: workspace)
-                } label: {
-                    WorkspaceRow(workspace: workspace)
+            ForEach(store.groups) { group in
+                Section {
+                    ForEach(group.workspaces) { workspace in
+                        NavigationLink {
+                            WorkspaceDetailView(workspace: workspace)
+                        } label: {
+                            WorkspaceRow(workspace: workspace)
+                        }
+                        .swipeActions(edge: .trailing) {
+                            if workspace.status == "archived" {
+                                Button("Restore") {
+                                    Task { await store.restore(workspace) }
+                                }
+                            } else {
+                                Button("Archive") {
+                                    Task { await store.archive(workspace, removeWorktree: false) }
+                                }
+                                .tint(.orange)
+                            }
+                        }
+                    }
+                    Button {
+                        creatingIn = group.repository
+                    } label: {
+                        Label("New workspace", systemImage: "plus")
+                            .font(.subheadline)
+                    }
+                } header: {
+                    HStack {
+                        Text(group.repository.name)
+                        Spacer()
+                        Text("\(group.repository.activeWorkspaces) active")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if !store.orphanedWorkspaces.isEmpty {
+                // Their repository is missing from the inventory; hiding them
+                // would make a workspace disappear with no explanation.
+                Section("Repository missing") {
+                    ForEach(store.orphanedWorkspaces) { workspace in
+                        NavigationLink {
+                            WorkspaceDetailView(workspace: workspace)
+                        } label: {
+                            WorkspaceRow(workspace: workspace)
+                        }
+                    }
                 }
             }
         }
-        .listStyle(.plain)
+        .listStyle(.insetGrouped)
         .refreshable { await store.refresh() }
         .overlay {
-            if store.workspaces.isEmpty && !store.isStale {
+            if store.groups.isEmpty && store.orphanedWorkspaces.isEmpty && !store.isStale {
                 ContentUnavailableView(
-                    "No workspaces", systemImage: "tray",
-                    description: Text("Create one from the desktop app."))
+                    "No repositories", systemImage: "folder",
+                    description: Text("Add one with the button in the top right."))
             }
         }
     }
@@ -90,26 +152,20 @@ struct WorkspaceRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            HStack(spacing: 8) {
-                Text(workspace.repositoryName)
-                Text(workspace.branch)
-                    .monospaced()
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
+            Text(workspace.branch)
+                .font(.caption)
+                .monospaced()
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .foregroundStyle(.secondary)
             chips
         }
         .padding(.vertical, 3)
-        .accessibilityElement(children: .combine)
     }
 
     @ViewBuilder
     private var chips: some View {
         HStack(spacing: 6) {
-            // awaiting_input is not part of the shared status scale, but it is
-            // the one thing worth interrupting someone for, so it leads.
             if workspace.awaitingInput {
                 Chip(text: "needs you", systemImage: "person.wave.2.fill", tint: .orange)
             }

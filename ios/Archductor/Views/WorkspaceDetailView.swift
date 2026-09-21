@@ -12,13 +12,14 @@ struct WorkspaceDetailView: View {
 
     @State private var panel: Panel = .chat
     @State private var store: ChatStore?
+    @State private var review: ReviewStore?
     @State private var creating = false
 
     enum Panel: String, CaseIterable, Identifiable {
         case chat = "Chat"
         case changes = "Changes"
         case checks = "Checks"
-        case files = "Files"
+        case todos = "Todos"
         var id: String { rawValue }
     }
 
@@ -34,10 +35,12 @@ struct WorkspaceDetailView: View {
             switch panel {
             case .chat:
                 chatPanel
-            case .changes, .checks, .files:
-                ContentUnavailableView(
-                    panel.rawValue, systemImage: "hourglass",
-                    description: Text("Review surfaces land in the next phase."))
+            case .changes:
+                if let review { ChangesPanel(store: review) } else { ProgressView() }
+            case .checks:
+                if let review { ChecksPanel(store: review) } else { ProgressView() }
+            case .todos:
+                if let review { TodosPanel(store: review) } else { ProgressView() }
             }
         }
         .navigationTitle(workspace.name)
@@ -46,7 +49,16 @@ struct WorkspaceDetailView: View {
             guard store == nil, let session = model.session else { return }
             let store = ChatStore(session: session, workspace: workspace.name)
             self.store = store
+            let review = ReviewStore(session: session, workspace: workspace.name)
+            self.review = review
             await store.refreshThreads()
+            await review.refreshAll()
+        }
+        .task {
+            // Keeps the review panels live while the workspace is open, so a
+            // turn that writes files updates the changes list without a pull.
+            guard let review else { return }
+            await review.observe()
         }
     }
 

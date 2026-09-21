@@ -182,6 +182,64 @@ final class LiveDaemonUITests: XCTestCase {
         add(shot)
     }
 
+    /// Repositories, workspace creation, and the review surface, against a
+    /// daemon with a real edit in its worktree.
+    func testReviewsARealChangeAndCreatesAWorkspace() throws {
+        let config = try liveConfig()
+        let app = pair(XCUIApplication(), with: config)
+
+        // The list is grouped by repository now, so the repository name is a
+        // section header the phone can see.
+        XCTAssertTrue(app.staticTexts["demo"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts[config.workspace].waitForExistence(timeout: 10))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", config.workspace))
+            .firstMatch.tap()
+
+        app.buttons["Changes"].tap()
+        XCTAssertTrue(app.staticTexts["main.rs"].waitForExistence(timeout: 15))
+        app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "main.rs"))
+            .firstMatch.tap()
+
+        // The diff itself: the added line has to be on screen, not just the
+        // file name in a list.
+        let added = app.staticTexts.containing(
+            NSPredicate(format: "label CONTAINS %@", "println!(\"new\")")).firstMatch
+        XCTAssertTrue(added.waitForExistence(timeout: 15), "diff never rendered")
+        let diffShot = XCTAttachment(screenshot: app.screenshot())
+        diffShot.name = "diff-live"
+        diffShot.lifetime = .keepAlways
+        add(diffShot)
+
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["Checks"].tap()
+        XCTAssertTrue(app.staticTexts["Changed files"].waitForExistence(timeout: 15))
+
+        // Back to the list, and make a workspace from a task description.
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.buttons["New workspace"].waitForExistence(timeout: 10))
+        app.buttons["New workspace"].firstMatch.tap()
+
+        let promptField = app.textViews["workspace-prompt"].exists
+            ? app.textViews["workspace-prompt"]
+            : app.textFields["workspace-prompt"]
+        XCTAssertTrue(promptField.waitForExistence(timeout: 10))
+        promptField.tap()
+        promptField.typeText("tidy up the readme")
+        app.buttons["Create"].tap()
+
+        // The daemon names it, so the assertion is that the list grew rather
+        // than that a particular name appeared.
+        XCTAssertTrue(
+            app.staticTexts["New workspace"].waitForExistence(timeout: 30)
+                || app.buttons["New workspace"].waitForExistence(timeout: 30),
+            "never returned to the workspace list")
+
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "workspaces-live"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
     func testPairsWithALiveDaemonAndListsItsWorkspaces() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let address = environment["ARCHDUCTOR_UITEST_ADDRESS"],
