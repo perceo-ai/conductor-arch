@@ -17,7 +17,9 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::archcar::client::ArchcarClient;
-use crate::archcar::protocol::{ArchcarRequest, ArchcarResponse, WorkspaceChangeScope};
+use crate::archcar::protocol::{
+    ArchcarRequest, ArchcarResponse, ArchcarWorkspaceSummary, WorkspaceChangeScope,
+};
 
 /// MCP protocol revision this server implements.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -842,33 +844,48 @@ pub fn tool_definitions(options: McpOptions) -> Vec<Value> {
 /// to know a workspace name it never chose — the session's environment or the
 /// directory it is working in answers for it.
 fn default_workspace(client: &ArchcarClient) -> Option<String> {
-    if let Some(name) = std::env::var(WORKSPACE_ENV)
+    let env_name = std::env::var(WORKSPACE_ENV)
         .ok()
         .map(|name| name.trim().to_owned())
-        .filter(|name| !name.is_empty())
-    {
-        return Some(name);
-    }
-    let cwd = std::env::current_dir().ok()?;
-    let ArchcarResponse::Workspaces { workspaces } =
-        client.send(ArchcarRequest::ListWorkspaces).ok()?
+        .filter(|name| !name.is_empty());
+    let Some(ArchcarResponse::Workspaces { workspaces }) =
+        client.send(ArchcarRequest::ListWorkspaces).ok()
     else {
-        return None;
+        // The daemon could not answer, so the environment's word stands.
+        return env_name;
     };
+    resolve_default_workspace(env_name, &workspaces, std::env::current_dir().ok())
+}
+
+fn resolve_default_workspace(
+    env_name: Option<String>,
+    workspaces: &[ArchcarWorkspaceSummary],
+    cwd: Option<std::path::PathBuf>,
+) -> Option<String> {
+    // The environment names the workspace as it was when the session spawned.
+    // A rename since then leaves that name pointing at nothing, and every call
+    // bound to it fails at the daemon. The workspace directory does not move on
+    // rename, so when the name is gone fall through to matching by path.
+    if let Some(name) = &env_name {
+        if workspaces.iter().any(|workspace| &workspace.name == name) {
+            return env_name;
+        }
+    }
+    let cwd = cwd?;
     // Both sides are canonicalized: on macOS `/tmp` is a symlink, so a stored
     // workspace path and the agent's cwd routinely disagree about the same
     // directory. Longest matching root wins, so a nested workspace beats its
     // parent.
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     workspaces
-        .into_iter()
+        .iter()
         .filter(|workspace| {
             let path = std::path::PathBuf::from(&workspace.path);
             let path = std::fs::canonicalize(&path).unwrap_or(path);
             cwd.starts_with(&path)
         })
         .max_by_key(|workspace| workspace.path.len())
-        .map(|workspace| workspace.name)
+        .map(|workspace| workspace.name.clone())
 }
 
 fn default_thread_id() -> Option<i64> {
@@ -1308,6 +1325,57 @@ mod tests {
             "{names:?}"
         );
         assert_eq!(names.len(), SESSION_PROFILE_TOOLS.len());
+    }
+
+    fn workspace_summary(name: &str, path: &str) -> ArchcarWorkspaceSummary {
+        serde_json::from_value(json!({
+            "id": 1,
+            "name": name,
+            "repository_name": "repo",
+            "path": path,
+            "branch": "b",
+            "base_ref": "main",
+            "status": "active",
+            "open_todos": 0,
+            "active_sessions": 0,
+            "run_running": false,
+            "changed_files": 0,
+            "diff_additions": 0,
+            "diff_deletions": 0,
+            "updated_at": "now",
+        }))
+        .expect("workspace summary")
+    }
+
+    #[test]
+    fn a_renamed_workspace_is_found_by_path_when_the_env_name_is_stale() {
+        let workspaces = vec![workspace_summary("fix-mcp-server", "/ws/tinycore")];
+
+        // The env name survives while it still exists.
+        assert_eq!(
+            resolve_default_workspace(
+                Some("fix-mcp-server".to_owned()),
+                &workspaces,
+                Some("/ws/tinycore/sub".into()),
+            )
+            .as_deref(),
+            Some("fix-mcp-server")
+        );
+        // A stale env name resolves through the unchanged directory instead.
+        assert_eq!(
+            resolve_default_workspace(
+                Some("tinycore".to_owned()),
+                &workspaces,
+                Some("/ws/tinycore/sub".into()),
+            )
+            .as_deref(),
+            Some("fix-mcp-server")
+        );
+        // No name and no matching directory binds nothing.
+        assert_eq!(
+            resolve_default_workspace(None, &workspaces, Some("/elsewhere".into())),
+            None
+        );
     }
 
     #[test]

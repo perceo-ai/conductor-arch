@@ -235,18 +235,36 @@ fn skip_json_value(json: &str) -> &str {
 fn parse_toml_mcp_keys(toml: &str, source: &str) -> Vec<McpServer> {
     // Codex stores servers under [mcp_servers] or [mcpServers] section
     let mut in_mcp = false;
-    let mut servers = Vec::new();
+    let mut servers: Vec<McpServer> = Vec::new();
     for line in toml.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
             let section = trimmed.trim_matches(|c| c == '[' || c == ']');
             in_mcp = section == "mcp_servers" || section == "mcpServers";
+            // Codex writes one sub-table per server - `[mcp_servers.archductor]` -
+            // rather than inline keys under `[mcp_servers]`. The sub-table name is
+            // the server name, and everything nested below it belongs to that
+            // server, not to a new list of servers.
+            if let Some(name) = section
+                .strip_prefix("mcp_servers.")
+                .or_else(|| section.strip_prefix("mcpServers."))
+            {
+                // Only the first segment names the server: `[mcp_servers.x.env]`
+                // configures `x`, it does not declare a server called `x.env`.
+                let name = name.split('.').next().unwrap_or_default().trim();
+                if !name.is_empty() && !servers.iter().any(|server| server.name == name) {
+                    servers.push(McpServer {
+                        name: name.to_owned(),
+                        source: source.to_owned(),
+                    });
+                }
+            }
             continue;
         }
         if in_mcp {
             if let Some(eq) = trimmed.find('=') {
                 let key = trimmed[..eq].trim();
-                if !key.is_empty() {
+                if !key.is_empty() && !servers.iter().any(|server| server.name == key) {
                     servers.push(McpServer {
                         name: key.to_owned(),
                         source: source.to_owned(),
@@ -418,25 +436,63 @@ pub fn unregister_archductor_mcp(clients: &[McpClientKind]) -> Vec<McpRegistrati
 
 /// Whether each client currently lists Archductor among its MCP servers.
 pub fn archductor_mcp_registered() -> Vec<(McpClientKind, bool)> {
-    let home = crate::platform::home_dir();
-    let claude = home
-        .as_ref()
-        .map(|home| read_claude_mcp(&home.join(".claude.json")))
-        .unwrap_or_default();
-    let codex = home
-        .as_ref()
-        .map(|home| read_codex_mcp(&home.join(".codex/config.toml")))
-        .unwrap_or_default();
-    vec![
-        (McpClientKind::Claude, names_archductor(&claude)),
-        (McpClientKind::Codex, names_archductor(&codex)),
-    ]
+    McpClientKind::ALL
+        .into_iter()
+        .map(|client| {
+            let registered = registered_command(client)
+                .is_some_and(|command| command_is_archductor_cli(&command));
+            (client, registered)
+        })
+        .collect()
 }
 
-fn names_archductor(servers: &[McpServer]) -> bool {
-    servers
-        .iter()
-        .any(|server| server.name == ARCHDUCTOR_MCP_SERVER_NAME)
+/// The command a client currently launches for the Archductor MCP server.
+fn registered_command(client: McpClientKind) -> Option<String> {
+    let home = crate::platform::home_dir()?;
+    match client {
+        McpClientKind::Claude => {
+            claude_registered_command(&std::fs::read_to_string(home.join(".claude.json")).ok()?)
+        }
+        McpClientKind::Codex => codex_registered_command(
+            &std::fs::read_to_string(home.join(".codex/config.toml")).ok()?,
+        ),
+    }
+}
+
+fn claude_registered_command(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("mcpServers")?
+        .get(ARCHDUCTOR_MCP_SERVER_NAME)?
+        .get("command")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn codex_registered_command(config: &str) -> Option<String> {
+    // `str::parse::<toml::Value>()` parses a bare value in this crate version;
+    // a whole document has to go through `from_str`.
+    let value = toml::from_str::<toml::Value>(config).ok()?;
+    value
+        .get("mcp_servers")
+        .or_else(|| value.get("mcpServers"))?
+        .get(ARCHDUCTOR_MCP_SERVER_NAME)?
+        .get("command")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// A registration only counts when it launches the `archductor` CLI. An entry
+/// left behind by the archcar-daemon bug still carries the `archductor` name,
+/// so checking the name alone reports a dead server as healthy: the client
+/// keeps saying CONNECTION_CLOSED and the UI never offers a repair. Judging by
+/// the command instead makes a stale entry read as unregistered, and
+/// re-registering rewrites it.
+fn command_is_archductor_cli(command: &str) -> bool {
+    Path::new(command)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(archductor_file_stem()))
 }
 
 fn remove_registration(client: McpClientKind) -> McpRegistrationOutcome {
@@ -487,6 +543,42 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn codex_sub_table_sections_name_their_server() {
+        let toml = "[mcp_servers.archductor]\ncommand = \"/bin/archductor\"\nargs = [\"mcp\"]\n\n[mcp_servers.other.env]\nA = \"1\"\n";
+        let names: Vec<_> = parse_toml_mcp_keys(toml, "config.toml")
+            .into_iter()
+            .map(|server| server.name)
+            .collect();
+        assert_eq!(names, vec!["archductor".to_owned(), "other".to_owned()]);
+    }
+
+    #[test]
+    fn registered_command_is_read_from_each_client_config() {
+        let claude =
+            r#"{"mcpServers":{"archductor":{"command":"/bin/archductor","args":["mcp"]}}}"#;
+        assert_eq!(
+            claude_registered_command(claude).as_deref(),
+            Some("/bin/archductor")
+        );
+        let codex = "[mcp_servers.archductor]\ncommand = \"/bin/archductor\"\n";
+        assert_eq!(
+            codex_registered_command(codex).as_deref(),
+            Some("/bin/archductor")
+        );
+    }
+
+    #[test]
+    fn an_archcar_registration_does_not_count_as_registered() {
+        assert!(command_is_archductor_cli(
+            "/Applications/x.app/Contents/Resources/bin/archductor"
+        ));
+        assert!(!command_is_archductor_cli(
+            "/Applications/x.app/Contents/Resources/bin/archcar"
+        ));
+        assert!(command_is_archductor_cli("archductor.exe"));
     }
 
     #[test]
