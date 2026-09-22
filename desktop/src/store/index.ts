@@ -23,6 +23,7 @@ export { threadsStore } from "./threads";
 export { terminalStore } from "./terminal";
 export { interactionsStore } from "./interactions";
 export { newChatContextStore } from "./newChatContext";
+export { composerDraftsStore } from "./composerDrafts";
 export { toastsStore } from "./toasts";
 export { updateStore } from "./update";
 export type { Toast } from "./toasts";

@@ -5,6 +5,7 @@ import {
   actions,
   prefsStore,
   newChatContextStore,
+  composerDraftsStore,
 } from "@/store";
 import { EFFORTS, agentModelOptions, agentModelValue, firstModel, providerForModel } from "@/lib/models";
 import {
@@ -79,7 +80,13 @@ export function Composer(props: {
   // composer used to hold directly — so everything downstream of it is
   // unchanged; what a string cannot hold is a chip, which is why the document
   // is the source of truth now and the string is derived from it.
-  const [nodes, setNodes] = createSignal<ComposerNode[]>([]);
+  // Drafts live in a per-thread store, not in this component: the composer is
+  // not remounted when the reader switches chats (so a local signal followed
+  // them into the next chat) and it *is* destroyed when the chat surface shows
+  // a file or a commit instead (so a local signal was lost). Both are wrong;
+  // the draft belongs to the thread.
+  const nodes = () => composerDraftsStore.nodes(props.threadId);
+  const setNodes = (next: ComposerNode[]) => composerDraftsStore.set(props.threadId, next);
   const text = () => toVisible(nodes());
   let input: RichInputApi | undefined;
   const [fileMention, setFileMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
@@ -239,6 +246,20 @@ export function Composer(props: {
     const sid = sessionId();
     if (sid != null) void send({ type: "set_session_fast_mode", session_id: sid, fast_mode: next }).catch(() => {});
   }
+
+  // Switching chats keeps this component mounted, so the painted document has
+  // to be swapped by hand — without stealing focus, since the reader was
+  // clicking a chat, not the composer.
+  createEffect((previous: number | undefined) => {
+    const threadId = props.threadId;
+    if (previous === threadId) return threadId;
+    if (previous !== undefined) {
+      input?.setNodes(untrack(nodes), undefined, false);
+      setFileMention(null);
+      setSkillMention(null);
+    }
+    return threadId;
+  });
 
   const PASTE_TO_FILE_CHARS = 2000;
 
