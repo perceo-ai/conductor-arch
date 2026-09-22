@@ -5241,7 +5241,11 @@ mutation($threadId: ID!) {{
     pub fn refresh_pull_request_state(&self, name: &str) -> Result<Option<PullRequest>> {
         let workspace = self.get_by_name(name)?;
         if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
-            return Ok(None);
+            // No PR on record does not mean no PR: one created outside
+            // Archductor (gh CLI, the GitHub web UI, an agent shell) has no
+            // row yet. Discover it by branch and record it, so a refresh
+            // finds reality instead of reporting the stale "no PR yet".
+            return self.existing_pull_request_for_workspace(&workspace);
         }
         let args = self.gh_pr_args_for_workspace(&workspace, "view", &["--json", "state"])?;
         let state = command_output_owned(&workspace.path, "gh", &args)?;
@@ -21897,6 +21901,76 @@ exit 1
                 .unwrap()
                 .state,
             "merged"
+        );
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn refresh_pull_request_state_discovers_externally_created_pr() {
+        // A PR opened outside Archductor (gh CLI, web UI, an agent shell) has
+        // no pull_requests row; refresh used to answer "no PR" forever. It
+        // must instead look the branch up on GitHub and record what it finds.
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ] && [ "$3" = "--head" ] && [ "$4" = "lc/berlin" ]; then
+  printf '[{"url":"https://github.com/example/demo/pull/131"}]\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "131" ] && [ "$4" = "--json" ] && [ "$5" = "state" ]; then
+  printf '{"state":"open"}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        // First refresh: nothing recorded, so it discovers and records #131.
+        let discovered = store
+            .refresh_pull_request_state("berlin")
+            .unwrap()
+            .expect("refresh should discover the externally created PR");
+        assert_eq!(discovered.number, 131);
+        assert_eq!(discovered.state, "open");
+        assert!(store
+            .pull_request_by_workspace_id(workspace.id)
+            .unwrap()
+            .is_some());
+
+        // Second refresh: the row exists now, so it goes through `pr view`.
+        assert_eq!(
+            store
+                .refresh_pull_request_state("berlin")
+                .unwrap()
+                .unwrap()
+                .state,
+            "open"
         );
 
         restore_path(old_path);
