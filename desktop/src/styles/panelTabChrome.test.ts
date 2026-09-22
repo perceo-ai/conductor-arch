@@ -174,6 +174,30 @@ describe("panel tab chrome", () => {
     expect(tabRadius).toBe("var(--r-sm, 7px)");
   });
 
+  it("restores the larger right-panel tabs in Comfortable density", () => {
+    const comfortable = rulesFor(".ws-right-tabs .workbench-tab").find(
+      (rule) => rule.selector === "body.lc-density-comfortable .ws-right-tabs .workbench-tab",
+    );
+
+    expect(comfortable).toBeDefined();
+    expect(declaration(comfortable!.body, "height")).toBe("30px");
+    expect(declaration(comfortable!.body, "min-height")).toBe("30px");
+    expect(declaration(comfortable!.body, "font-size")).toBe("12.5px");
+  });
+
+  it("only stretches the PR bar inside a compact strip leaf", () => {
+    const stretching = rulesFor(".ws-pr-bar").filter(
+      (rule) => declaration(rule.body, "flex") === "1 0 auto",
+    );
+
+    expect(stretching.length).toBeGreaterThan(0);
+    expect(
+      stretching.map((rule) => rule.selector),
+    ).toEqual([
+      '.workbench-leaf-compact > .workbench-panel-body[data-panel-kind="strip"] > .ws-pr-bar',
+    ]);
+  });
+
   it("keeps an xterm host inside a narrow terminal dock", () => {
     const terminalRule = rulesFor(".ws-terminal").find((rule) => rule.selector === ".ws-terminal");
 

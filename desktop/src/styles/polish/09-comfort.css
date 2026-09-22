@@ -169,6 +169,12 @@ body.lc-density-comfortable .command-panel {
     padding: 16px;
 }
 
+body.lc-density-comfortable .ws-right-tabs .workbench-tab {
+    height: 30px;
+    min-height: 30px;
+    font-size: 12.5px;
+}
+
 /* Panel buttons gain the unified 28px floor only in Comfortable; their
    border-radius normalization stays in 05-panels.css at every density. */
 body.lc-density-comfortable .suggested-action,

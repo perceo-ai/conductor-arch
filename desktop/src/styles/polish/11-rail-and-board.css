@@ -138,7 +138,7 @@
  * bar's own content box is shorter (28px in a 40px band), so the leftover
  * 12px painted as a dead gap between the bar and the tab strip below it.
  * Let the bar grow to its panel body and centre its content instead. */
-.workbench-panel-body > .ws-pr-bar {
+.workbench-leaf-compact > .workbench-panel-body[data-panel-kind="strip"] > .ws-pr-bar {
     flex: 1 0 auto;
     align-items: center;
     box-sizing: border-box;
