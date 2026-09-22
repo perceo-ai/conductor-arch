@@ -41,3 +41,24 @@ describe("renderMarkdownWithInlineFileChips", () => {
     );
   });
 });
+
+describe("markdown images", () => {
+  it("renders a markdown image as a labeled chip, not an <img>", () => {
+    const html = renderMarkdown("![dashboard screenshot](/tmp/shots/01-dashboard.png)");
+    expect(html).not.toContain("<img");
+    expect(html).toContain("md-image-chip");
+    expect(html).toContain("dashboard screenshot");
+    expect(html).toContain("/tmp/shots/01-dashboard.png");
+  });
+
+  it("falls back to the filename when the image has no alt text", () => {
+    const html = renderMarkdown("![](/tmp/shots/02-workspace.png)");
+    expect(html).toContain("02-workspace.png");
+  });
+
+  it("escapes hostile alt text and titles in image chips", () => {
+    const html = renderMarkdown('![<script>x</script>](/a.png "t<i>t")');
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("t<i>t");
+  });
+});

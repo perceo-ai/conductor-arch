@@ -87,6 +87,32 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Markdown image reference, rendered as a chip (see markdown.ts: local paths
+   and CSP-blocked hosts can never load, so a raw <img> shows a broken icon). */
+.md-image-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 32ch;
+  margin: 0 2px;
+  padding: 1px 6px;
+  vertical-align: 0.08em;
+  overflow: hidden;
+  border: 1px solid var(--lc-border, #2f2f2f);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--lc-text-muted, #b8b8b8);
+  font-size: 0.82em;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Belt for any <img> that still reaches the transcript (e.g. via a future
+   renderer change): never let it overflow the measure. */
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 6px;
+}
 /* fenced code block (highlighted) */
 .markdown-body pre.md-code {
   margin: 8px 0;
