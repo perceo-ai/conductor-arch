@@ -1,19 +1,54 @@
 name = "default"
 version = "v1"
 
+# Prompt-pack keys REPLACE the built-in prompt for that slot; they do not append
+# to it. So only set a key here when this repository genuinely differs from the
+# built-in, and restate anything from the built-in that still applies.
+# Every unset key falls through to the built-in in `default_prompt_settings()`,
+# which is the better default. Do not restate built-ins here.
+
 [prompts]
-code_review = "Focus on correctness, behavior changes, missing tests, and regressions."
-commit_generation = "Write a conventional commit message that matches the actual diff."
-continue_work = "Continue from the current state. Inspect recent changes before editing."
-create_pr = "Write a concise PR body with summary, tests, and risk."
-fix_errors = "Reproduce the failure, then make the smallest safe fix."
-general = "Prefer small, reviewable changes. Explain verification clearly."
-handoff = "Write a concise handoff with context, changed files, tests, and next steps."
-new_workspace = "Create a small, reviewable workspace plan before changing code."
-refactor_style = "Keep behavior-preserving refactors separate from feature changes."
-rename_branch = "Use a short descriptive branch name."
-resolve_merge_conflicts = "Preserve user changes and explain any conflict resolution choices."
-run_script = "Infer the local development run command and include port/env requirements."
-setup_script = "Infer the repository setup command from existing package and build files."
-summarize_session = "Summarize the work completed, verification run, and remaining risk."
-test_fixing = "Run the failing test first, fix the root cause, then rerun focused tests."
+general = """
+Prefer small, reviewable changes. Explain verification clearly.
+Keep the CLI and the Electron desktop app in line: do not land a user-visible \
+change in only one surface unless you report the other as incomplete. The GTK \
+app under crates/gtk-app is removed; the desktop surface is desktop/.
+"""
+
+code_review = """
+Review the current workspace like a code reviewer. Inspect the diff against the \
+base branch and prioritize correctness regressions, user-visible behavior \
+changes, missing tests, data/security risk, and unclear ownership. Leave concise \
+findings with file/line references, then summarize residual risk and \
+verification gaps.
+Check CLI/desktop parity explicitly: flag any user-visible change that landed in \
+only one surface.
+If the `archductor` MCP server is available, read `get_context_briefing` first \
+for intent and open tasks, and record each actionable finding with `create_task`.
+"""
+
+create_pr = """
+Prepare this workspace for review. Inspect the branch diff, recent commits, \
+summaries, todos, checks, and open review comments. Commit only appropriate \
+changes, push the branch, create or update the PR with Summary, What Changed, \
+Validation, and Risk sections, refresh PR state, and report the final URL plus \
+anything still blocked.
+Before claiming behavior is done, verify with written tests plus the relevant \
+CLI smoke and desktop (Electron) smoke, and put that evidence in Validation.
+If the work has a Linear issue in the Perceo team's Archductor project, name the \
+issue key in the PR body and move the issue to In Review.
+If the `archductor` MCP server is available, read `get_context_briefing` before \
+drafting the body, and once the PR exists call `set_workspace_context` with the \
+PR URL and current state so the handoff summary is not stale.
+"""
+
+push_branch = """
+Prepare this branch for remote review. Inspect uncommitted changes, stage and \
+commit only appropriate work, avoid committing unrelated local edits, push to \
+the configured remote/upstream, refresh PR state if present, and report commit \
+hash, remote branch, and PR/check status.
+Another agent may be editing this same tree: stage your own hunks only, never \
+`git add -A` and never bare `git stash`.
+If the `archductor` MCP server is available, call `set_workspace_context` after \
+the push so the handoff summary matches what is now on the remote.
+"""

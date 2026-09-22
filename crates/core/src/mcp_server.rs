@@ -61,7 +61,11 @@ impl McpProfile {
 
 /// The session profile's tool set: name things, keep the handoff summary
 /// current, track tasks, and read back what is already known.
-const SESSION_PROFILE_TOOLS: [&str; 6] = [
+///
+/// Public because the built-in prompts in [`crate::settings`] name these tools
+/// directly, and a test there asserts every tool a prompt cites is one an
+/// in-workspace agent can actually see.
+pub const SESSION_PROFILE_TOOLS: [&str; 6] = [
     "set_workspace_context",
     "get_context_briefing",
     "get_summary",
