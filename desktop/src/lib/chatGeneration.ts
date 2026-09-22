@@ -41,9 +41,35 @@ export function chatGenerationState(input: ChatGenerationInput): ChatGenerationS
   // A ready session is parked waiting for input.
   if (session.ready) return "idle";
 
-  // Not ready. `running` means the agent is actively working the turn;
-  // anything else at this point is the session still coming up.
-  return session.runtime_state === "running" ? "generating" : "starting";
+  // Not ready. The daemon's runtime vocabulary has three states that all mean
+  // "the agent is actively working the turn" — matching only `running` left
+  // the chip stuck on "Still starting" through whole streamed replies and
+  // tool runs (AgentSessionState::as_str in core/src/session_state.rs).
+  if (isGeneratingRuntimeState(session.runtime_state)) return "generating";
+
+  // A not-ready session in a parked or terminal state is not about to produce
+  // output — saying "starting" there is the stuck-chip bug in another shape.
+  // Anything else (including states this file has never heard of) is treated
+  // as still coming up, matching the old behaviour for unknowns.
+  if (PARKED_OR_TERMINAL.has(session.runtime_state)) return "idle";
+  return "starting";
+}
+
+const PARKED_OR_TERMINAL = new Set([
+  "waiting_for_input",
+  "interrupted",
+  "failed",
+  "exited",
+  "archived",
+]);
+
+/** The daemon runtime states in which the agent is actively producing work. */
+export function isGeneratingRuntimeState(runtimeState: string): boolean {
+  return (
+    runtimeState === "running" ||
+    runtimeState === "streaming" ||
+    runtimeState === "tool_running"
+  );
 }
 
 /** Should the generation loader be on screen? */

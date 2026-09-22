@@ -36,6 +36,25 @@ describe("chatGenerationState", () => {
     expect(chatGenerationState(input({ session: BOOTING }))).toBe("starting");
   });
 
+  it("is generating through the daemon's whole working vocabulary", () => {
+    // AgentSessionState::as_str emits streaming and tool_running mid-turn;
+    // matching only "running" left the chip on "Still starting" through
+    // entire streamed replies.
+    for (const runtime_state of ["running", "streaming", "tool_running"]) {
+      expect(chatGenerationState(input({ session: { runtime_state, ready: false } }))).toBe(
+        "generating",
+      );
+    }
+  });
+
+  it("is idle for parked and terminal states even while not ready", () => {
+    for (const runtime_state of ["waiting_for_input", "interrupted", "failed", "exited", "archived"]) {
+      expect(chatGenerationState(input({ session: { runtime_state, ready: false } }))).toBe(
+        "idle",
+      );
+    }
+  });
+
   it("is starting while a session is being created or launched", () => {
     expect(chatGenerationState(input({ phase: { kind: "starting" } }))).toBe("starting");
     expect(chatGenerationState(input({ phase: { kind: "creating" } }))).toBe("starting");
