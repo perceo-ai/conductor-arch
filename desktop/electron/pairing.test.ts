@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildPairingPayload, pairingWindowHtml, renderPairingQr } from "./pairing";
+import {
+  buildPairingPayload,
+  pairingWindowHtml,
+  preferredPairingHost,
+  renderPairingQr,
+} from "./pairing";
 
 describe("buildPairingPayload", () => {
   it("uses the daemon's own listen address when it has one", () => {
@@ -93,6 +98,32 @@ describe("renderPairingQr", () => {
     );
     expect(svg).toContain("<svg");
     expect(svg).toContain("</svg>");
+  });
+});
+
+describe("preferredPairingHost", () => {
+  const lan = { address: "192.168.1.24", family: "IPv4", internal: false };
+  const tailnet = { address: "100.123.163.17", family: "IPv4", internal: false };
+  const loopback = { address: "127.0.0.1", family: "IPv4", internal: true };
+
+  it("prefers a tailnet address, which reaches the machine off the LAN", () => {
+    expect(preferredPairingHost({ en0: [lan], utun4: [tailnet] }, "mac.local")).toBe(
+      "100.123.163.17",
+    );
+  });
+
+  it("falls back to a private LAN address", () => {
+    expect(preferredPairingHost({ en0: [lan], lo0: [loopback] }, "mac.local")).toBe("192.168.1.24");
+  });
+
+  it("falls back to the hostname when nothing routable is up", () => {
+    expect(preferredPairingHost({ lo0: [loopback] }, "mac.local")).toBe("mac.local");
+    expect(preferredPairingHost({}, "mac.local")).toBe("mac.local");
+  });
+
+  it("ignores IPv6 and internal interfaces", () => {
+    const v6 = { address: "fe80::1", family: "IPv6", internal: false };
+    expect(preferredPairingHost({ en0: [v6], lo0: [loopback] }, "mac.local")).toBe("mac.local");
   });
 });
 

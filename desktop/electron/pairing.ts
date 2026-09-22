@@ -54,6 +54,42 @@ export function buildPairingPayload(input: PairingInput): PairingResult {
   };
 }
 
+/** One entry of `os.networkInterfaces()`, narrowed to what matters here. */
+export interface PairingInterface {
+  address: string;
+  family: string | number;
+  internal: boolean;
+}
+
+/**
+ * The address to advertise when the daemon binds a wildcard.
+ *
+ * The hostname was the only answer, and `<machine>.local` is an mDNS name: it
+ * resolves on the same LAN and nowhere else, so a phone on a VPN — the setup
+ * this pairing flow is most useful for — reads the code and cannot connect.
+ * A tailnet address is preferred because it reaches the machine from anywhere
+ * the VPN does, then a private LAN address, and only then the hostname.
+ */
+export function preferredPairingHost(
+  interfaces: Record<string, PairingInterface[] | undefined>,
+  hostname: string,
+): string {
+  const candidates = Object.values(interfaces)
+    .flatMap((entries) => entries ?? [])
+    .filter((entry) => !entry.internal && (entry.family === "IPv4" || entry.family === 4));
+  // 100.64.0.0/10: carrier-grade NAT space, which is what Tailscale hands out.
+  const tailnet = candidates.find((entry) => {
+    const [a, b] = entry.address.split(".").map(Number);
+    return a === 100 && b >= 64 && b <= 127;
+  });
+  if (tailnet) return tailnet.address;
+  const lan = candidates.find((entry) => {
+    const [a, b] = entry.address.split(".").map(Number);
+    return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  });
+  return lan?.address ?? hostname;
+}
+
 export function renderPairingQr(payload: string): Promise<string> {
   return QRCode.toString(payload, { type: "svg", errorCorrectionLevel: "M", margin: 1 });
 }

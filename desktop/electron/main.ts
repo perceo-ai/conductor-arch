@@ -14,7 +14,12 @@ import {
   upsertClient,
 } from "./archcar.js";
 import { parseGithubRepos } from "./githubRepos.js";
-import { buildPairingPayload, pairingWindowHtml, renderPairingQr } from "./pairing.js";
+import {
+  buildPairingPayload,
+  pairingWindowHtml,
+  preferredPairingHost,
+  renderPairingQr,
+} from "./pairing.js";
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
 // CommonJS package: the named export is not reachable through ESM interop.
@@ -374,7 +379,7 @@ ipcMain.handle("pairing:qr", async () => {
       // the service status is the fallback for a daemon started by hand.
       listen: access.listen ?? status.status?.listen ?? null,
       token: access.token ?? "",
-      fallbackHost: os.hostname(),
+      fallbackHost: preferredPairingHost(os.networkInterfaces(), os.hostname()),
     });
     if (!built.ok) return built;
 
