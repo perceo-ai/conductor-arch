@@ -24,6 +24,10 @@ pub enum ProviderProjectionCategory {
     McpTool,
     NativeTool,
     Skill,
+    /// The body of a loaded skill. Separate from `Skill` because that one is
+    /// parser noise — the pty parser emits a line per skill read — while this
+    /// is real content a reader may want to open.
+    SkillContent,
     Plugin,
     Hook,
     Subagent,
@@ -566,6 +570,9 @@ fn provider_projection_category(
         ProviderEventKind::DiffFileChange => ProviderProjectionCategory::FileDiff,
         ProviderEventKind::Tool => ProviderProjectionCategory::NativeTool,
         ProviderEventKind::Mcp => ProviderProjectionCategory::McpTool,
+        ProviderEventKind::SkillPluginHook if subtype.contains("skill_content") => {
+            ProviderProjectionCategory::SkillContent
+        }
         ProviderEventKind::SkillPluginHook if subtype.contains("plugin") => {
             ProviderProjectionCategory::Plugin
         }
@@ -619,6 +626,7 @@ fn provider_projection_category_uses_raw_payload(category: ProviderProjectionCat
             | ProviderProjectionCategory::McpTool
             | ProviderProjectionCategory::NativeTool
             | ProviderProjectionCategory::Skill
+            | ProviderProjectionCategory::SkillContent
             | ProviderProjectionCategory::Plugin
             | ProviderProjectionCategory::Hook
             | ProviderProjectionCategory::Subagent
@@ -737,7 +745,9 @@ fn render_class_for_category(category: ProviderProjectionCategory) -> Projection
         ProviderProjectionCategory::McpTool | ProviderProjectionCategory::NativeTool => {
             ProjectionRenderClass::ToolCard
         }
-        ProviderProjectionCategory::Skill => ProjectionRenderClass::SkillCard,
+        ProviderProjectionCategory::Skill | ProviderProjectionCategory::SkillContent => {
+            ProjectionRenderClass::SkillCard
+        }
         ProviderProjectionCategory::Plugin => ProjectionRenderClass::PluginCard,
         ProviderProjectionCategory::Hook => ProjectionRenderClass::HookCard,
         ProviderProjectionCategory::Subagent => ProjectionRenderClass::SubagentCard,
@@ -779,7 +789,9 @@ fn projection_title(category: ProviderProjectionCategory, title: &str) -> String
         ProviderProjectionCategory::SearchOutput => "Search output".to_owned(),
         ProviderProjectionCategory::McpTool => "MCP tool".to_owned(),
         ProviderProjectionCategory::NativeTool => "Native tool".to_owned(),
-        ProviderProjectionCategory::Skill => "Skill".to_owned(),
+        ProviderProjectionCategory::Skill | ProviderProjectionCategory::SkillContent => {
+            "Skill".to_owned()
+        }
         ProviderProjectionCategory::Plugin => "Plugin".to_owned(),
         ProviderProjectionCategory::Hook => "Hook".to_owned(),
         ProviderProjectionCategory::Subagent => "Subagent".to_owned(),
@@ -1100,6 +1112,31 @@ mod tests {
                 "{title} should not render in normal chat"
             );
         }
+    }
+
+    #[test]
+    fn chat_projection_keeps_a_loaded_skill_body_as_a_collapsed_card() {
+        // The skill's own text is real content, unlike the parser's duplicate
+        // "Read SKILL.md" lines — it renders as an inline card the reader can
+        // open, not as a page of prose in the transcript and not as nothing.
+        let mut event = record(
+            ProviderEventKind::SkillPluginHook,
+            ProviderEventPhase::Completed,
+            "skill_content",
+        );
+        event.normalized_payload = json!({
+            "title": "Skill systematic-debugging",
+            "body": "# Systematic Debugging\n\nALWAYS find root cause first.",
+        });
+        let item = provider_projection_from_records(&[event])
+            .items
+            .into_iter()
+            .next()
+            .unwrap();
+
+        assert_eq!(item.category, ProviderProjectionCategory::SkillContent);
+        assert_eq!(item.render_class, ProjectionRenderClass::SkillCard);
+        assert!(provider_projection_item_is_relevant_chat_event(&item));
     }
 
     #[test]

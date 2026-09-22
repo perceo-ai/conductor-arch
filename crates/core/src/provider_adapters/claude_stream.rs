@@ -952,6 +952,11 @@ pub enum ClaudeProviderEventKind {
     ToolResult,
     Permission,
     Hook,
+    /// The body of a skill claude just loaded, injected back as a synthetic
+    /// user message. It is not something a human said, and printing a whole
+    /// SKILL.md into the transcript buries the conversation — it belongs in a
+    /// collapsed card.
+    SkillContent,
     Subagent,
     Usage,
     ApiRetry,
@@ -1316,6 +1321,9 @@ impl ClaudeStreamParser {
         ) {
             return ClaudeProviderEventKind::RateLimit;
         }
+        if top_type.as_deref() == Some("user") && claude_skill_content_path(value).is_some() {
+            return ClaudeProviderEventKind::SkillContent;
+        }
         if top_type.as_deref() == Some("user") && deferred_tool_result(value).is_some() {
             return ClaudeProviderEventKind::DeferredResult;
         }
@@ -1501,7 +1509,7 @@ impl ClaudeStreamParser {
             ClaudeProviderEventKind::AssistantMessage => {
                 message_content_text(&draft.raw_json, "text", "text")
             }
-            ClaudeProviderEventKind::UserMessage => {
+            ClaudeProviderEventKind::UserMessage | ClaudeProviderEventKind::SkillContent => {
                 message_content_text(&draft.raw_json, "text", "text")
             }
             ClaudeProviderEventKind::ToolResult | ClaudeProviderEventKind::DeferredResult => {
@@ -1768,6 +1776,16 @@ fn claude_canonical_kind_and_subtype(
         }
     }
 
+    // The record carries no subtype of its own, and the category mapping reads
+    // this string: without it a skill body would land in the same bucket as the
+    // parser's duplicate skill lines, which the chat projection drops.
+    if kind == ClaudeProviderEventKind::SkillContent {
+        return (
+            ProviderEventKind::SkillPluginHook,
+            Some("skill_content".to_owned()),
+        );
+    }
+
     (
         claude_kind_to_provider_kind(kind),
         subtype.or_else(|| Some(format!("{kind:?}").to_ascii_lowercase())),
@@ -1808,7 +1826,9 @@ fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventK
         | ClaudeProviderEventKind::ToolInputDelta
         | ClaudeProviderEventKind::ToolResult => ProviderEventKind::Tool,
         ClaudeProviderEventKind::Permission => ProviderEventKind::ApprovalPermission,
-        ClaudeProviderEventKind::Hook => ProviderEventKind::SkillPluginHook,
+        ClaudeProviderEventKind::Hook | ClaudeProviderEventKind::SkillContent => {
+            ProviderEventKind::SkillPluginHook
+        }
         ClaudeProviderEventKind::Subagent => ProviderEventKind::SubagentCollaboration,
         ClaudeProviderEventKind::Usage
         | ClaudeProviderEventKind::ApiRetry
@@ -1871,7 +1891,8 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
         ClaudeProviderEventKind::MessageStop
         | ClaudeProviderEventKind::ContentBlockStop
         | ClaudeProviderEventKind::ToolResult
-        | ClaudeProviderEventKind::AssistantMessage => ProviderEventPhase::Completed,
+        | ClaudeProviderEventKind::AssistantMessage
+        | ClaudeProviderEventKind::SkillContent => ProviderEventPhase::Completed,
         ClaudeProviderEventKind::DeferredResult => ProviderEventPhase::Declined,
         ClaudeProviderEventKind::Result => match claude_result_status_from_json(raw_json) {
             ClaudeResultStatus::Success => ProviderEventPhase::Completed,
@@ -1912,6 +1933,7 @@ fn claude_title_for(
         | ClaudeProviderEventKind::ContentBlockStop => "Assistant output".to_owned(),
         ClaudeProviderEventKind::Permission => "Permission request".to_owned(),
         ClaudeProviderEventKind::Hook => "Hook".to_owned(),
+        ClaudeProviderEventKind::SkillContent => "Skill".to_owned(),
         ClaudeProviderEventKind::Subagent => "Subagent".to_owned(),
         ClaudeProviderEventKind::Usage => "Usage".to_owned(),
         ClaudeProviderEventKind::ApiRetry => "API retry".to_owned(),
@@ -2000,7 +2022,38 @@ fn claude_event_title(
             .unwrap_or_else(|| claude_title_for(kind, tool_name, tool_target));
     }
 
+    if kind == ClaudeProviderEventKind::SkillContent {
+        return claude_skill_content_path(raw_json)
+            .and_then(|path| claude_skill_name(&path))
+            .map(|name| format!("Skill {name}"))
+            .unwrap_or_else(|| claude_title_for(kind, tool_name, tool_target));
+    }
+
     claude_title_for(kind, tool_name, tool_target)
+}
+
+/// The skill directory claude names when it injects a loaded skill's body.
+///
+/// Claude marks the record `isSynthetic` — it is the harness talking, not the
+/// human — and opens the text with the skill's base directory. Both have to
+/// hold: a synthetic user message we do not recognise is still the human's
+/// transcript as far as we know, and mislabelling one as a skill would hide it.
+fn claude_skill_content_path(value: &Value) -> Option<String> {
+    if value.get("isSynthetic").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let text = message_content_text(value, "text", "text")?;
+    let rest = text.trim_start().strip_prefix(SKILL_CONTENT_PREFIX)?;
+    let path = rest.lines().next()?.trim();
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
+const SKILL_CONTENT_PREFIX: &str = "Base directory for this skill:";
+
+/// `.../skills/systematic-debugging` → `systematic-debugging`.
+fn claude_skill_name(path: &str) -> Option<String> {
+    let name = path.trim_end_matches('/').rsplit('/').next()?.trim();
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 fn claude_hook_body(raw_json: &Value) -> Option<String> {
@@ -2660,6 +2713,59 @@ mod tests {
             ));
 
         assert_eq!(event.normalized_payload["title"], "Read /repo/cli.py");
+    }
+
+    #[test]
+    fn loaded_skill_bodies_become_skill_cards_not_user_prose() {
+        // Verified against a recorded session: claude injects the skill's whole
+        // SKILL.md back as an `isSynthetic` user record. Left as a user
+        // message it renders as pages of prose in the middle of the chat, as
+        // though the human had pasted it.
+        let native = concat!(
+            r#"{"isSynthetic":true,"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /Users/x/.claude/skills/systematic-debugging\n\n# Systematic Debugging\n\nFind the root cause first."}]}}"#,
+            "\n",
+        );
+
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+        let draft = drafts.first().expect("expected an event");
+        assert_eq!(draft.kind, ClaudeProviderEventKind::SkillContent);
+
+        let event = draft
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(event.kind, ProviderEventKind::SkillPluginHook);
+        assert_eq!(event.provider_subtype.as_deref(), Some("skill_content"));
+        assert_eq!(
+            event.normalized_payload["title"],
+            "Skill systematic-debugging"
+        );
+        // The text is kept, just folded away — the card opens.
+        assert!(event.normalized_payload["body"]
+            .as_str()
+            .unwrap()
+            .contains("Find the root cause first."));
+    }
+
+    #[test]
+    fn synthetic_records_that_are_not_skills_stay_user_messages() {
+        // Only the skill preamble earns the reclassification; anything else
+        // synthetic is still transcript we have no business hiding.
+        let native = concat!(
+            r#"{"isSynthetic":true,"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"No response requested."}]}}"#,
+            "\n",
+        );
+
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+        assert_eq!(
+            drafts.first().expect("expected an event").kind,
+            ClaudeProviderEventKind::UserMessage
+        );
     }
 
     #[test]
