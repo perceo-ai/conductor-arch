@@ -305,12 +305,6 @@ pub fn install(
     if listen.is_some() {
         remote::ensure_token(paths)?;
     }
-    // Saved outside the unit file so an app-spawned daemon serves the same
-    // address. Without this, remote access only worked when the service won
-    // the race for the local socket, which it loses whenever the desktop app
-    // is already running.
-    remote::save_listen_addr(paths, listen_addr.as_ref())?;
-
     // Linger before start, not after: enabling it is what brings the systemd
     // user manager up, and without a running manager `systemctl --user` has no
     // bus to talk to. That is the difference between this working from an SSH
@@ -325,6 +319,21 @@ pub fn install(
         Ok(detail) => detail,
         Err(err) => return Err(explain_start_failure(err, manager, boot_persistent)),
     };
+    // Saved outside the unit file so an app-spawned daemon serves the same
+    // address. Without this, remote access only worked when the service won
+    // the race for the local socket, which it loses whenever the desktop app
+    // is already running.
+    //
+    // Written only once the service is actually up: a failed install reports
+    // that remote access is off, and a saved address here would quietly
+    // contradict it the next time the desktop app spawned its own daemon.
+    let previous_listen = remote::load_listen_addr(paths).and_then(|result| result.ok());
+    remote::save_listen_addr(paths, listen_addr.as_ref())?;
+    if listen_addr.is_none() {
+        if let Some(warning) = live_listener_warning(previous_listen) {
+            warnings.push(warning);
+        }
+    }
     Ok(ServiceStatus {
         manager: manager.as_str().to_owned(),
         installed: true,
@@ -350,7 +359,11 @@ pub fn uninstall(paths: &AppPaths) -> Result<ServiceStatus> {
             let _ = systemctl_user(&["daemon-reload"]);
         }
     }
+    let previous_listen = remote::load_listen_addr(paths).and_then(|result| result.ok());
     remote::save_listen_addr(paths, None)?;
+    let warnings = live_listener_warning(previous_listen)
+        .map(|warning| vec![warning])
+        .unwrap_or_default();
     Ok(ServiceStatus {
         manager: manager.as_str().to_owned(),
         installed: false,
@@ -361,7 +374,7 @@ pub fn uninstall(paths: &AppPaths) -> Result<ServiceStatus> {
         path: None,
         // Linger is deliberately left alone: the user may have enabled it for
         // their own reasons, and turning it off would stop unrelated services.
-        warnings: Vec::new(),
+        warnings,
         detail: if detail.is_empty() {
             "service removed".to_owned()
         } else {
@@ -665,6 +678,43 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (!value.is_empty()).then(|| std::ffi::OsString::from(value))
+}
+
+/// How long the probe below waits for the old listener to answer.
+const LIVE_LISTENER_PROBE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The address to dial when checking whether `addr` is still being served.
+///
+/// A wildcard bind is not something a client can connect to, so probe the
+/// loopback address of the same family instead — a daemon bound to `0.0.0.0`
+/// answers there too.
+fn dialable_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    if !addr.ip().is_unspecified() {
+        return addr;
+    }
+    match addr {
+        std::net::SocketAddr::V4(_) => {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
+        }
+        std::net::SocketAddr::V6(_) => {
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+        }
+    }
+}
+
+/// Warn when a daemon already running still owns the TCP listener.
+///
+/// Clearing the saved address only decides what the *next* daemon binds. A
+/// daemon that bound the port at startup keeps serving it until it exits, so
+/// reporting remote access as removed on its own would be false: the phone
+/// that paired earlier still connects.
+fn live_listener_warning(previous: Option<std::net::SocketAddr>) -> Option<String> {
+    let addr = previous?;
+    std::net::TcpStream::connect_timeout(&dialable_addr(addr), LIVE_LISTENER_PROBE).ok()?;
+    Some(format!(
+        "a daemon started earlier is still serving {addr}, so remote access stays reachable \
+until it exits \u{2014} quit and reopen the desktop app, or stop that daemon"
+    ))
 }
 
 /// Warn when the service cannot start serving the requested address yet.
@@ -1704,6 +1754,36 @@ mod tests {
 
         // No remote access requested, nothing to warn about.
         assert!(socket_conflict_warning(&paths, None, None).is_none());
+    }
+
+    #[test]
+    fn disabling_remote_access_says_so_while_a_daemon_still_serves_it() {
+        // Clearing the saved address only decides what the next daemon binds.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let warning = live_listener_warning(Some(addr)).expect("the listener is still up");
+        assert!(warning.contains(&addr.to_string()), "{warning}");
+        assert!(warning.contains("until it exits"), "{warning}");
+
+        drop(listener);
+        assert!(live_listener_warning(Some(addr)).is_none());
+        assert!(live_listener_warning(None).is_none());
+    }
+
+    #[test]
+    fn a_wildcard_bind_is_probed_on_loopback() {
+        // `0.0.0.0:<port>` is not an address a client can dial; the daemon
+        // bound to it answers on loopback.
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let wildcard = remote::parse_listen_addr(&format!("0.0.0.0:{port}")).unwrap();
+
+        assert_eq!(
+            dialable_addr(wildcard),
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+        );
+        assert!(live_listener_warning(Some(wildcard)).is_some());
     }
 
     #[test]

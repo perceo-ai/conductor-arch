@@ -112,6 +112,12 @@ describe("preferredPairingHost", () => {
     );
   });
 
+  it("ignores a CGNAT address on an interface that is not a tunnel", () => {
+    // Another VPN or virtual adapter can own 100.64.0.0/10; advertising it over
+    // a working LAN address would send the phone somewhere it cannot reach.
+    expect(preferredPairingHost({ en0: [lan], ppp0: [tailnet] }, "mac.local")).toBe("192.168.1.24");
+  });
+
   it("falls back to a private LAN address", () => {
     expect(preferredPairingHost({ en0: [lan], lo0: [loopback] }, "mac.local")).toBe("192.168.1.24");
   });

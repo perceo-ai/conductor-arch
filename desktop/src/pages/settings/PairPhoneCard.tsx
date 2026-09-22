@@ -1,5 +1,5 @@
 import { Show, createResource, createSignal } from "solid-js";
-import { send } from "@/bridge/client";
+import { sendLocal } from "@/bridge/client";
 import { pairingReadiness } from "./pairingReadiness";
 
 // Pairing a phone with this daemon.
@@ -9,9 +9,12 @@ import { pairingReadiness } from "./pairingReadiness";
 // It is its own card now, and it states up front whether this daemon is even
 // reachable from a phone.
 export function PairPhoneCard() {
+  // Deliberately the local route, not the selected daemon: `pairing:qr` builds
+  // the code from this machine's own daemon, so asking a remote daemon whether
+  // it is ready would answer a question about the wrong computer.
   const [access, { refetch }] = createResource(async () => {
     try {
-      const res = await send({ type: "get_remote_access" });
+      const res = await sendLocal({ type: "get_remote_access" });
       return res.type === "remote_access" ? { listen: res.listen, token: res.token } : null;
     } catch {
       return null;
@@ -20,7 +23,7 @@ export function PairPhoneCard() {
   // What remote access was configured to serve, which outlives any one daemon.
   const [configured, { refetch: refetchConfigured }] = createResource(async () => {
     try {
-      const res = await send({ type: "get_service_status" });
+      const res = await sendLocal({ type: "get_service_status" });
       return res.type === "service_status" ? (res.status.listen ?? null) : null;
     } catch {
       return null;

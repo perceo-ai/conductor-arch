@@ -195,6 +195,12 @@ jobs:
         working-directory: desktop
         run: pnpm install --frozen-lockfile
 
+      # Kept separate from packaging so the signing secrets are never in the
+      # environment of the Vite build and the npm dependency tree it executes.
+      - name: Build desktop bundle
+        working-directory: desktop
+        run: pnpm build
+
       - name: Package installers
         working-directory: desktop
         # No GH_TOKEN here so electron-builder never auto-publishes; the upload
@@ -225,7 +231,6 @@ jobs:
             export APPLE_APP_SPECIFIC_PASSWORD="$MACOS_APPLE_APP_SPECIFIC_PASSWORD"
             export APPLE_TEAM_ID="$MACOS_APPLE_TEAM_ID"
           fi
-          pnpm build
           pnpm exec electron-builder "--$EB_PLATFORM" --publish never
 
       - name: Collect artifacts

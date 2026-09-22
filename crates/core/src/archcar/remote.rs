@@ -717,9 +717,22 @@ pub fn save_listen_addr(paths: &AppPaths, addr: Option<&SocketAddr>) -> Result<(
 }
 
 /// The saved listen address, if remote access was ever enabled here.
+///
+/// Only a missing file means "not configured". A permission error, a broken
+/// link, or any other I/O failure is reported: swallowing it would start the
+/// daemon with no TCP access and no reason why the remote access someone
+/// configured had disappeared.
 pub fn load_listen_addr(paths: &AppPaths) -> Option<Result<SocketAddr>> {
     let path = listen_path(paths);
-    let contents = std::fs::read_to_string(&path).ok()?;
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            return Some(
+                Err(err).with_context(|| format!("read archcar listen {}", path.display())),
+            );
+        }
+    };
     let value = contents.trim();
     (!value.is_empty()).then(|| parse_listen_addr(value))
 }
@@ -808,6 +821,33 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn a_missing_listen_file_means_remote_access_was_never_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(load_listen_addr(&paths_in(temp.path())).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_listen_file_is_reported_not_treated_as_off() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        save_listen_addr(&paths, Some(&parse_listen_addr("0.0.0.0:7420").unwrap())).unwrap();
+        let path = listen_path(&paths);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            // Running as root, where the mode does not deny anything.
+            return;
+        }
+
+        let err = load_listen_addr(&paths)
+            .expect("an unreadable file is not \"not configured\"")
+            .expect_err("the read failure is surfaced");
+        assert!(err.to_string().contains("read archcar listen"), "{err}");
+    }
 
     #[test]
     fn an_unknown_host_key_is_explained_with_the_command_that_fixes_it() {
