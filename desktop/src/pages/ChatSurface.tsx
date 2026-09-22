@@ -138,12 +138,6 @@ export default function ChatSurface(props: { workspace: string }) {
     }
   }
 
-  onMount(() => {
-    const onNewChat = () => void newChat();
-    window.addEventListener("archductor:new-chat", onNewChat);
-    onCleanup(() => window.removeEventListener("archductor:new-chat", onNewChat));
-  });
-
   async function closeThread(thread: ArchcarChatThread) {
     try {
       await send({ type: "close_chat_thread", thread_id: thread.id });
@@ -162,6 +156,26 @@ export default function ChatSurface(props: { workspace: string }) {
       // non-fatal
     }
   }
+
+  onMount(() => {
+    const onNewChat = () => void newChat();
+    const onCloseActiveChat = () => {
+      const file = openFilePath();
+      if (file && view().kind === "file") {
+        closeFile(file);
+        return;
+      }
+      const threadId = nav.selectedChatThread();
+      const thread = threads().find((candidate) => candidate.id === threadId) ?? threads()[0];
+      if (thread) void closeThread(thread);
+    };
+    window.addEventListener("archductor:new-chat", onNewChat);
+    window.addEventListener("archductor:close-active-chat", onCloseActiveChat);
+    onCleanup(() => {
+      window.removeEventListener("archductor:new-chat", onNewChat);
+      window.removeEventListener("archductor:close-active-chat", onCloseActiveChat);
+    });
+  });
 
   return (
     <div class="chat-surface">

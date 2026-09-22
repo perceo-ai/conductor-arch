@@ -1885,6 +1885,10 @@ impl WorkspaceStore {
             for workspace_id in workspace_ids {
                 self.delete_workspace_rows(workspace_id)?;
             }
+            self.conn.execute(
+                "DELETE FROM background_tasks WHERE repository_id = ?1",
+                [repository.id],
+            )?;
             let changed = self
                 .conn
                 .execute("DELETE FROM repositories WHERE id = ?1", [repository.id])?;
@@ -2443,6 +2447,31 @@ impl WorkspaceStore {
                 OR process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
             [workspace_id],
         )?;
+        self.conn.execute(
+            "UPDATE background_tasks
+             SET workspace_id = NULL, workspace_name = NULL, task_id = NULL
+             WHERE workspace_id = ?1
+                OR task_id IN (SELECT id FROM tasks WHERE workspace_id = ?1)",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM diff_contributions WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM context_attachments WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM summary_refresh_state WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM summaries WHERE workspace_id = ?1",
+            [workspace_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM tasks WHERE workspace_id = ?1", [workspace_id])?;
         self.conn.execute(
             "DELETE FROM processes WHERE workspace_id = ?1",
             [workspace_id],
@@ -14133,6 +14162,18 @@ mod tests {
                 base_ref: None,
             })
             .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO background_tasks (
+                    repository_id, repository_name, workspace_id, workspace_name, task_id,
+                    title, prompt, provider, status, run_checks, open_pr, draft_pr,
+                    detail, error, created_at, updated_at
+                 ) VALUES (?1, 'demo', ?2, ?3, NULL, 'Archive cleanup', 'prompt',
+                    'codex', 'running', 1, 0, 1, '', NULL, 'now', 'now')",
+                rusqlite::params![workspace.repository_id, workspace.id, workspace.name],
+            )
+            .unwrap();
 
         store.remove_repository("demo").unwrap();
 
@@ -14151,6 +14192,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(workspaces, 0);
+        let background_tasks: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM background_tasks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(background_tasks, 0);
         // Removing an unknown repository surfaces an error.
         assert!(store.remove_repository("demo").is_err());
     }
@@ -15852,6 +15898,67 @@ CUSTOM_VALUE = "from-settings"
         store
             .append_chat_message(thread.id, "user", "hi", "user_send")
             .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO tasks (
+                    workspace_id, title, body, status, owner_session_id, owner,
+                    intended_areas, blocked_reason, review_notes, created_at, updated_at
+                 ) VALUES (?1, 'Fix archive', '', 'open', ?2, 'codex', '', NULL, '', 'now', 'now')",
+                rusqlite::params![workspace.id, thread.id],
+            )
+            .unwrap();
+        let task_id = store.conn.last_insert_rowid();
+        store
+            .conn
+            .execute(
+                "INSERT INTO summaries (
+                    workspace_id, scope_type, scope_id, body_markdown, source_refs, created_at, updated_at
+                 ) VALUES (?1, 'workspace', 0, 'summary', '', 'now', 'now')",
+                [workspace.id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO context_attachments (
+                    workspace_id, source, kind, body_or_ref, scope, pinned, created_at
+                 ) VALUES (?1, 'manual', 'text', 'notes', '', 0, 'now')",
+                [workspace.id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO diff_contributions (
+                    workspace_id, session_id, files, still_present, patch_ref,
+                    commands, risks, blockers, created_at, updated_at
+                 ) VALUES (?1, ?2, '', '', NULL, '', '', '', 'now', 'now')",
+                rusqlite::params![workspace.id, thread.id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO summary_refresh_state (
+                    workspace_id, scope_type, scope_id, source, evidence_hash,
+                    latest_message_id, latest_provider_sequence, last_refreshed_at
+                 ) VALUES (?1, 'workspace', 0, 'auto', 'hash', NULL, NULL, 'now')",
+                [workspace.id],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO background_tasks (
+                    repository_id, repository_name, workspace_id, workspace_name, task_id,
+                    title, prompt, provider, status, run_checks, open_pr, draft_pr,
+                    detail, error, created_at, updated_at
+                 ) VALUES (?1, 'demo', ?2, 'berlin', ?3, 'Fix archive', 'prompt', 'codex',
+                    'running', 1, 0, 1, '', NULL, 'now', 'now')",
+                rusqlite::params![workspace.repository_id, workspace.id, task_id],
+            )
+            .unwrap();
         let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
         let process = store
             .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
@@ -15943,6 +16050,30 @@ CUSTOM_VALUE = "from-settings"
         assert_eq!(orphan_session_events, 0);
         assert_eq!(orphan_provider_events, 0);
         assert_eq!(orphan_provider_raw_payloads, 0);
+        for table in [
+            "tasks",
+            "summaries",
+            "context_attachments",
+            "diff_contributions",
+            "summary_refresh_state",
+        ] {
+            let sql = format!("SELECT COUNT(*) FROM {table} WHERE workspace_id = ?1");
+            let count: i64 = store
+                .conn
+                .query_row(&sql, [workspace.id], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table} rows should be removed");
+        }
+        let detached_background_tasks: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM background_tasks
+                 WHERE repository_id = ?1 AND workspace_id IS NULL AND task_id IS NULL",
+                [workspace.repository_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(detached_background_tasks, 1);
     }
 
     #[test]

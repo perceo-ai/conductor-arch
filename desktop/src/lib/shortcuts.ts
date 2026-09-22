@@ -40,6 +40,7 @@ export type ShortcutAction =
   | "workspace-actions"
   | "add-project"
   | "new-chat"
+  | "close-active-chat"
   | "toggle-terminal"
   | "open-in-app"
   | "open-menu"
@@ -100,6 +101,7 @@ export const DEFAULT_SHORTCUTS: ShortcutBinding[] = [
   { action: "workspace-actions", keys: "mod+shift+alt+a", label: "Workspace actions", aliases: ["actions", "workspace-actions"] },
   { action: "add-project", keys: "mod+alt+a", label: "Add repository", aliases: ["add-project", "project"] },
   { action: "new-chat", keys: "mod+t", label: "New chat tab", aliases: ["chat", "new-chat"] },
+  { action: "close-active-chat", keys: "mod+w", label: "Close active chat tab", aliases: ["close-chat", "close-active-chat"] },
   { action: "toggle-terminal", keys: "mod+j", label: "Toggle terminal panel", aliases: ["terminal", "dock"] },
   { action: "toggle-sidebar", keys: "mod+b", label: "Toggle sidebar", aliases: ["sidebar"] },
   { action: "toggle-right-panel", keys: "mod+alt+b", label: "Toggle right sidebar", aliases: ["right-sidebar", "right-panel"] },
