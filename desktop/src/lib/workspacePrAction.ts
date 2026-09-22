@@ -19,6 +19,7 @@ export type WorkspacePrActionKind = "create" | "push" | "merge" | "view" | "none
  * Derived in the same pass as the action so the two cannot drift.
  */
 export type WorkspacePrStateKind =
+  | "loading"
   | "no-changes"
   | "no-pr"
   | "uncommitted"
@@ -43,6 +44,11 @@ export interface WorkspacePrActionInput {
   sourceBranchAhead?: number | null;
   branchBehind?: number | null;
   conflicts?: number | null;
+  /** The status data has not landed yet. Say so instead of deriving a
+   *  confident state from absent fields — an unloaded row and a clean
+   *  workspace are indistinguishable otherwise, so the bar used to claim
+   *  "No changes" and then flip once the data arrived. */
+  loading?: boolean;
 }
 
 export interface WorkspacePrActionState {
@@ -66,8 +72,10 @@ export function workspacePrActionInput(
       }
     | undefined,
   checks: ArchcarChecksSummary | undefined,
+  loading = false,
 ): WorkspacePrActionInput {
   return {
+    loading,
     prNumber: row?.prNumber,
     prState: row?.prState,
     changedFiles: row?.changedFiles,
@@ -82,6 +90,14 @@ export function workspacePrActionInput(
 }
 
 export function deriveWorkspacePrAction(input: WorkspacePrActionInput): WorkspacePrActionState {
+  if (input.loading) {
+    return {
+      title: "Loading…",
+      cssClass: "ws-pr-status-muted",
+      action: "none",
+      state: "loading",
+    };
+  }
   const prNumber = input.prNumber ?? 0;
   const prState = (input.prState ?? "").toLowerCase();
   const check = (input.checkStatus ?? "").toLowerCase();
@@ -215,6 +231,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
 /** Glyph per state. Distinct per state by design — this is the whole reason
  *  `WorkspacePrStateKind` exists separately from the action kind. */
 export const WORKSPACE_PR_STATE_ICON: Record<WorkspacePrStateKind, IconName> = {
+  loading: "ellipsis",
   "no-changes": "circle-dashed",
   "no-pr": "git-branch",
   uncommitted: "circle-dot",

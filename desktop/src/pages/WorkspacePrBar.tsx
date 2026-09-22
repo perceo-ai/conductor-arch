@@ -19,9 +19,14 @@ import type { ShortcutAction } from "@/lib/shortcuts";
 
 export default function WorkspacePrBar(props: { workspace: string }) {
   const [busy, setBusy] = createSignal(false);
+  const row = () => workspacesStore.row(props.workspace);
+  // Keyed on the row's updated_at as well as the name: any workspace event
+  // (commit, push, PR opened) bumps it, so the bar re-reads checks right then
+  // instead of waiting out the poll interval.
   const [checks, { refetch: refetchChecks }] = createResource(
-    () => props.workspace,
-    async (ws): Promise<ArchcarChecksSummary | undefined> => {
+    () => `${props.workspace}\u0000${row()?.updatedAt ?? ""}`,
+    async (key): Promise<ArchcarChecksSummary | undefined> => {
+      const ws = key.split("\u0000")[0];
       try {
         const res = await send({ type: "get_checks_summary", workspace: ws });
         return res.type === "checks_summary" ? res.summary : undefined;
@@ -38,8 +43,14 @@ export default function WorkspacePrBar(props: { workspace: string }) {
     onCleanup(() => window.clearInterval(timer));
   });
 
-  const row = () => workspacesStore.row(props.workspace);
-  const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checks())));
+  // The row alone already answers ("uncommitted", "unpushed", "no PR"); checks
+  // only refine it, so the bar waits on the row and not on the RPC. And
+  // `checks.latest` keeps the last checks answer on screen while a refetch is
+  // in flight, so re-keying refines the bar instead of blanking it.
+  const loading = () => !workspacesStore.loaded() || !row();
+  const st = createMemo(() =>
+    deriveWorkspacePrAction(workspacePrActionInput(row(), checks.latest, loading())),
+  );
   const actionShortcut = (): ShortcutAction | undefined => {
     if (st().action === "create") return "create-pr";
     if (st().action === "push") return "push-branch";

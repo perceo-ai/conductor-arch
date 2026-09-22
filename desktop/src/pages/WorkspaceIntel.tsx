@@ -1,5 +1,5 @@
 import { For, Show, createMemo, createResource, createSignal } from "solid-js";
-import type { JSX } from "solid-js";
+import type { JSX, Resource } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
 import { actions, nav, workspacesStore } from "@/store";
 import { intelStore } from "@/store/intel";
@@ -98,60 +98,95 @@ function WorkItemRow(props: {
   );
 }
 
+/**
+ * A resource answer tagged with what it describes.
+ *
+ * These resources re-key on `intelStore.version()`, so every intel event makes
+ * a plain `res()` read go undefined until the refetch lands — the panel blanked
+ * and redrew on each update. `res.latest` holds the previous answer through the
+ * refetch and fixes that, but it also survives a workspace or chat switch, and
+ * showing the wrong workspace's summary is worse than showing none. The tag is
+ * how the reader tells "still loading the same thing" from "this is somebody
+ * else's data".
+ */
+interface TaggedAnswer<T> {
+  tag: string;
+  value: T;
+}
+
+/** The last answer for `tag`, or undefined while nothing has been loaded for it. */
+function latestFor<T>(res: Resource<TaggedAnswer<T>>, tag: () => string): T | undefined {
+  const latest = res.latest;
+  return latest && latest.tag === tag() ? latest.value : undefined;
+}
+
 export function SummaryPanel(props: { workspace: string }) {
+  const tag = () => props.workspace;
+  const key = () => `${props.workspace}:${intelStore.version()}`;
   const [stored, { refetch }] = createResource(
-    () => `${props.workspace}:${intelStore.version()}`,
-    async (): Promise<Summary | null> => {
+    key,
+    async (): Promise<TaggedAnswer<Summary | null>> => {
+      const workspace = props.workspace;
       try {
-        const res = await send({ type: "list_summaries", workspace: props.workspace });
-        if (res.type !== "summaries") return null;
-        return res.summaries.find((summary) => summary.scope_type === "workspace") ?? null;
+        const res = await send({ type: "list_summaries", workspace });
+        const value =
+          res.type === "summaries"
+            ? (res.summaries.find((summary) => summary.scope_type === "workspace") ?? null)
+            : null;
+        return { tag: workspace, value };
       } catch {
-        return null;
+        return { tag: workspace, value: null };
       }
     },
   );
   const [tasks, { refetch: refetchTasks }] = createResource(
-    () => `${props.workspace}:${intelStore.version()}`,
-    async (): Promise<Task[]> => {
+    key,
+    async (): Promise<TaggedAnswer<Task[]>> => {
+      const workspace = props.workspace;
       try {
-        const res = await send({ type: "list_tasks", workspace: props.workspace });
-        return res.type === "tasks" ? res.tasks : [];
+        const res = await send({ type: "list_tasks", workspace });
+        return { tag: workspace, value: res.type === "tasks" ? res.tasks : [] };
       } catch {
-        return [];
+        return { tag: workspace, value: [] };
       }
     },
   );
   const [todos] = createResource(
-    () => `${props.workspace}:${intelStore.version()}`,
-    async (): Promise<Todo[]> => {
+    key,
+    async (): Promise<TaggedAnswer<Todo[]>> => {
+      const workspace = props.workspace;
       try {
-        const res = await send({ type: "list_todos", workspace: props.workspace });
-        return res.type === "todos" ? res.todos : [];
+        const res = await send({ type: "list_todos", workspace });
+        return { tag: workspace, value: res.type === "todos" ? res.todos : [] };
       } catch {
-        return [];
+        return { tag: workspace, value: [] };
       }
     },
   );
   const [overlaps] = createResource(
-    () => `${props.workspace}:${intelStore.version()}`,
-    async (): Promise<SessionOverlap[]> => {
+    key,
+    async (): Promise<TaggedAnswer<SessionOverlap[]>> => {
+      const workspace = props.workspace;
       try {
-        const res = await send({ type: "list_session_overlaps", workspace: props.workspace });
-        return res.type === "session_overlaps" ? res.overlaps : [];
+        const res = await send({ type: "list_session_overlaps", workspace });
+        return { tag: workspace, value: res.type === "session_overlaps" ? res.overlaps : [] };
       } catch {
-        return [];
+        return { tag: workspace, value: [] };
       }
     },
   );
+  const storedSummary = () => latestFor(stored, tag);
+  const taskList = () => latestFor(tasks, tag);
+  const todoList = () => latestFor(todos, tag);
+  const overlapList = () => latestFor(overlaps, tag);
   const [editing, setEditing] = createSignal(false);
   const [draftBody, setDraftBody] = createSignal<string | null>(null);
   const [feedback, setFeedback] = createSignal("");
 
-  const savedText = () => stored()?.body_markdown ?? "";
+  const savedText = () => storedSummary()?.body_markdown ?? "";
   // While editing, unsaved keystrokes win; otherwise the stored summary shows.
   const text = () => draftBody() ?? savedText();
-  const workItems = createMemo(() => mergeWorkItems(tasks() ?? [], todos() ?? []));
+  const workItems = createMemo(() => mergeWorkItems(taskList() ?? [], todoList() ?? []));
 
   function startEditing() {
     setDraftBody(savedText());
@@ -227,7 +262,7 @@ export function SummaryPanel(props: { workspace: string }) {
   }
 
   async function setStatus(item: SummaryWorkItem, status: TaskStatus) {
-    const task = (tasks() ?? []).find((candidate) => candidate.id === item.id);
+    const task = (taskList() ?? []).find((candidate) => candidate.id === item.id);
     if (!task) return;
     // Core rejects a blocked task with no reason, so ask rather than fail.
     let update: TaskUpdate = { status };
@@ -253,7 +288,7 @@ export function SummaryPanel(props: { workspace: string }) {
   }
 
   const provenance = () => {
-    const summary = stored();
+    const summary = storedSummary();
     if (!summary) return "No summary yet";
     // Three authors, and which one wrote it changes how much to trust it: the
     // agent's own note, a human's edit, or the daemon's placeholder draft.
@@ -293,7 +328,7 @@ export function SummaryPanel(props: { workspace: string }) {
             when={savedText().trim()}
             fallback={
               <div class="ws-check-empty">
-                {stored.loading
+                {storedSummary() === undefined
                   ? "Loading…"
                   : "No summary yet — it appears once the agent has something to record."}
               </div>
@@ -329,7 +364,9 @@ export function SummaryPanel(props: { workspace: string }) {
         when={workItems().length > 0}
         fallback={
           <div class="ws-check-empty">
-            {tasks.loading || todos.loading ? "Loading…" : "No open work tracked in this branch."}
+            {taskList() === undefined || todoList() === undefined
+              ? "Loading…"
+              : "No open work tracked in this branch."}
           </div>
         }
       >
@@ -338,9 +375,9 @@ export function SummaryPanel(props: { workspace: string }) {
         </For>
       </Show>
 
-      <Show when={(overlaps() ?? []).length > 0}>
+      <Show when={(overlapList() ?? []).length > 0}>
         <div class="ws-flat-section-label">Overlapping sessions</div>
-        <For each={overlaps()}>
+        <For each={overlapList()}>
           {(overlap) => (
             <SummaryRow
               tone="running"
@@ -365,37 +402,40 @@ function extractCurrentChatSection(markdown: string): string | null {
 /** Read-only view of the selected chat thread's maintained context. */
 function CurrentChatSection(props: { workspace: string }) {
   const threadId = () => nav.selectedChatThread();
+  const tag = () => `${props.workspace}:${threadId() ?? ""}`;
   const [chatContext] = createResource(
     () => {
       const id = threadId();
       return id != null ? `${props.workspace}:${id}:${intelStore.version()}` : null;
     },
-    async (): Promise<string | null> => {
+    async (): Promise<TaggedAnswer<string | null>> => {
       const id = threadId();
-      if (id == null) return null;
+      const answerTag = tag();
+      if (id == null) return { tag: answerTag, value: null };
       try {
         const res = await send({
           type: "get_context_briefing",
           workspace: props.workspace,
           thread_id: id,
         });
-        if (res.type !== "context_briefing") return null;
-        return extractCurrentChatSection(res.briefing.body_markdown);
+        if (res.type !== "context_briefing") return { tag: answerTag, value: null };
+        return { tag: answerTag, value: extractCurrentChatSection(res.briefing.body_markdown) };
       } catch {
-        return null;
+        return { tag: answerTag, value: null };
       }
     },
   );
+  const context = () => latestFor(chatContext, tag);
   return (
     <>
       <div class="ws-flat-section-label">Current chat</div>
       <Show
-        when={chatContext()}
+        when={context()}
         fallback={
           <div class="ws-check-empty">
             {threadId() == null
               ? "Select a chat to see its maintained context here."
-              : chatContext.loading
+              : context() === undefined
                 ? "Loading…"
                 : "No maintained context for this chat yet — it appears after the next turn."}
           </div>

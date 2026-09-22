@@ -9,6 +9,26 @@ import {
 } from "./workspacePrAction";
 
 describe("deriveWorkspacePrAction", () => {
+  it("says loading instead of guessing a state from absent data", () => {
+    // A workspace whose status has not arrived looks exactly like a clean one,
+    // so deriving from the empty input is how the bar used to claim "No
+    // changes" and then visibly flip a moment later.
+    expect(deriveWorkspacePrAction({ loading: true })).toMatchObject({
+      title: "Loading…",
+      action: "none",
+      state: "loading",
+    });
+    expect(deriveWorkspacePrAction(workspacePrActionInput(undefined, undefined, true)).state).toBe(
+      "loading",
+    );
+  });
+
+  it("derives normally once the row has landed", () => {
+    expect(
+      deriveWorkspacePrAction(workspacePrActionInput({ changedFiles: 2 }, undefined, false)).state,
+    ).toBe("no-pr");
+  });
+
   it("promotes local changes to a create PR action", () => {
     expect(deriveWorkspacePrAction({ changedFiles: 2 })).toMatchObject({
       title: "No pull request yet",
@@ -162,6 +182,7 @@ describe("deriveWorkspacePrAction state", () => {
   const OPEN = { prNumber: 42, prState: "open" };
 
   const CASES: Array<{ state: WorkspacePrStateKind; input: WorkspacePrActionInput }> = [
+    { state: "loading", input: { loading: true } },
     { state: "no-changes", input: {} },
     { state: "no-pr", input: { changedFiles: 3 } },
     { state: "unpushed", input: { branchAhead: 2 } },

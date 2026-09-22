@@ -24,6 +24,12 @@
     transition: color var(--mo-fast) var(--mo-in-out);
 }
 
+/* Status not read yet. Same dim as the idle states — a spinner that shouts
+   would be worse than the flash it replaces. */
+.workspace-git-state-loading {
+    color: #5f5f5f;
+}
+
 /* Idle — nothing has happened yet, or the PR is over. Dimmest in the list so
    these rows recede. */
 .workspace-git-state-no-changes {
