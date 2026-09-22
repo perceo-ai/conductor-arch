@@ -10,12 +10,22 @@ export const SETTINGS_SECTIONS: Array<{
   label: string;
   group: string;
   icon: IconName;
+  /** Extra search terms: what the section holds, not what it is called. */
+  keywords?: string[];
 }> = [
-  { id: "general", label: "General", group: "Personal", icon: "settings" },
-  { id: "clients", label: "Clients", group: "Archcars", icon: "panel-right" },
-  { id: "agents", label: "Agents", group: "Agents & environment", icon: "brain" },
-  { id: "repository", label: "Repository behavior", group: "Repositories", icon: "folder" },
-  { id: "advanced", label: "Advanced", group: "More", icon: "wrench" },
+  { id: "general", label: "General", group: "Personal", icon: "settings", keywords: ["theme", "density", "appearance", "updates", "shortcuts", "keybindings"] },
+  {
+    id: "clients",
+    label: "Clients",
+    group: "Archcars",
+    icon: "panel-right",
+    // Searching for the thing you want to do: pairing a phone lives here, and
+    // "clients" is not a word anyone types when looking for it.
+    keywords: ["pair", "pairing", "phone", "mobile", "ios", "iphone", "ipad", "qr", "remote", "daemon", "token", "service", "mcp"],
+  },
+  { id: "agents", label: "Agents", group: "Agents & environment", icon: "brain", keywords: ["model", "skills", "mcp", "environment", "recovery"] },
+  { id: "repository", label: "Repository behavior", group: "Repositories", icon: "folder", keywords: ["git", "worktree", "branch", "push", "remote"] },
+  { id: "advanced", label: "Advanced", group: "More", icon: "wrench", keywords: ["toml", "config", "settings file", "logs"] },
 ];
 export function SettingsNavButton(props: {
   active: boolean;

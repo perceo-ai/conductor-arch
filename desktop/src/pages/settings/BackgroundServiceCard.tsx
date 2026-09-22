@@ -28,6 +28,7 @@ export function BackgroundServiceCard() {
   const [listen, setListen] = createSignal("7420");
   const [showToken, setShowToken] = createSignal(false);
   const [doctor, setDoctor] = createSignal<ServiceDoctorReport | null>(null);
+  const [installWarnings, setInstallWarnings] = createSignal<string[]>([]);
 
   const supported = () => (status()?.manager ?? "unsupported") !== "unsupported";
 
@@ -63,6 +64,10 @@ export function BackgroundServiceCard() {
         type: "install_service",
         input: { listen: listen().trim() || undefined }
       });
+      // Install-time warnings are not recomputed by `get_service_status` — the
+      // socket-conflict one in particular is about this moment — so keep them
+      // rather than losing them on the next refresh.
+      setInstallWarnings(res.type === "service_status" ? (res.status.warnings ?? []) : []);
       setFeedback(res.type === "error" ? res.message : res.type === "service_status" ? res.status.detail : "");
     });
 
@@ -122,6 +127,9 @@ export function BackgroundServiceCard() {
         </div>
       </Show>
       <For each={status()?.warnings ?? []}>
+        {(warning) => <div class="settings-status settings-hint">⚠ {warning}</div>}
+      </For>
+      <For each={installWarnings().filter((warning) => !(status()?.warnings ?? []).includes(warning))}>
         {(warning) => <div class="settings-status settings-hint">⚠ {warning}</div>}
       </For>
       <Show when={doctor()}>

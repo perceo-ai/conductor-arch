@@ -3302,12 +3302,14 @@ fn run_cli() -> Result<()> {
                 listen,
                 archcar_path,
             } => {
+                // The CLI is not the daemon, so it has no listener of its own.
                 let status = service::install(
                     &paths,
                     &service::InstallService {
                         listen,
                         archcar_path,
                     },
+                    None,
                 )?;
                 print_service_status(&status);
             }
@@ -5292,6 +5294,7 @@ fn run_first_run_setup(
                 listen: Some(listen.clone()),
                 archcar_path,
             },
+            None,
         ) {
             Ok(status) => print_service_status(&status),
             // A missing service manager should not block the rest of setup —

@@ -399,6 +399,7 @@
 }
 
 .ws-file-name,
+.ws-folder-name,
 .ws-file-summary-counts,
 .card-branch,
 .commit-list,
@@ -407,7 +408,8 @@
   font-family: var(--ui-font-mono);
 }
 
-.ws-file-name {
+.ws-file-name,
+.ws-folder-name {
   font-size: var(--ui-text-sm);
 }
 
