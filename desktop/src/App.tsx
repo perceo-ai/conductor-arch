@@ -58,6 +58,7 @@ const GLOBAL_SHORTCUT_ACTIONS = new Set<ShortcutAction>([
   "workspace-actions",
   "add-project",
   "new-chat",
+  "close-active-chat",
   "toggle-terminal",
   "toggle-theme",
   "toggle-right-panel",
@@ -217,8 +218,13 @@ export default function App() {
         layoutStore.setEditing(false);
         return;
       }
-      if (isTypingTarget(e.target)) return;
       const action = resolveShortcut(e, activeShortcuts());
+      if (action === "close-active-chat") {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent("archductor:close-active-chat"));
+        return;
+      }
+      if (isTypingTarget(e.target)) return;
       if (!action || action === "open-palette") return;
       if (!GLOBAL_SHORTCUT_ACTIONS.has(action)) return;
       e.preventDefault();

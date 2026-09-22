@@ -87,11 +87,14 @@
 /* ---- Shortcuts help overlay ---- */
 .shortcuts-panel {
   width: min(460px, 90vw);
+  max-height: min(760px, 86vh);
   background: var(--lc-surface-raised, #1c1c1c);
   border: 1px solid var(--lc-border, #333);
   border-radius: 12px;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .shortcuts-head {
   display: flex;
@@ -102,6 +105,8 @@
 }
 .shortcuts-list {
   padding: 8px 8px 12px;
+  overflow-y: auto;
+  min-height: 0;
 }
 .shortcuts-row {
   display: flex;

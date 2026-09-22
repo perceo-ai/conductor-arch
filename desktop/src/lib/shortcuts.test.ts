@@ -87,6 +87,7 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(ev("s", true))).toBe("save");
     expect(resolveShortcut(ev("Enter", true))).toBe("send-immediate");
     expect(resolveShortcut(ev("t", true))).toBe("new-chat");
+    expect(resolveShortcut(ev("w", true))).toBe("close-active-chat");
     expect(resolveShortcut(ev("Tab", true, true))).toBe("toggle-plan-mode");
     expect(resolveShortcut(ev("Enter", true, true))).toBe("approve-plan");
   });
