@@ -37,6 +37,7 @@
  * row rather than the text inside it. */
 .ws-change-row,
 .ws-file-row,
+.ws-dir-row,
 .ws-check-row-flat,
 .ws-timeline-row,
 .ws-file-comment-row,
@@ -48,6 +49,7 @@
 
 .ws-change-row:hover,
 .ws-file-row:hover,
+.ws-dir-row:hover,
 .ws-check-row-flat:hover,
 .ws-timeline-row:hover {
     background: var(--el-2);

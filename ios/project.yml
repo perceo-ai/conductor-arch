@@ -37,6 +37,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: ai.perceo.archductor.ios
         SWIFT_STRICT_CONCURRENCY: complete
         GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
   ArchductorUITests:
     type: bundle.ui-testing

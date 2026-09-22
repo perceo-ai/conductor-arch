@@ -71,6 +71,11 @@ struct ServerState {
     drain_reruns: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
     subscribers: Vec<Sender<ArchcarEvent>>,
+    /// The TCP address this daemon actually bound, if any. Reported as-is
+    /// rather than re-read from configuration: a client asking how to reach
+    /// this machine wants the truth about the process answering it, not what
+    /// some unit file asked for.
+    remote_listen: Option<std::net::SocketAddr>,
 }
 
 /// How often the daemon advances background development tasks.
@@ -167,12 +172,13 @@ impl ArchcarServer {
         }
         let listener = transport::bind(&endpoint_path)
             .with_context(|| format!("bind archcar endpoint {}", endpoint_path.display()))?;
-        let remote = match remote::listen_addr_from_env() {
+        let remote = match remote::configured_listen_addr(&paths) {
             Some(Ok(addr)) => Some(bind_remote_listener(&paths, addr)?),
             Some(Err(err)) => return Err(err),
             None => None,
         };
         let state = Arc::new(Mutex::new(ServerState {
+            remote_listen: remote.as_ref().map(|listener| listener.addr),
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
             shutting_down: false,
@@ -2644,7 +2650,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             },
         },
         ArchcarRequest::InstallService { input } => {
-            match crate::service::install(&AppPaths::from_env(), &input) {
+            let current_listen = state.lock().ok().and_then(|guard| guard.remote_listen);
+            match crate::service::install(&AppPaths::from_env(), &input, current_listen) {
                 Ok(status) => ArchcarResponse::ServiceStatus { status },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -2659,8 +2666,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetRemoteAccess => remote_access_response(false),
-        ArchcarRequest::RotateRemoteToken => remote_access_response(true),
+        ArchcarRequest::GetRemoteAccess => remote_access_response(false, state),
+        ArchcarRequest::RotateRemoteToken => remote_access_response(true, state),
         // ---- Background development tasks -------------------------------
         ArchcarRequest::StartBackgroundTask { input } => start_background_task(state, input),
         ArchcarRequest::ListBackgroundTasks { active_only } => with_store(state, |store| {
@@ -3012,7 +3019,7 @@ fn broadcast_inventory_change_for_response(
 /// Report (or rotate) the token and address a remote client needs. The listen
 /// address comes from this process's configuration, so it reflects the daemon
 /// that is actually running rather than what a unit file once said.
-fn remote_access_response(rotate: bool) -> ArchcarResponse {
+fn remote_access_response(rotate: bool, state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
     let paths = AppPaths::from_env();
     let token = if rotate {
         remote::rotate_token(&paths)
@@ -3021,8 +3028,10 @@ fn remote_access_response(rotate: bool) -> ArchcarResponse {
     };
     match token {
         Ok(token) => ArchcarResponse::RemoteAccess {
-            listen: remote::listen_addr_from_env()
-                .and_then(|addr| addr.ok())
+            listen: state
+                .lock()
+                .ok()
+                .and_then(|guard| guard.remote_listen)
                 .map(|addr| addr.to_string()),
             token,
             token_path: remote::token_path(&paths).display().to_string(),
@@ -6263,6 +6272,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let on = dispatch_request(
@@ -6355,6 +6365,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
         let added = dispatch_request(
             ArchcarRequest::AddRepository {
@@ -6442,6 +6453,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = dispatch_request(
@@ -6530,6 +6542,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
+            remote_listen: None,
         }));
 
         let response = dispatch_request(
@@ -6636,6 +6649,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
+            remote_listen: None,
         }));
 
         let context = crate::workspace::DeterministicNamingContext {
@@ -6719,6 +6733,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
+            remote_listen: None,
         }));
 
         // Agent metadata is applied while a thread renders, so a read can rename
@@ -6792,6 +6807,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
+            remote_listen: None,
         }));
 
         let response = dispatch_request(
@@ -6934,6 +6950,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = dispatch_request(
@@ -7044,6 +7061,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         drain_queued_input_for_thread(&state, thread.id);
@@ -7136,6 +7154,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: vec![subscriber_tx],
+            remote_listen: None,
         }));
 
         handle_session_event(
@@ -7225,6 +7244,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         handle_session_event(
@@ -7311,6 +7331,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
         let interaction = ProviderInteractionStore::new(db_path.clone())
             .register(interaction_draft_for(
@@ -7384,6 +7405,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         let interaction = interactions
@@ -7435,6 +7457,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         interactions
@@ -7504,6 +7527,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         drain_every_queued_chat_thread(&state);
@@ -7557,6 +7581,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         // Two sends back to back, the way a user types a follow-up right after
@@ -7617,6 +7642,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         // A brand-new chat thread has no session, so nothing would ever deliver
@@ -7668,6 +7694,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         assert_eq!(
@@ -7695,6 +7722,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let guard = QueueDrainGuard::begin(&state, thread.id).expect("first drain runs");
@@ -7781,6 +7809,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = dispatch_request(
@@ -7831,6 +7860,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
         let first = ensure_default_session(
             &state,
@@ -7873,6 +7903,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![event_tx],
+            remote_listen: None,
         }));
 
         let claude = ensure_default_session(
@@ -7913,6 +7944,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = spawn_session(
@@ -8132,6 +8164,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = ensure_default_session(
@@ -8207,6 +8240,7 @@ mod tests {
                 ),
             ]),
             subscribers: Vec::new(),
+            remote_listen: None,
         };
         let (subscriber_tx, subscriber_rx) = mpsc::channel();
 
@@ -8251,6 +8285,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
+            remote_listen: None,
         }));
 
         begin_shutdown(&state);
@@ -8319,6 +8354,7 @@ mod tests {
                 },
             )]),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
@@ -8398,6 +8434,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = ensure_chat_thread_session(
@@ -8450,6 +8487,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = dispatch_request(
@@ -8504,6 +8542,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions,
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = dispatch_request(
@@ -8574,6 +8613,7 @@ mod tests {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let response = ensure_chat_thread_session(
@@ -8985,6 +9025,7 @@ icon = "cloud"
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let added = dispatch_request(
@@ -9071,6 +9112,7 @@ default = true
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let added = dispatch_request(
@@ -9164,6 +9206,7 @@ default = true
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
         dispatch_request(
             ArchcarRequest::AddRepository {
@@ -9265,6 +9308,7 @@ default = true
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         dispatch_request(
@@ -9473,6 +9517,7 @@ default = true
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         let added = dispatch_request(
@@ -9580,6 +9625,7 @@ default = true
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
+            remote_listen: None,
         }));
 
         dispatch_request(
@@ -9651,6 +9697,7 @@ default = true
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            remote_listen: None,
         }));
 
         dispatch_request(

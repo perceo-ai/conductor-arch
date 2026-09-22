@@ -131,14 +131,15 @@ hours, and offers it as a sticky toast — but only once every agent session and
 run script has stopped. Restarting under a running agent is the one thing the
 prompt must not cause.
 
-- `desktop/electron/updater.ts` holds the policy. Only the Windows nsis build
-  and a Linux AppImage can install in place (`mode: "install"`,
+- `desktop/electron/updater.ts` holds the policy. Windows nsis, Linux
+  AppImage, and (since 2026-09-21) macOS install in place (`mode: "install"`,
   electron-updater, background download, `quitAndInstall`). deb/rpm belong to
-  the package manager and the macOS dmg is unsigned, so both get
-  `mode: "open"`: same prompt, opens the release page.
-- macOS self-update stays blocked until there is an Apple Developer identity to
-  sign and notarize with. Squirrel.Mac refuses an unsigned bundle; adding the
-  zip target alone would not help.
+  the package manager and get `mode: "open"`: same prompt, opens the release
+  page.
+- macOS release builds are Developer ID-signed, hardened-runtime, and
+  notarized (see the signing section below); a self-built unsigned bundle
+  trips Squirrel's signature check at runtime and main.ts demotes just that
+  machine to `open` (`shouldFallBackToOpen`).
 - `electron-builder.yml` gained a `publish` block so the build *generates*
   `latest*.yml` + blockmaps and bakes `app-update.yml` in; the release workflow
   uploads them. CI still packages with `--publish never`.
@@ -1721,3 +1722,27 @@ menu in the app (shown only while a remote client is selected).
   driving the real Electron window ([[electron-ui-smoke-recipe]]).
 - Import assumes the branch exists on the shared remote or locally; a branch
   that only ever lived in the remote worktree is not pushed for you.
+
+## macOS signing + notarization (2026-09-21)
+
+Release dmg/zip are now signed with the Developer ID Application identity
+(team UM8FW24DFH), hardened-runtime with `desktop/build/entitlements.mac.plist`
+(JIT, unsigned exec memory, dyld env vars, no library validation — Electron +
+the Rust sidecars need all four), and notarized in CI. This unblocks macOS
+self-update: Squirrel.Mac installs from the zip target, which
+`electron-builder.yml` now also builds and the release workflow uploads
+alongside `latest-mac.yml`.
+
+- CI: the mac package step imports the cert from `MACOS_CERT_P12_BASE64` /
+  `MACOS_CERT_PASSWORD` (electron-builder reads base64 straight from
+  `CSC_LINK`) and notarizes with `APPLE_ID` / `APPLE_APP_SPECIFIC_PASSWORD` /
+  `APPLE_TEAM_ID`. The step fails fast if the cert secret is missing rather
+  than shipping an unsigned mac build that would strand updaters.
+- `desktop/electron/macSigning.test.ts` pins the contract (hardened runtime,
+  notarize, zip target, entitlement keys, workflow globs + env).
+- Verified locally: signed build shows `flags=0x10000(runtime)`, Developer ID
+  authority chain, entitlements baked, sidecars signed, `codesign --verify
+  --deep --strict` clean; `spctl` says "Unnotarized Developer ID" as expected
+  pre-CI. Full notarization only runs in CI where the Apple ID secrets live.
+- Known gap: macos-14 runner builds arm64 only, so Intel Macs still have no
+  installable artifact; adding x64 means cross-building the Rust sidecars.

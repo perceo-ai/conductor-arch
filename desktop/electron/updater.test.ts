@@ -4,6 +4,7 @@ import {
   checkLatestRelease,
   compareVersions,
   scheduleUpdateChecks,
+  shouldFallBackToOpen,
   updateMode,
 } from "./updater";
 
@@ -28,8 +29,24 @@ describe("updateMode", () => {
     expect(updateMode({ platform: "linux", packaged: true, env: {} })).toBe("open");
   });
 
-  it("only points macOS at the release page, because the app is unsigned", () => {
-    expect(updateMode({ platform: "darwin", packaged: true, env: {} })).toBe("open");
+  it("installs in place on macOS now that release builds are signed + notarized", () => {
+    expect(updateMode({ platform: "darwin", packaged: true, env: {} })).toBe("install");
+  });
+});
+
+describe("shouldFallBackToOpen", () => {
+  it("demotes a mac build Squirrel rejects for its signature", () => {
+    expect(
+      shouldFallBackToOpen("darwin", "Could not get code signature for running application"),
+    ).toBe(true);
+    expect(shouldFallBackToOpen("darwin", "app is not signed")).toBe(true);
+  });
+
+  it("keeps retrying install for transient errors and other platforms", () => {
+    // Offline / missing feed heal on their own; the next check must retry.
+    expect(shouldFallBackToOpen("darwin", "net::ERR_INTERNET_DISCONNECTED")).toBe(false);
+    expect(shouldFallBackToOpen("darwin", "Cannot find latest-mac.yml")).toBe(false);
+    expect(shouldFallBackToOpen("win32", "signature verification failed")).toBe(false);
   });
 });
 

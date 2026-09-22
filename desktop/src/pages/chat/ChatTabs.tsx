@@ -38,7 +38,7 @@ export function ThreadTab(props: {
       }}
       role="button"
       tabIndex={0}
-      title={`${props.thread.provider} · ${props.thread.status || "ready"}`}
+      title={`${props.label} · ${props.thread.provider} · ${props.thread.status || "ready"}`}
     >
       <Show when={showFinishedDot() || showAttentionDot()}>
         <span

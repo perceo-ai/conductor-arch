@@ -14,7 +14,12 @@ import {
   upsertClient,
 } from "./archcar.js";
 import { parseGithubRepos } from "./githubRepos.js";
-import { buildPairingPayload, pairingWindowHtml, renderPairingQr } from "./pairing.js";
+import {
+  buildPairingPayload,
+  pairingWindowHtml,
+  preferredPairingHost,
+  renderPairingQr,
+} from "./pairing.js";
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
 // CommonJS package: the named export is not reachable through ESM interop.
@@ -22,6 +27,7 @@ import electronUpdater from "electron-updater";
 import {
   checkLatestRelease,
   scheduleUpdateChecks,
+  shouldFallBackToOpen,
   updateMode,
   type UpdateReady,
 } from "./updater.js";
@@ -374,7 +380,7 @@ ipcMain.handle("pairing:qr", async () => {
       // the service status is the fallback for a daemon started by hand.
       listen: access.listen ?? status.status?.listen ?? null,
       token: access.token ?? "",
-      fallbackHost: os.hostname(),
+      fallbackHost: preferredPairingHost(os.networkInterfaces(), os.hostname()),
     });
     if (!built.ok) return built;
 
@@ -812,9 +818,9 @@ ipcMain.handle("app:check-for-updates", async () => {
 
 // --- Auto-update ----------------------------------------------------------
 // Where an in-place install is possible we download in the background and the
-// renderer only ever sees "a new version is ready"; where it is not (unsigned
-// macOS, deb/rpm) the same signal carries the release URL instead. See
-// updater.ts for why the platforms differ.
+// renderer only ever sees "a new version is ready"; where it is not (deb/rpm,
+// a mac bundle Squirrel rejects) the same signal carries the release URL
+// instead. See updater.ts for why the platforms differ.
 
 const UPDATE_FIRST_CHECK_MS = 10_000;
 const UPDATE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -837,27 +843,31 @@ function announceUpdate(ready: UpdateReady): void {
   win?.webContents.send("app:update-ready", ready);
 }
 
+function startOpenPoller(): void {
+  cancelUpdateChecks = scheduleUpdateChecks({
+    initialDelayMs: UPDATE_FIRST_CHECK_MS,
+    intervalMs: UPDATE_INTERVAL_MS,
+    run: () => {
+      void checkLatestRelease(app.getVersion()).then((result) => {
+        if (result.ok && result.updateAvailable && result.latestVersion) {
+          announceUpdate({
+            version: result.latestVersion,
+            mode: "open",
+            releaseUrl: result.releaseUrl ?? RELEASES_PAGE_URL,
+          });
+        } else if (!result.ok) {
+          logLine("error", `update check failed: ${result.error}`);
+        }
+      });
+    },
+  });
+}
+
 function startUpdater(): void {
   if (currentUpdateMode === "disabled" || cancelUpdateChecks) return;
 
   if (currentUpdateMode === "open") {
-    cancelUpdateChecks = scheduleUpdateChecks({
-      initialDelayMs: UPDATE_FIRST_CHECK_MS,
-      intervalMs: UPDATE_INTERVAL_MS,
-      run: () => {
-        void checkLatestRelease(app.getVersion()).then((result) => {
-          if (result.ok && result.updateAvailable && result.latestVersion) {
-            announceUpdate({
-              version: result.latestVersion,
-              mode: "open",
-              releaseUrl: result.releaseUrl ?? RELEASES_PAGE_URL,
-            });
-          } else if (!result.ok) {
-            logLine("error", `update check failed: ${result.error}`);
-          }
-        });
-      },
-    });
+    startOpenPoller();
     return;
   }
 
@@ -870,9 +880,17 @@ function startUpdater(): void {
     announceUpdate({ version: `v${info.version.replace(/^v/i, "")}`, mode: "install" });
   });
   // An unreachable feed is normal (offline, a release without metadata yet) and
-  // must not surface as a dialog.
+  // must not surface as a dialog. The one exception: Squirrel.Mac rejecting an
+  // unsigned self-built bundle — that never heals on retry, so drop that
+  // machine to the tell-and-open path instead of going silent.
   autoUpdater.on("error", (err: Error) => {
     logLine("error", `auto-update failed: ${err.message}`);
+    if (shouldFallBackToOpen(process.platform, err.message)) {
+      cancelUpdateChecks?.();
+      cancelUpdateChecks = null;
+      pendingUpdate = null;
+      startOpenPoller();
+    }
   });
   cancelUpdateChecks = scheduleUpdateChecks({
     initialDelayMs: UPDATE_FIRST_CHECK_MS,

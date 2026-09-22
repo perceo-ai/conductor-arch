@@ -18,22 +18,6 @@ export function RemoteDaemonCard() {
 
   const busy = () => clientsStore.state.busy;
 
-  // Pairing code for the iOS app. Main opens it in its own isolated window;
-  // the code encodes the daemon token, so this process only learns the address.
-  const [pairingAddress, setPairingAddress] = createSignal("");
-  const [pairingError, setPairingError] = createSignal("");
-
-  async function showPairingCode() {
-    setPairingError("");
-    const result = await window.archductor.pairingQr();
-    if (result.ok) {
-      setPairingAddress(result.address);
-    } else {
-      setPairingAddress("");
-      setPairingError(result.error);
-    }
-  }
-
   async function add() {
     const addr = address().trim();
     const tok = token().trim();
@@ -188,23 +172,6 @@ export function RemoteDaemonCard() {
         </div>
         <Show when={feedback()}>
           <div class="settings-status">{feedback()}</div>
-        </Show>
-
-        <div class="settings-field-title">Pair a phone</div>
-        <div class="settings-action-row">
-          <button class="ui-button-secondary" onClick={() => void showPairingCode()}>
-            Show pairing code
-          </button>
-        </div>
-        <Show when={pairingError()}>
-          <div class="settings-status">{pairingError()}</div>
-        </Show>
-        <Show when={pairingAddress()}>
-          <div class="settings-status settings-hint">
-            The code for {pairingAddress()} is open in its own window. Anyone who scans it gains
-            full control of this machine, so close that window once the phone has paired;
-            `archductor service token --rotate` revokes it.
-          </div>
         </Show>
       </Show>
     </div>

@@ -22,6 +22,7 @@ import { readTomlValue, writeTomlValue, type TomlValueKind } from "./settings/to
 import {  setShortcutBinding, shortcutBindingKey } from "./settings/shortcuts";
 import { SkillsCard } from "./settings/SkillsCard";
 import { RemoteDaemonCard } from "./settings/RemoteDaemonCard";
+import { PairPhoneCard } from "./settings/PairPhoneCard";
 import { BackgroundServiceCard } from "./settings/BackgroundServiceCard";
 import { McpRegistrationCard } from "./settings/McpRegistrationCard";
 
@@ -49,7 +50,8 @@ export function SettingsPage() {
     return SETTINGS_SECTIONS.filter(
       (section) =>
         section.label.toLowerCase().includes(needle) ||
-        section.group.toLowerCase().includes(needle),
+        section.group.toLowerCase().includes(needle) ||
+        (section.keywords ?? []).some((keyword) => keyword.includes(needle)),
     );
   });
   const groupedSections = createMemo(() => {
@@ -376,6 +378,9 @@ export function SettingsPage() {
                 meta="Use one host:port plus the current token per client. Rotating the token revokes existing clients."
                 accent
               />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Phone">
+              <PairPhoneCard />
             </SettingsSectionBlock>
           </div>
         </Show>

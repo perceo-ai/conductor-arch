@@ -686,6 +686,63 @@ pub fn listen_addr_from_env() -> Option<Result<SocketAddr>> {
         .map(|value| parse_listen_addr(&value))
 }
 
+pub fn listen_path(paths: &AppPaths) -> PathBuf {
+    paths.state_dir.join("archcar.listen")
+}
+
+/// Remember the listen address for every daemon on this machine, not just the
+/// one the service manager starts.
+///
+/// Remote access used to live only in the service unit's environment, so
+/// whichever daemon reached the socket first decided whether a phone could
+/// connect at all: the app spawns its own sidecar on demand, that sidecar
+/// holds the socket with no TCP listener, and the installed service then
+/// cannot bind and restarts forever. Storing the address next to the token
+/// takes the race out of it — whoever ends up serving reads the same file.
+pub fn save_listen_addr(paths: &AppPaths, addr: Option<&SocketAddr>) -> Result<()> {
+    let path = listen_path(paths);
+    let Some(addr) = addr else {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(err) => {
+                Err(err).with_context(|| format!("clear archcar listen {}", path.display()))
+            }
+        };
+    };
+    std::fs::create_dir_all(&paths.state_dir)
+        .with_context(|| format!("create archcar state dir {}", paths.state_dir.display()))?;
+    std::fs::write(&path, format!("{addr}\n"))
+        .with_context(|| format!("write archcar listen {}", path.display()))
+}
+
+/// The saved listen address, if remote access was ever enabled here.
+///
+/// Only a missing file means "not configured". A permission error, a broken
+/// link, or any other I/O failure is reported: swallowing it would start the
+/// daemon with no TCP access and no reason why the remote access someone
+/// configured had disappeared.
+pub fn load_listen_addr(paths: &AppPaths) -> Option<Result<SocketAddr>> {
+    let path = listen_path(paths);
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return None,
+        Err(err) => {
+            return Some(
+                Err(err).with_context(|| format!("read archcar listen {}", path.display())),
+            );
+        }
+    };
+    let value = contents.trim();
+    (!value.is_empty()).then(|| parse_listen_addr(value))
+}
+
+/// Where this daemon should listen: the environment first, so a one-off run
+/// can still override, then what was saved when remote access was enabled.
+pub fn configured_listen_addr(paths: &AppPaths) -> Option<Result<SocketAddr>> {
+    listen_addr_from_env().or_else(|| load_listen_addr(paths))
+}
+
 pub fn bind(addr: SocketAddr) -> Result<TcpListener> {
     TcpListener::bind(addr).with_context(|| format!("bind archcar tcp listener on {addr}"))
 }
@@ -764,6 +821,33 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn a_missing_listen_file_means_remote_access_was_never_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(load_listen_addr(&paths_in(temp.path())).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_listen_file_is_reported_not_treated_as_off() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        save_listen_addr(&paths, Some(&parse_listen_addr("0.0.0.0:7420").unwrap())).unwrap();
+        let path = listen_path(&paths);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            // Running as root, where the mode does not deny anything.
+            return;
+        }
+
+        let err = load_listen_addr(&paths)
+            .expect("an unreadable file is not \"not configured\"")
+            .expect_err("the read failure is surfaced");
+        assert!(err.to_string().contains("read archcar listen"), "{err}");
+    }
 
     #[test]
     fn an_unknown_host_key_is_explained_with_the_command_that_fixes_it() {
@@ -1234,6 +1318,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("address"), "{err}");
+    }
+
+    #[test]
+    fn saved_listen_address_outlives_the_process_that_configured_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        assert!(load_listen_addr(&paths).is_none());
+
+        let addr = parse_listen_addr("0.0.0.0:7420").unwrap();
+        save_listen_addr(&paths, Some(&addr)).unwrap();
+        assert_eq!(load_listen_addr(&paths).unwrap().unwrap(), addr);
+
+        // Uninstalling remote access takes the address with it.
+        save_listen_addr(&paths, None).unwrap();
+        assert!(load_listen_addr(&paths).is_none());
+        // Clearing what is already clear is not an error.
+        save_listen_addr(&paths, None).unwrap();
+    }
+
+    #[test]
+    fn configured_listen_prefers_the_environment_over_the_saved_address() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        let saved = parse_listen_addr("0.0.0.0:7420").unwrap();
+        save_listen_addr(&paths, Some(&saved)).unwrap();
+
+        // No env var: the saved address is what a daemon binds, which is the
+        // whole point — an app-spawned sidecar has no service environment.
+        assert_eq!(configured_listen_addr(&paths).unwrap().unwrap(), saved);
     }
 
     #[test]

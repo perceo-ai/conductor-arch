@@ -54,6 +54,58 @@ export function buildPairingPayload(input: PairingInput): PairingResult {
   };
 }
 
+/** One entry of `os.networkInterfaces()`, narrowed to what matters here. */
+export interface PairingInterface {
+  address: string;
+  family: string | number;
+  internal: boolean;
+}
+
+/**
+ * The address to advertise when the daemon binds a wildcard.
+ *
+ * The hostname was the only answer, and `<machine>.local` is an mDNS name: it
+ * resolves on the same LAN and nowhere else, so a phone on a VPN — the setup
+ * this pairing flow is most useful for — reads the code and cannot connect.
+ * A tailnet address is preferred because it reaches the machine from anywhere
+ * the VPN does, then a private LAN address, and only then the hostname.
+ */
+export function preferredPairingHost(
+  interfaces: Record<string, PairingInterface[] | undefined>,
+  hostname: string,
+): string {
+  const named = Object.entries(interfaces).flatMap(([name, entries]) =>
+    (entries ?? [])
+      .filter((entry) => !entry.internal && (entry.family === "IPv4" || entry.family === 4))
+      .map((entry) => ({ name, entry })),
+  );
+  // 100.64.0.0/10 is shared carrier-grade NAT space, not Tailscale's alone: a
+  // corporate VPN, another mesh, or a virtual adapter can own an address in it,
+  // and preferring that over a working LAN address would put an endpoint in the
+  // code that the phone cannot reach. The interface name has to agree before
+  // the range counts as a tailnet.
+  const tailnet = named.find(({ name, entry }) => {
+    if (!isTailscaleInterface(name)) return false;
+    const [a, b] = entry.address.split(".").map(Number);
+    return a === 100 && b >= 64 && b <= 127;
+  });
+  if (tailnet) return tailnet.entry.address;
+  const lan = named.find(({ entry }) => {
+    const [a, b] = entry.address.split(".").map(Number);
+    return a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+  });
+  return lan?.entry.address ?? hostname;
+}
+
+/**
+ * Interface names Tailscale uses: `tailscale0` on Linux, `utun<n>` on macOS
+ * (shared with other tunnels, which is why the CGNAT range still has to match),
+ * and the adapter description on Windows.
+ */
+function isTailscaleInterface(name: string): boolean {
+  return /^(tailscale|ts)\d*$/i.test(name) || /^utun\d*$/i.test(name) || /tailscale/i.test(name);
+}
+
 export function renderPairingQr(payload: string): Promise<string> {
   return QRCode.toString(payload, { type: "svg", errorCorrectionLevel: "M", margin: 1 });
 }

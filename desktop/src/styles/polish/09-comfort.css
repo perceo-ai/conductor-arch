@@ -150,6 +150,7 @@ body.lc-density-comfortable .workspace-list {
 /* ── Right-rail lists ── */
 body.lc-density-comfortable .ws-change-row,
 body.lc-density-comfortable .ws-file-row,
+body.lc-density-comfortable .ws-dir-row,
 body.lc-density-comfortable .ws-check-row-flat,
 body.lc-density-comfortable .ws-timeline-row,
 body.lc-density-comfortable .ws-file-comment-row {

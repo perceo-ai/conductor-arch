@@ -253,7 +253,15 @@ fn ensure_durable_binary(binary: &Path) -> Result<()> {
 }
 
 /// Write the service definition and start it. Returns the resulting status.
-pub fn install(paths: &AppPaths, input: &InstallService) -> Result<ServiceStatus> {
+///
+/// `current_listen` is the TCP address the calling daemon has already bound,
+/// when the caller is itself a running daemon. It decides whether the local
+/// socket already being taken is worth warning about.
+pub fn install(
+    paths: &AppPaths,
+    input: &InstallService,
+    current_listen: Option<std::net::SocketAddr>,
+) -> Result<ServiceStatus> {
     let manager = ServiceManager::detect();
     anyhow::ensure!(
         manager != ServiceManager::Unsupported,
@@ -262,10 +270,11 @@ pub fn install(paths: &AppPaths, input: &InstallService) -> Result<ServiceStatus
     let unit_path = unit_path(paths, manager).context("could not resolve the service unit path")?;
     let binary = resolve_archcar_binary(input.archcar_path.as_deref())?;
     ensure_durable_binary(&binary)?;
-    let listen = match input.listen.as_deref() {
-        Some(value) => Some(remote::parse_listen_addr(value)?.to_string()),
+    let listen_addr = match input.listen.as_deref() {
+        Some(value) => Some(remote::parse_listen_addr(value)?),
         None => None,
     };
+    let listen = listen_addr.map(|addr| addr.to_string());
     let path_env = service_path_env();
 
     if let Some(parent) = unit_path.parent() {
@@ -296,7 +305,6 @@ pub fn install(paths: &AppPaths, input: &InstallService) -> Result<ServiceStatus
     if listen.is_some() {
         remote::ensure_token(paths)?;
     }
-
     // Linger before start, not after: enabling it is what brings the systemd
     // user manager up, and without a running manager `systemctl --user` has no
     // bus to talk to. That is the difference between this working from an SSH
@@ -304,10 +312,28 @@ pub fn install(paths: &AppPaths, input: &InstallService) -> Result<ServiceStatus
     // cron job, or container exec, where nothing has.
     let mut warnings = Vec::new();
     let boot_persistent = ensure_boot_persistence(manager, &mut warnings);
+    if let Some(warning) = socket_conflict_warning(paths, listen_addr, current_listen) {
+        warnings.push(warning);
+    }
     let detail = match start_service(manager, &unit_path) {
         Ok(detail) => detail,
         Err(err) => return Err(explain_start_failure(err, manager, boot_persistent)),
     };
+    // Saved outside the unit file so an app-spawned daemon serves the same
+    // address. Without this, remote access only worked when the service won
+    // the race for the local socket, which it loses whenever the desktop app
+    // is already running.
+    //
+    // Written only once the service is actually up: a failed install reports
+    // that remote access is off, and a saved address here would quietly
+    // contradict it the next time the desktop app spawned its own daemon.
+    let previous_listen = remote::load_listen_addr(paths).and_then(|result| result.ok());
+    remote::save_listen_addr(paths, listen_addr.as_ref())?;
+    if listen_addr.is_none() {
+        if let Some(warning) = live_listener_warning(previous_listen) {
+            warnings.push(warning);
+        }
+    }
     Ok(ServiceStatus {
         manager: manager.as_str().to_owned(),
         installed: true,
@@ -333,6 +359,11 @@ pub fn uninstall(paths: &AppPaths) -> Result<ServiceStatus> {
             let _ = systemctl_user(&["daemon-reload"]);
         }
     }
+    let previous_listen = remote::load_listen_addr(paths).and_then(|result| result.ok());
+    remote::save_listen_addr(paths, None)?;
+    let warnings = live_listener_warning(previous_listen)
+        .map(|warning| vec![warning])
+        .unwrap_or_default();
     Ok(ServiceStatus {
         manager: manager.as_str().to_owned(),
         installed: false,
@@ -343,7 +374,7 @@ pub fn uninstall(paths: &AppPaths) -> Result<ServiceStatus> {
         path: None,
         // Linger is deliberately left alone: the user may have enabled it for
         // their own reasons, and turning it off would stop unrelated services.
-        warnings: Vec::new(),
+        warnings,
         detail: if detail.is_empty() {
             "service removed".to_owned()
         } else {
@@ -647,6 +678,71 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     (!value.is_empty()).then(|| std::ffi::OsString::from(value))
+}
+
+/// How long the probe below waits for the old listener to answer.
+const LIVE_LISTENER_PROBE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The address to dial when checking whether `addr` is still being served.
+///
+/// A wildcard bind is not something a client can connect to, so probe the
+/// loopback address of the same family instead — a daemon bound to `0.0.0.0`
+/// answers there too.
+fn dialable_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    if !addr.ip().is_unspecified() {
+        return addr;
+    }
+    match addr {
+        std::net::SocketAddr::V4(_) => {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, addr.port()))
+        }
+        std::net::SocketAddr::V6(_) => {
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, addr.port()))
+        }
+    }
+}
+
+/// Warn when a daemon already running still owns the TCP listener.
+///
+/// Clearing the saved address only decides what the *next* daemon binds. A
+/// daemon that bound the port at startup keeps serving it until it exits, so
+/// reporting remote access as removed on its own would be false: the phone
+/// that paired earlier still connects.
+fn live_listener_warning(previous: Option<std::net::SocketAddr>) -> Option<String> {
+    let addr = previous?;
+    std::net::TcpStream::connect_timeout(&dialable_addr(addr), LIVE_LISTENER_PROBE).ok()?;
+    Some(format!(
+        "a daemon started earlier is still serving {addr}, so remote access stays reachable \
+until it exits \u{2014} quit and reopen the desktop app, or stop that daemon"
+    ))
+}
+
+/// Warn when the service cannot start serving the requested address yet.
+///
+/// Only one process can hold the local socket, and the service loses that race
+/// to any daemon already running — normally the one the desktop app spawned on
+/// demand. That daemon predates the listen address being saved, so it serves
+/// no TCP at all, and the service restarts forever behind it. The address now
+/// outlives any single process (see `remote::save_listen_addr`), so a restart
+/// is all that is needed; say so rather than reporting a clean install and
+/// leaving a phone unable to connect.
+fn socket_conflict_warning(
+    paths: &AppPaths,
+    requested: Option<std::net::SocketAddr>,
+    current_listen: Option<std::net::SocketAddr>,
+) -> Option<String> {
+    let requested = requested?;
+    if current_listen == Some(requested) {
+        return None;
+    }
+    let endpoint = paths.archcar_endpoint_path();
+    crate::archcar::transport::connect(&endpoint).ok()?;
+    Some(format!(
+        "another archcar already holds {}, so the service cannot take over yet; \
+it will serve {requested} once that daemon exits \u{2014} quit and reopen the \
+desktop app, or stop the running daemon",
+        endpoint.display()
+    ))
 }
 
 // --- Service manager plumbing --------------------------------------------
@@ -1336,6 +1432,33 @@ mod tests {
 
     const NO_PATH: &str = "";
 
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_already_holding_the_socket_is_reported_not_papered_over() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let requested = remote::parse_listen_addr("0.0.0.0:7420").unwrap();
+
+        // Nothing serving: installing has no conflict to report.
+        assert!(socket_conflict_warning(&paths, Some(requested), None).is_none());
+
+        // Stand in for the daemon the desktop app spawns on demand.
+        let endpoint = paths.archcar_endpoint_path();
+        let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
+
+        let warning = socket_conflict_warning(&paths, Some(requested), None)
+            .expect("a live socket owner has to be reported");
+        assert!(warning.contains("0.0.0.0:7420"), "{warning}");
+        assert!(warning.contains("quit and reopen"), "{warning}");
+
+        // The caller *is* that daemon, already serving the requested address:
+        // reinstalling over yourself is not a conflict.
+        assert!(socket_conflict_warning(&paths, Some(requested), Some(requested)).is_none());
+        // No listener requested at all: nothing to warn about either.
+        assert!(socket_conflict_warning(&paths, None, None).is_none());
+    }
+
     #[test]
     fn systemd_unit_starts_archcar_and_carries_the_listen_address() {
         let unit = systemd_unit(
@@ -1592,6 +1715,75 @@ mod tests {
         let manager_default = ServiceManager::Launchd.default_path();
         assert!(!manager_default.contains("/opt/homebrew/bin"));
         assert!(!manager_default.contains(".local/bin"));
+    }
+
+    #[cfg(unix)]
+    fn paths_in(dir: &Path) -> AppPaths {
+        AppPaths {
+            config_dir: dir.join("config"),
+            data_dir: dir.join("data"),
+            state_dir: dir.join("state"),
+            cache_dir: dir.join("cache"),
+            database_path: dir.join("data/archductor.db"),
+            logs_dir: dir.join("state/logs"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_warns_when_another_daemon_already_holds_the_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(temp.path());
+        std::fs::create_dir_all(&paths.state_dir).unwrap();
+        let requested = remote::parse_listen_addr("0.0.0.0:7420").unwrap();
+
+        // Nothing is serving yet: the service will get the socket.
+        assert!(socket_conflict_warning(&paths, Some(requested), None).is_none());
+
+        // The desktop app's on-demand daemon is what usually holds it. The
+        // service cannot bind behind it, so a clean "installed" is a lie.
+        let _listener =
+            std::os::unix::net::UnixListener::bind(paths.archcar_endpoint_path()).unwrap();
+        let warning = socket_conflict_warning(&paths, Some(requested), None).unwrap();
+        assert!(warning.contains("0.0.0.0:7420"), "{warning}");
+        assert!(warning.contains("quit and reopen"), "{warning}");
+
+        // ...unless the daemon holding it is already serving that address,
+        // which is every reinstall from inside a listening daemon.
+        assert!(socket_conflict_warning(&paths, Some(requested), Some(requested)).is_none());
+
+        // No remote access requested, nothing to warn about.
+        assert!(socket_conflict_warning(&paths, None, None).is_none());
+    }
+
+    #[test]
+    fn disabling_remote_access_says_so_while_a_daemon_still_serves_it() {
+        // Clearing the saved address only decides what the next daemon binds.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let warning = live_listener_warning(Some(addr)).expect("the listener is still up");
+        assert!(warning.contains(&addr.to_string()), "{warning}");
+        assert!(warning.contains("until it exits"), "{warning}");
+
+        drop(listener);
+        assert!(live_listener_warning(Some(addr)).is_none());
+        assert!(live_listener_warning(None).is_none());
+    }
+
+    #[test]
+    fn a_wildcard_bind_is_probed_on_loopback() {
+        // `0.0.0.0:<port>` is not an address a client can dial; the daemon
+        // bound to it answers on loopback.
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let wildcard = remote::parse_listen_addr(&format!("0.0.0.0:{port}")).unwrap();
+
+        assert_eq!(
+            dialable_addr(wildcard),
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+        );
+        assert!(live_listener_warning(Some(wildcard)).is_some());
     }
 
     #[test]

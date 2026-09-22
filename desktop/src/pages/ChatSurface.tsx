@@ -13,6 +13,7 @@ import type {
   WorkspaceChangeScope,
 } from "@/bridge/protocol";
 import { titleCaseWorkspace } from "@/lib/text";
+import { chatTabLabel } from "@/lib/chatTabLabel";
 import { registerOpenFile, registerOpenCommit } from "./openFileBridge";
 import Icon from "@/components/Icon";
 import { ThreadTab, FileTab } from "./chat/ChatTabs";
@@ -196,7 +197,7 @@ export default function ChatSurface(props: { workspace: string }) {
             {(thread, i) => (
               <ThreadTab
                 thread={thread}
-                label={`Chat ${i() + 1}`}
+                label={chatTabLabel(thread.title, i())}
                 queued={chatStore.slice(thread.id).queue.length}
                 pendingInteraction={interactionsStore.pending(thread.id) != null}
                 active={view().kind === "chat" && nav.selectedChatThread() === thread.id}

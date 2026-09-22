@@ -9,10 +9,12 @@
 //                        AppImage, which is what $APPIMAGE tells us
 //   Linux deb/rpm        owned by the system package manager — electron-updater
 //                        cannot replace those files
-//   macOS (dmg)          Squirrel.Mac refuses an unsigned/unnotarized bundle,
-//                        and this app is not signed yet
+//   macOS                download + relaunch; release builds are Developer
+//                        ID-signed and notarized, which Squirrel.Mac requires.
+//                        A self-built unsigned bundle fails the Squirrel check
+//                        at runtime, so main.ts drops that case back to "open".
 //
-// The two cases that cannot self-install still tell the user a release exists;
+// The cases that cannot self-install still tell the user a release exists;
 // their button opens the release page instead.
 
 /** How the Update button behaves, or that updating is off entirely. */
@@ -29,8 +31,18 @@ export function updateMode({ platform, packaged, env }: UpdateModeInput): Update
   if (!packaged) return "disabled";
   if (platform === "win32") return "install";
   if (platform === "linux") return env.APPIMAGE ? "install" : "open";
-  // darwin and anything unexpected: tell, don't install.
+  if (platform === "darwin") return "install";
+  // Anything unexpected: tell, don't install.
   return "open";
+}
+
+/** Squirrel.Mac refuses to update an unsigned/unnotarized bundle (someone's
+ *  local `pnpm dist` build). That surfaces as a code-signature error from
+ *  electron-updater; demote just that case to "open" so the user still hears
+ *  about releases. Transient errors (offline, missing feed) must NOT demote —
+ *  the next scheduled check should retry the install path. */
+export function shouldFallBackToOpen(platform: NodeJS.Platform, errorMessage: string): boolean {
+  return platform === "darwin" && /signature|not signed|codesign/i.test(errorMessage);
 }
 
 export function normalizeVersion(value: string): number[] {

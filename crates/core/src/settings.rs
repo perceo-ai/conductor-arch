@@ -1040,49 +1040,48 @@ pub fn default_prompt_pack_toml() -> Result<String> {
 fn default_prompt_settings() -> PromptSettings {
     PromptSettings {
         new_workspace: Some(
-            "Create a small, reviewable workspace plan before changing code.".to_owned(),
+            "Create a small, reviewable workspace plan before changing code. If the `archductor` MCP server is available, read `get_context_briefing` for what is already known, record the plan's steps with `create_task`, and give the workspace, branch, and chat real names with `set_workspace_context`.".to_owned(),
         ),
         general: Some("Prefer small, reviewable changes. Explain verification clearly.".to_owned()),
         continue_work: Some(
-            "Continue from the current state. Inspect recent changes before editing.".to_owned(),
+            "Continue from the current state. Inspect recent changes before editing. If the `archductor` MCP server is available, start with `get_context_briefing` and `list_tasks` instead of re-deriving intent from the diff.".to_owned(),
         ),
         summarize_session: Some(
-            "Summarize the work completed, verification run, and remaining risk.".to_owned(),
+            "Summarize the work completed, verification run, and remaining risk. If the `archductor` MCP server is available, store the result with `set_workspace_context` so the next agent reads the summary rather than the transcript.".to_owned(),
         ),
         handoff: Some(
-            "Write a concise handoff with context, changed files, tests, and next steps."
-                .to_owned(),
+            "Write a concise handoff with context, changed files, tests, and next steps. If the `archductor` MCP server is available, store it with `set_workspace_context` and close out finished work with `update_task`.".to_owned(),
         ),
         code_review: Some(
-            "Review the current workspace like a code reviewer. Start from the provided workspace context, inspect the diff against the base branch, prioritize correctness regressions, user-visible behavior changes, missing tests, data/security risk, and unclear ownership. Leave concise findings with file/line references where possible, then summarize residual risk and verification gaps.".to_owned(),
+            "Review the current workspace like a code reviewer. Start from the provided workspace context, inspect the diff against the base branch, prioritize correctness regressions, user-visible behavior changes, missing tests, data/security risk, and unclear ownership. Leave concise findings with file/line references where possible, then summarize residual risk and verification gaps. If the `archductor` MCP server is available, read `get_context_briefing` first for intent and open tasks, and record each actionable finding with `create_task`.".to_owned(),
         ),
         review_comments: Some(
-            "Address the provided open review comments. For each comment, inspect the referenced file and surrounding diff, make the smallest appropriate change, run focused verification, and report which comments were resolved or still need human input.".to_owned(),
+            "Address the provided open review comments. For each comment, inspect the referenced file and surrounding diff, make the smallest appropriate change, run focused verification, and report which comments were resolved or still need human input. If the `archductor` MCP server is available, read `get_context_briefing` first and close each handled item with `update_task`.".to_owned(),
         ),
         create_pr: Some(
-            "Prepare this workspace for review. Inspect the branch diff, recent commits, summaries, todos, checks, and open review comments. Commit only appropriate changes, push the branch, create or update the PR using a clear title/body with Summary, What Changed, Validation, and Risk sections, refresh PR state, and report the final URL plus anything still blocked.".to_owned(),
+            "Prepare this workspace for review. Inspect the branch diff, recent commits, summaries, todos, checks, and open review comments. Commit only appropriate changes, push the branch, create or update the PR using a clear title/body with Summary, What Changed, Validation, and Risk sections, refresh PR state, and report the final URL plus anything still blocked. If the `archductor` MCP server is available, read `get_context_briefing` before drafting the body, and once the PR exists call `set_workspace_context` with the PR URL and current state so the handoff summary is not stale.".to_owned(),
         ),
         fix_errors: Some(
-            "Reproduce the reported failure first. Use logs/check output from the workspace context, identify the root cause, make the smallest safe fix, rerun the focused check, and report the command evidence.".to_owned(),
+            "Reproduce the reported failure first. Use logs/check output from the workspace context, identify the root cause, make the smallest safe fix, rerun the focused check, and report the command evidence. If the `archductor` MCP server is available, read `get_context_briefing` first and record the root cause with `update_task`.".to_owned(),
         ),
         resolve_merge_conflicts: Some(
             "Resolve merge conflicts carefully. Inspect both sides, preserve user intent and existing behavior, avoid dropping unrelated changes, run focused verification after resolving, and explain any non-obvious conflict choices.".to_owned(),
         ),
-        rename_branch: Some("Use a short descriptive branch name.".to_owned()),
+        rename_branch: Some("Use a short descriptive branch name. If the `archductor` MCP server is available, record it with `set_workspace_context` so the workspace label matches the branch.".to_owned()),
         commit_generation: Some(
             "Write a commit message that matches the actual staged diff. Prefer concise imperative subject text, include scope only when it clarifies ownership, and do not mention files or tests that are not represented in the diff.".to_owned(),
         ),
         push_branch: Some(
-            "Prepare this branch for remote review. Inspect uncommitted changes, stage and commit only appropriate work, avoid committing unrelated local edits, push to the configured remote/upstream, refresh PR state if present, and report commit hash, remote branch, and PR/check status.".to_owned(),
+            "Prepare this branch for remote review. Inspect uncommitted changes, stage and commit only appropriate work, avoid committing unrelated local edits, push to the configured remote/upstream, refresh PR state if present, and report commit hash, remote branch, and PR/check status. If the `archductor` MCP server is available, call `set_workspace_context` after the push so the handoff summary matches what is now on the remote.".to_owned(),
         ),
         merge_pr: Some(
-            "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action.".to_owned(),
+            "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action. If the `archductor` MCP server is available, read `get_context_briefing` first and call `set_workspace_context` after the merge to record the outcome.".to_owned(),
         ),
         revert_changes: Some(
             "Revert changes only after identifying the requested scope. Prefer targeted git restore/revert over broad resets, preserve unrelated user changes, show what will be removed, run focused verification when behavior changes, and report exactly what was reverted.".to_owned(),
         ),
         test_fixing: Some(
-            "Run the failing test first, fix the root cause, then rerun focused tests.".to_owned(),
+            "Run the failing test first, fix the root cause, then rerun focused tests. If the `archductor` MCP server is available, read `get_context_briefing` first and close the item with `update_task` once the test passes.".to_owned(),
         ),
         refactor_style: Some(
             "Keep behavior-preserving refactors separate from feature changes.".to_owned(),
@@ -5633,5 +5632,119 @@ file_include_globs = ".env.local"
 
         let err = validate_repository_settings(&settings).unwrap_err();
         assert!(err.to_string().contains("default_visible_tab"));
+    }
+
+    /// Every built-in prompt slot, paired with its text, so a test can sweep
+    /// all of them without restating the list.
+    fn builtin_prompt_texts() -> Vec<(PromptKind, String)> {
+        const KINDS: [PromptKind; 19] = [
+            PromptKind::NewWorkspace,
+            PromptKind::General,
+            PromptKind::ContinueWork,
+            PromptKind::SummarizeSession,
+            PromptKind::Handoff,
+            PromptKind::CodeReview,
+            PromptKind::CreatePr,
+            PromptKind::FixErrors,
+            PromptKind::ResolveMergeConflicts,
+            PromptKind::RenameBranch,
+            PromptKind::CommitGeneration,
+            PromptKind::PushBranch,
+            PromptKind::MergePr,
+            PromptKind::RevertChanges,
+            PromptKind::ReviewComments,
+            PromptKind::TestFixing,
+            PromptKind::RefactorStyle,
+            PromptKind::SetupScript,
+            PromptKind::RunScript,
+        ];
+        let defaults = default_prompt_settings();
+        KINDS
+            .into_iter()
+            .map(|kind| {
+                let text = defaults
+                    .get(kind)
+                    .unwrap_or_else(|| panic!("built-in prompt for {}", kind.as_str()))
+                    .to_owned();
+                (kind, text)
+            })
+            .collect()
+    }
+
+    /// Pull out every `backticked_token` that looks like an MCP tool name.
+    fn backticked_snake_case(text: &str) -> Vec<String> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|token| {
+                !token.is_empty()
+                    && token
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            })
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn git_action_prompts_ask_the_agent_to_refresh_workspace_context() {
+        let defaults = default_prompt_settings();
+        for kind in [
+            PromptKind::CreatePr,
+            PromptKind::PushBranch,
+            PromptKind::MergePr,
+        ] {
+            let prompt = defaults.get(kind).expect("built-in prompt");
+            assert!(
+                prompt.contains("set_workspace_context"),
+                "{} prompt should tell the agent to refresh the handoff summary: {prompt}",
+                kind.as_str()
+            );
+        }
+    }
+
+    /// Guards against citing a tool the agent cannot see. Agent sessions
+    /// register the MCP server with the `session` profile, so a prompt that
+    /// names a full-profile-only tool sends the agent looking for something
+    /// that is not in its tool list.
+    #[test]
+    fn builtin_prompts_only_name_session_profile_mcp_tools() {
+        let all_tools: Vec<&str> = crate::mcp_server::tools()
+            .iter()
+            .map(|tool| tool.name)
+            .collect();
+
+        for (kind, text) in builtin_prompt_texts() {
+            for token in backticked_snake_case(&text) {
+                if !all_tools.contains(&token.as_str()) {
+                    continue;
+                }
+                assert!(
+                    crate::mcp_server::SESSION_PROFILE_TOOLS.contains(&token.as_str()),
+                    "{} prompt names MCP tool `{token}`, which is not in the session profile",
+                    kind.as_str()
+                );
+            }
+        }
+    }
+
+    /// The reverse typo guard: a prompt that says `get_context_briefng` would
+    /// pass the test above by simply not matching any real tool.
+    #[test]
+    fn builtin_prompts_mentioning_mcp_tools_spell_them_correctly() {
+        for (kind, text) in builtin_prompt_texts() {
+            if !text.contains("MCP") {
+                continue;
+            }
+            let cited = backticked_snake_case(&text);
+            assert!(
+                cited
+                    .iter()
+                    .any(|token| crate::mcp_server::SESSION_PROFILE_TOOLS
+                        .contains(&token.as_str())),
+                "{} prompt mentions MCP but names no known session tool: {cited:?}",
+                kind.as_str()
+            );
+        }
     }
 }

@@ -199,6 +199,20 @@ for you on bootstrap. Keys available in both `[prompts]` and a pack file:
 Inline `[prompts]` in `settings.toml` overrides the active pack, so a pack can
 carry the house defaults and one repository can deviate on a single key.
 
+Setting a key **replaces** the built-in prompt for that slot; it does not append
+to it. The built-ins are long and specific — the `create_pr` built-in already
+asks for Summary / What Changed / Validation / Risk, and the action prompts tell
+the agent to keep the workspace handoff summary current through the `archductor`
+MCP server. A one-line override throws all of that away. So set a key only where
+your repository genuinely differs, restate whatever from the built-in still
+applies, and leave every other key unset so it falls through.
+
+Prompts may name MCP tools, but agent sessions register the MCP server with the
+`session` profile, which exposes only `set_workspace_context`,
+`get_context_briefing`, `get_summary`, `list_tasks`, `create_task`, and
+`update_task`. Naming any other tool sends the agent looking for something that
+is not in its tool list.
+
 ```bash
 archductor archcar prompt-packs <repository>
 archductor archcar set-prompt-pack <repository> team
