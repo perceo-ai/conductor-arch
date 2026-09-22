@@ -170,7 +170,7 @@ describe("panel tab chrome", () => {
       })
       .at(-1);
 
-    expect(stripPadding).toBe("5px 8px");
+    expect(stripPadding).toBe("4px 6px");
     expect(tabRadius).toBe("var(--r-sm, 7px)");
   });
 

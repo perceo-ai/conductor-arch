@@ -1,0 +1,114 @@
+/* ── Polish pass: dense default ──
+ *
+ * User direction (2026-09-21): the default density should sit one step
+ * *below* the pre-polish scale — Conductor-grade density, not just the old
+ * numbers back. Every rule here is plain-selector, so both density settings
+ * still win by specificity: `body.lc-density-comfortable …` (09-comfort) and
+ * `.lc-density-compact …` (theme/15) each out-rank these regardless of source
+ * order. This file only tightens type, row heights, and padding — no colour,
+ * no layout, no chrome heights (the 52px topbar band aligns the window
+ * controls and stays put). */
+
+/* ── Chat prose ── */
+.chat-agent-text,
+.chat-agent-row > .markdown-body,
+.markdown-body {
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+.chat-reasoning-text {
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.chat-user-bubble {
+    font-size: 13px;
+    line-height: 1.5;
+    padding: 8px 12px;
+}
+
+.chat-messages {
+    padding: 16px 24px 18px;
+}
+
+/* ── Tool-call rows ── */
+.chat-inline-event-header {
+    min-height: 24px;
+    font-size: 12px;
+}
+
+.chat-inline-event-chip-label,
+.chat-inline-event-action {
+    font-size: 11px;
+}
+
+/* ── Composer ── */
+.chat-composer-box {
+    padding: 10px 12px 8px;
+    gap: 6px;
+}
+
+.chat-input-view,
+.chat-placeholder {
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* ── Sidebar ── */
+.workspace-row-shell {
+    min-height: 30px;
+    padding: 4px 8px;
+}
+
+.sidebar-nav-button {
+    min-height: 28px;
+}
+
+.project-row {
+    min-height: 26px;
+    padding: 3px 8px;
+}
+
+/* ── Right-rail lists and panels ── */
+.ws-change-row,
+.ws-file-row,
+.ws-check-row-flat,
+.ws-timeline-row,
+.ws-file-comment-row {
+    min-height: 20px;
+    padding-block: 2px;
+}
+
+.ws-tab-panel,
+.command-panel {
+    padding: 10px;
+}
+
+/* ── Right-rail tabs: slimmer pills in a slimmer strip ── */
+.ws-right-tabs {
+    padding: 4px 6px;
+}
+
+.ws-right-tabs .workbench-tab {
+    height: 24px;
+    min-height: 24px;
+    font-size: 11.5px;
+}
+
+/* ── Buttons ── */
+.suggested-action,
+.secondary-action,
+.ui-button-primary,
+.ui-button-secondary,
+.ui-button-destructive {
+    min-height: 24px;
+    font-size: 12px;
+}
+
+/* ── Page chrome ── */
+.page-body,
+.page-board,
+.kanban-board {
+    padding: 14px 18px;
+}
