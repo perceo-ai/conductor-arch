@@ -76,12 +76,24 @@ function QuestionWizard(props: {
   const go = (delta: number) =>
     setIndex((prev) => Math.min(props.questions.length - 1, Math.max(0, prev + delta)));
 
+  // Submitting is answering the whole ask: a partial resolve would hand the
+  // agent silence for the questions it still needs.
+  const allAnswered = () => props.questions.every((question) => valuesFor(question).length > 0);
+
   const submit = () => {
-    const answers = props.questions
-      .map((question) => ({ question_id: question.id, values: valuesFor(question) }))
-      .filter((answer) => answer.values.length > 0);
-    if (answers.length === 0) return;
-    props.resolve({ type: "answer", answers });
+    if (!allAnswered()) {
+      // Jump to the first gap instead of doing nothing.
+      const gap = props.questions.findIndex((question) => valuesFor(question).length === 0);
+      if (gap >= 0) setIndex(gap);
+      return;
+    }
+    props.resolve({
+      type: "answer",
+      answers: props.questions.map((question) => ({
+        question_id: question.id,
+        values: valuesFor(question),
+      })),
+    });
   };
 
   const advance = () => (isLast() ? submit() : go(1));
@@ -174,7 +186,12 @@ function QuestionWizard(props: {
         </Show>
         <button
           class="ui-button-primary chat-interaction-advance"
-          disabled={valuesFor(current()).length === 0}
+          disabled={isLast() ? !allAnswered() : valuesFor(current()).length === 0}
+          title={
+            isLast() && !allAnswered() && valuesFor(current()).length > 0
+              ? "Answer every question first"
+              : undefined
+          }
           onClick={advance}
         >
           {isLast() ? "Submit" : "Next"}

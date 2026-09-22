@@ -93,6 +93,31 @@ describe("InteractionBanner questions", () => {
     });
   });
 
+  // Submit answers the whole ask, never a slice of it: it stays disabled while
+  // any question is blank, and Enter from the free-text row walks the user back
+  // to the first gap instead of resolving without it.
+  it("refuses to submit while an earlier question is unanswered", () => {
+    const el = mount(record([question("a"), question("b")]));
+    el.querySelector<HTMLButtonElement>('[aria-label="Next question"]')!.click();
+    options(el)[1].click();
+    expect(advance(el).textContent).toBe("Submit");
+    expect(advance(el).disabled).toBe(true);
+    const input = el.querySelector<HTMLInputElement>(".chat-interaction-other-input")!;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(resolveInteraction).not.toHaveBeenCalled();
+    expect(el.querySelector(".chat-interaction-question-text")?.textContent).toBe("Question a?");
+    options(el)[0].click();
+    advance(el).click();
+    advance(el).click();
+    expect(resolveInteraction).toHaveBeenCalledWith("int-1", {
+      type: "answer",
+      answers: [
+        { question_id: "a", values: ["Alpha"] },
+        { question_id: "b", values: ["Beta"] },
+      ],
+    });
+  });
+
   it("pages back to an earlier question and keeps its pick", () => {
     const el = mount(record([question("a"), question("b")]));
     options(el)[0].click();
