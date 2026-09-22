@@ -1523,13 +1523,11 @@ impl WorkspaceStore {
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
         let (name, branch) = self.resolve_create_identity(&repository, &name, &branch)?;
-        let default_base_branch = settings
+        let configured_base_branch = settings
             .customization
             .workspace_defaults
             .base_branch
-            .as_deref()
-            .unwrap_or(&repository.default_branch)
-            .to_owned();
+            .as_deref();
         let base_ref = if let Some(base_ref) = input.base_ref {
             let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
             resolve_source_base_ref(
@@ -1539,7 +1537,22 @@ impl WorkspaceStore {
                 remote_available,
             )?
         } else {
-            default_base_branch
+            let base_ref = configured_base_branch.unwrap_or(&repository.default_branch);
+            let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
+            let remote_prefix = format!("{}/", repository.remote_name);
+            let remote_branch = base_ref.strip_prefix(&remote_prefix).unwrap_or(base_ref);
+            let base_ref = if remote_available
+                && !base_ref.starts_with("refs/")
+                && fetch_remote_source_branch(
+                    &repository.root_path,
+                    &repository.remote_name,
+                    remote_branch,
+                )? {
+                format!("{}{}", remote_prefix, remote_branch)
+            } else {
+                remote_branch.to_owned()
+            };
+            base_ref
         };
 
         let path = repository.workspace_parent_path.join(&name);
@@ -5241,7 +5254,17 @@ mutation($threadId: ID!) {{
     pub fn refresh_pull_request_state(&self, name: &str) -> Result<Option<PullRequest>> {
         let workspace = self.get_by_name(name)?;
         if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
-            return Ok(None);
+            // No PR on record does not mean no PR: one created outside
+            // Archductor (gh CLI, the GitHub web UI, an agent shell) has no
+            // row yet. Discover it by branch and record it, so a refresh
+            // finds reality instead of reporting the stale "no PR yet".
+            let url = match self.pull_request_url_for_workspace(&workspace) {
+                Ok(url) => url,
+                Err(_) => return Ok(None),
+            };
+            return url
+                .map(|url| self.record_pull_request(workspace.id, &url))
+                .transpose();
         }
         let args = self.gh_pr_args_for_workspace(&workspace, "view", &["--json", "state"])?;
         let state = command_output_owned(&workspace.path, "gh", &args)?;
@@ -5277,6 +5300,13 @@ mutation($threadId: ID!) {{
                 return Ok(Some(pr));
             }
         }
+        let Some(url) = self.pull_request_url_for_workspace(workspace)? else {
+            return Ok(None);
+        };
+        self.record_pull_request(workspace.id, &url).map(Some)
+    }
+
+    fn pull_request_url_for_workspace(&self, workspace: &Workspace) -> Result<Option<String>> {
         let output = command_output(
             &workspace.path,
             "gh",
@@ -5293,10 +5323,7 @@ mutation($threadId: ID!) {{
                 "1",
             ],
         )?;
-        match first_pull_request_url_from_json(&output) {
-            Some(url) => self.record_pull_request(workspace.id, &url).map(Some),
-            None => Ok(None),
-        }
+        Ok(first_pull_request_url_from_json(&output))
     }
 
     /// What the agent last said, for the pull-request body.
@@ -13966,7 +13993,84 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_without_explicit_base_uses_local_default_branch() {
+    fn create_workspace_without_explicit_base_uses_remote_default_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("local-only.txt"), "local\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "local-only.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "local only",
+            ])
+            .status()
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: None,
+            })
+            .unwrap();
+
+        assert_eq!(workspace.base_ref, "origin/main");
+        assert!(!workspace.path.join("local-only.txt").exists());
+        assert_eq!(
+            git_output(&workspace.path, ["branch", "--show-current"]).trim(),
+            "lc/berlin"
+        );
+    }
+
+    #[test]
+    fn create_workspace_falls_back_to_local_default_when_remote_default_is_unavailable() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         Command::new("git")
@@ -14003,11 +14107,8 @@ mod tests {
             })
             .unwrap();
 
+        assert_eq!(workspace.status, "active");
         assert_eq!(workspace.base_ref, "main");
-        assert_eq!(
-            git_output(&workspace.path, ["branch", "--show-current"]).trim(),
-            "lc/berlin"
-        );
     }
 
     #[test]
@@ -21898,6 +21999,115 @@ exit 1
                 .state,
             "merged"
         );
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn refresh_pull_request_state_discovers_externally_created_pr() {
+        // A PR opened outside Archductor (gh CLI, web UI, an agent shell) has
+        // no pull_requests row; refresh used to answer "no PR" forever. It
+        // must instead look the branch up on GitHub and record what it finds.
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ] && [ "$3" = "--head" ] && [ "$4" = "lc/berlin" ]; then
+  printf '[{"url":"https://github.com/example/demo/pull/131"}]\n'
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "131" ] && [ "$4" = "--json" ] && [ "$5" = "state" ]; then
+  printf '{"state":"open"}\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        // First refresh: nothing recorded, so it discovers and records #131.
+        let discovered = store
+            .refresh_pull_request_state("berlin")
+            .unwrap()
+            .expect("refresh should discover the externally created PR");
+        assert_eq!(discovered.number, 131);
+        assert_eq!(discovered.state, "open");
+        assert!(store
+            .pull_request_by_workspace_id(workspace.id)
+            .unwrap()
+            .is_some());
+
+        // Second refresh: the row exists now, so it goes through `pr view`.
+        assert_eq!(
+            store
+                .refresh_pull_request_state("berlin")
+                .unwrap()
+                .unwrap()
+                .state,
+            "open"
+        );
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn refresh_pull_request_state_preserves_no_pr_when_discovery_is_unavailable() {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+echo "GitHub unavailable" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        assert_eq!(store.refresh_pull_request_state("berlin").unwrap(), None);
 
         restore_path(old_path);
     }

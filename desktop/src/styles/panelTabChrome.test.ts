@@ -148,7 +148,12 @@ describe("panel tab chrome", () => {
     expect(flex).toBe("1 1 0");
   });
 
-  it("lets right-panel tabs fill their strip instead of floating as inset cards", () => {
+  it("renders right-panel tabs as inset rounded segments, not flush squares", () => {
+    // Reversal of the earlier fill-the-strip decision, on user direction
+    // (2026-09-21): the flush, square-cornered, full-height tabs read as a
+    // foreign element in an app whose every other control is rounded. The
+    // strip keeps an inset and the tabs keep a radius; the even flex split
+    // (asserted above) is what still prevents the original ellipsis bug.
     const stripRules = rulesFor(".ws-right-tabs");
     const stripPadding = stripRules
       .filter((rule) => rule.selector === ".ws-right-tabs")
@@ -165,8 +170,32 @@ describe("panel tab chrome", () => {
       })
       .at(-1);
 
-    expect(stripPadding).toBe("0");
-    expect(tabRadius).toBe("0");
+    expect(stripPadding).toBe("4px 6px");
+    expect(tabRadius).toBe("var(--r-sm, 7px)");
+  });
+
+  it("restores the larger right-panel tabs in Comfortable density", () => {
+    const comfortable = rulesFor(".ws-right-tabs .workbench-tab").find(
+      (rule) => rule.selector === "body.lc-density-comfortable .ws-right-tabs .workbench-tab",
+    );
+
+    expect(comfortable).toBeDefined();
+    expect(declaration(comfortable!.body, "height")).toBe("30px");
+    expect(declaration(comfortable!.body, "min-height")).toBe("30px");
+    expect(declaration(comfortable!.body, "font-size")).toBe("12.5px");
+  });
+
+  it("only stretches the PR bar inside a compact strip leaf", () => {
+    const stretching = rulesFor(".ws-pr-bar").filter(
+      (rule) => declaration(rule.body, "flex") === "1 0 auto",
+    );
+
+    expect(stretching.length).toBeGreaterThan(0);
+    expect(
+      stretching.map((rule) => rule.selector),
+    ).toEqual([
+      '.workbench-leaf-compact > .workbench-panel-body[data-panel-kind="strip"] > .ws-pr-bar',
+    ]);
   });
 
   it("keeps an xterm host inside a narrow terminal dock", () => {

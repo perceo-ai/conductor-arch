@@ -32,6 +32,7 @@ import {
 import {
   chatGenerationState,
   generationLabel,
+  isGeneratingRuntimeState,
   showsGenerationLoader,
   type ChatGenerationState
 } from "@/lib/chatGeneration";
@@ -87,7 +88,9 @@ export function Composer(props: {
   const [skillMentionCursor, setSkillMentionCursor] = createSignal(0);
   const slice = () => chatStore.slice(props.threadId);
   const sessionKind = () => providerToKind(props.provider);
-  const running = () => slice().session?.runtime_state === "running";
+  // Any actively-working runtime state, not just `running` — otherwise the
+  // interrupt affordance vanishes while the agent streams or runs a tool.
+  const running = () => isGeneratingRuntimeState(slice().session?.runtime_state ?? "");
   // Same derivation the timeline loader uses, so the toolbar chip and the
   // loader can never disagree about whether the agent is working. Note this
   // one is NOT blocked-aware: `awaitingUser` is rendered as its own chip just

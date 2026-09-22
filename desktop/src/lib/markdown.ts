@@ -28,6 +28,16 @@ marked.use({
       const raw = typeof token === "string" ? token : token.text ?? token.raw ?? "";
       return escapeHtml(raw);
     },
+    // Markdown images almost never load here: agents reference local
+    // workspace paths, and the CSP allows img-src only for 'self', data: and
+    // GitHub avatars — so a raw <img> renders as a broken icon (or, for a
+    // data: URI, as an unconstrained bitmap). Render a labeled chip instead;
+    // the path rides in `title` so hovering shows where the image lives.
+    image(this: unknown, token: { href: string; title: string | null; text: string }) {
+      const label = token.text || token.href.split("/").filter(Boolean).at(-1) || "image";
+      const title = escapeHtml(token.title || token.href);
+      return `<span class="md-image-chip" title="${title}">🖼 ${escapeHtml(label)}</span>`;
+    },
   },
 });
 

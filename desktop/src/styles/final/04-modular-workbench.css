@@ -295,10 +295,13 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
   margin-left: auto;
 }
 
-/* Inspector tabs are the strip, not inset controls floating inside it. */
+/* Inspector tabs are compact rounded segments inside the strip — the flush
+   full-height square treatment read as a foreign element in an otherwise
+   rounded app (user direction, 2026-09-21). The shells still share the strip
+   evenly; the buttons inside are pill-cornered and centred. */
 .ws-right-tabs {
-  gap: 0;
-  padding: 0;
+  gap: 4px;
+  padding: 5px 8px;
 }
 
 .ws-right-tabs .workbench-tab-shell {
@@ -307,9 +310,9 @@ body.resizing-col .workbench-split > .resize-handle-split::after {
 }
 
 .ws-right-tabs .workbench-tab {
-  height: 40px;
-  min-height: 40px;
-  border-radius: 0;
+  height: 28px;
+  min-height: 28px;
+  border-radius: var(--r-sm, 7px);
 }
 
 .workbench-tab-close {
