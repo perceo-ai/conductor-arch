@@ -1523,13 +1523,11 @@ impl WorkspaceStore {
         validate_workspace_name(&name)?;
         let branch = self.resolve_workspace_branch(&settings, &input.branch, &name);
         let (name, branch) = self.resolve_create_identity(&repository, &name, &branch)?;
-        let default_base_branch = settings
+        let configured_base_branch = settings
             .customization
             .workspace_defaults
             .base_branch
-            .as_deref()
-            .unwrap_or(&repository.default_branch)
-            .to_owned();
+            .as_deref();
         let base_ref = if let Some(base_ref) = input.base_ref {
             let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
             resolve_source_base_ref(
@@ -1539,7 +1537,22 @@ impl WorkspaceStore {
                 remote_available,
             )?
         } else {
-            default_base_branch
+            let base_ref = configured_base_branch.unwrap_or(&repository.default_branch);
+            let remote_available = remote_exists(&repository.root_path, &repository.remote_name);
+            let base_ref = if remote_available
+                && !base_ref.starts_with("refs/")
+                && !base_ref.starts_with(&format!("{}/", repository.remote_name))
+            {
+                format!("{}/{}", repository.remote_name, base_ref)
+            } else {
+                base_ref.to_owned()
+            };
+            resolve_source_base_ref(
+                &repository.root_path,
+                &repository.remote_name,
+                &base_ref,
+                remote_available,
+            )?
         };
 
         let path = repository.workspace_parent_path.join(&name);
@@ -13970,17 +13983,48 @@ mod tests {
     }
 
     #[test]
-    fn create_workspace_without_explicit_base_uses_local_default_branch() {
+    fn create_workspace_without_explicit_base_uses_remote_default_branch() {
         let temp = tempfile::tempdir().unwrap();
+        let remote_path = temp.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "--bare", "--initial-branch", "main"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         Command::new("git")
             .arg("-C")
             .arg(&repo_path)
+            .args(["remote", "add", "origin"])
+            .arg(&remote_path)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["push", "-u", "origin", "main"])
+            .status()
+            .unwrap();
+        fs::write(repo_path.join("local-only.txt"), "local\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["add", "local-only.txt"])
+            .status()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
             .args([
-                "remote",
-                "add",
-                "origin",
-                "https://example.invalid/demo.git",
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "local only",
             ])
             .status()
             .unwrap();
@@ -14007,7 +14051,8 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(workspace.base_ref, "main");
+        assert_eq!(workspace.base_ref, "origin/main");
+        assert!(!workspace.path.join("local-only.txt").exists());
         assert_eq!(
             git_output(&workspace.path, ["branch", "--show-current"]).trim(),
             "lc/berlin"

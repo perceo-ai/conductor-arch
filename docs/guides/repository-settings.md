@@ -289,6 +289,11 @@ default_visible_tab = "changes"
 `working_directory` is the one to reach for in a monorepo: scripts and agent
 sessions start there instead of at the worktree root.
 
+When a repository has its configured remote, Archductor fetches `base_branch`
+and creates new worktrees from the remote-tracking ref (for example,
+`origin/main`), not a potentially stale local branch. An explicit base chosen
+for one workspace is used as written.
+
 ### View
 
 ```toml
