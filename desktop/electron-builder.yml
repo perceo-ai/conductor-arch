@@ -89,11 +89,24 @@ rpm:
 appImage:
   artifactName: archductor-desktop-${version}-${arch}.AppImage
 
+# Signed with a Developer ID Application identity and notarized so Gatekeeper
+# and Squirrel.Mac accept the bundle — the zip target is what electron-updater
+# actually downloads and installs from (the dmg is for first installs). CI
+# provides CSC_LINK/CSC_KEY_PASSWORD for signing and APPLE_ID/
+# APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID for notarytool; a local build
+# without those env vars still packages, just unsigned (and updater.ts falls
+# back to opening the release page when Squirrel rejects such a build).
 mac:
   target:
     - dmg
+    - zip
   category: public.app-category.developer-tools
   icon: build/icon.icns
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: true
 
 win:
   target:

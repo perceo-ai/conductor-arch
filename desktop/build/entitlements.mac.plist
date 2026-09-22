@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened-runtime entitlements for the signed macOS build. Electron needs
+     JIT + unsigned executable memory for V8; library validation is disabled so
+     the bundle may load the Rust sidecars and any natively-built node modules;
+     dyld env vars keep ELECTRON_RUN_AS_NODE-style child spawns working. Used
+     as both entitlements and entitlementsInherit (see electron-builder.yml). -->
+<plist version="1.0">
+  <dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

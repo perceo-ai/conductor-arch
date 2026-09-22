@@ -135,7 +135,7 @@ jobs:
     name: Package (${{ matrix.os }})
     needs: [version, verify, release]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90 # notarization can add 5-30 min on the mac leg
     permissions:
       contents: write
     # Every run step here is written in POSIX shell. Without this the Windows
@@ -199,10 +199,32 @@ jobs:
         working-directory: desktop
         # No GH_TOKEN here so electron-builder never auto-publishes; the upload
         # step below attaches artifacts explicitly.
+        #
+        # The mac build signs with the Developer ID Application identity
+        # (CSC_LINK is the base64 .p12 — electron-builder reads it straight
+        # from the env var) and notarizes via notarytool with the Apple ID
+        # credentials. Squirrel.Mac requires both before it will self-update.
+        # The env vars are empty strings on the other platforms, which
+        # electron-builder must not see as "a cert was provided" — hence the
+        # conditional exports below.
         env:
           EB_PLATFORM: ${{ matrix.platform }}
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_APPLE_ID: ${{ secrets.APPLE_ID }}
+          MACOS_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          MACOS_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          if [ "$EB_PLATFORM" = "mac" ]; then
+            : "${MACOS_CERT_P12_BASE64:?mac release needs the MACOS_CERT_P12_BASE64 secret}"
+            : "${MACOS_APPLE_ID:?mac release needs the APPLE_ID secret}"
+            export CSC_LINK="$MACOS_CERT_P12_BASE64"
+            export CSC_KEY_PASSWORD="$MACOS_CERT_PASSWORD"
+            export APPLE_ID="$MACOS_APPLE_ID"
+            export APPLE_APP_SPECIFIC_PASSWORD="$MACOS_APPLE_APP_SPECIFIC_PASSWORD"
+            export APPLE_TEAM_ID="$MACOS_APPLE_TEAM_ID"
+          fi
           pnpm build
           pnpm exec electron-builder "--$EB_PLATFORM" --publish never
 
@@ -215,6 +237,7 @@ jobs:
             desktop/release/*.deb
             desktop/release/*.rpm
             desktop/release/*.dmg
+            desktop/release/*.zip
             desktop/release/*.exe
             desktop/release/latest*.yml
             desktop/release/*.blockmap
@@ -232,8 +255,10 @@ jobs:
           shopt -s nullglob
           # latest*.yml and the blockmaps are the update feed the in-app
           # updater reads; without them on the release, a packaged app can see
-          # no new version even though the installers are right there.
-          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.exe desktop/release/latest*.yml desktop/release/*.blockmap)
+          # no new version even though the installers are right there. The mac
+          # zip is what Squirrel.Mac actually installs from (dmg = first
+          # install only), so latest-mac.yml points at it.
+          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.zip desktop/release/*.exe desktop/release/latest*.yml desktop/release/*.blockmap)
           if [ ${#files[@]} -eq 0 ]; then
             echo "no installers produced on $MATRIX_OS" >&2
             exit 0
