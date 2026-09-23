@@ -637,6 +637,7 @@ export function ReviewPromptButton(props: { workspace: string }) {
         type: "get_workspace_git_action_prompt",
         workspace: props.workspace,
         action: "open_pr",
+        thread_id: thread.id,
       });
       if (prompt.type === "error") throw new Error(prompt.message);
       if (prompt.type !== "workspace_git_action_prompt") throw new Error("Unable to prepare review prompt.");

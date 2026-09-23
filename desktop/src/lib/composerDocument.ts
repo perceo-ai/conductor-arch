@@ -1,4 +1,5 @@
 import { fileNameFromPath } from "./chatAttachments";
+import { CHIP_ATTR } from "./fileChip";
 
 /**
  * The composer's document is a flat list: the input has no block structure, so
@@ -92,8 +93,12 @@ export function normalize(nodes: ComposerNode[]): ComposerNode[] {
   return out;
 }
 
-/** Marks a chip element. Also the hook the CSS and the tests select on. */
-export const CHIP_ATTR = "data-chip";
+/**
+ * Marks a chip element. Defined in `fileChip` so the composer and the
+ * transcript cannot disagree about it; re-exported here because this module's
+ * callers have always imported it from here.
+ */
+export { CHIP_ATTR } from "./fileChip";
 
 function chipNode(el: Element): ComposerNode | null {
   const kind = el.getAttribute(CHIP_ATTR);

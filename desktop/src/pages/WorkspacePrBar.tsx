@@ -86,7 +86,12 @@ export default function WorkspacePrBar(props: { workspace: string }) {
     const action = gitAction();
     if (!action) return;
     const thread = await activeChatThread();
-    const prompt = await send({ type: "get_workspace_git_action_prompt", workspace: props.workspace, action });
+    const prompt = await send({
+      type: "get_workspace_git_action_prompt",
+      workspace: props.workspace,
+      action,
+      thread_id: thread.id,
+    });
     if (prompt.type === "error") throw new Error(prompt.message);
     if (prompt.type !== "workspace_git_action_prompt") throw new Error("Unable to prepare agent prompt.");
     nav.selectChatThread(thread.id);

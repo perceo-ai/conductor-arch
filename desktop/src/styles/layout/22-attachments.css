@@ -1,41 +1,4 @@
 
-/* Composer attachment chips (large pastes saved as files). */
-.chat-attachment-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding-bottom: 8px;
-}
-.chat-attachment-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 6px 3px 8px;
-  font-size: 12px;
-  color: var(--lc-text, #e6e6e6);
-  background: var(--lc-surface, #1f1f1f);
-  border: 1px solid var(--lc-border, #2f2f2f);
-  border-radius: 999px;
-}
-.chat-attachment-chip-label {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.chat-attachment-chip-remove {
-  background: none;
-  border: none;
-  color: #9a9a9a;
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  padding: 0;
-}
-.chat-attachment-chip-remove:hover {
-  color: var(--lc-text, #e6e6e6);
-}
-
 /* Agent interaction banner (permission / question / plan approval). */
 .chat-interaction {
   margin: 8px 16px 0;

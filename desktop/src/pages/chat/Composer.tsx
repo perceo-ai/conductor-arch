@@ -37,6 +37,8 @@ import {
   type ChatGenerationState
 } from "@/lib/chatGeneration";
 import { inlineFileMentionAt } from "@/lib/chatAttachments";
+import { loadWorkspaceFiles } from "@/lib/workspaceFiles";
+import { openFileInCenter } from "@/pages/openFileBridge";
 import { fuzzyScore } from "@/lib/fuzzy";
 import { providerToKind } from "./providerKind";
 import { applyApprovalMode, supportsApprovalMode } from "./approvalMode";
@@ -111,17 +113,9 @@ export function Composer(props: {
         : "Agent starting";
   const sessionId = () => slice().session?.session_id ?? null;
   const modelOptions = agentModelOptions;
-  const [workspaceFiles] = createResource(
-    () => props.workspace,
-    async (workspace): Promise<string[]> => {
-      try {
-        const res = await send({ type: "list_workspace_files", workspace });
-        return res.type === "workspace_files" ? res.files : [];
-      } catch {
-        return [];
-      }
-    },
-  );
+  // Shared with the timeline, which needs the same list to resolve the chips in
+  // messages that have already been sent.
+  const [workspaceFiles] = createResource(() => props.workspace, loadWorkspaceFiles);
   const fileMentionOptions = createMemo(() => {
     const mention = fileMention();
     if (!mention) return [];
@@ -651,6 +645,7 @@ export function Composer(props: {
               syncFileMention(toVisible(next), caret);
             }}
             onKeyDown={onKeyDown}
+            onOpenFile={(path) => openFileInCenter(props.workspace, path)}
             onPaste={(e, insert) => void onPaste(e, insert)}
           />
           <Show when={skillMention() && skillMentionOptions().length > 0}>

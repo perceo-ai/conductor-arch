@@ -94,7 +94,14 @@ export type ArchcarRequest =
   | { type: "get_check_log"; workspace: string }
   | { type: "commit_workspace_changes"; workspace: string; message: string; stage_all?: boolean }
   | { type: "get_pull_request_readiness"; workspace: string }
-  | { type: "get_workspace_git_action_prompt"; workspace: string; action: WorkspaceGitAction }
+  | {
+      type: "get_workspace_git_action_prompt";
+      workspace: string;
+      action: WorkspaceGitAction;
+      // Saves the resolved prompt against this thread and returns a
+      // `visible_input` carrying a chip that opens it.
+      thread_id?: number;
+    }
   | { type: "get_spotlight_status"; workspace: string }
   | { type: "start_spotlight"; workspace: string }
   | { type: "stop_spotlight"; workspace: string }

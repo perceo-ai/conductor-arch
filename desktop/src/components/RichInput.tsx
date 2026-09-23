@@ -6,7 +6,7 @@ import {
   nodesFromDom,
   type ComposerNode,
 } from "@/lib/composerDocument";
-import { materialFileIcon } from "@/lib/materialFileIcons";
+import { fileChipElement, openableChipPath } from "@/lib/fileChip";
 
 export interface RichInputApi {
   focus(): void;
@@ -40,6 +40,8 @@ export default function RichInput(props: {
   onInput: (nodes: ComposerNode[], caret: number) => void;
   onKeyDown?: (e: KeyboardEvent) => void;
   onPaste?: (e: ClipboardEvent, insert: (text: string) => void) => void;
+  /** Clicking a file chip opens the file it stands for. */
+  onOpenFile?: (path: string) => void;
   placeholder: string;
   class?: string;
   ref?: (api: RichInputApi) => void;
@@ -50,25 +52,23 @@ export default function RichInput(props: {
   let composing = false;
 
   function chipElement(node: Extract<ComposerNode, { kind: "file" | "command" }>): HTMLSpanElement {
+    if (node.kind === "file") {
+      // Built by the same module the transcript renders with, so a chip looks
+      // identical before and after the message is sent. A chip whose `path` is
+      // only its label came back from a draft restore and has nowhere to open.
+      const chip = fileChipElement({
+        path: node.path,
+        label: node.label,
+        openable: node.path !== node.label,
+      });
+      chip.setAttribute("contenteditable", "false");
+      return chip;
+    }
     const chip = document.createElement("span");
     chip.setAttribute(CHIP_ATTR, node.kind);
     chip.setAttribute("contenteditable", "false");
-    if (node.kind === "file") {
-      chip.setAttribute("data-path", node.path);
-      chip.setAttribute("data-label", node.label);
-      chip.title = node.path;
-      // The file's own type icon, so a chip says what kind of file it is before
-      // the name is read. An <img> contributes no text, which matters: the
-      // chip's textContent is what `nodesFromDom` and the caret arithmetic see.
-      const icon = document.createElement("img");
-      icon.className = "chat-chip-icon";
-      icon.src = materialFileIcon(node.path).src;
-      icon.alt = "";
-      chip.append(icon, document.createTextNode(node.label));
-    } else {
-      chip.setAttribute("data-name", node.name);
-      chip.textContent = nodeText(node);
-    }
+    chip.setAttribute("data-name", node.name);
+    chip.textContent = nodeText(node);
     return chip;
   }
 
@@ -181,6 +181,14 @@ export default function RichInput(props: {
       role="textbox"
       aria-multiline="true"
       data-placeholder={props.placeholder}
+      // A chip is `contenteditable="false"`, so a click on one carries no caret
+      // position to lose — it is free to mean "open this".
+      onClick={(e) => {
+        const path = openableChipPath(e.target);
+        if (!path) return;
+        e.preventDefault();
+        props.onOpenFile?.(path);
+      }}
       onInput={report}
       onCompositionStart={() => {
         composing = true;

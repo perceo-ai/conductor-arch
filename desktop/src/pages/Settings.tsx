@@ -495,27 +495,6 @@ export function SettingsPage() {
                 }
               />
               <SettingsRow
-                title="New workspace"
-                description="Used when creating a workspace from free-form instructions."
-                control={
-                  <SettingsTextInput
-                    value={settingValue("prompts", "new_workspace")}
-                    placeholder="Create a small workspace plan..."
-                    onInput={(value) => setSettingValue("prompts", "new_workspace", value)}
-                  />
-                }
-              />
-              <SettingsRow
-                title="Continue work"
-                description="Used when asking an agent to pick up existing work."
-                control={
-                  <SettingsTextInput
-                    value={settingValue("prompts", "continue_work")}
-                    onInput={(value) => setSettingValue("prompts", "continue_work", value)}
-                  />
-                }
-              />
-              <SettingsRow
                 title="Code review"
                 description="Used for review staging and review-focused agent work."
                 control={

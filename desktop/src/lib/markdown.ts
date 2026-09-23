@@ -1,5 +1,6 @@
 import { marked } from "marked";
 import { highlightCode, escapeHtml } from "./highlight";
+import { fileChipHtml, fileChipSpecFor } from "./fileChip";
 
 // Render assistant message markdown to HTML with fenced code blocks
 // syntax-highlighted (so ```tsx / ```py blocks look like editor code). marked is
@@ -67,9 +68,21 @@ export function renderMarkdownDocument(md: string): string {
 const INLINE_FILE_MARKER =
   /\{([A-Za-z0-9_.@+ -]+\.(?:c|cc|cpp|css|gif|go|h|hpp|html|jpeg|jpg|js|jsx|json|md|pdf|png|py|rs|scss|sh|sql|toml|ts|tsx|txt|webp|ya?ml))\}/g;
 
-export function renderMarkdownWithInlineFileChips(md: string): string {
-  return renderMarkdown(md).replace(INLINE_FILE_MARKER, (_match, label: string) => {
-    const safe = escapeHtml(label);
-    return `<span class="chat-inline-file-chip" title="${safe}">${safe}</span>`;
-  });
+/**
+ * Render a sent message, turning `{file.md}` markers back into the same chips
+ * the composer drew before it was sent.
+ *
+ * The markup comes from `fileChip`, which the composer also uses — the two used
+ * to build it separately and had drifted into looking like different things.
+ * `opts` is what lets a chip be opened: the marker carries only a filename, so
+ * the path has to be recovered (see `fileChipSpecFor`). Without it the chips
+ * still render, they just aren't clickable.
+ */
+export function renderMarkdownWithInlineFileChips(
+  md: string,
+  opts: { threadId?: number | null; files?: readonly string[] } = {},
+): string {
+  return renderMarkdown(md).replace(INLINE_FILE_MARKER, (_match, label: string) =>
+    fileChipHtml(fileChipSpecFor(label, opts)),
+  );
 }

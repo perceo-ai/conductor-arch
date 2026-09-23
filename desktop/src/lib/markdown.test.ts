@@ -4,6 +4,7 @@ import {
   renderMarkdownDocument,
   renderMarkdownWithInlineFileChips,
 } from "./markdown";
+import { fileChipHtml } from "./fileChip";
 
 describe("renderMarkdownDocument", () => {
   it("reflows a single newline instead of breaking the line", () => {
@@ -35,10 +36,50 @@ describe("renderMarkdownDocument", () => {
 });
 
 describe("renderMarkdownWithInlineFileChips", () => {
-  it("renders file markers as compact inline chips", () => {
-    expect(renderMarkdownWithInlineFileChips("abc {pasted-text-a1b2c3d4.md} abc")).toContain(
-      '<span class="chat-inline-file-chip" title="pasted-text-a1b2c3d4.md">pasted-text-a1b2c3d4.md</span>',
-    );
+  it("renders file markers as chips", () => {
+    const html = renderMarkdownWithInlineFileChips("abc {pasted-text-a1b2c3d4.md} abc");
+    expect(html).toContain('data-chip="file"');
+    expect(html).toContain('data-label="pasted-text-a1b2c3d4.md"');
+  });
+
+  it("draws the same chip the composer draws", () => {
+    // These two used to build their own markup and had drifted: the composer's
+    // chip had the file's type icon and the accent treatment, this one was a
+    // plain grey span. The same attachment must not look like two things.
+    const spec = { path: "docs/guide.md", label: "guide.md", openable: true };
+    const html = renderMarkdownWithInlineFileChips("see {guide.md}", {
+      threadId: 1,
+      files: ["docs/guide.md"],
+    });
+    expect(html).toContain(fileChipHtml(spec));
+  });
+
+  it("points a resolved chip at the file it stands for", () => {
+    const html = renderMarkdownWithInlineFileChips("see {guide.md}", {
+      threadId: 1,
+      files: ["docs/guide.md"],
+    });
+    expect(html).toContain('data-path="docs/guide.md"');
+    expect(html).toContain('data-openable="true"');
+  });
+
+  it("resolves a chat attachment against the thread's attachment directory", () => {
+    // `.context/` is gitignored, so this never comes back in the file list.
+    const html = renderMarkdownWithInlineFileChips("{pasted-text-a1b2c3d4.md}", {
+      threadId: 42,
+      files: [],
+    });
+    expect(html).toContain('data-path=".context/archductor/42/pasted-text-a1b2c3d4.md"');
+  });
+
+  it("leaves an unresolvable chip inert rather than pointing it at a bare filename", () => {
+    const html = renderMarkdownWithInlineFileChips("see {ghost.ts}", { threadId: 1, files: [] });
+    expect(html).toContain('data-chip="file"');
+    expect(html).not.toContain("data-openable");
+  });
+
+  it("still renders chips when given no resolution context at all", () => {
+    expect(renderMarkdownWithInlineFileChips("see {guide.md}")).toContain('data-chip="file"');
   });
 });
 
