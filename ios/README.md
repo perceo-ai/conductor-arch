@@ -38,6 +38,24 @@ xcodebuild -project Archductor.xcodeproj -scheme Archductor \
   -destination 'platform=iOS Simulator,name=iPhone 17' test
 ```
 
+`VisualTourUITests` walks every screen against a live daemon and attaches a
+screenshot of each one, which is how a look is reviewed — no assertion says
+anything about a colour. It reads only: it opens panels that already exist and
+never creates, archives, or sends anything.
+
+```sh
+TEST_RUNNER_ARCHDUCTOR_UITEST_ADDRESS=127.0.0.1:7420 \
+TEST_RUNNER_ARCHDUCTOR_UITEST_TOKEN="$(cat ~/.local/state/archductor/archcar.token)" \
+TEST_RUNNER_ARCHDUCTOR_UITEST_WORKSPACE=<a workspace on that daemon> \
+xcodebuild -project Archductor.xcodeproj -scheme Archductor \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -resultBundlePath build/tour.xcresult \
+  -only-testing:ArchductorUITests/VisualTourUITests test
+
+xcrun xcresulttool export attachments --path build/tour.xcresult \
+  --output-path /tmp/tour     # names are in the manifest.json it writes
+```
+
 `LiveDaemonUITests` pairs the real app with a real daemon, creates a chat on
 it, and renders a transcript. It skips unless you point it at one; `xcodebuild`
 only forwards variables prefixed with `TEST_RUNNER_`:
@@ -64,10 +82,18 @@ xcrun devicectl list devices            # UDID of the plugged-in phone
 make ios-device DEVICE=<udid> TEAM=<team-id>
 ```
 
-The phone must be unlocked for the install to launch, and a personal (free)
-Apple team signs builds that expire after seven days — re-run the same command
-to refresh. First launch may need the developer trusted under
-Settings → General → VPN & Device Management.
+The phone must be unlocked for the install to launch. First launch may need the
+developer trusted under Settings → General → VPN & Device Management.
+
+`TEAM` decides how long the build lasts. A personal (free) Apple team signs
+builds that stop opening after seven days. A paid Apple Developer Program team
+signs against a provisioning profile good for a year, which is the difference
+between a phone client you can rely on and one that dies mid-week:
+
+```sh
+security find-certificate -c "Apple Development" -p |
+  openssl x509 -noout -subject          # OU=... is the team id
+```
 
 The app is useless until it can reach a daemon, which means the daemon needs a
 listener it can dial: see `docs/guides/phone-access.md`.

@@ -2,4 +2,9 @@
 Archductor.xcodeproj/
 .build/
 DerivedData/
+# Where the Makefile's ios-device target and every local xcodebuild run put
+# their derived data. Leaving it untracked rather than ignored put thousands of
+# build artifacts into `git status`, which is what the workspace's own change
+# list, the review panels, and the phone all read.
+build/
 tools/node_modules/

@@ -9,6 +9,35 @@ public enum ArchcarTransportError: Error, Equatable, Sendable {
     case closed
 }
 
+/// Turns an `NWError` into the sentence a phone can act on.
+///
+/// Network.framework's own text ("The operation couldn't be completed") names
+/// nothing the user owns. These three cases are the ones that actually happen:
+/// the daemon is not running, the VPN is not up, or the machine is asleep — and
+/// each has a different fix.
+func connectionReason(_ error: NWError, address: DaemonAddress) -> String {
+    switch error {
+    case .posix(.ECONNREFUSED):
+        return """
+            \(address.host) refused the connection on port \(address.port). \
+            The daemon is not listening — open the Archductor desktop app, or \
+            check `archductor service status`.
+            """
+    case .posix(.EHOSTUNREACH), .posix(.ENETUNREACH), .posix(.EHOSTDOWN):
+        return """
+            No route to \(address.host). If that is a Tailscale address, turn \
+            Tailscale on — on this phone and on the machine.
+            """
+    case .posix(.ETIMEDOUT):
+        return """
+            \(address.host) did not answer on port \(address.port). The machine \
+            may be asleep, or something between you and it is dropping the port.
+            """
+    default:
+        return "Could not reach \(address.host):\(address.port) — \(error.localizedDescription)"
+    }
+}
+
 /// One TCP connection to archcar, framed as newline-delimited JSON.
 ///
 /// The token goes out as the first line, before any RPC — the daemon reads
@@ -39,6 +68,9 @@ public actor ArchcarConnection {
     public func open() async throws {
         guard connection == nil else { return }
         _ = lines
+        // Bound locally so the state handler below can name the endpoint in its
+        // errors without capturing the actor.
+        let address = self.address
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(address.host),
             port: NWEndpoint.Port(rawValue: address.port) ?? NWEndpoint.Port(rawValue: DaemonAddress.defaultPort)!)
@@ -61,12 +93,18 @@ public actor ArchcarConnection {
                 case .ready:
                     continuation.resume()
                 case .failed(let error):
-                    continuation.resume(throwing: ArchcarTransportError.connectionFailed(error.localizedDescription))
+                    let reason = connectionReason(error, address: address)
+                    ArchcarLog.transport.error(
+                        "connect failed host=\(address.host, privacy: .public) port=\(address.port, privacy: .public) error=\(String(describing: error), privacy: .public)")
+                    continuation.resume(throwing: ArchcarTransportError.connectionFailed(reason))
                 case .waiting(let error):
                     // Network.framework parks a refused or unreachable endpoint
                     // in `.waiting` and retries forever. A phone wants to be
                     // told, so the retry decision stays with the caller.
-                    continuation.resume(throwing: ArchcarTransportError.connectionFailed(error.localizedDescription))
+                    let reason = connectionReason(error, address: address)
+                    ArchcarLog.transport.error(
+                        "connect waiting host=\(address.host, privacy: .public) port=\(address.port, privacy: .public) error=\(String(describing: error), privacy: .public)")
+                    continuation.resume(throwing: ArchcarTransportError.connectionFailed(reason))
                 case .cancelled:
                     continuation.resume(throwing: ArchcarTransportError.closed)
                 default:

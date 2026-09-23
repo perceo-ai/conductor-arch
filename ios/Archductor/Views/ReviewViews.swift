@@ -3,84 +3,146 @@ import SwiftUI
 
 /// Changed files, with a scope picker matching the desktop's.
 struct ChangesPanel: View {
+    @Environment(\.palette) private var palette
     let store: ReviewStore
     @State private var committing = false
 
     var body: some View {
-        List {
-            Section {
-                Picker("Scope", selection: Binding(
-                    get: { store.scope },
-                    set: { scope in Task { await store.setScope(scope) } })) {
-                    Text("All").tag(WorkspaceChangeScope.all)
-                    Text("Uncommitted").tag(WorkspaceChangeScope.uncommitted)
-                }
-                .pickerStyle(.segmented)
-            }
+        VStack(spacing: 0) {
+            SegmentedScope(
+                scope: store.scope,
+                select: { scope in Task { await store.setScope(scope) } })
+                .padding(.horizontal, Metrics.pageInset)
+                .padding(.vertical, 9)
+                .background(palette.bg)
 
-            ForEach(store.files) { file in
-                NavigationLink {
-                    DiffView(store: store, path: file.path)
-                } label: {
-                    ChangedFileRow(file: file)
-                }
-            }
-
-            if !store.files.isEmpty {
-                Section {
-                    Button {
-                        committing = true
-                    } label: {
-                        Label("Commit these changes", systemImage: "checkmark.seal")
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(store.files) { file in
+                        NavigationLink {
+                            DiffView(store: store, path: file.path)
+                        } label: {
+                            ChangedFileRow(file: file)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if !store.files.isEmpty {
+                        Button("Commit these changes") { committing = true }
+                            .buttonStyle(AccentButtonStyle())
+                            .padding(.top, 6)
                     }
                 }
+                .padding(.horizontal, Metrics.pageInset)
+                .padding(.bottom, 14)
+            }
+            .archductorScreen()
+            .refreshable { await store.refreshChanges() }
+            .overlay {
+                if let failure = store.changesError {
+                    // Never claim a clean tree on a failed fetch — that is a
+                    // statement about someone's work, and it would be wrong.
+                    EmptyStateView(
+                        title: "Could not list changes",
+                        systemImage: "exclamationmark.triangle",
+                        detail: failure,
+                        action: (label: "Try again", run: {
+                            Task { await store.refreshChanges() }
+                        }))
+                } else if store.files.isEmpty {
+                    EmptyStateView(
+                        title: "No changes", systemImage: "checkmark.circle",
+                        detail: store.scope == .uncommitted
+                            ? "Nothing is uncommitted in this worktree."
+                            : "This branch matches its base.")
+                }
             }
         }
-        .listStyle(.plain)
-        .refreshable { await store.refreshChanges() }
-        .overlay {
-            if store.files.isEmpty {
-                ContentUnavailableView(
-                    "No changes", systemImage: "checkmark.circle",
-                    description: Text("Nothing differs from \(store.scope.label.lowercased())."))
-            }
-        }
+        .background(palette.bg)
         .sheet(isPresented: $committing) { CommitSheet(store: store) }
     }
 }
 
+/// The scope picker, in the app's own colours.
+///
+/// `.pickerStyle(.segmented)` cannot be tinted past its selected-capsule fill,
+/// and that capsule is the one thing on the screen that would still read as
+/// system grey.
+struct SegmentedScope: View {
+    @Environment(\.palette) private var palette
+    let scope: WorkspaceChangeScope
+    let select: (WorkspaceChangeScope) -> Void
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach([WorkspaceChangeScope.all, .uncommitted], id: \.self) { option in
+                let selected = scope == option
+                Button {
+                    select(option)
+                } label: {
+                    Text(option == .all ? "All" : "Uncommitted")
+                        .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                        .foregroundStyle(selected ? palette.accent : palette.textMuted)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(
+                            selected ? palette.accentWash : palette.surface,
+                            in: RoundedRectangle(cornerRadius: Metrics.radiusSmall, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Metrics.radiusSmall, style: .continuous)
+                                .strokeBorder(
+                                    selected ? palette.accentEdge : palette.border,
+                                    lineWidth: Metrics.hairline))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
 struct ChangedFileRow: View {
+    @Environment(\.palette) private var palette
     let file: DiffFileSummary
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 9) {
             Text(file.stateLabel)
-                .font(.caption2.monospaced().weight(.semibold))
-                .frame(width: 22)
-                .foregroundStyle(file.untracked ? .green : .orange)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .frame(width: 20)
+                .foregroundStyle(file.untracked ? palette.diffAdd : palette.warning)
             VStack(alignment: .leading, spacing: 2) {
-                Text(file.fileName).font(.subheadline).lineLimit(1)
+                Text(file.fileName)
+                    .font(Typeface.body)
+                    .foregroundStyle(palette.textStrong)
+                    .lineLimit(1)
                 if !file.directory.isEmpty {
                     Text(file.directory)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(Typeface.monoSmall)
+                        .foregroundStyle(palette.textMuted)
                         .lineLimit(1)
                         .truncationMode(.head)
                 }
             }
-            Spacer()
+            Spacer(minLength: 6)
             if let additions = file.additions, let deletions = file.deletions {
-                Text("+\(additions) −\(deletions)")
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Text("+\(additions)").foregroundStyle(palette.diffAdd)
+                    Text("−\(deletions)").foregroundStyle(palette.diffDelete)
+                }
+                .font(Typeface.monoSmall)
             }
         }
+        .padding(.horizontal, Metrics.rowInset)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .panel()
     }
 }
 
 /// A unified diff, coloured. Monospaced and horizontally scrollable, because
 /// wrapping code on a phone makes it unreadable.
 struct DiffView: View {
+    @Environment(\.palette) private var palette
     let store: ReviewStore
     let path: String
 
@@ -93,7 +155,7 @@ struct DiffView: View {
             if loading {
                 ProgressView()
             } else if lines.isEmpty {
-                ContentUnavailableView("No diff", systemImage: "doc")
+                EmptyStateView(title: "No diff", systemImage: "doc", detail: "Nothing to show for this file.")
             } else {
                 // A two-axis ScrollView centres content smaller than the
                 // viewport, which pushes a short diff into the middle of the
@@ -102,7 +164,7 @@ struct DiffView: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(lines) { line in
                             Text(line.text.isEmpty ? " " : line.text)
-                                .font(.system(.caption, design: .monospaced))
+                                .font(Typeface.code)
                                 .foregroundStyle(colour(for: line.kind))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 1)
@@ -111,15 +173,17 @@ struct DiffView: View {
                         }
                         if truncated {
                             Text("… diff truncated at \(DiffParser.lineLimit) lines")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                                .font(Typeface.micro)
+                                .foregroundStyle(palette.textMuted)
                                 .padding(8)
                         }
                     }
                 }
                 .defaultScrollAnchor(.topLeading)
+                .background(palette.codeSurface)
             }
         }
+        .background(palette.bg)
         .navigationTitle(path.split(separator: "/").last.map(String.init) ?? path)
         .navigationBarTitleDisplayMode(.inline)
         .task {
@@ -133,18 +197,18 @@ struct DiffView: View {
 
     private func colour(for kind: DiffLine.Kind) -> Color {
         switch kind {
-        case .addition: .green
-        case .deletion: .red
-        case .hunkHeader: .accentColor
-        case .fileHeader: .secondary
-        case .context: .primary
+        case .addition: palette.diffAdd
+        case .deletion: palette.diffDelete
+        case .hunkHeader: palette.accent
+        case .fileHeader: palette.textMuted
+        case .context: palette.codeText
         }
     }
 
     private func background(for kind: DiffLine.Kind) -> Color {
         switch kind {
-        case .addition: Color.green.opacity(0.10)
-        case .deletion: Color.red.opacity(0.10)
+        case .addition: palette.diffAddBackground
+        case .deletion: palette.diffDeleteBackground
         default: .clear
         }
     }
@@ -152,6 +216,7 @@ struct DiffView: View {
 
 /// Checks, CI runs, and the pull request.
 struct ChecksPanel: View {
+    @Environment(\.palette) private var palette
     let store: ReviewStore
     @State private var creatingPR = false
 
@@ -163,7 +228,7 @@ struct ChecksPanel: View {
                     if let status = checks.checkStatus {
                         LabeledContent("Checks") {
                             Text(status)
-                                .foregroundStyle(status == "passed" ? .green : .orange)
+                                .foregroundStyle(status == "passed" ? palette.diffAdd : palette.warning)
                         }
                     }
                     if let ahead = checks.branchAhead {
@@ -227,15 +292,18 @@ struct ChecksPanel: View {
                 }
             }
             if let error = store.lastError {
-                Section { Text(error).font(.caption).foregroundStyle(.red) }
+                Section { Text(error).font(Typeface.secondary).foregroundStyle(palette.danger) }
             }
         }
+        .archductorScreen()
+        .tint(palette.accent)
         .refreshable { await store.refreshChecks() }
         .sheet(isPresented: $creatingPR) { CreatePullRequestSheet(store: store) }
     }
 }
 
 struct WorkflowRunRow: View {
+    @Environment(\.palette) private var palette
     let run: WorkflowRun
 
     var body: some View {
@@ -243,10 +311,13 @@ struct WorkflowRunRow: View {
             Image(systemName: icon)
                 .foregroundStyle(tint)
             VStack(alignment: .leading, spacing: 2) {
-                Text(run.name).font(.subheadline).lineLimit(1)
+                Text(run.name)
+                    .font(Typeface.body)
+                    .foregroundStyle(palette.textStrong)
+                    .lineLimit(1)
                 Text(run.isRunning ? run.status : run.conclusion)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(Typeface.micro)
+                    .foregroundStyle(palette.textMuted)
             }
             Spacer()
             Link(destination: URL(string: run.url) ?? URL(string: "https://github.com")!) {
@@ -261,12 +332,13 @@ struct WorkflowRunRow: View {
     }
 
     private var tint: Color {
-        if run.isRunning { return .secondary }
-        return run.isFailure ? .red : .green
+        if run.isRunning { return palette.textMuted }
+        return run.isFailure ? palette.diffDelete : palette.diffAdd
     }
 }
 
 struct TodosPanel: View {
+    @Environment(\.palette) private var palette
     let store: ReviewStore
     @State private var draft = ""
 
@@ -275,10 +347,14 @@ struct TodosPanel: View {
             ForEach(store.todos) { todo in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: todo.isOpen ? "circle" : "checkmark.circle.fill")
-                        .foregroundStyle(todo.isOpen ? Color.secondary : Color.green)
+                        .foregroundStyle(todo.isOpen ? palette.textMuted : palette.diffAdd)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(todo.text).font(.subheadline)
-                        Text(todo.source).font(.caption2).foregroundStyle(.secondary)
+                        Text(todo.text)
+                            .font(Typeface.body)
+                            .foregroundStyle(palette.text)
+                        Text(todo.source)
+                            .font(Typeface.micro)
+                            .foregroundStyle(palette.textMuted)
                     }
                 }
             }
@@ -294,10 +370,14 @@ struct TodosPanel: View {
                 }
             }
         }
+        .archductorScreen()
+        .tint(palette.accent)
         .refreshable { await store.refreshTodos() }
         .overlay {
             if store.todos.isEmpty {
-                ContentUnavailableView("No todos", systemImage: "checklist")
+                EmptyStateView(
+                    title: "No todos", systemImage: "checklist",
+                    detail: "Nothing is tracked against this workspace yet.")
             }
         }
     }
@@ -318,6 +398,7 @@ struct CommitSheet: View {
                     Text("Stages everything in the worktree, the same as the desktop's commit.")
                 }
             }
+            .archductorForm()
             .navigationTitle("Commit")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -360,6 +441,7 @@ struct CreatePullRequestSheet: View {
                     Toggle("Draft pull request", isOn: $draft)
                 }
             }
+            .archductorForm()
             .navigationTitle("New pull request")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

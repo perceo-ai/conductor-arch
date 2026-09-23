@@ -65,6 +65,22 @@ describe("isDisplayableTimelineItem", () => {
     ).toBe(true);
   });
 
+  it("drops the status card claude's image note projects to", () => {
+    // An image the agent read is already accounted for by its Read card; the
+    // "[Image: original …]" note the provider appends is metadata, projected as
+    // a status card, and must not appear as a chat row.
+    expect(
+      isDisplayableTimelineItem(
+        item({
+          render_class: "status_card",
+          title: "Image",
+          status: "complete",
+          stream_state: "complete",
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it("shows provider error cards", () => {
     expect(
       isDisplayableTimelineItem(

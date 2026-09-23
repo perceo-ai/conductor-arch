@@ -954,6 +954,8 @@ pub enum ClaudeProviderEventKind {
     Hook,
     /// A skill body claude injected into the conversation on its own behalf.
     SkillInjection,
+    /// The dimensions note claude appends after an image tool result.
+    ImageCompanionNote,
     Subagent,
     Usage,
     ApiRetry,
@@ -1167,7 +1169,11 @@ impl ClaudeProviderEventDraft {
             | ClaudeProviderEventKind::UserMessage => self.provider_message_id.clone(),
             _ => None,
         };
-        let body = if self.kind == ClaudeProviderEventKind::Hook {
+        let body = if self.kind == ClaudeProviderEventKind::ImageCompanionNote {
+            // The note only restates the image's dimensions; the chat shows the
+            // read that produced it, so the text stays in the raw payload.
+            String::new()
+        } else if self.kind == ClaudeProviderEventKind::Hook {
             claude_hook_body(&self.raw_json).unwrap_or_default()
         } else if let Some(thinking_tokens) = claude_thinking_token_count(&self.raw_json) {
             // Claude does not send thinking text over stream-json — the deltas
@@ -1326,6 +1332,9 @@ impl ClaudeStreamParser {
         }
         if top_type.as_deref() == Some("user") && claude_skill_injection_name(value).is_some() {
             return ClaudeProviderEventKind::SkillInjection;
+        }
+        if top_type.as_deref() == Some("user") && claude_image_companion_note(value) {
+            return ClaudeProviderEventKind::ImageCompanionNote;
         }
         if top_type.as_deref() == Some("assistant")
             && message_has_block_type(value, "thinking")
@@ -1786,6 +1795,36 @@ fn claude_skill_injection_name(value: &Value) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// The note claude appends to its own turn after an image tool result, verbatim.
+const CLAUDE_IMAGE_NOTE_PREFIX: &str = "[Image:";
+
+/// True if this record is claude's own companion note for an image it just read.
+///
+/// Claude sends the note as a `type: "user"` record — `isMeta` plus
+/// `turnCompanion` in the transcript on disk, `isSynthetic` over stream-json —
+/// whose whole content is the string "[Image: original 2560x1800, displayed at
+/// …]". Read literally it claims the human typed that line; the image itself is
+/// already accounted for by the tool result that precedes it.
+fn claude_image_companion_note(value: &Value) -> bool {
+    let synthetic = ["isSynthetic", "isMeta", "turnCompanion"]
+        .into_iter()
+        .any(|key| value.get(key).and_then(Value::as_bool).unwrap_or(false));
+    if !synthetic || message_has_block_type(value, "tool_result") {
+        return false;
+    }
+    claude_message_plain_text(value)
+        .is_some_and(|text| text.trim_start().starts_with(CLAUDE_IMAGE_NOTE_PREFIX))
+}
+
+/// `message.content` when claude wrote it as a bare string rather than blocks.
+fn claude_message_plain_text(value: &Value) -> Option<String> {
+    value
+        .pointer("/message/content")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| message_content_text(value, "text", "text"))
+}
+
 fn claude_canonical_kind_and_subtype(
     kind: ClaudeProviderEventKind,
     tool_name: Option<&str>,
@@ -1793,6 +1832,12 @@ fn claude_canonical_kind_and_subtype(
 ) -> (ProviderEventKind, Option<String>) {
     if kind == ClaudeProviderEventKind::SkillInjection {
         return (ProviderEventKind::SkillPluginHook, Some("skill".to_owned()));
+    }
+    if kind == ClaudeProviderEventKind::ImageCompanionNote {
+        return (
+            ProviderEventKind::WebBrowserMedia,
+            Some("image_note".to_owned()),
+        );
     }
     if matches!(
         kind,
@@ -1851,6 +1896,7 @@ fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventK
         ClaudeProviderEventKind::Hook | ClaudeProviderEventKind::SkillInjection => {
             ProviderEventKind::SkillPluginHook
         }
+        ClaudeProviderEventKind::ImageCompanionNote => ProviderEventKind::WebBrowserMedia,
         ClaudeProviderEventKind::Subagent => ProviderEventKind::SubagentCollaboration,
         ClaudeProviderEventKind::Usage
         | ClaudeProviderEventKind::ApiRetry
@@ -1914,6 +1960,7 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
         | ClaudeProviderEventKind::ContentBlockStop
         | ClaudeProviderEventKind::ToolResult
         | ClaudeProviderEventKind::SkillInjection
+        | ClaudeProviderEventKind::ImageCompanionNote
         | ClaudeProviderEventKind::AssistantMessage => ProviderEventPhase::Completed,
         ClaudeProviderEventKind::DeferredResult => ProviderEventPhase::Declined,
         ClaudeProviderEventKind::Result => match claude_result_status_from_json(raw_json) {
@@ -1956,6 +2003,7 @@ fn claude_title_for(
         ClaudeProviderEventKind::Permission => "Permission request".to_owned(),
         ClaudeProviderEventKind::Hook => "Hook".to_owned(),
         ClaudeProviderEventKind::SkillInjection => "Skill".to_owned(),
+        ClaudeProviderEventKind::ImageCompanionNote => "Image".to_owned(),
         ClaudeProviderEventKind::Subagent => "Subagent".to_owned(),
         ClaudeProviderEventKind::Usage => "Usage".to_owned(),
         ClaudeProviderEventKind::ApiRetry => "API retry".to_owned(),
@@ -2808,6 +2856,67 @@ mod tests {
         assert_eq!(
             event.normalized_payload["title"],
             "Skill: caveman:caveman-help"
+        );
+    }
+
+    /// Captured from claude 2.1.278: reading an image sends the bytes as a
+    /// `tool_result`, then appends a `type: "user"` record — flagged `isMeta`
+    /// and `turnCompanion` — whose whole content is the dimensions note.
+    const IMAGE_COMPANION_NOTE: &str = concat!(
+        r#"{"type":"user","session_id":"s1","uuid":"u3","isMeta":true,"turnCompanion":true,"#,
+        r#""message":{"role":"user","content":"[Image: original 2560x1800, displayed at 2000x1406."#,
+        r#" Multiply coordinates by 1.28 to map to original image.]"}}"#,
+    );
+
+    #[test]
+    fn an_image_dimensions_note_is_not_a_user_message() {
+        // The note describes an image the Read tool card already accounts for.
+        // Read literally it claims the human typed "[Image: original …]".
+        let drafts = parse_claude_stream_json_lines(IMAGE_COMPANION_NOTE).unwrap();
+        let draft = drafts.first().expect("expected an event");
+        let event = draft
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(draft.kind, ClaudeProviderEventKind::ImageCompanionNote);
+        assert_eq!(event.kind, ProviderEventKind::WebBrowserMedia);
+        assert_eq!(event.provider_subtype.as_deref(), Some("image_note"));
+        assert_eq!(event.normalized_payload["title"], "Image");
+        // The note stays in the inspectable payload, never in the chat body.
+        assert_eq!(event.normalized_payload["body"], "");
+    }
+
+    #[test]
+    fn the_stream_json_spelling_of_the_image_note_is_recognised_too() {
+        // Over stream-json the same record is flagged `isSynthetic`.
+        let native = IMAGE_COMPANION_NOTE.replace(
+            "\"isMeta\":true,\"turnCompanion\":true",
+            "\"isSynthetic\":true",
+        );
+        let drafts = parse_claude_stream_json_lines(&native).unwrap();
+
+        assert_eq!(
+            drafts.first().map(|draft| draft.kind),
+            Some(ClaudeProviderEventKind::ImageCompanionNote)
+        );
+    }
+
+    #[test]
+    fn a_human_typing_an_image_note_is_still_a_user_message() {
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","#,
+            r#""content":"[Image: original 10x10] is what your parser writes"}}"#,
+        );
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+
+        assert_eq!(
+            drafts.first().map(|draft| draft.kind),
+            Some(ClaudeProviderEventKind::UserMessage)
         );
     }
 

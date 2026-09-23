@@ -4,6 +4,7 @@ import SwiftUI
 /// One conversation: the transcript, what is queued behind it, and whatever the
 /// agent is currently blocked on.
 struct ChatView: View {
+    @Environment(\.palette) private var palette
     let store: ChatStore
     @State private var draft = ""
     @State private var showQueue = false
@@ -16,6 +17,7 @@ struct ChatView: View {
             if !store.queued.isEmpty { queueStrip }
             composer
         }
+        .background(palette.bg)
         .navigationTitle(store.selectedThread?.title ?? "Chat")
         .navigationBarTitleDisplayMode(.inline)
         // A conversation is a full-screen surface: leaving the tab bar up
@@ -92,11 +94,12 @@ struct ChatView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
             }
+            .archductorScreen()
             .overlay {
                 if store.items.isEmpty {
-                    ContentUnavailableView(
-                        "No messages yet", systemImage: "bubble.left",
-                        description: Text("Send a turn to start this chat."))
+                    EmptyStateView(
+                        title: "No messages yet", systemImage: "bubble.left",
+                        detail: "Send a turn to start this chat.")
                 }
             }
             // Following the tail is the whole point of watching from a phone.
@@ -118,15 +121,25 @@ struct ChatView: View {
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "person.wave.2.fill")
+                        .foregroundStyle(WorkspaceStatusKind.blocked.swiftUIColor)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(interaction.title).font(.subheadline.weight(.semibold))
-                        Text(interaction.kindLabel).font(.caption)
+                        Text(interaction.title)
+                            .font(Typeface.bodyStrong)
+                            .foregroundStyle(palette.textStrong)
+                        Text(interaction.kindLabel)
+                            .font(Typeface.secondary)
+                            .foregroundStyle(palette.textMuted)
                     }
                     Spacer()
-                    Image(systemName: "chevron.right").font(.caption)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(palette.textMuted)
                 }
-                .padding(12)
-                .background(WorkspaceStatusKind.blocked.swiftUIColor.opacity(0.18))
+                .padding(Metrics.rowInset)
+                .background(WorkspaceStatusKind.blocked.swiftUIColor.opacity(0.14))
+                .overlay(alignment: .top) {
+                    Rectangle().fill(palette.border).frame(height: Metrics.hairline)
+                }
             }
             .buttonStyle(.plain)
         }
@@ -136,7 +149,10 @@ struct ChatView: View {
         DisclosureGroup(isExpanded: $showQueue) {
             ForEach(store.queued) { input in
                 HStack {
-                    Text(input.displayText).font(.caption).lineLimit(2)
+                    Text(input.displayText)
+                        .font(Typeface.secondary)
+                        .foregroundStyle(palette.text)
+                        .lineLimit(2)
                     Spacer()
                     Button {
                         Task { await store.moveQueued(input, up: true) }
@@ -157,26 +173,36 @@ struct ChatView: View {
             Label(
                 "\(store.queued.count) queued turn\(store.queued.count == 1 ? "" : "s")",
                 systemImage: "tray.full")
-                .font(.caption)
+                .font(Typeface.secondary)
+                .foregroundStyle(palette.textMuted)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .tint(palette.accent)
+        .padding(.horizontal, Metrics.pageInset)
+        .padding(.vertical, 7)
+        .background(palette.surface)
+        .overlay(alignment: .top) {
+            Rectangle().fill(palette.border).frame(height: Metrics.hairline)
+        }
     }
 
     private var composer: some View {
         VStack(spacing: 6) {
             if let error = store.composerError {
-                Text(error).font(.caption2).foregroundStyle(.red)
+                Text(error)
+                    .font(Typeface.micro)
+                    .foregroundStyle(palette.danger)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Message", text: $draft, axis: .vertical)
                     .lineLimit(1...5)
                     .textFieldStyle(.plain)
+                    .font(Typeface.body)
+                    .foregroundStyle(palette.text)
                     .focused($composerFocused)
-                    .padding(8)
-                    .background(Color.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .panel(fill: \.surfaceRaised, radius: Metrics.radiusMedium)
                     .accessibilityIdentifier("chat-composer")
 
                 if store.isTurnRunning {
@@ -185,7 +211,9 @@ struct ChatView: View {
                     Button {
                         Task { await store.interrupt() }
                     } label: {
-                        Image(systemName: "stop.circle.fill").font(.title2)
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(palette.danger)
                     }
                     .accessibilityIdentifier("chat-interrupt")
                 } else {
@@ -194,7 +222,11 @@ struct ChatView: View {
                         draft = ""
                         Task { await store.send(text) }
                     } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(
+                                draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                    ? palette.textMuted : palette.accent)
                     }
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || store.isSending)
@@ -202,65 +234,87 @@ struct ChatView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, Metrics.pageInset)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(palette.surface)
+        .overlay(alignment: .top) {
+            Rectangle().fill(palette.border).frame(height: Metrics.hairline)
+        }
     }
 }
 
 struct TimelineRow: View {
+    @Environment(\.palette) private var palette
     let item: ProjectionItem
 
     var body: some View {
         switch item.presentation {
         case .userMessage:
-            bubble(alignment: .trailing, background: Color.accentColor.opacity(0.18))
+            // The desktop tints the user's own turns with the accent wash and
+            // leaves the agent on a plain panel, so the eye can find "what did
+            // I ask" while scrolling.
+            bubble(alignment: .trailing, background: palette.accentWash, edge: palette.accentEdge)
         case .assistantMessage:
-            bubble(alignment: .leading, background: Color.secondary.opacity(0.12))
+            bubble(alignment: .leading, background: palette.surfaceRaised, edge: palette.border)
         case .card:
             card
         }
     }
 
-    private func bubble(alignment: HorizontalAlignment, background: Color) -> some View {
+    private func bubble(alignment: HorizontalAlignment, background: Color, edge: Color) -> some View {
         HStack {
-            if alignment == .trailing { Spacer(minLength: 40) }
+            if alignment == .trailing { Spacer(minLength: 36) }
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.displayBody)
-                    .font(.callout)
+                    .font(Typeface.body)
+                    .foregroundStyle(palette.text)
                     .textSelection(.enabled)
             }
-            .padding(10)
-            .background(background, in: RoundedRectangle(cornerRadius: 14))
-            if alignment == .leading { Spacer(minLength: 40) }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .background(background, in: RoundedRectangle(cornerRadius: Metrics.radiusMedium, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Metrics.radiusMedium, style: .continuous)
+                    .strokeBorder(edge, lineWidth: Metrics.hairline))
+            if alignment == .leading { Spacer(minLength: 36) }
         }
     }
 
     private var card: some View {
         DisclosureGroup {
             Text(item.displayBody)
-                .font(.caption.monospaced())
+                .font(Typeface.code)
+                .foregroundStyle(palette.codeText)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: item.symbolName)
+                    .imageScale(.small)
+                    .foregroundStyle(palette.textMuted)
                 // Verb plus what it acted on, the same split the desktop makes,
                 // so "Ran cargo test" does not read as "Ran Ran cargo test".
                 let label = ChatFormat.verbChip(renderClass: item.renderClass, title: item.title)
                 Text(label.verb)
-                    .font(.caption.weight(.semibold))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(palette.text)
                 if !label.chip.isEmpty {
                     Text(label.chip)
-                        .font(.caption.monospaced())
+                        .font(Typeface.monoSmall)
+                        .foregroundStyle(palette.textMuted)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
-                if item.isStreaming { ProgressView().controlSize(.mini) }
+                if item.isStreaming {
+                    ProgressView().controlSize(.mini).tint(palette.accent)
+                }
             }
         }
-        .padding(8)
-        .background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+        .tint(palette.textMuted)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .panel(fill: \.surface)
     }
 }
 

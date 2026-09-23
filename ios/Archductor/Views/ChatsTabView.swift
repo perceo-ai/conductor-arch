@@ -14,32 +14,39 @@ struct ChatsTabView: View {
                 if let store = model.workspaces {
                     list(store)
                 } else {
-                    ContentUnavailableView(
-                        "Not connected", systemImage: "wifi.slash",
-                        description: Text("Pair a daemon from the More tab."))
+                    EmptyStateView(
+                        title: "Not connected", systemImage: "wifi.slash",
+                        detail: "Pair a daemon from the More tab.")
                 }
             }
+            .archductorScreen()
             .navigationTitle("Chats")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 
     private func list(_ store: WorkspacesStore) -> some View {
-        List {
-            ForEach(rows(store), id: \.id) { row in
-                NavigationLink {
-                    WorkspaceChatEntry(workspace: row.workspace, threadID: row.thread.id)
-                } label: {
-                    ChatsTabRow(row: row)
+        ScrollView {
+            LazyVStack(spacing: 6) {
+                ForEach(rows(store), id: \.id) { row in
+                    NavigationLink {
+                        WorkspaceChatEntry(workspace: row.workspace, threadID: row.thread.id)
+                    } label: {
+                        ChatsTabRow(row: row)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
+            .padding(.horizontal, Metrics.pageInset)
+            .padding(.vertical, 14)
         }
-        .listStyle(.plain)
+        .archductorScreen()
         .refreshable { await store.refresh() }
         .overlay {
             if rows(store).isEmpty {
-                ContentUnavailableView(
-                    "No chats yet", systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Open a workspace to start one."))
+                EmptyStateView(
+                    title: "No chats yet", systemImage: "bubble.left.and.bubble.right",
+                    detail: "Open a workspace to start one.")
             }
         }
     }
@@ -67,30 +74,40 @@ struct ChatsTabView: View {
 }
 
 struct ChatsTabRow: View {
+    @Environment(\.palette) private var palette
     let row: ChatsTabView.Row
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 if row.needsYou {
                     Image(systemName: "person.wave.2.fill")
+                        .imageScale(.small)
                         .foregroundStyle(WorkspaceStatusKind.blocked.swiftUIColor)
                 }
                 Text(row.thread.title.isEmpty ? "Untitled chat" : row.thread.title)
-                    .font(.subheadline)
+                    .font(Typeface.bodyStrong)
+                    .foregroundStyle(palette.textStrong)
                     .lineLimit(1)
-                Spacer()
+                Spacer(minLength: 6)
                 Text(RelativeTime.format(epochSecondsString: row.thread.updatedAt))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(Typeface.micro)
+                    .foregroundStyle(palette.textMuted)
             }
             HStack(spacing: 6) {
                 Text(row.workspace.name)
+                    .font(Typeface.monoSmall)
                 Text(row.thread.provider)
+                    .font(Typeface.micro)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(palette.textMuted)
+            .lineLimit(1)
         }
+        .padding(.horizontal, Metrics.rowInset)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .panel()
     }
 }
 
