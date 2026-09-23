@@ -952,6 +952,8 @@ pub enum ClaudeProviderEventKind {
     ToolResult,
     Permission,
     Hook,
+    /// A skill body claude injected into the conversation on its own behalf.
+    SkillInjection,
     Subagent,
     Usage,
     ApiRetry,
@@ -1321,6 +1323,9 @@ impl ClaudeStreamParser {
         }
         if top_type.as_deref() == Some("user") && message_has_block_type(value, "tool_result") {
             return ClaudeProviderEventKind::ToolResult;
+        }
+        if top_type.as_deref() == Some("user") && claude_skill_injection_name(value).is_some() {
+            return ClaudeProviderEventKind::SkillInjection;
         }
         if top_type.as_deref() == Some("assistant")
             && message_has_block_type(value, "thinking")
@@ -1749,11 +1754,46 @@ fn claude_system_hook_event(value: &Value) -> bool {
         || string_at(value, &["hook_event_name"]).is_some()
 }
 
+/// The two openings claude uses for a skill it injected, verbatim: the first
+/// carries the whole `SKILL.md`, the second is the note it sends instead when
+/// the same skill is invoked twice in a thread.
+const CLAUDE_SKILL_BODY_PREFIX: &str = "Base directory for this skill:";
+const CLAUDE_SKILL_RELOAD_PREFIX: &str = "Skill /";
+
+/// The skill claude injected on its own behalf, if this record is one.
+///
+/// Claude delivers a skill body as a `type: "user"` record — flagged
+/// `isSynthetic` over stream-json, `isMeta` in the transcript on disk — so read
+/// literally it claims the human pasted the whole skill into the chat.
+fn claude_skill_injection_name(value: &Value) -> Option<String> {
+    let synthetic = ["isSynthetic", "isMeta"]
+        .into_iter()
+        .any(|key| value.get(key).and_then(Value::as_bool).unwrap_or(false));
+    if !synthetic || message_has_block_type(value, "tool_result") {
+        return None;
+    }
+    let text = message_content_text(value, "text", "text")?;
+    let first_line = text.trim_start().lines().next()?.trim();
+
+    if let Some(path) = first_line.strip_prefix(CLAUDE_SKILL_BODY_PREFIX) {
+        // "Base directory for this skill: <…>/skills/systematic-debugging"
+        let name = path.trim().rsplit('/').find(|part| !part.is_empty())?;
+        return Some(name.to_owned());
+    }
+    // "Skill /caveman:caveman-help is already loaded above; instructions unchanged."
+    let rest = first_line.strip_prefix(CLAUDE_SKILL_RELOAD_PREFIX)?;
+    let name = rest.split_whitespace().next()?;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 fn claude_canonical_kind_and_subtype(
     kind: ClaudeProviderEventKind,
     tool_name: Option<&str>,
     subtype: Option<String>,
 ) -> (ProviderEventKind, Option<String>) {
+    if kind == ClaudeProviderEventKind::SkillInjection {
+        return (ProviderEventKind::SkillPluginHook, Some("skill".to_owned()));
+    }
     if matches!(
         kind,
         ClaudeProviderEventKind::ToolUse
@@ -1808,7 +1848,9 @@ fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventK
         | ClaudeProviderEventKind::ToolInputDelta
         | ClaudeProviderEventKind::ToolResult => ProviderEventKind::Tool,
         ClaudeProviderEventKind::Permission => ProviderEventKind::ApprovalPermission,
-        ClaudeProviderEventKind::Hook => ProviderEventKind::SkillPluginHook,
+        ClaudeProviderEventKind::Hook | ClaudeProviderEventKind::SkillInjection => {
+            ProviderEventKind::SkillPluginHook
+        }
         ClaudeProviderEventKind::Subagent => ProviderEventKind::SubagentCollaboration,
         ClaudeProviderEventKind::Usage
         | ClaudeProviderEventKind::ApiRetry
@@ -1871,6 +1913,7 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
         ClaudeProviderEventKind::MessageStop
         | ClaudeProviderEventKind::ContentBlockStop
         | ClaudeProviderEventKind::ToolResult
+        | ClaudeProviderEventKind::SkillInjection
         | ClaudeProviderEventKind::AssistantMessage => ProviderEventPhase::Completed,
         ClaudeProviderEventKind::DeferredResult => ProviderEventPhase::Declined,
         ClaudeProviderEventKind::Result => match claude_result_status_from_json(raw_json) {
@@ -1912,6 +1955,7 @@ fn claude_title_for(
         | ClaudeProviderEventKind::ContentBlockStop => "Assistant output".to_owned(),
         ClaudeProviderEventKind::Permission => "Permission request".to_owned(),
         ClaudeProviderEventKind::Hook => "Hook".to_owned(),
+        ClaudeProviderEventKind::SkillInjection => "Skill".to_owned(),
         ClaudeProviderEventKind::Subagent => "Subagent".to_owned(),
         ClaudeProviderEventKind::Usage => "Usage".to_owned(),
         ClaudeProviderEventKind::ApiRetry => "API retry".to_owned(),
@@ -1949,6 +1993,7 @@ fn claude_tool_target(input: &Value) -> Option<String> {
         "query",
         "url",
         "notebook_path",
+        "skill",
         "description",
     ] {
         if let Some(value) = input.get(key).and_then(Value::as_str) {
@@ -1997,6 +2042,12 @@ fn claude_event_title(
             .or_else(|| string_at(raw_json, &["hook_event"]))
             .or_else(|| string_at(raw_json, &["hook", "name"]))
             .or_else(|| string_at(raw_json, &["event", "hook_event_name"]))
+            .unwrap_or_else(|| claude_title_for(kind, tool_name, tool_target));
+    }
+
+    if kind == ClaudeProviderEventKind::SkillInjection {
+        return claude_skill_injection_name(raw_json)
+            .map(|name| format!("Skill: {name}"))
             .unwrap_or_else(|| claude_title_for(kind, tool_name, tool_target));
     }
 
@@ -2682,6 +2733,127 @@ mod tests {
 
         assert_eq!(draft.kind, ClaudeProviderEventKind::Reasoning);
         assert_eq!(event.normalized_payload["body"], "Thought for ~165 tokens");
+    }
+
+    /// Captured from claude 2.1.278 stream-json: invoking a skill emits the
+    /// whole SKILL.md as a `type: "user"` record flagged `isSynthetic`.
+    const SKILL_INJECTION: &str = concat!(
+        r#"{"type":"user","session_id":"s1","uuid":"u1","isSynthetic":true,"parent_tool_use_id":null,"#,
+        r#""message":{"role":"user","content":[{"type":"text","text":"#,
+        r#""Base directory for this skill: /home/k/.claude/plugins/cache/superpowers/6.4.1/skills/systematic-debugging"#,
+        r#"\n\n# Systematic Debugging\n\nALWAYS find root cause before attempting fixes."}]}}"#,
+    );
+
+    #[test]
+    fn an_injected_skill_body_is_a_skill_card_not_a_user_message() {
+        // Claude hands a skill's SKILL.md back as a synthetic user turn. Read
+        // literally that makes the transcript claim the human pasted the whole
+        // skill into the chat.
+        let drafts = parse_claude_stream_json_lines(SKILL_INJECTION).unwrap();
+        let draft = drafts.first().expect("expected an event");
+        let event = draft
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(draft.kind, ClaudeProviderEventKind::SkillInjection);
+        assert_eq!(event.kind, ProviderEventKind::SkillPluginHook);
+        assert_eq!(event.provider_subtype.as_deref(), Some("skill"));
+        assert_eq!(
+            event.normalized_payload["title"],
+            "Skill: systematic-debugging"
+        );
+        // The body belongs in the inspectable payload, not inline in the chat.
+        assert_eq!(event.normalized_payload["body"], "");
+    }
+
+    #[test]
+    fn a_replayed_skill_body_is_recognised_by_the_transcripts_own_flag() {
+        // The stream flags these `isSynthetic`; the session transcript on disk
+        // spells the same thing `isMeta`.
+        let transcript = SKILL_INJECTION.replace("\"isSynthetic\":true", "\"isMeta\":true");
+        let drafts = parse_claude_stream_json_lines(&transcript).unwrap();
+
+        assert_eq!(
+            drafts.first().map(|draft| draft.kind),
+            Some(ClaudeProviderEventKind::SkillInjection)
+        );
+    }
+
+    #[test]
+    fn re_invoking_a_loaded_skill_is_a_skill_card_too() {
+        // Captured from a live session: the second invocation in a thread sends
+        // this note instead of the body, and it is synthetic in the same way.
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","uuid":"u2","isSynthetic":true,"message":{"role":"user","#,
+            r#""content":[{"type":"text","text":"Skill /caveman:caveman-help is already loaded above; instructions unchanged."}]}}"#,
+        );
+
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+        let draft = drafts.first().expect("expected an event");
+        let event = draft
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(draft.kind, ClaudeProviderEventKind::SkillInjection);
+        assert_eq!(
+            event.normalized_payload["title"],
+            "Skill: caveman:caveman-help"
+        );
+    }
+
+    #[test]
+    fn a_real_user_turn_is_still_a_user_message() {
+        let native = r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: is a weird thing to type"}]}}"#;
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+
+        assert_eq!(
+            drafts.first().map(|draft| draft.kind),
+            Some(ClaudeProviderEventKind::UserMessage)
+        );
+    }
+
+    #[test]
+    fn the_skill_tool_call_stays_a_tool_card_naming_the_skill() {
+        let native = concat!(
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Skill","input":{}}}}"#,
+            "\n",
+            r#"{"type":"assistant","session_id":"s1","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Skill","input":{"skill":"superpowers:systematic-debugging"}}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Launching skill: superpowers:systematic-debugging"}]}}"#,
+            "\n",
+        );
+
+        let drafts = parse_claude_stream_json_lines(native).unwrap();
+        let result = drafts
+            .iter()
+            .find(|draft| draft.kind == ClaudeProviderEventKind::ToolResult)
+            .expect("expected a tool result");
+        let event = result
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        // Core drops Skill-category items as parser noise, so the call itself
+        // has to stay a tool card or nothing would say the skill ran.
+        assert_eq!(event.kind, ProviderEventKind::Tool);
+        assert_eq!(
+            event.normalized_payload["title"],
+            "Skill superpowers:systematic-debugging"
+        );
     }
 
     #[test]
