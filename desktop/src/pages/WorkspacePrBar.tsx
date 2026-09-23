@@ -17,6 +17,14 @@ import type { ShortcutAction } from "@/lib/shortcuts";
 // (PR number/state/url) plus get_checks_summary (check/run status,
 // ahead/behind, conflicts).
 
+// Last summary each workspace answered with. Two jobs: a workspace switch
+// derives from its own stale checks instead of the previous workspace's (or
+// none), and reads never go through the resource accessor — a plain read
+// during the 10s poll re-registers with the panel's <Suspense>, detaching the
+// whole bar until the poll resolves whenever a store update lands mid-fetch.
+// That was the PR strip visibly blinking after agent turns.
+const lastChecksByWorkspace = new Map<string, ArchcarChecksSummary>();
+
 export default function WorkspacePrBar(props: { workspace: string }) {
   const [busy, setBusy] = createSignal(false);
   const [checks, { refetch: refetchChecks }] = createResource(
@@ -24,12 +32,17 @@ export default function WorkspacePrBar(props: { workspace: string }) {
     async (ws): Promise<ArchcarChecksSummary | undefined> => {
       try {
         const res = await send({ type: "get_checks_summary", workspace: ws });
-        return res.type === "checks_summary" ? res.summary : undefined;
+        if (res.type !== "checks_summary") return lastChecksByWorkspace.get(ws);
+        lastChecksByWorkspace.set(ws, res.summary);
+        return res.summary;
       } catch {
-        return undefined;
+        return lastChecksByWorkspace.get(ws);
       }
     },
   );
+  // `checks.loading` and the map are read instead of `checks()` on purpose;
+  // see `lastChecksByWorkspace`.
+  const checksNow = () => (checks.loading ? lastChecksByWorkspace.get(props.workspace) : checks.latest);
 
   onMount(() => {
     const timer = window.setInterval(() => {
@@ -39,7 +52,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
   });
 
   const row = () => workspacesStore.row(props.workspace);
-  const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checks())));
+  const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checksNow())));
   const actionShortcut = (): ShortcutAction | undefined => {
     if (st().action === "create") return "create-pr";
     if (st().action === "push") return "push-branch";
