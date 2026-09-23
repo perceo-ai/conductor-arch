@@ -868,6 +868,42 @@ pub const DEFAULT_CHAT_TRANSCRIPT_LIMIT: usize = 8;
 /// Workspace-relative directory holding attachable plan markdown.
 pub const CONTEXT_PLANS_DIR: &str = ".context/plans";
 
+/// Render the file behind a queued action's prompt chip.
+///
+/// The prompt itself is what matters, so it goes in whole and unedited; the
+/// header exists to answer the question the chat could not — which slot fed
+/// this, and which prompt pack was in force when it was built.
+fn format_action_prompt_document(
+    action_label: &str,
+    kind: PromptKind,
+    pack: Option<String>,
+    prompt: &str,
+) -> String {
+    let pack = pack.unwrap_or_else(|| "built-in defaults (no pack active)".to_owned());
+    // Built line by line rather than as one continued literal: a `\` continuation
+    // keeps the source indentation, and leading spaces turn a markdown heading
+    // into an indented code block wherever this file gets rendered.
+    let blurb = concat!(
+        "This is the exact text queued to the agent. Anything your prompt pack ",
+        "sets for this slot appears below under \"Repository instructions\"; if ",
+        "that heading is missing, the slot was unset and the built-in prompt was ",
+        "used on its own."
+    );
+    [
+        format!("# {action_label} — resolved agent prompt"),
+        String::new(),
+        format!("Prompt slot `{}` · prompt pack `{pack}`", kind.as_str()),
+        String::new(),
+        blurb.to_owned(),
+        String::new(),
+        "---".to_owned(),
+        String::new(),
+        prompt.trim().to_owned(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
 fn is_transcript_role(role: &str) -> bool {
     matches!(role, "user" | "agent")
 }
@@ -5285,19 +5321,23 @@ mutation($threadId: ID!) {{
         if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
             // No PR on record does not mean no PR: one created outside
             // Archductor (gh CLI, the GitHub web UI, an agent shell) has no
-            // row yet. Discover it by branch and record it, so a refresh
-            // finds reality instead of reporting the stale "no PR yet".
-            let url = match self.pull_request_url_for_workspace(&workspace) {
-                Ok(url) => url,
+            // row yet. Discover it by branch — in any state, because a PR
+            // opened and merged entirely outside Archductor is still the
+            // workspace's PR — and record what was found, so a refresh finds
+            // reality instead of reporting the stale "no PR yet".
+            let found = match self.pull_request_in_any_state_for_workspace(&workspace) {
+                Ok(found) => found,
                 Err(_) => return Ok(None),
             };
-            return url
-                .map(|url| self.record_pull_request(workspace.id, &url))
+            return found
+                .map(|(url, state)| self.record_pull_request_with_state(workspace.id, &url, &state))
                 .transpose();
         }
         let args = self.gh_pr_args_for_workspace(&workspace, "view", &["--json", "state"])?;
         let state = command_output_owned(&workspace.path, "gh", &args)?;
-        let state = extract_json_string_field(&state, "state").unwrap_or_else(|| "open".to_owned());
+        let state = extract_json_string_field(&state, "state")
+            .map(|state| state.to_ascii_lowercase())
+            .unwrap_or_else(|| "open".to_owned());
         let now = timestamp();
         self.conn.execute(
             "UPDATE pull_requests SET state = ?1, updated_at = ?2 WHERE workspace_id = ?3",
@@ -5333,6 +5373,48 @@ mutation($threadId: ID!) {{
             return Ok(None);
         };
         self.record_pull_request(workspace.id, &url).map(Some)
+    }
+
+    /// The branch's most recent PR in any state, as `(url, state)`.
+    ///
+    /// `pull_request_url_for_workspace` deliberately lists open PRs only —
+    /// create-pr uses it to decide whether to reuse — so refresh discovery
+    /// needs its own query or a merged/closed external PR stays invisible.
+    fn pull_request_in_any_state_for_workspace(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Option<(String, String)>> {
+        let output = command_output(
+            &workspace.path,
+            "gh",
+            &[
+                "pr",
+                "list",
+                "--head",
+                workspace.branch.as_str(),
+                "--state",
+                "all",
+                "--json",
+                "url,state",
+                "--limit",
+                "1",
+            ],
+        )?;
+        let Some(entry) = serde_json::from_str::<Value>(&output)
+            .ok()
+            .and_then(|value| value.as_array()?.first().cloned())
+        else {
+            return Ok(None);
+        };
+        let Some(url) = entry.get("url").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let state = entry
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| "open".to_owned());
+        Ok(Some((url.to_owned(), state)))
     }
 
     fn pull_request_url_for_workspace(&self, workspace: &Workspace) -> Result<Option<String>> {
@@ -5383,19 +5465,28 @@ mutation($threadId: ID!) {{
     }
 
     fn record_pull_request(&self, workspace_id: i64, url: &str) -> Result<PullRequest> {
+        self.record_pull_request_with_state(workspace_id, url, "open")
+    }
+
+    fn record_pull_request_with_state(
+        &self,
+        workspace_id: i64,
+        url: &str,
+        state: &str,
+    ) -> Result<PullRequest> {
         let number = parse_pull_request_number(url)
             .with_context(|| format!("parse pull request number from {url}"))?;
         let now = timestamp();
         self.conn.execute(
             "INSERT INTO pull_requests (
                 workspace_id, provider, number, url, state, created_at, updated_at
-            ) VALUES (?1, 'github', ?2, ?3, 'open', ?4, ?5)
+            ) VALUES (?1, 'github', ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(workspace_id) DO UPDATE SET
                 number = excluded.number,
                 url = excluded.url,
-                state = 'open',
+                state = excluded.state,
                 updated_at = excluded.updated_at",
-            params![workspace_id, number, url, now, now],
+            params![workspace_id, number, url, state, now, now],
         )?;
         let pull_request = self
             .pull_request_by_workspace_id(workspace_id)?
@@ -7547,6 +7638,16 @@ mutation($threadId: ID!) {{
         thread_id: i64,
         text: &str,
     ) -> Result<crate::chat_attachments::SavedChatAttachment> {
+        self.save_thread_text_attachment(thread_id, "pasted text", text)
+    }
+
+    /// Write a text attachment into a chat thread's attachment directory.
+    fn save_thread_text_attachment(
+        &self,
+        thread_id: i64,
+        label: &str,
+        text: &str,
+    ) -> Result<crate::chat_attachments::SavedChatAttachment> {
         let root: String = self.conn.query_row(
             "SELECT w.path
              FROM workspaces w
@@ -7559,9 +7660,64 @@ mutation($threadId: ID!) {{
             Path::new(&root),
             &thread_id.to_string(),
             crate::chat_attachments::AttachmentKind::Text,
-            "pasted text",
+            label,
             text.as_bytes(),
         )
+    }
+
+    /// Save a workspace action's resolved agent prompt as a chat attachment,
+    /// returning the filename to reference it by.
+    ///
+    /// A queued action like "Create PR" sends the agent a prompt built from the
+    /// built-in action text plus whatever the repository's prompt pack sets for
+    /// that slot — but the chat only ever showed the short label, so there was
+    /// no way to tell whether the pack had contributed anything, or what the
+    /// agent was actually asked. Writing the prompt to a file means the message
+    /// can carry an ordinary file chip that opens it.
+    pub fn save_thread_action_prompt_attachment(
+        &self,
+        thread_id: i64,
+        action_label: &str,
+        kind: PromptKind,
+        prompt: &str,
+    ) -> Result<String> {
+        let document = format_action_prompt_document(
+            action_label,
+            kind,
+            self.thread_prompt_pack(thread_id),
+            prompt,
+        );
+        let saved = self.save_thread_text_attachment(
+            thread_id,
+            &format!("{action_label} prompt"),
+            &document,
+        )?;
+        Ok(Path::new(&saved.relative_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&saved.relative_path)
+            .to_owned())
+    }
+
+    /// The prompt pack in force for a thread's repository, for provenance. Best
+    /// effort: a missing pack is worth reporting as "built-in", not failing the
+    /// action over.
+    fn thread_prompt_pack(&self, thread_id: i64) -> Option<String> {
+        let workspace: String = self
+            .conn
+            .query_row(
+                "SELECT w.name
+                 FROM workspaces w
+                 JOIN chat_threads t ON t.workspace_id = w.id
+                 WHERE t.id = ?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .ok()?;
+        self.workspace_repo_settings(&workspace)
+            .ok()?
+            .prompt_pack
+            .active
     }
 
     /// Whether this chat is planning rather than building. Plan mode is thread
@@ -14440,6 +14596,95 @@ branch_prefix = "team"
         let front_id = store.list_queued_chat_inputs(thread.id).unwrap()[0].id;
         assert_eq!(store.move_queued_chat_input(front_id, true).unwrap(), None);
         assert_eq!(store.move_queued_chat_input(999_999, true).unwrap(), None);
+    }
+
+    #[test]
+    fn action_prompt_document_names_its_slot_and_pack() {
+        let doc = format_action_prompt_document(
+            "Create pull request",
+            PromptKind::CreatePr,
+            Some("startup".to_owned()),
+            "Prepare this workspace for a pull request.",
+        );
+        assert!(doc.contains("create_pr"), "{doc}");
+        assert!(doc.contains("startup"), "{doc}");
+        // The prompt itself has to survive whole: this file is the only place a
+        // human can read what the agent was actually given.
+        assert!(
+            doc.contains("Prepare this workspace for a pull request."),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn action_prompt_document_indents_no_line_into_a_code_block() {
+        // The header was built from a `\`-continued literal, which keeps the
+        // source indentation — four leading spaces silently turned the heading
+        // and the explanation into code blocks in the rendered file.
+        let doc = format_action_prompt_document(
+            "Create pull request",
+            PromptKind::CreatePr,
+            Some("startup".to_owned()),
+            "Prepare this workspace.",
+        );
+        for line in doc.lines().take_while(|line| *line != "---") {
+            assert!(
+                !line.starts_with("    ") && !line.starts_with('\t'),
+                "header line is indented and will render as code: {line:?}"
+            );
+        }
+        assert!(doc.starts_with("# Create pull request"), "{doc}");
+    }
+
+    #[test]
+    fn action_prompt_document_says_so_when_no_pack_is_active() {
+        let doc =
+            format_action_prompt_document("Push branch", PromptKind::PushBranch, None, "Push it.");
+        assert!(doc.contains("built-in defaults"), "{doc}");
+    }
+
+    #[test]
+    fn save_thread_action_prompt_attachment_returns_a_chip_filename() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+
+        let filename = store
+            .save_thread_action_prompt_attachment(
+                thread.id,
+                "Create pull request",
+                PromptKind::CreatePr,
+                "Prepare this workspace for a pull request.",
+            )
+            .unwrap();
+
+        // A bare filename, because that is what the `{marker}` grammar carries;
+        // the desktop rebuilds the path from the thread's attachment directory.
+        assert!(!filename.contains('/'), "{filename}");
+        assert!(
+            filename.starts_with("create-pull-request-prompt-"),
+            "{filename}"
+        );
+        assert!(filename.ends_with(".md"), "{filename}");
+
+        let ws_path: String = store
+            .conn
+            .query_row(
+                "SELECT path FROM workspaces WHERE name = 'berlin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let full = Path::new(&ws_path)
+            .join(".context/archductor")
+            .join(thread.id.to_string())
+            .join(&filename);
+        let body = fs::read_to_string(full).unwrap();
+        assert!(
+            body.contains("Prepare this workspace for a pull request."),
+            "{body}"
+        );
     }
 
     #[test]
@@ -22200,6 +22445,65 @@ exit 1
                 .state,
             "open"
         );
+
+        restore_path(old_path);
+    }
+
+    #[test]
+    fn refresh_pull_request_state_discovers_a_pr_that_is_no_longer_open() {
+        // A PR opened and merged (or closed) entirely outside Archductor never
+        // had a row either. Discovery that only lists open PRs reports "no PR"
+        // for a branch whose work is in fact merged — the sidebar keeps
+        // offering "Create PR" for shipped work.
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ] && [ "$3" = "--head" ] && [ "$4" = "lc/berlin" ]; then
+  case "$*" in
+    *"--state all"*)
+      printf '[{"url":"https://github.com/example/demo/pull/77","state":"MERGED"}]\n'
+      ;;
+    *)
+      printf '[]\n'
+      ;;
+  esac
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+
+        let discovered = store
+            .refresh_pull_request_state("berlin")
+            .unwrap()
+            .expect("refresh should discover the merged PR");
+        assert_eq!(discovered.number, 77);
+        assert_eq!(discovered.state, "merged");
 
         restore_path(old_path);
     }

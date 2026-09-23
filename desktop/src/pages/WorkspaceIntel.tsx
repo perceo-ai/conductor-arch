@@ -148,10 +148,15 @@ export function SummaryPanel(props: { workspace: string }) {
   const [draftBody, setDraftBody] = createSignal<string | null>(null);
   const [feedback, setFeedback] = createSignal("");
 
-  const savedText = () => stored()?.body_markdown ?? "";
+  // `.latest` everywhere below: these resources refetch on every intel-version
+  // bump (≈ every agent turn), and a plain read during a refetch re-registers
+  // with the panel's <Suspense>, detaching the whole Summary panel until the
+  // pull resolves — which read as the tab flashing after each turn. The stale
+  // value is the right thing to show while the update is in flight.
+  const savedText = () => stored.latest?.body_markdown ?? "";
   // While editing, unsaved keystrokes win; otherwise the stored summary shows.
   const text = () => draftBody() ?? savedText();
-  const workItems = createMemo(() => mergeWorkItems(tasks() ?? [], todos() ?? []));
+  const workItems = createMemo(() => mergeWorkItems(tasks.latest ?? [], todos.latest ?? []));
 
   function startEditing() {
     setDraftBody(savedText());
@@ -227,7 +232,7 @@ export function SummaryPanel(props: { workspace: string }) {
   }
 
   async function setStatus(item: SummaryWorkItem, status: TaskStatus) {
-    const task = (tasks() ?? []).find((candidate) => candidate.id === item.id);
+    const task = (tasks.latest ?? []).find((candidate) => candidate.id === item.id);
     if (!task) return;
     // Core rejects a blocked task with no reason, so ask rather than fail.
     let update: TaskUpdate = { status };
@@ -253,7 +258,7 @@ export function SummaryPanel(props: { workspace: string }) {
   }
 
   const provenance = () => {
-    const summary = stored();
+    const summary = stored.latest;
     if (!summary) return "No summary yet";
     // Three authors, and which one wrote it changes how much to trust it: the
     // agent's own note, a human's edit, or the daemon's placeholder draft.
@@ -338,9 +343,9 @@ export function SummaryPanel(props: { workspace: string }) {
         </For>
       </Show>
 
-      <Show when={(overlaps() ?? []).length > 0}>
+      <Show when={(overlaps.latest ?? []).length > 0}>
         <div class="ws-flat-section-label">Overlapping sessions</div>
-        <For each={overlaps()}>
+        <For each={overlaps.latest}>
           {(overlap) => (
             <SummaryRow
               tone="running"
@@ -390,7 +395,7 @@ function CurrentChatSection(props: { workspace: string }) {
     <>
       <div class="ws-flat-section-label">Current chat</div>
       <Show
-        when={chatContext()}
+        when={chatContext.latest}
         fallback={
           <div class="ws-check-empty">
             {threadId() == null
@@ -427,7 +432,7 @@ export function ContextPanel(props: { workspace: string }) {
   const [kind, setKind] = createSignal<ContextKind>("note");
   const [feedback, setFeedback] = createSignal("");
 
-  const local = () => (attachments() ?? []).filter((a) => a.source === "local");
+  const local = () => (attachments.latest ?? []).filter((a) => a.source === "local");
 
   async function add(pinned: boolean) {
     const body = value().trim();
@@ -659,7 +664,7 @@ export function PrPanel(props: { workspace: string }) {
             : "No pull request yet"}
         </span>
       </div>
-      <Show when={checks()}>
+      <Show when={checks.latest}>
         {(summary) => (
           <div class="detail-row">
             <span class="detail-label">Branch</span>

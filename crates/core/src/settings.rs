@@ -42,23 +42,14 @@ pub struct RepositorySettingsLoadReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PromptSettings {
-    pub new_workspace: Option<String>,
     pub general: Option<String>,
-    pub continue_work: Option<String>,
-    pub summarize_session: Option<String>,
-    pub handoff: Option<String>,
     pub code_review: Option<String>,
     pub create_pr: Option<String>,
     pub fix_errors: Option<String>,
-    pub resolve_merge_conflicts: Option<String>,
-    pub rename_branch: Option<String>,
-    pub commit_generation: Option<String>,
     pub push_branch: Option<String>,
     pub merge_pr: Option<String>,
-    pub revert_changes: Option<String>,
     pub review_comments: Option<String>,
     pub test_fixing: Option<String>,
-    pub refactor_style: Option<String>,
     pub setup_script: Option<String>,
     pub run_script: Option<String>,
 }
@@ -69,40 +60,22 @@ pub struct PromptSettings {
 /// app-shared, repository, and local project layers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptKind {
-    /// Prompt used when creating a workspace from free-form instructions.
-    NewWorkspace,
     /// General instructions prepended to the first managed chat turn.
     General,
-    /// Prompt used to continue existing workspace work.
-    ContinueWork,
-    /// Prompt used to summarize a saved session.
-    SummarizeSession,
-    /// Prompt used to hand work off between agents or sessions.
-    Handoff,
     /// Prompt used for code review staging.
     CodeReview,
     /// Prompt used when asking an agent to create a pull request.
     CreatePr,
     /// Prompt used when asking an agent to fix failing checks.
     FixErrors,
-    /// Prompt used when asking an agent to resolve merge conflicts.
-    ResolveMergeConflicts,
-    /// Prompt used when asking an agent to rename a branch.
-    RenameBranch,
-    /// Prompt used when asking an agent to produce a commit.
-    CommitGeneration,
     /// Prompt used when asking an agent to push a branch.
     PushBranch,
     /// Prompt used when asking an agent to merge a pull request.
     MergePr,
-    /// Prompt used when asking an agent to safely revert changes.
-    RevertChanges,
     /// Prompt used when asking an agent to address local review comments.
     ReviewComments,
     /// Prompt used when asking an agent to repair tests.
     TestFixing,
-    /// Prompt used when asking an agent to perform style refactors.
-    RefactorStyle,
     /// Prompt used for setup-script assistant context.
     SetupScript,
     /// Prompt used for run-script assistant context.
@@ -113,23 +86,14 @@ impl PromptKind {
     /// Returns the stable TOML field name for this prompt kind.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::NewWorkspace => "new_workspace",
             Self::General => "general",
-            Self::ContinueWork => "continue_work",
-            Self::SummarizeSession => "summarize_session",
-            Self::Handoff => "handoff",
             Self::CodeReview => "code_review",
             Self::CreatePr => "create_pr",
             Self::FixErrors => "fix_errors",
-            Self::ResolveMergeConflicts => "resolve_merge_conflicts",
-            Self::RenameBranch => "rename_branch",
-            Self::CommitGeneration => "commit_generation",
             Self::PushBranch => "push_branch",
             Self::MergePr => "merge_pr",
-            Self::RevertChanges => "revert_changes",
             Self::ReviewComments => "review_comments",
             Self::TestFixing => "test_fixing",
-            Self::RefactorStyle => "refactor_style",
             Self::SetupScript => "setup_script",
             Self::RunScript => "run_script",
         }
@@ -140,23 +104,14 @@ impl PromptSettings {
     /// Returns the configured text for a prompt kind, if that slot is set.
     pub fn get(&self, kind: PromptKind) -> Option<&str> {
         match kind {
-            PromptKind::NewWorkspace => self.new_workspace.as_deref(),
             PromptKind::General => self.general.as_deref(),
-            PromptKind::ContinueWork => self.continue_work.as_deref(),
-            PromptKind::SummarizeSession => self.summarize_session.as_deref(),
-            PromptKind::Handoff => self.handoff.as_deref(),
             PromptKind::CodeReview => self.code_review.as_deref(),
             PromptKind::CreatePr => self.create_pr.as_deref(),
             PromptKind::FixErrors => self.fix_errors.as_deref(),
-            PromptKind::ResolveMergeConflicts => self.resolve_merge_conflicts.as_deref(),
-            PromptKind::RenameBranch => self.rename_branch.as_deref(),
-            PromptKind::CommitGeneration => self.commit_generation.as_deref(),
             PromptKind::PushBranch => self.push_branch.as_deref(),
             PromptKind::MergePr => self.merge_pr.as_deref(),
-            PromptKind::RevertChanges => self.revert_changes.as_deref(),
             PromptKind::ReviewComments => self.review_comments.as_deref(),
             PromptKind::TestFixing => self.test_fixing.as_deref(),
-            PromptKind::RefactorStyle => self.refactor_style.as_deref(),
             PromptKind::SetupScript => self.setup_script.as_deref(),
             PromptKind::RunScript => self.run_script.as_deref(),
         }
@@ -1039,19 +994,7 @@ pub fn default_prompt_pack_toml() -> Result<String> {
 
 fn default_prompt_settings() -> PromptSettings {
     PromptSettings {
-        new_workspace: Some(
-            "Create a small, reviewable workspace plan before changing code. If the `archductor` MCP server is available, read `get_context_briefing` for what is already known, record the plan's steps with `create_task`, and give the workspace, branch, and chat real names with `set_workspace_context`.".to_owned(),
-        ),
         general: Some("Prefer small, reviewable changes. Explain verification clearly.".to_owned()),
-        continue_work: Some(
-            "Continue from the current state. Inspect recent changes before editing. If the `archductor` MCP server is available, start with `get_context_briefing` and `list_tasks` instead of re-deriving intent from the diff.".to_owned(),
-        ),
-        summarize_session: Some(
-            "Summarize the work completed, verification run, and remaining risk. If the `archductor` MCP server is available, store the result with `set_workspace_context` so the next agent reads the summary rather than the transcript.".to_owned(),
-        ),
-        handoff: Some(
-            "Write a concise handoff with context, changed files, tests, and next steps. If the `archductor` MCP server is available, store it with `set_workspace_context` and close out finished work with `update_task`.".to_owned(),
-        ),
         code_review: Some(
             "Review the current workspace like a code reviewer. Start from the provided workspace context, inspect the diff against the base branch, prioritize correctness regressions, user-visible behavior changes, missing tests, data/security risk, and unclear ownership. Leave concise findings with file/line references where possible, then summarize residual risk and verification gaps. If the `archductor` MCP server is available, read `get_context_briefing` first for intent and open tasks, and record each actionable finding with `create_task`.".to_owned(),
         ),
@@ -1064,27 +1007,14 @@ fn default_prompt_settings() -> PromptSettings {
         fix_errors: Some(
             "Reproduce the reported failure first. Use logs/check output from the workspace context, identify the root cause, make the smallest safe fix, rerun the focused check, and report the command evidence. If the `archductor` MCP server is available, read `get_context_briefing` first and record the root cause with `update_task`.".to_owned(),
         ),
-        resolve_merge_conflicts: Some(
-            "Resolve merge conflicts carefully. Inspect both sides, preserve user intent and existing behavior, avoid dropping unrelated changes, run focused verification after resolving, and explain any non-obvious conflict choices.".to_owned(),
-        ),
-        rename_branch: Some("Use a short descriptive branch name. If the `archductor` MCP server is available, record it with `set_workspace_context` so the workspace label matches the branch.".to_owned()),
-        commit_generation: Some(
-            "Write a commit message that matches the actual staged diff. Prefer concise imperative subject text, include scope only when it clarifies ownership, and do not mention files or tests that are not represented in the diff.".to_owned(),
-        ),
         push_branch: Some(
             "Prepare this branch for remote review. Inspect uncommitted changes, stage and commit only appropriate work, avoid committing unrelated local edits, push to the configured remote/upstream, refresh PR state if present, and report commit hash, remote branch, and PR/check status. If the `archductor` MCP server is available, call `set_workspace_context` after the push so the handoff summary matches what is now on the remote.".to_owned(),
         ),
         merge_pr: Some(
             "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action. If the `archductor` MCP server is available, read `get_context_briefing` first and call `set_workspace_context` after the merge to record the outcome.".to_owned(),
         ),
-        revert_changes: Some(
-            "Revert changes only after identifying the requested scope. Prefer targeted git restore/revert over broad resets, preserve unrelated user changes, show what will be removed, run focused verification when behavior changes, and report exactly what was reverted.".to_owned(),
-        ),
         test_fixing: Some(
             "Run the failing test first, fix the root cause, then rerun focused tests. If the `archductor` MCP server is available, read `get_context_briefing` first and close the item with `update_task` once the test passes.".to_owned(),
-        ),
-        refactor_style: Some(
-            "Keep behavior-preserving refactors separate from feature changes.".to_owned(),
         ),
         setup_script: Some(
             "Infer the repository setup command from existing package and build files.".to_owned(),
@@ -1318,15 +1248,7 @@ struct RawRepositorySettings {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct RawPromptSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
-    new_workspace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     general: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    continue_work: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    summarize_session: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    handoff: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     code_review: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1334,23 +1256,13 @@ struct RawPromptSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     fix_errors: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    resolve_merge_conflicts: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    rename_branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    commit_generation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     push_branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     merge_pr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    revert_changes: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     review_comments: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     test_fixing: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    refactor_style: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     setup_script: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2224,25 +2136,14 @@ fn is_valid_run_script_id(value: &str) -> bool {
 impl RawPromptSettings {
     fn merge(self, local: Self) -> Self {
         Self {
-            new_workspace: local.new_workspace.or(self.new_workspace),
             general: local.general.or(self.general),
-            continue_work: local.continue_work.or(self.continue_work),
-            summarize_session: local.summarize_session.or(self.summarize_session),
-            handoff: local.handoff.or(self.handoff),
             code_review: local.code_review.or(self.code_review),
             create_pr: local.create_pr.or(self.create_pr),
             fix_errors: local.fix_errors.or(self.fix_errors),
-            resolve_merge_conflicts: local
-                .resolve_merge_conflicts
-                .or(self.resolve_merge_conflicts),
-            rename_branch: local.rename_branch.or(self.rename_branch),
-            commit_generation: local.commit_generation.or(self.commit_generation),
             push_branch: local.push_branch.or(self.push_branch),
             merge_pr: local.merge_pr.or(self.merge_pr),
-            revert_changes: local.revert_changes.or(self.revert_changes),
             review_comments: local.review_comments.or(self.review_comments),
             test_fixing: local.test_fixing.or(self.test_fixing),
-            refactor_style: local.refactor_style.or(self.refactor_style),
             setup_script: local.setup_script.or(self.setup_script),
             run_script: local.run_script.or(self.run_script),
         }
@@ -2250,23 +2151,14 @@ impl RawPromptSettings {
 
     fn into_settings(self) -> PromptSettings {
         PromptSettings {
-            new_workspace: self.new_workspace,
             general: self.general,
-            continue_work: self.continue_work,
-            summarize_session: self.summarize_session,
-            handoff: self.handoff,
             code_review: self.code_review,
             create_pr: self.create_pr,
             fix_errors: self.fix_errors,
-            resolve_merge_conflicts: self.resolve_merge_conflicts,
-            rename_branch: self.rename_branch,
-            commit_generation: self.commit_generation,
             push_branch: self.push_branch,
             merge_pr: self.merge_pr,
-            revert_changes: self.revert_changes,
             review_comments: self.review_comments,
             test_fixing: self.test_fixing,
-            refactor_style: self.refactor_style,
             setup_script: self.setup_script,
             run_script: self.run_script,
         }
@@ -2274,23 +2166,14 @@ impl RawPromptSettings {
 
     fn from_settings(settings: &PromptSettings) -> Self {
         Self {
-            new_workspace: settings.new_workspace.clone(),
             general: settings.general.clone(),
-            continue_work: settings.continue_work.clone(),
-            summarize_session: settings.summarize_session.clone(),
-            handoff: settings.handoff.clone(),
             code_review: settings.code_review.clone(),
             create_pr: settings.create_pr.clone(),
             fix_errors: settings.fix_errors.clone(),
-            resolve_merge_conflicts: settings.resolve_merge_conflicts.clone(),
-            rename_branch: settings.rename_branch.clone(),
-            commit_generation: settings.commit_generation.clone(),
             push_branch: settings.push_branch.clone(),
             merge_pr: settings.merge_pr.clone(),
-            revert_changes: settings.revert_changes.clone(),
             review_comments: settings.review_comments.clone(),
             test_fixing: settings.test_fixing.clone(),
-            refactor_style: settings.refactor_style.clone(),
             setup_script: settings.setup_script.clone(),
             run_script: settings.run_script.clone(),
         }
@@ -3373,26 +3256,50 @@ mod tests {
     }
 
     #[test]
+    fn removed_prompt_slots_are_ignored_rather_than_rejected() {
+        // Nine prompt slots were removed because nothing read them. A config or
+        // prompt pack written while they existed must keep loading: settings
+        // parsing does not deny unknown fields, and this is what holds that.
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        fs::create_dir_all(repo.join(".archductor/prompt-packs")).unwrap();
+        fs::write(
+            repo.join(".archductor/settings.toml"),
+            "[prompts]\n\
+             new_workspace = \"gone\"\n\
+             continue_work = \"gone\"\n\
+             summarize_session = \"gone\"\n\
+             handoff = \"gone\"\n\
+             resolve_merge_conflicts = \"gone\"\n\
+             rename_branch = \"gone\"\n\
+             commit_generation = \"gone\"\n\
+             revert_changes = \"gone\"\n\
+             refactor_style = \"gone\"\n\
+             general = \"still here\"\n",
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(repo).unwrap();
+        let prompts = settings.prompts.unwrap();
+        assert_eq!(prompts.general.as_deref(), Some("still here"));
+    }
+
+    #[test]
     fn prompt_kind_returns_matching_value() {
         let prompts = PromptSettings {
-            continue_work: Some("Inspect current changes.".to_owned()),
             create_pr: Some("Write a concise PR.".to_owned()),
-            revert_changes: Some("Revert scoped changes.".to_owned()),
+            merge_pr: Some("Merge once green.".to_owned()),
             ..PromptSettings::default()
         };
 
         assert_eq!(
-            prompts.get(PromptKind::ContinueWork),
-            Some("Inspect current changes.")
-        );
-        assert_eq!(
             prompts.get(PromptKind::CreatePr),
             Some("Write a concise PR.")
         );
-        assert_eq!(
-            prompts.get(PromptKind::RevertChanges),
-            Some("Revert scoped changes.")
-        );
+        assert_eq!(prompts.get(PromptKind::MergePr), Some("Merge once green."));
+        // An unset slot reports nothing; the built-in default is layered in
+        // before this type is consulted, not by it.
+        assert_eq!(prompts.get(PromptKind::CodeReview), None);
     }
 
     #[test]
@@ -3402,23 +3309,14 @@ mod tests {
         let prompts = raw.prompts.into_settings();
 
         for kind in [
-            PromptKind::NewWorkspace,
             PromptKind::General,
-            PromptKind::ContinueWork,
-            PromptKind::SummarizeSession,
-            PromptKind::Handoff,
             PromptKind::CodeReview,
             PromptKind::CreatePr,
             PromptKind::FixErrors,
-            PromptKind::ResolveMergeConflicts,
-            PromptKind::RenameBranch,
-            PromptKind::CommitGeneration,
             PromptKind::PushBranch,
             PromptKind::MergePr,
-            PromptKind::RevertChanges,
             PromptKind::ReviewComments,
             PromptKind::TestFixing,
-            PromptKind::RefactorStyle,
             PromptKind::SetupScript,
             PromptKind::RunScript,
         ] {
@@ -3465,7 +3363,7 @@ mod tests {
         fs::create_dir_all(app.parent().unwrap()).unwrap();
         fs::write(
             &app,
-            "[prompts]\ncontinue_work = \"shared continue\"\ncode_review = \"shared review\"\n",
+            "[prompts]\nfix_errors = \"shared fix\"\ncode_review = \"shared review\"\n",
         )
         .unwrap();
         fs::write(
@@ -3475,7 +3373,7 @@ mod tests {
         .unwrap();
         fs::write(
             repo.join(".archductor/settings.local.toml"),
-            "[prompts]\nhandoff = \"local handoff\"\n",
+            "[prompts]\nmerge_pr = \"local merge\"\n",
         )
         .unwrap();
         fs::write(
@@ -3487,14 +3385,14 @@ mod tests {
         let settings = load_effective_repository_settings(&repo, &app).unwrap();
         let prompts = settings.prompts.unwrap();
         assert_eq!(
-            prompts.new_workspace,
-            default_prompt_settings().new_workspace,
+            prompts.test_fixing,
+            default_prompt_settings().test_fixing,
             "built-in prompt should survive when no later layer overrides it"
         );
-        assert_eq!(prompts.continue_work.as_deref(), Some("shared continue"));
+        assert_eq!(prompts.fix_errors.as_deref(), Some("shared fix"));
         assert_eq!(prompts.code_review.as_deref(), Some("pack review"));
         assert_eq!(prompts.general.as_deref(), Some("repository general"));
-        assert_eq!(prompts.handoff.as_deref(), Some("local handoff"));
+        assert_eq!(prompts.merge_pr.as_deref(), Some("local merge"));
     }
 
     #[test]
@@ -4707,23 +4605,14 @@ LOCAL_ONLY = "1"
                 path: Some(".archductor/prompt-packs/startup.toml".to_owned()),
             },
             prompts: Some(PromptSettings {
-                new_workspace: Some("Plan before editing.".to_owned()),
                 general: Some("Ship small changes.".to_owned()),
-                continue_work: Some("Resume from existing context.".to_owned()),
-                summarize_session: Some("Summarize tests and risk.".to_owned()),
-                handoff: Some("Leave a concise handoff.".to_owned()),
                 code_review: Some("Find correctness issues.".to_owned()),
                 create_pr: Some("Include test evidence.".to_owned()),
                 fix_errors: Some("Focus on failing checks.".to_owned()),
-                resolve_merge_conflicts: Some("Preserve user changes.".to_owned()),
-                rename_branch: Some("Use short feature names.".to_owned()),
-                commit_generation: None,
                 push_branch: None,
                 merge_pr: None,
-                revert_changes: None,
                 review_comments: None,
                 test_fixing: None,
-                refactor_style: None,
                 setup_script: Some("Use the configured setup script.".to_owned()),
                 run_script: Some("Use the configured run script.".to_owned()),
             }),
@@ -4752,7 +4641,7 @@ LOCAL_ONLY = "1"
         let saved = fs::read_to_string(temp.path().join(".archductor/settings.toml")).unwrap();
         assert!(saved.contains("[prompt_pack]"));
         assert!(saved.contains("typecheck = \"pnpm typecheck\""));
-        assert!(saved.contains("summarize_session = \"Summarize tests and risk.\""));
+        assert!(saved.contains("code_review = \"Find correctness issues.\""));
         assert!(temp.path().join(".archductor/settings.toml").exists());
         assert!(!temp.path().join(".archductor/settings.local.toml").exists());
     }
@@ -5140,6 +5029,10 @@ theme = "dark"
         fs::create_dir(&conductor_dir).unwrap();
         fs::write(
             conductor_dir.join("settings.toml"),
+            // `new_workspace`, `continue_work`, `summarize_session`, `handoff`
+            // and `refactor_style` are prompt slots that no longer exist. They
+            // stay in this fixture on purpose: a config written before they were
+            // removed has to keep loading, with the dead keys simply ignored.
             r##"
 [prompts]
 new_workspace = "Plan the workspace."
@@ -5256,8 +5149,8 @@ surface = "#102030"
             Some("Fix the failing test first.".to_owned())
         );
         assert_eq!(
-            settings.prompts.as_ref().unwrap().new_workspace,
-            Some("Plan the workspace.".to_owned())
+            settings.prompts.as_ref().unwrap().setup_script,
+            Some("Prepare dependencies.".to_owned())
         );
         assert_eq!(
             settings.prompt_pack.path,
@@ -5637,24 +5530,15 @@ file_include_globs = ".env.local"
     /// Every built-in prompt slot, paired with its text, so a test can sweep
     /// all of them without restating the list.
     fn builtin_prompt_texts() -> Vec<(PromptKind, String)> {
-        const KINDS: [PromptKind; 19] = [
-            PromptKind::NewWorkspace,
+        const KINDS: [PromptKind; 10] = [
             PromptKind::General,
-            PromptKind::ContinueWork,
-            PromptKind::SummarizeSession,
-            PromptKind::Handoff,
             PromptKind::CodeReview,
             PromptKind::CreatePr,
             PromptKind::FixErrors,
-            PromptKind::ResolveMergeConflicts,
-            PromptKind::RenameBranch,
-            PromptKind::CommitGeneration,
             PromptKind::PushBranch,
             PromptKind::MergePr,
-            PromptKind::RevertChanges,
             PromptKind::ReviewComments,
             PromptKind::TestFixing,
-            PromptKind::RefactorStyle,
             PromptKind::SetupScript,
             PromptKind::RunScript,
         ];

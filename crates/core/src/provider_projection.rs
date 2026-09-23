@@ -1365,6 +1365,75 @@ mod tests {
     }
 
     #[test]
+    fn a_skill_invocation_shows_the_call_and_never_the_skill_body() {
+        // Real claude 2.1.278 stream-json: the skill body comes back as a
+        // synthetic `type: "user"` record, which read literally puts the whole
+        // SKILL.md in the transcript as if the human had pasted it.
+        let native = include_str!("../tests/fixtures/claude_stream/skill_invocation.jsonl");
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let mut latest = BTreeMap::new();
+
+        for (sequence, event) in parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let mut draft =
+                event.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: sequence as u64,
+                    schema_version: 1,
+                    adapter_version: "claude-projection-test".to_owned(),
+                });
+            draft.provider_sequence = Some(sequence as i64);
+            let record = store.upsert_event(&draft).unwrap();
+            latest.insert(record.identity_key.clone(), record);
+        }
+
+        let projection = provider_projection_from_records(
+            &latest.into_values().collect::<Vec<ProviderEventRecord>>(),
+        );
+
+        assert!(
+            !projection
+                .items
+                .iter()
+                .any(|item| item.render_class == ProjectionRenderClass::UserChat),
+            "a skill invocation contains no human turn"
+        );
+        assert_eq!(
+            projection
+                .items
+                .iter()
+                .find(|item| item.render_class == ProjectionRenderClass::SkillCard)
+                .map(|item| item.title.as_str()),
+            Some("Skill: caveman-help")
+        );
+
+        // What the chat surface actually shows: the call, and not the body.
+        // Skill cards are already filtered out as parser noise.
+        let chat = projection
+            .items
+            .iter()
+            .filter(|item| provider_projection_item_is_relevant_chat_event(item))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            chat.iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Skill caveman:caveman-help"]
+        );
+        assert!(
+            chat.iter()
+                .all(|item| !item.body.contains("# Caveman Help")),
+            "the skill body never reaches the transcript"
+        );
+    }
+
+    #[test]
     fn claude_projection_authoritative_final_repairs_partial_delta_before_empty_stops() {
         let native = r#"{"type":"stream_event","session_id":"claude-session","event":{"type":"message_start","message":{"id":"claude-message","role":"assistant","content":[]}}}
 {"type":"stream_event","session_id":"claude-session","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}

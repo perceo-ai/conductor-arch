@@ -7,6 +7,8 @@ import Icon from "@/components/Icon";
 import type { IconName } from "@/components/Icon";
 import { renderMarkdown, renderMarkdownWithInlineFileChips } from "@/lib/markdown";
 import { ansiToHtml } from "@/lib/ansi";
+import { openableChipPath } from "@/lib/fileChip";
+import { openFileInCenter } from "@/pages/openFileBridge";
 import { TurnForkAction } from "./MessageActions";
 import {
   formatReasoningText,
@@ -18,12 +20,27 @@ import {
 
 // One row of the chat timeline. The projection built in core decides which
 // shape a row takes; this module owns how each shape renders.
-function UserBubble(props: { body: string }) {
+function UserBubble(props: {
+  body: string;
+  threadId: number;
+  workspace: string;
+  files: readonly string[];
+}) {
   return (
     <div class="chat-user-row">
       <div
         class="chat-user-bubble markdown-body"
-        innerHTML={renderMarkdownWithInlineFileChips(stripArchductorMetadata(props.body))}
+        // A chip in a sent message opens the file it stands for, the same way
+        // the composer's chips do — the message is the only record of what was
+        // attached, so it has to be the way back to it.
+        onClick={(e) => {
+          const path = openableChipPath(e.target);
+          if (path) openFileInCenter(props.workspace, path);
+        }}
+        innerHTML={renderMarkdownWithInlineFileChips(stripArchductorMetadata(props.body), {
+          threadId: props.threadId,
+          files: props.files,
+        })}
       />
     </div>
   );
@@ -108,13 +125,20 @@ export function TimelineItem(props: {
   item: ArchcarProjectionItem;
   agentIdle: boolean;
   threadId: number;
+  workspace: string;
+  files: readonly string[];
   forkable: boolean;
 }) {
   const cls = () => props.item.render_class;
   return (
     <Switch fallback={<InlineCard item={props.item} agentIdle={props.agentIdle} />}>
       <Match when={cls() === "user_chat"}>
-        <UserBubble body={props.item.body} />
+        <UserBubble
+          body={props.item.body}
+          threadId={props.threadId}
+          workspace={props.workspace}
+          files={props.files}
+        />
       </Match>
       <Match when={cls() === "assistant_chat"}>
         {/* Reasoning already marked itself as streaming; agent prose did not,

@@ -594,6 +594,10 @@ enum ArchcarCommand {
         workspace: String,
         #[arg(long, value_enum)]
         action: CliWorkspaceGitAction,
+        /// Chat thread to save the resolved prompt against, so it is reachable
+        /// from the chat as a file chip. Omit to just print the prompt.
+        #[arg(long)]
+        thread: Option<i64>,
     },
     /// Show spotlight-testing status for a workspace.
     SpotlightStatus {
@@ -2070,11 +2074,16 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::GetPullRequestReadiness { workspace })?,
                     );
                 }
-                ArchcarCommand::GitActionPrompt { workspace, action } => {
+                ArchcarCommand::GitActionPrompt {
+                    workspace,
+                    action,
+                    thread,
+                } => {
                     print_archcar_response(client.send(
                         ArchcarRequest::GetWorkspaceGitActionPrompt {
                             workspace,
                             action: action.into(),
+                            thread_id: thread,
                         },
                     )?);
                 }

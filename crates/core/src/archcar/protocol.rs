@@ -394,6 +394,13 @@ pub enum ArchcarRequest {
     GetWorkspaceGitActionPrompt {
         workspace: String,
         action: WorkspaceGitAction,
+        /// Chat thread the prompt is about to be queued into. When present the
+        /// resolved prompt is also saved as an attachment on that thread, and
+        /// `visible_input` carries a chip marker pointing at it — which is how
+        /// a human can see what the agent was actually asked. Optional because
+        /// the CLI prints the prompt without queuing it anywhere.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread_id: Option<i64>,
     },
     /// Spotlight testing: current status for a workspace (is its patch applied
     /// to the repo root for live testing).
@@ -1973,8 +1980,12 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetPullRequestReadiness { workspace } => {
             format!("get_pull_request_readiness workspace={workspace}")
         }
-        ArchcarRequest::GetWorkspaceGitActionPrompt { workspace, action } => format!(
-            "get_workspace_git_action_prompt workspace={workspace} action={action:?}"
+        ArchcarRequest::GetWorkspaceGitActionPrompt {
+            workspace,
+            action,
+            thread_id,
+        } => format!(
+            "get_workspace_git_action_prompt workspace={workspace} action={action:?} thread={thread_id:?}"
         ),
         ArchcarRequest::GetSpotlightStatus { workspace } => {
             format!("get_spotlight_status workspace={workspace}")

@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createSignal, on, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createResource, createSignal, on, onMount } from "solid-js";
 import {
   chatStore,
   interactionsStore,
@@ -26,12 +26,17 @@ import {
 } from "@/lib/chatGeneration";
 import { NewChatIntro } from "./NewChatIntro";
 import { TimelineItem } from "./TimelineItem";
+import { loadWorkspaceFiles } from "@/lib/workspaceFiles";
 import { PlanCard } from "./Interactions";
 
 // The scrolling message column, including follow-the-bottom behaviour and the
 // generation loader that trails the last message.
 export function Timeline(props: { threadId: number; workspace: string }) {
   let scrollRef: HTMLDivElement | undefined;
+  // Only used to work out where a sent message's file chip points; a chip whose
+  // name isn't in the list simply stays inert, so the list arriving late costs
+  // nothing but a re-render.
+  const [workspaceFiles] = createResource(() => props.workspace, loadWorkspaceFiles);
   let followBottom = true;
   const slice = () => chatStore.slice(props.threadId);
   const pendingPlan = () => {
@@ -135,6 +140,8 @@ export function Timeline(props: { threadId: number; workspace: string }) {
                 item={item}
                 agentIdle={agentIdle()}
                 threadId={props.threadId}
+                workspace={props.workspace}
+                files={workspaceFiles() ?? []}
                 forkable={forkableItems().has(item.id)}
               />
             )}

@@ -1483,8 +1483,13 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetWorkspaceGitActionPrompt { workspace, action } => {
+        ArchcarRequest::GetWorkspaceGitActionPrompt {
+            workspace,
+            action,
+            thread_id,
+        } => {
             let db_path = state.lock().unwrap().db_path.clone();
+            let label = workspace_git_action_visible_input(action);
             let result = WorkspaceStore::open_app(&db_path).and_then(|s| {
                 let prompt = match action {
                     WorkspaceGitAction::CreatePr => {
@@ -1494,14 +1499,30 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     WorkspaceGitAction::MergePr => s.merge_pull_request_agent_prompt(&workspace)?,
                     WorkspaceGitAction::OpenPr => s.review_pull_request_agent_prompt(&workspace)?,
                 };
-                Ok(prompt)
+                // Save the resolved prompt beside the chat so the queued message
+                // can show a chip that opens it. Best effort: failing to write
+                // the copy must not stop the action the human asked for — they
+                // just lose the ability to inspect it.
+                let visible_input = thread_id
+                    .and_then(|thread_id| {
+                        s.save_thread_action_prompt_attachment(
+                            thread_id,
+                            label,
+                            workspace_git_action_prompt_kind(action),
+                            &prompt,
+                        )
+                        .ok()
+                    })
+                    .map(|filename| format!("{label} {{{filename}}}"))
+                    .unwrap_or_else(|| label.to_owned());
+                Ok((prompt, visible_input))
             });
             match result {
-                Ok(prompt) => ArchcarResponse::WorkspaceGitActionPrompt {
+                Ok((prompt, visible_input)) => ArchcarResponse::WorkspaceGitActionPrompt {
                     workspace,
                     action,
                     prompt,
-                    visible_input: workspace_git_action_visible_input(action).to_owned(),
+                    visible_input,
                 },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -4434,6 +4455,10 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         }
         _ => None,
     };
+    let pr_sync_thread_id = match &event {
+        ArchcarEvent::TurnCompleted { thread_id, .. } => Some(*thread_id),
+        _ => None,
+    };
     {
         let mut guard = state.lock().unwrap();
         if let ArchcarEvent::SessionExited { session_id, .. } = &event {
@@ -4450,6 +4475,57 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
             refresh_workspace_context_after_change(state, &workspace, Some(thread_id));
         }
     }
+    // A finished turn may have changed GitHub without telling us: agents run
+    // `gh pr create` / `gh pr merge` in their own shell at least as often as
+    // they use the archductor MCP tools, and until now the pull_requests row —
+    // and every surface's PR chip — only learned about it when a human pressed
+    // "Refresh PR". Sync on our own initiative at the turn boundary. On a
+    // spawned thread: `gh` goes to the network and this pump feeds live chats.
+    if let Some(thread_id) = pr_sync_thread_id {
+        let state = Arc::clone(state);
+        std::thread::spawn(move || {
+            if let Some(workspace) = workspace_name_for_thread(&state, thread_id) {
+                sync_pull_request_state_after_turn(&state, &workspace);
+            }
+        });
+    }
+}
+
+/// Re-read the workspace's PR from GitHub and tell every client if anything
+/// about it changed (discovered, renumbered, or moved state). Quiet on failure:
+/// no `gh`, no remote, or no network is the normal case for local-only repos.
+fn sync_pull_request_state_after_turn(state: &Arc<Mutex<ServerState>>, workspace: &str) {
+    let db_path = state.lock().unwrap().db_path.clone();
+    let Ok(store) = WorkspaceStore::open_app(&db_path) else {
+        return;
+    };
+    let before = store.pull_request(workspace).ok().flatten();
+    let Ok(after) = store.refresh_pull_request_state(workspace) else {
+        return;
+    };
+    if let Some(event) = pull_request_changed_event(workspace, before.as_ref(), after.as_ref()) {
+        broadcast(&mut state.lock().unwrap(), event);
+    }
+}
+
+/// The inventory event a PR sync should broadcast, if the sync found news.
+fn pull_request_changed_event(
+    workspace: &str,
+    before: Option<&crate::workspace::PullRequest>,
+    after: Option<&crate::workspace::PullRequest>,
+) -> Option<ArchcarEvent> {
+    let changed = match (before, after) {
+        (None, None) => false,
+        (Some(before), Some(after)) => {
+            before.number != after.number || before.state != after.state || before.url != after.url
+        }
+        _ => true,
+    };
+    changed.then(|| ArchcarEvent::InventoryChanged {
+        scope: "workspaces".to_owned(),
+        workspace: Some(workspace.to_owned()),
+        repository: None,
+    })
 }
 
 fn queued_archcar_input_from_record(
@@ -4792,6 +4868,18 @@ fn clone_repository(url: &str, dest: &str) -> Result<()> {
         command_failure_message(command.program, &command.args, &output)
     );
     Ok(())
+}
+
+/// The prompt slot each git action resolves, so a saved prompt can say which
+/// pack entry fed it.
+fn workspace_git_action_prompt_kind(action: WorkspaceGitAction) -> crate::settings::PromptKind {
+    use crate::settings::PromptKind;
+    match action {
+        WorkspaceGitAction::CreatePr => PromptKind::CreatePr,
+        WorkspaceGitAction::PushBranch => PromptKind::PushBranch,
+        WorkspaceGitAction::MergePr => PromptKind::MergePr,
+        WorkspaceGitAction::OpenPr => PromptKind::CodeReview,
+    }
 }
 
 fn workspace_git_action_visible_input(action: WorkspaceGitAction) -> &'static str {
@@ -6201,6 +6289,47 @@ fn terminate_managed_handle(handle: &SessionHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pr_row(number: i64, state: &str) -> crate::workspace::PullRequest {
+        crate::workspace::PullRequest {
+            id: 1,
+            workspace_id: 1,
+            provider: "github".to_owned(),
+            number,
+            url: format!("https://github.com/example/demo/pull/{number}"),
+            state: state.to_owned(),
+            created_at: "0".to_owned(),
+            updated_at: "0".to_owned(),
+        }
+    }
+
+    #[test]
+    fn pull_request_sync_broadcasts_only_when_the_pr_actually_changed() {
+        // Discovered where there was none: news.
+        let discovered = pull_request_changed_event("berlin", None, Some(&pr_row(77, "open")));
+        assert!(matches!(
+            discovered,
+            Some(ArchcarEvent::InventoryChanged { scope, workspace, .. })
+                if scope == "workspaces" && workspace.as_deref() == Some("berlin")
+        ));
+        // Merged out from under us: news.
+        assert!(pull_request_changed_event(
+            "berlin",
+            Some(&pr_row(77, "open")),
+            Some(&pr_row(77, "merged"))
+        )
+        .is_some());
+        // Same PR, same state: a sync after every turn must not make every
+        // client re-pull the inventory for nothing.
+        assert!(pull_request_changed_event(
+            "berlin",
+            Some(&pr_row(77, "open")),
+            Some(&pr_row(77, "open"))
+        )
+        .is_none());
+        // Still no PR anywhere: silence.
+        assert!(pull_request_changed_event("berlin", None, None).is_none());
+    }
     use crate::archcar::harness_contract::{
         ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
     };
