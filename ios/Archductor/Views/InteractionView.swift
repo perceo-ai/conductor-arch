@@ -6,6 +6,7 @@ import SwiftUI
 /// Three shapes behind one screen, because the daemon models them as one
 /// record: a permission prompt, a batch of questions, and a plan approval.
 struct InteractionView: View {
+    @Environment(\.palette) private var palette
     let store: ChatStore
     let interaction: ProviderInteraction
 
@@ -18,10 +19,13 @@ struct InteractionView: View {
     var body: some View {
         Form {
             Section {
-                Text(interaction.title).font(.headline)
+                Text(interaction.title)
+                    .font(Typeface.title)
+                    .foregroundStyle(palette.textStrong)
                 if !interaction.detail.isEmpty {
                     Text(interaction.detail)
-                        .font(.caption.monospaced())
+                        .font(Typeface.code)
+                        .foregroundStyle(palette.codeText)
                         .textSelection(.enabled)
                 }
             } header: {
@@ -35,6 +39,7 @@ struct InteractionView: View {
                 approvalSection
             }
         }
+        .archductorForm()
         .navigationTitle("Needs you")
         .navigationBarTitleDisplayMode(.inline)
         .disabled(working)
@@ -75,8 +80,8 @@ struct InteractionView: View {
                                 Text(option.label)
                                 if !option.description.isEmpty {
                                     Text(option.description)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .font(Typeface.secondary)
+                                        .foregroundStyle(palette.textMuted)
                                 }
                             }
                         }

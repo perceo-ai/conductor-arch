@@ -82,6 +82,7 @@ struct NewWorkspaceSheet: View {
                     Section { Text(error).font(.footnote).foregroundStyle(.red) }
                 }
             }
+            .archductorForm()
             .navigationTitle("New workspace")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -190,6 +191,7 @@ struct AddRepositorySheet: View {
                     Section { Text(error).font(.footnote).foregroundStyle(.red) }
                 }
             }
+            .archductorForm()
             .navigationTitle("Add repository")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

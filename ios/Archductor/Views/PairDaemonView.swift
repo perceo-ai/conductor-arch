@@ -2,6 +2,7 @@ import ArchcarKit
 import SwiftUI
 
 struct PairDaemonView: View {
+    @Environment(\.palette) private var palette
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
@@ -67,11 +68,12 @@ struct PairDaemonView: View {
                 if let error {
                     Section {
                         Text(error)
-                            .foregroundStyle(.red)
-                            .font(.footnote)
+                            .foregroundStyle(palette.danger)
+                            .font(Typeface.secondary)
                     }
                 }
             }
+            .archductorForm()
             .navigationTitle("Pair daemon")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

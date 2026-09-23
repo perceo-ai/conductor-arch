@@ -82,8 +82,12 @@ public actor DaemonSession {
 
             connectionState = .connected
             backoff.reset()
+            ArchcarLog.session.notice(
+                "connected host=\(self.address.host, privacy: .public) port=\(self.address.port, privacy: .public)")
         } catch {
             connectionState = .failed(String(describing: error))
+            ArchcarLog.session.error(
+                "connect failed host=\(self.address.host, privacy: .public) port=\(self.address.port, privacy: .public) error=\(String(describing: error), privacy: .public)")
             throw error
         }
     }

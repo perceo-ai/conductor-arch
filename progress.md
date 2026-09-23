@@ -124,6 +124,45 @@ signing (P5 in the spec). The bundle id is `ai.perceo.archductor.ios`, distinct
 from the Electron app's, because one Apple account cannot hold the same App ID
 for two platforms.
 
+## iOS client, connection and look (2026-09-23)
+
+Debugged against the real phone over Tailscale. The reported "it will not
+connect" was a stale build: the daemon, the token, the saved address, and the
+pairing all checked out, and a freshly installed build connected on launch.
+Four real defects turned up while proving that, and all four are fixed.
+
+- `WorkspacesStore.observe` refetched the whole inventory per invalidating
+  event. One agent turn emits a spawn, a start, a ready, interactions and a
+  completion, so a busy daemon meant several full snapshots a second — each its
+  own TCP connection over a VPN. Refreshes now coalesce behind a 250ms quiet
+  window, with events landing mid-refetch earning exactly one more.
+- The app emitted no `os_log` at all, so a failure on a phone was
+  undiagnosable, and every one of them surfaced as "Are you on the right
+  network?". There is now an `ArchcarLog` facade (no token ever reaches it) and
+  `connectionReason` turns `ECONNREFUSED` / `EHOSTUNREACH` / `ETIMEDOUT` into
+  the three different things they actually mean.
+- A failed `get_workspace_changes` rendered as "No changes" — a wrong statement
+  about someone's tree. `ReviewStore` now tracks `changesError` separately from
+  an empty list, and the panel offers a retry.
+- `ios/build` was untracked rather than ignored, so every local `xcodebuild`
+  run put thousands of artifacts into `git status` — 7091 entries in the
+  workspace's own change list, which is what pushed the daemon into the error
+  above.
+
+The look was the other half. The generated palette existed, was tested, and was
+read by zero of the thirteen views, so the app rendered as stock light-mode
+SwiftUI. It now runs on the desktop's tokens throughout: near-black surfaces,
+hairline edges, the gold accent spent on selection and the one primary action
+per screen, mono for branches and paths, and the desktop's density. Appearance
+is an app preference defaulting to dark, matching `prefsStore`, because
+following the phone's light mode is not the same product. The Review *tab* was
+a placeholder promising panels that already live inside a workspace, so it is
+gone and the tab bar is three.
+
+`VisualTourUITests` screenshots every screen against a live daemon; a look
+cannot be asserted, so it is reviewed. Signing moved to the paid team, whose
+profile runs to 2027 instead of expiring after a week.
+
 ## App auto-update (2026-09-21)
 
 The packaged desktop app now checks for a newer release on launch and every six

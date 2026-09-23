@@ -3,6 +3,7 @@ import SwiftUI
 
 /// The workspace tree, one level at a time.
 struct FilesPanel: View {
+    @Environment(\.palette) private var palette
     let store: FilesStore
     var prefix: String = ""
 
@@ -11,35 +12,68 @@ struct FilesPanel: View {
     }
 
     var body: some View {
-        List {
-            ForEach(entries.directories, id: \.self) { directory in
-                NavigationLink {
-                    FilesPanel(store: store, prefix: joined(directory))
-                        .navigationTitle(directory)
-                } label: {
-                    Label(directory, systemImage: "folder")
+        ScrollView {
+            LazyVStack(spacing: 4) {
+                ForEach(entries.directories, id: \.self) { directory in
+                    NavigationLink {
+                        FilesPanel(store: store, prefix: joined(directory))
+                            .navigationTitle(directory)
+                    } label: {
+                        entryRow(directory, systemImage: "folder", isDirectory: true)
+                    }
+                    .buttonStyle(.plain)
+                }
+                ForEach(entries.files, id: \.self) { file in
+                    NavigationLink {
+                        FileEditorView(store: store, path: joined(file))
+                    } label: {
+                        entryRow(file, systemImage: "doc.text", isDirectory: false)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            ForEach(entries.files, id: \.self) { file in
-                NavigationLink {
-                    FileEditorView(store: store, path: joined(file))
-                } label: {
-                    Label(file, systemImage: "doc.text")
-                }
-            }
+            .padding(.horizontal, Metrics.pageInset)
+            .padding(.vertical, 12)
         }
-        .listStyle(.plain)
+        .archductorScreen()
         .refreshable { await store.refresh() }
         .overlay {
             if store.isLoading && store.paths.isEmpty {
-                ProgressView()
+                ProgressView().tint(palette.textMuted)
             } else if entries.directories.isEmpty && entries.files.isEmpty {
-                ContentUnavailableView("No files", systemImage: "folder")
+                EmptyStateView(
+                    title: "No files", systemImage: "folder",
+                    detail: "This directory is empty.")
             }
         }
         .task {
             if store.paths.isEmpty { await store.refresh() }
         }
+    }
+
+    private func entryRow(_ name: String, systemImage: String, isDirectory: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .imageScale(.small)
+                .foregroundStyle(isDirectory ? palette.accent : palette.textMuted)
+                .frame(width: 16)
+            Text(name)
+                .font(Typeface.mono)
+                .foregroundStyle(isDirectory ? palette.textStrong : palette.text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 6)
+            if isDirectory {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(palette.textMuted)
+            }
+        }
+        .padding(.horizontal, Metrics.rowInset)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .panel(fill: \.surface)
     }
 
     private func joined(_ component: String) -> String {
@@ -49,6 +83,7 @@ struct FilesPanel: View {
 
 /// Reading, and editing, one file.
 struct FileEditorView: View {
+    @Environment(\.palette) private var palette
     let store: FilesStore
     let path: String
 
@@ -63,15 +98,20 @@ struct FileEditorView: View {
     var body: some View {
         Group {
             if loading {
-                ProgressView()
+                ProgressView().tint(palette.textMuted)
             } else {
                 TextEditor(text: $text)
-                    .font(.system(.footnote, design: .monospaced))
+                    .font(Typeface.code)
+                    .foregroundStyle(palette.codeText)
+                    .scrollContentBackground(.hidden)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
                     .accessibilityIdentifier("file-editor")
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(palette.codeSurface)
+        .tint(palette.accent)
         .navigationTitle(path.split(separator: "/").last.map(String.init) ?? path)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -119,6 +159,7 @@ struct FileEditorView: View {
 /// sends keystrokes back — enough to read output and run the occasional
 /// command, which is what a phone is for.
 struct TerminalPanel: View {
+    @Environment(\.palette) private var palette
     let store: TerminalStore
     @State private var command = ""
 
@@ -139,7 +180,8 @@ struct TerminalPanel: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                             Text(line.isEmpty ? " " : line)
-                                .font(.system(size: 11, design: .monospaced))
+                                .font(Typeface.monoSmall)
+                                .foregroundStyle(palette.codeText)
                                 .textSelection(.enabled)
                                 .id(index)
                         }
@@ -147,6 +189,7 @@ struct TerminalPanel: View {
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .background(palette.codeSurface)
                 .defaultScrollAnchor(.topLeading)
                 .onChange(of: store.screen) { _, _ in
                     guard !lines.isEmpty else { return }
@@ -157,28 +200,35 @@ struct TerminalPanel: View {
                 }
             }
 
-            Divider()
+            Rectangle().fill(palette.border).frame(height: Metrics.hairline)
 
             HStack(spacing: 8) {
                 // No control key on a phone keyboard, and stopping a runaway
                 // command is the main reason to open a terminal from one.
                 Button("^C") { Task { await store.sendControl("C") } }
-                    .buttonStyle(.bordered)
+                    .buttonStyle(QuietButtonStyle())
                     .accessibilityIdentifier("terminal-ctrl-c")
 
                 TextField("Command", text: $command)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .font(.system(.footnote, design: .monospaced))
+                    .font(Typeface.mono)
+                    .foregroundStyle(palette.text)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 7)
+                    .panel(fill: \.surfaceRaised)
                     .accessibilityIdentifier("terminal-input")
                     .onSubmit(run)
 
                 Button("Run", action: run)
+                    .buttonStyle(AccentButtonStyle())
                     .disabled(command.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            .padding(8)
-            .background(.bar)
+            .padding(.horizontal, Metrics.pageInset)
+            .padding(.vertical, 8)
+            .background(palette.surface)
         }
+        .background(palette.bg)
         .task {
             await store.start()
             await store.refreshScreen()

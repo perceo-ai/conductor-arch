@@ -20,6 +20,19 @@ public final class WorkspacesStore {
     /// A create/archive/restore is in flight; the UI disables its controls so
     /// a slow worktree operation cannot be fired twice.
     public private(set) var isMutating = false
+    /// How many inventory snapshots this store has asked the daemon for. The
+    /// number is the whole point of the coalescing below, so it is observable
+    /// rather than inferred from a log.
+    public private(set) var refreshCount = 0
+
+    /// How long the store waits for the event stream to go quiet before
+    /// refetching. Long enough to swallow one turn's worth of events, short
+    /// enough that the list still reads as live.
+    public static let refreshQuietWindow = Duration.milliseconds(250)
+
+    private var isCoalescing = false
+    private var refreshAgain = false
+    private var coalescedRefresh: Task<Void, Never>?
 
     private let session: DaemonSession
 
@@ -184,6 +197,7 @@ public final class WorkspacesStore {
     }
 
     public func refresh() async {
+        refreshCount += 1
         do {
             let response = try await session.request(GetInventorySnapshotRequest())
             guard case .inventorySnapshot(let repositories, let workspaces, let chatThreads) = response
@@ -200,14 +214,50 @@ public final class WorkspacesStore {
         } catch {
             lastError = String(describing: error)
             isStale = true
+            ArchcarLog.store.error(
+                "inventory refresh failed error=\(String(describing: error), privacy: .public)")
         }
     }
 
     /// Runs for the lifetime of the session, refreshing on every event that
     /// touches the list.
+    ///
+    /// The refetch is coalesced rather than run per event. One agent turn emits
+    /// a spawn, a start, a ready, interactions, and a completion, and every one
+    /// of them invalidates the list; on a phone each refetch is a fresh TCP
+    /// connection plus a whole inventory snapshot over a VPN, so answering each
+    /// event separately turns a busy daemon into a permanent backlog.
     public func observe() async {
         for await event in await session.events where Self.invalidates(event) {
-            await refresh()
+            refreshSoon()
         }
+        coalescedRefresh?.cancel()
+    }
+
+    /// Asks for a refresh without waiting for one. Bursts collapse into a
+    /// single round trip; events that land mid-refetch earn exactly one more.
+    public func refreshSoon() {
+        guard !isCoalescing else {
+            refreshAgain = true
+            return
+        }
+        isCoalescing = true
+        coalescedRefresh = Task { [weak self] in
+            await self?.drainCoalescedRefreshes()
+        }
+    }
+
+    private func drainCoalescedRefreshes() async {
+        defer {
+            isCoalescing = false
+            coalescedRefresh = nil
+        }
+        repeat {
+            // Let the rest of the burst land before paying for a round trip.
+            try? await Task.sleep(for: Self.refreshQuietWindow)
+            guard !Task.isCancelled else { return }
+            refreshAgain = false
+            await refresh()
+        } while refreshAgain && !Task.isCancelled
     }
 }

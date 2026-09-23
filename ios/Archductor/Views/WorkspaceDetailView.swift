@@ -8,6 +8,7 @@ import SwiftUI
 /// their own phases rather than being faked now.
 struct WorkspaceDetailView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.palette) private var palette
     let workspace: WorkspaceSummary
 
     @State private var panel: Panel = .chat
@@ -31,24 +32,34 @@ struct WorkspaceDetailView: View {
         VStack(spacing: 0) {
             // Six panels do not fit a phone's width as a segmented control.
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     ForEach(Panel.allCases) { item in
+                        let selected = panel == item
                         Button {
                             panel = item
                         } label: {
                             Text(item.rawValue)
-                                .font(.subheadline.weight(panel == item ? .semibold : .regular))
-                                .padding(.horizontal, 12)
+                                .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                .foregroundStyle(selected ? palette.accent : palette.textMuted)
+                                .padding(.horizontal, 11)
                                 .padding(.vertical, 6)
                                 .background(
-                                    panel == item ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.10),
+                                    selected ? palette.accentWash : palette.surface,
                                     in: Capsule())
+                                .overlay(
+                                    Capsule().strokeBorder(
+                                        selected ? palette.accentEdge : palette.border,
+                                        lineWidth: Metrics.hairline))
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.horizontal, Metrics.pageInset)
+                .padding(.vertical, 9)
+            }
+            .background(palette.bg)
+            .overlay(alignment: .bottom) {
+                Rectangle().fill(palette.border).frame(height: Metrics.hairline)
             }
 
             switch panel {
@@ -66,6 +77,7 @@ struct WorkspaceDetailView: View {
                 if let terminal { TerminalPanel(store: terminal) } else { ProgressView() }
             }
         }
+        .background(palette.bg)
         .navigationTitle(workspace.name)
         .navigationBarTitleDisplayMode(.inline)
         .task {
@@ -92,30 +104,42 @@ struct WorkspaceDetailView: View {
     @ViewBuilder
     private var chatPanel: some View {
         if let store {
-            List {
-                Section {
+            ScrollView {
+                LazyVStack(spacing: 6) {
                     ForEach(store.threads) { thread in
                         NavigationLink {
                             ChatThreadScreen(store: store, thread: thread)
                         } label: {
                             ChatThreadRow(thread: thread)
                         }
+                        .buttonStyle(.plain)
                     }
-                }
-                Section {
                     Button {
                         creating = true
                     } label: {
-                        Label("New chat", systemImage: "plus.bubble")
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.bubble").imageScale(.small)
+                            Text("New chat")
+                            Spacer()
+                        }
+                        .font(Typeface.secondary)
+                        .foregroundStyle(palette.textMuted)
+                        .padding(.horizontal, Metrics.rowInset)
+                        .padding(.vertical, 10)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
+                    .panel(fill: \.surface)
                 }
+                .padding(.horizontal, Metrics.pageInset)
+                .padding(.vertical, 12)
             }
-            .listStyle(.plain)
+            .archductorScreen()
             .overlay {
                 if store.threads.isEmpty {
-                    ContentUnavailableView(
-                        "No chats", systemImage: "bubble.left.and.bubble.right",
-                        description: Text("Start one to put an agent on this workspace."))
+                    EmptyStateView(
+                        title: "No chats", systemImage: "bubble.left.and.bubble.right",
+                        detail: "Start one to put an agent on this workspace.")
                 }
             }
             .refreshable { await store.refreshThreads() }
@@ -141,22 +165,31 @@ struct ChatThreadScreen: View {
 }
 
 struct ChatThreadRow: View {
+    @Environment(\.palette) private var palette
     let thread: ChatThread
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             Text(thread.title.isEmpty ? "Untitled chat" : thread.title)
-                .font(.subheadline)
+                .font(Typeface.bodyStrong)
+                .foregroundStyle(palette.textStrong)
                 .lineLimit(1)
-            HStack(spacing: 6) {
-                Text(thread.provider)
-                if let model = thread.model { Text(model) }
-                Spacer()
+            HStack(spacing: 5) {
+                TintChip(text: thread.provider, kind: .info)
+                if let model = thread.model {
+                    Text(model).font(Typeface.monoSmall).foregroundStyle(palette.textMuted)
+                }
+                Spacer(minLength: 6)
                 Text(RelativeTime.format(epochSecondsString: thread.updatedAt))
+                    .font(Typeface.micro)
+                    .foregroundStyle(palette.textMuted)
             }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
         }
+        .padding(.horizontal, Metrics.rowInset)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .panel()
     }
 }
 
@@ -192,6 +225,7 @@ struct NewChatSheet: View {
                     provider = first.providerKey
                 }
             }
+            .archductorForm()
             .navigationTitle("New chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

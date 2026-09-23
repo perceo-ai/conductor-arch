@@ -9,6 +9,13 @@ import Foundation
 @Observable
 public final class ReviewStore {
     public private(set) var files: [DiffFileSummary] = []
+    /// Why the last changes fetch failed, if it did.
+    ///
+    /// Tracked separately from `lastError` because an empty `files` is
+    /// ambiguous: a clean worktree and a daemon that refused to answer look
+    /// identical, and telling someone "no changes" about a tree full of them is
+    /// worse than telling them nothing.
+    public private(set) var changesError: String?
     public private(set) var scope: WorkspaceChangeScope = .all
     public private(set) var checks: ChecksSummary?
     public private(set) var runs: WorkflowRunSummary?
@@ -44,7 +51,14 @@ public final class ReviewStore {
 
     public func refreshChanges() async {
         guard case .workspaceChanges(_, let files)? = await request(
-            GetWorkspaceChangesRequest(workspace: workspace, scope: scope)) else { return }
+            GetWorkspaceChangesRequest(workspace: workspace, scope: scope))
+        else {
+            changesError = lastError ?? "The daemon did not answer."
+            ArchcarLog.store.error(
+                "workspace changes failed workspace=\(self.workspace, privacy: .public) error=\(self.changesError ?? "", privacy: .public)")
+            return
+        }
+        changesError = nil
         self.files = files.sorted { $0.path < $1.path }
     }
 

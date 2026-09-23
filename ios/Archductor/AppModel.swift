@@ -53,8 +53,15 @@ final class AppModel {
         } catch DaemonSessionError.authenticationFailed {
             connectionError = "\(daemon.label) rejected the saved token. Pair again to get a fresh one."
             return
+        } catch ArchcarTransportError.connectionFailed(let reason) {
+            // The transport already worked out which of "not running", "not on
+            // the VPN", and "asleep" this is; repeating a generic question here
+            // would throw that away.
+            connectionError = reason
+            return
         } catch {
-            connectionError = "Could not reach \(daemon.address). Are you on the right network?"
+            connectionError =
+                "Could not reach \(daemon.address.host):\(daemon.address.port) — \(error.localizedDescription)"
             return
         }
         connectionError = nil
