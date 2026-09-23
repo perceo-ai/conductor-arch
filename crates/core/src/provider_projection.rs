@@ -580,6 +580,12 @@ fn provider_projection_category(
         {
             ProviderProjectionCategory::SearchOutput
         }
+        // Claude's own "[Image: original …]" note after an image tool result is
+        // provider metadata about an image the read already showed, so it lands
+        // in the timeline as status and never as a chat row.
+        ProviderEventKind::WebBrowserMedia if subtype.contains("image_note") => {
+            ProviderProjectionCategory::Status
+        }
         ProviderEventKind::WebBrowserMedia
             if subtype_contains_any(&subtype, &["image", "media"]) =>
         {
@@ -1430,6 +1436,67 @@ mod tests {
             chat.iter()
                 .all(|item| !item.body.contains("# Caveman Help")),
             "the skill body never reaches the transcript"
+        );
+    }
+
+    #[test]
+    fn reading_an_image_shows_the_tool_card_and_no_human_turn() {
+        // Real claude 2.1.278 records: the dimensions note that follows an image
+        // tool result is a `type: "user"` record, which read literally puts
+        // "[Image: original …]" in the transcript as something the human typed.
+        let native = include_str!("../tests/fixtures/claude_stream/image_read.jsonl");
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let mut latest = BTreeMap::new();
+
+        for (sequence, event) in parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let mut draft =
+                event.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: sequence as u64,
+                    schema_version: 1,
+                    adapter_version: "claude-projection-test".to_owned(),
+                });
+            draft.provider_sequence = Some(sequence as i64);
+            let record = store.upsert_event(&draft).unwrap();
+            latest.insert(record.identity_key.clone(), record);
+        }
+
+        let projection = provider_projection_from_records(
+            &latest.into_values().collect::<Vec<ProviderEventRecord>>(),
+        );
+
+        assert!(
+            !projection
+                .items
+                .iter()
+                .any(|item| item.render_class == ProjectionRenderClass::UserChat),
+            "an agent reading an image contains no human turn"
+        );
+
+        let chat = projection
+            .items
+            .iter()
+            .filter(|item| provider_projection_item_is_relevant_chat_event(item))
+            .collect::<Vec<_>>();
+        assert!(
+            chat.iter()
+                .any(|item| item.title.contains("01-home-light.png")),
+            "the read itself is what the chat shows: {:?}",
+            chat.iter()
+                .map(|item| item.title.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            chat.iter()
+                .all(|item| !item.body.contains("[Image:") && !item.title.contains("[Image:")),
+            "the dimensions note never reaches the transcript"
         );
     }
 
