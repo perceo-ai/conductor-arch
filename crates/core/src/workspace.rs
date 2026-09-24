@@ -16097,8 +16097,7 @@ CUSTOM_VALUE = "from-settings"
 
         let setups = store.list_setups("berlin").unwrap();
         assert_eq!(setups.len(), 1);
-        wait_for_path(&workspace.path.join(".context/setup-env"));
-        let setup_env = fs::read_to_string(workspace.path.join(".context/setup-env")).unwrap();
+        let setup_env = wait_for_file_lines(&workspace.path.join(".context/setup-env"), 7);
         let lines = setup_env.lines().collect::<Vec<_>>();
         assert_eq!(
             lines,
@@ -28119,16 +28118,6 @@ spotlight_testing = true
             .unwrap();
         assert!(output.status.success(), "git command failed: {output:?}");
         String::from_utf8(output.stdout).unwrap()
-    }
-
-    fn wait_for_path(path: &Path) {
-        for _ in 0..50 {
-            if path.exists() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        panic!("timed out waiting for {}", path.display());
     }
 
     fn wait_for_file_lines(path: &Path, expected_lines: usize) -> String {
