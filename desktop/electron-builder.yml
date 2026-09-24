@@ -33,14 +33,10 @@ files:
   - dist/**/*
   - dist-electron/**/*
 
-# Bundle the Rust sidecars alongside the app. main resolves
-# resources/bin/archcar at runtime (see electron/archcar.ts). Built by
-# `cargo build --release` before packaging.
+# Bundle icons once for every platform. Platform-specific sidecars live under
+# linux/mac/win below: electron-builder merges top-level `extraResources` with
+# platform blocks instead of replacing it, so sidecars must not sit here.
 extraResources:
-  - from: ../target/release/archcar
-    to: bin/archcar
-  - from: ../target/release/archductor
-    to: bin/archductor
   - from: build/icon.png
     to: icon.png
   - from: build/icon.ico
@@ -53,6 +49,11 @@ linux:
     - rpm
   category: Development
   icon: build/icon.png
+  extraResources:
+    - from: ../target/release/archcar
+      to: bin/archcar
+    - from: ../target/release/archductor
+      to: bin/archductor
   synopsis: Parallel coding-agent workflow tool built around Git worktrees.
   description: Archductor desktop UI. Talks to the archcar daemon over a Unix socket.
   desktop:
@@ -102,6 +103,11 @@ mac:
     - zip
   category: public.app-category.developer-tools
   icon: build/icon.icns
+  extraResources:
+    - from: ../target/release/archcar
+      to: bin/archcar
+    - from: ../target/release/archductor
+      to: bin/archductor
   hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
@@ -112,16 +118,12 @@ win:
   target:
     - nsis
   icon: build/icon.ico
-  # Windows sidecar is archcar.exe (override the unix extraResources entry).
+  # Windows sidecars have .exe names.
   extraResources:
     - from: ../target/release/archcar.exe
       to: bin/archcar.exe
     - from: ../target/release/archductor.exe
       to: bin/archductor.exe
-    - from: build/icon.png
-      to: icon.png
-    - from: build/icon.ico
-      to: icon.ico
 
 nsis:
   oneClick: false
