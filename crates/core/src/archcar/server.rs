@@ -31,6 +31,7 @@ use crate::archcar::session::{
     SessionCommand, SessionHandle,
 };
 use crate::archcar::transport::{self, DuplexStream, LocalListener};
+use crate::notifications::NotificationDeviceStore;
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
 use crate::provider_interactions::{ProviderInteractionRecord, ProviderInteractionStore};
@@ -2698,6 +2699,19 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetRemoteAccess => remote_access_response(false, state),
         ArchcarRequest::RotateRemoteToken => remote_access_response(true, state),
+        ArchcarRequest::RegisterNotificationDevice {
+            platform,
+            token,
+            app_bundle,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match NotificationDeviceStore::new(db_path).register(&platform, &token, &app_bundle) {
+                Ok(_) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         // ---- Background development tasks -------------------------------
         ArchcarRequest::StartBackgroundTask { input } => start_background_task(state, input),
         ArchcarRequest::ListBackgroundTasks { active_only } => with_store(state, |store| {
@@ -6192,6 +6206,11 @@ fn load_or_restore_session_handle(
 }
 
 fn broadcast(state: &mut ServerState, event: ArchcarEvent) {
+    if crate::notifications::event_notification(&event).is_some() {
+        let db_path = state.db_path.clone();
+        let notification_event = event.clone();
+        std::thread::spawn(move || crate::notifications::notify_event(db_path, notification_event));
+    }
     state
         .subscribers
         .retain(|subscriber| subscriber.send(event.clone()).is_ok());

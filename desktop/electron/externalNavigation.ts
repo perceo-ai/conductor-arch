@@ -29,3 +29,20 @@ export function externalNavigationUrl(url: string, devServerUrl: string | null):
   if (devOrigin && origin(url) === devOrigin) return null;
   return url;
 }
+
+function withoutHash(url: string): string {
+  const i = url.indexOf("#");
+  return i === -1 ? url : url.slice(0, i);
+}
+
+/**
+ * Whether a navigation is the app shell loading itself: the same document
+ * (hash changes included) or, in dev, anything on the Vite origin. Every other
+ * navigation — notably a chat file link resolving to another file:// path —
+ * must be cancelled, or Electron replaces the SPA with a raw file view.
+ */
+export function isAppShellNavigation(url: string, devServerUrl: string | null, appUrl: string): boolean {
+  const devOrigin = devServerUrl ? origin(devServerUrl) : null;
+  if (devOrigin) return origin(url) === devOrigin;
+  return !!appUrl && withoutHash(url) === withoutHash(appUrl);
+}

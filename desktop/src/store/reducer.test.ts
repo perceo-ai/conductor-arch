@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface MockApi {
   request: ReturnType<typeof vi.fn>;
+  notify: ReturnType<typeof vi.fn>;
   log: ReturnType<typeof vi.fn>;
 }
 
@@ -31,6 +32,7 @@ beforeEach(() => {
       if (req.type === "list_workspaces") return { type: "workspaces", workspaces: [] };
       return { type: "ack" };
     }),
+    notify: vi.fn(async () => ({ ok: true })),
     log: vi.fn(),
   };
   (globalThis as unknown as { window: { archductor: MockApi } }).window = { archductor: api };

@@ -17,6 +17,8 @@ final class AppModel {
     private(set) var isConnecting = false
 
     private var observation: Task<Void, Never>?
+    private var notificationObservation: Task<Void, Never>?
+    private let localNotifications = LocalNotificationService()
 
     init(directory: DaemonDirectory = DaemonDirectory()) {
         self.directory = directory
@@ -70,6 +72,8 @@ final class AppModel {
         workspaces = store
         await store.refresh()
         observation = Task { await store.observe() }
+        notificationObservation = Task { await observeNotifications(session: session) }
+        await localNotifications.registerForRemoteNotificationsIfAllowed()
     }
 
     func refreshSavedList() async {
@@ -79,6 +83,8 @@ final class AppModel {
     func disconnect() async {
         observation?.cancel()
         observation = nil
+        notificationObservation?.cancel()
+        notificationObservation = nil
         await session?.disconnect()
         session = nil
         workspaces = nil
@@ -96,6 +102,30 @@ final class AppModel {
             await workspaces?.refresh()
         } else {
             await activate(active)
+        }
+    }
+
+    private func observeNotifications(session: DaemonSession) async {
+        for await event in await session.events {
+            guard let descriptor = EventNotificationDescriptor.from(event) else { continue }
+            await localNotifications.deliver(descriptor)
+        }
+    }
+
+    func registerRemoteDeviceToken(_ token: String) async {
+        guard let session else {
+            ArchcarLog.notifications.notice("remote notification token arrived with no active daemon session")
+            return
+        }
+        do {
+            _ = try await session.request(
+                RegisterNotificationDeviceRequest(
+                    token: token,
+                    appBundle: "ai.perceo.archductor.ios"))
+            ArchcarLog.notifications.notice("registered remote notification device with daemon")
+        } catch {
+            ArchcarLog.notifications.error(
+                "failed to register remote notification device: \(String(describing: error), privacy: .public)")
         }
     }
 }

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation";
+import { externalNavigationUrl, isAppShellNavigation, isExternalOpenTarget } from "./externalNavigation";
 
 describe("isExternalOpenTarget", () => {
   it("accepts the schemes the OS browser/mail client should handle", () => {
@@ -37,5 +37,27 @@ describe("externalNavigationUrl", () => {
   it("returns null for schemes we refuse to hand to the OS", () => {
     expect(externalNavigationUrl("javascript:alert(1)", null)).toBeNull();
     expect(externalNavigationUrl("about:blank", null)).toBeNull();
+  });
+});
+
+describe("isAppShellNavigation", () => {
+  const packaged = "file:///Applications/App.app/Contents/Resources/app/dist/index.html";
+
+  it("allows the app document reloading itself", () => {
+    expect(isAppShellNavigation(packaged, null, packaged)).toBe(true);
+    expect(isAppShellNavigation(`${packaged}#/settings`, null, packaged)).toBe(true);
+    expect(isAppShellNavigation("http://localhost:5173/x", "http://localhost:5173", "http://localhost:5173/")).toBe(true);
+  });
+
+  it("refuses a chat file link resolving to another file:// document", () => {
+    expect(isAppShellNavigation("file:///Users/me/ws/src/main.ts", null, packaged)).toBe(false);
+    expect(
+      isAppShellNavigation("file:///Applications/App.app/Contents/Resources/app/dist/src/main.ts", null, packaged),
+    ).toBe(false);
+  });
+
+  it("refuses anything off the dev server origin", () => {
+    expect(isAppShellNavigation("file:///Users/me/a.ts", "http://localhost:5173", "http://localhost:5173/")).toBe(false);
+    expect(isAppShellNavigation("about:blank", null, packaged)).toBe(false);
   });
 });

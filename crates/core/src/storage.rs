@@ -315,6 +315,18 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           ON provider_interactions(request_fingerprint)
           WHERE status = 'pending';
 
+        CREATE TABLE IF NOT EXISTS notification_devices (
+          id INTEGER PRIMARY KEY,
+          platform TEXT NOT NULL,
+          token TEXT NOT NULL UNIQUE,
+          app_bundle TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_notification_devices_platform
+          ON notification_devices(platform, updated_at);
+
         CREATE TABLE IF NOT EXISTS provider_event_raw_payloads (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           identity_key TEXT NOT NULL,

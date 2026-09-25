@@ -926,6 +926,11 @@ pub enum ArchcarRequest {
     ListDiffContributions {
         workspace: String,
     },
+    RegisterNotificationDevice {
+        platform: String,
+        token: String,
+        app_bundle: String,
+    },
     Subscribe,
 }
 
@@ -2307,6 +2312,14 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::UninstallService => "uninstall_service".to_owned(),
         ArchcarRequest::GetRemoteAccess => "get_remote_access".to_owned(),
         ArchcarRequest::RotateRemoteToken => "rotate_remote_token".to_owned(),
+        ArchcarRequest::RegisterNotificationDevice {
+            platform,
+            token,
+            app_bundle,
+        } => format!(
+            "register_notification_device platform={platform} bundle={app_bundle} token_chars={}",
+            token.chars().count()
+        ),
         ArchcarRequest::StartBackgroundTask { input } => format!(
             "start_background_task repository={} provider={} open_pr={} prompt_chars={}",
             input.repository,

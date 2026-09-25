@@ -19,6 +19,7 @@ pub mod local_chat;
 pub mod mcp;
 pub mod mcp_server;
 pub mod model_registry;
+pub mod notifications;
 pub mod paths;
 pub mod platform;
 pub mod provider_adapters;

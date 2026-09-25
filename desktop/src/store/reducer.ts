@@ -1,10 +1,10 @@
 import type {
   ArchcarEvent,
-  BackgroundTask,
   ChatSnapshot,
   ProviderInteractionRecord,
 } from "@/bridge/protocol";
-import { send } from "@/bridge/client";
+import { notify, send } from "@/bridge/client";
+import { notificationForArchcarEvent } from "@/lib/eventNotifications";
 import { createRefreshCoalescer } from "@/lib/refreshCoalescer";
 import { chatStore } from "./chat";
 import { terminalStore } from "./terminal";
@@ -132,6 +132,9 @@ export function loadThread(threadId: number): void {
 }
 
 export function applyEvent(event: ArchcarEvent) {
+  const notification = notificationForArchcarEvent(event);
+  if (notification) void notify(notification);
+
   switch (event.type) {
     case "session_messages_updated":
       chatRefresh.request((event as { thread_id: number }).thread_id);
@@ -233,21 +236,6 @@ export function applyEvent(event: ArchcarEvent) {
     }
 
     case "background_task_updated": {
-      // Notify when a background task settles — the user may be away; that is
-      // the point of background work. Non-terminal advances stay silent.
-      const task = (event as { task: BackgroundTask }).task;
-      if (task.status === "ready" || task.status === "failed") {
-        const title =
-          task.status === "ready" ? "Background task ready" : "Background task failed";
-        const body = `#${task.id} ${task.title}${task.workspace_name ? ` (${task.workspace_name})` : ""}: ${task.detail || task.error || task.status}`;
-        try {
-          if (typeof Notification !== "undefined" && Notification.permission !== "denied") {
-            new Notification(title, { body });
-          }
-        } catch {
-          // Notifications are best-effort; the dashboard strip still updates.
-        }
-      }
       void refreshWorkspaceInventoryAndChats();
       break;
     }
