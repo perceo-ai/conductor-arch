@@ -200,7 +200,16 @@ export function AddProjectForm(props: { onDone: () => void }) {
       <Show when={error()}>{(msg) => <div class="dialog-error">{msg()}</div>}</Show>
       <Show when={error() && isPermissionError(error()!)}>
         <PermissionCard
-          probes={[{ root: path().trim(), state: "denied", detail: error()!, registered: false }]}
+          probes={[
+            {
+              // In clone mode the refused path is the destination, not the
+              // local-path field, which is empty on that tab.
+              root: mode() === "clone" ? dest() : path().trim(),
+              state: "denied",
+              detail: error()!,
+              registered: false,
+            },
+          ]}
           remoteAddress={remoteAddress()}
         />
       </Show>

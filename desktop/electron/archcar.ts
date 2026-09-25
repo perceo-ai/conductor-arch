@@ -565,6 +565,20 @@ export function spawnedDaemonPid(): number | null {
 }
 
 /**
+ * Remember the daemon this app spawned, and forget it the moment it exits.
+ *
+ * A pid outlives the process it named: if the daemon dies on its own and the OS
+ * reuses the number, signalling it later would hit an unrelated process.
+ */
+export function trackSpawnedDaemon(child: { pid?: number; once: (event: "exit", cb: () => void) => unknown }): void {
+  const pid = child.pid ?? null;
+  spawnedPid = pid;
+  child.once("exit", () => {
+    if (spawnedPid === pid) spawnedPid = null;
+  });
+}
+
+/**
  * Kill the daemon this app spawned so the next request starts a fresh one that
  * re-reads its macOS grants. Returns false when this app did not spawn it.
  */
@@ -627,7 +641,7 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
   child.once("error", (err: NodeJS.ErrnoException) => {
     spawned.failure = err;
   });
-  spawnedPid = child.pid ?? null;
+  trackSpawnedDaemon(child);
   child.unref();
 
   for (let i = 0; i < STARTUP_ATTEMPTS; i++) {

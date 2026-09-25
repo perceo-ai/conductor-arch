@@ -89,7 +89,12 @@ pub fn probe_roots(registered: &[PathBuf]) -> Vec<FileAccessProbe> {
         }
     }
     for root in registered {
-        if probes.iter().any(|probe| &probe.root == root) {
+        // A repository whose git root IS one of the protected folders was
+        // already probed above, as unregistered. Promote that probe rather than
+        // skipping the root: `registered` is what turns a denial from advisory
+        // into a blocker, and dropping it here would understate the problem.
+        if let Some(probe) = probes.iter_mut().find(|probe| &probe.root == root) {
+            probe.registered = true;
             continue;
         }
         probes.push(probe_root(root, true));
@@ -154,6 +159,32 @@ mod tests {
             probe.detail.contains("archcar"),
             "detail should name the daemon: {}",
             probe.detail
+        );
+    }
+
+    // A repository whose git root IS ~/Documents collides with the protected
+    // folder probed first. Skipping it would file the denial as advisory when
+    // an added repository is sitting behind it.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_registered_root_that_is_a_protected_folder_stays_registered() {
+        let home = crate::platform::home_dir().expect("home");
+        let documents = home.join("Documents");
+        if !documents.is_dir() {
+            return;
+        }
+
+        let probes = probe_roots(&[documents.clone()]);
+
+        let probe = probes
+            .iter()
+            .find(|probe| probe.root == documents)
+            .expect("Documents probed");
+        assert!(probe.registered, "the registered flag must survive dedup");
+        assert_eq!(
+            probes.iter().filter(|p| p.root == documents).count(),
+            1,
+            "and it must still be probed only once"
         );
     }
 

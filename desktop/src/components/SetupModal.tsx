@@ -38,8 +38,17 @@ export default function SetupModal() {
   // A denial keeps chat working, so the gate it raises has to be escapable.
   // Dismissal lasts for this run: the card comes back next launch, and the
   // "File access" readiness row keeps saying so in the meantime.
+  //
+  // "Only file access" covers the blocking case too. A denied root belonging to
+  // an already-added repository makes readiness incomplete, and holding the
+  // user behind the scrim for it is a trap: the controls that would let them
+  // remove that repository are on the other side of the modal.
   const [dismissed, setDismissed] = createSignal(false);
-  const fileAccessOnly = () => !setupStore.blocked() && deniedRoots().length > 0;
+  const fileAccessOnly = () => {
+    if (deniedRoots().length === 0) return false;
+    const rows = setupStore.report()?.rows ?? [];
+    return rows.every((row) => row.state === "ready" || row.action === "grant_file_access");
+  };
 
   const onRecheck = async () => {
     setError(null);
@@ -76,7 +85,7 @@ export default function SetupModal() {
   };
 
   return (
-    <Show when={setupStore.blocked() || (fileAccessOnly() && !dismissed())}>
+    <Show when={(setupStore.blocked() || fileAccessOnly()) && !(fileAccessOnly() && dismissed())}>
       <div class="modal-scrim setup-scrim">
         <div class="modal-body setup-modal">
           <div class="setup-title">Finish setup</div>

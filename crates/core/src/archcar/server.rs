@@ -4865,6 +4865,25 @@ fn command_failure_message(
 /// Clone a remote repository into `dest`. GitHub remotes go through `gh` so the
 /// desktop Clone tab uses the same local GitHub CLI auth it used to list repos.
 /// The caller then registers the cloned path with `RepositoryStore::add`.
+/// A clone failure, with an OS refusal of the destination named as such.
+///
+/// A denied destination fails here, before the repository is ever registered,
+/// so the permission mapping in `RepositoryStore::add` never sees it. Raw git
+/// stderr does not tell the user their daemon lacks file access, and the
+/// desktop keys its permission card off the mapped sentence.
+fn clone_failure_message(
+    program: &str,
+    args: &[String],
+    output: &std::process::Output,
+    dest: &str,
+) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("Operation not permitted") || stderr.contains("Permission denied") {
+        return crate::repository::permission_hint(std::path::Path::new(dest));
+    }
+    command_failure_message(program, args, output)
+}
+
 fn clone_repository(url: &str, dest: &str) -> Result<()> {
     let command = clone_command_for_url(url, dest);
     let output = std::process::Command::new(command.program)
@@ -4874,7 +4893,7 @@ fn clone_repository(url: &str, dest: &str) -> Result<()> {
     anyhow::ensure!(
         output.status.success(),
         "{}",
-        command_failure_message(command.program, &command.args, &output)
+        clone_failure_message(command.program, &command.args, &output, dest)
     );
     Ok(())
 }
@@ -6297,6 +6316,56 @@ fn terminate_managed_handle(handle: &SessionHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A clone into a folder macOS refuses the daemon fails before the
+    /// repository is ever registered, so the permission mapping in
+    /// `RepositoryStore::add` never runs. Without this the user is handed raw
+    /// git stderr and the desktop shows no permission card.
+    #[test]
+    fn a_clone_denied_by_the_os_says_what_to_do_about_it() {
+        let output = std::process::Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"fatal: could not create work tree dir '/Users/x/Documents/repo': Permission denied".to_vec(),
+        };
+
+        let message = clone_failure_message(
+            "git",
+            &["clone".to_owned()],
+            &output,
+            "/Users/x/Documents/repo",
+        );
+
+        assert!(
+            message.contains("archcar daemon"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("/Users/x/Documents/repo"));
+    }
+
+    #[test]
+    fn an_ordinary_clone_failure_keeps_gits_own_words() {
+        let output = std::process::Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"fatal: repository 'https://example.invalid/x.git' not found".to_vec(),
+        };
+
+        let message = clone_failure_message("git", &["clone".to_owned()], &output, "/tmp/dest");
+
+        assert!(
+            message.contains("not found"),
+            "unexpected message: {message}"
+        );
+        assert!(!message.contains("archcar daemon"));
+    }
+
+    fn failed_status() -> std::process::ExitStatus {
+        std::process::Command::new("sh")
+            .args(["-c", "exit 1"])
+            .status()
+            .expect("run sh")
+    }
     use super::*;
 
     fn pr_row(number: i64, state: &str) -> crate::workspace::PullRequest {

@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -452,3 +453,20 @@ describe("local daemon spawn", () => {
     }
   });
 });
+
+describe("spawned daemon tracking", () => {
+  // The pid outlives the process it names. If the daemon exits on its own and
+  // the OS hands that number to something else, a later "Restart daemon" would
+  // SIGTERM an unrelated process.
+  it("forgets a spawned daemon once it has exited", async () => {
+    const { killSpawnedDaemon, trackSpawnedDaemon } = await import("./archcar.js");
+    const exited = new EventEmitter() as EventEmitter & { pid?: number };
+    exited.pid = 999999;
+
+    trackSpawnedDaemon(exited as never);
+    exited.emit("exit", 0, null);
+
+    expect(killSpawnedDaemon()).toBe(false);
+  });
+});
+
