@@ -77,6 +77,14 @@ Linear live validation requires `LINEAR_API_KEY`. GitHub validation requires
 Do not announce support for a channel until install, upgrade, launch, checksum,
 and rollback or yank paths are validated for that channel.
 
+APT, DNF, and Homebrew listing work is tracked in
+`packaging/public-repositories.md`. Perceo-owned repositories can be automated;
+official Debian, Ubuntu, Fedora, and Homebrew/core submissions require human
+ownership of submission, maintainer review, and policy commitments. Run
+`scripts/check-public-repository-listing.sh --version <version> --metadata-only`
+before cutting a release branch, then rerun it with `--require-artifacts` on the
+release host after package artifacts exist.
+
 | Channel | Launch Requirement |
 | --- | --- |
 | GitHub/AppImage | Tag workflow attaches AppImage and checksum; AppImage runs the `archductor` CLI and forwards args. |
