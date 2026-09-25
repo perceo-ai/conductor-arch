@@ -855,6 +855,39 @@ jobs:
       - name: Check workspace
         run: cargo check --workspace --all-targets --locked
 
+  desktop:
+    name: Desktop typecheck and tests
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          version: 11
+
+      - name: Desktop install
+        working-directory: desktop
+        run: pnpm install --frozen-lockfile
+
+      # The same three commands the release workflow runs, on the same OS it
+      # runs them on. Until this job existed they ran only at tag time, so a
+      # desktop test that passed on a contributor's Mac and failed on Linux
+      # first surfaced as a failed release.
+      - name: Desktop typecheck + unit tests + build
+        working-directory: desktop
+        run: |
+          pnpm typecheck
+          pnpm test
+          pnpm build
+
   ci-gate:
     name: archductor/ci-gate
     needs:
@@ -871,6 +904,7 @@ jobs:
       - windows-release-package
       - linux-musl
       - linux-distros
+      - desktop
     # `always()` would also run this gate for a run that was cancelled by the
     # concurrency group, where every lane reports `cancelled` and the gate posts
     # a red required check for a run nobody is waiting on. `!cancelled()` still
@@ -896,6 +930,7 @@ jobs:
             windows-release-package=${{ needs.windows-release-package.result }}
             linux-musl=${{ needs.linux-musl.result }}
             linux-distros=${{ needs.linux-distros.result }}
+            desktop=${{ needs.desktop.result }}
         run: |
           set -euo pipefail
 
