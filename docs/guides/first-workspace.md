@@ -63,7 +63,34 @@ archductor repo doctor my-app
 
 `repo doctor` is worth reading rather than skimming. It tells you whether the
 default branch, remote, and worktree parent directory are what you think they
-are — all three are baked into every workspace created afterwards.
+are — all three are baked into every workspace created afterwards. On macOS it
+also prints a **file access** section; see below.
+
+### macOS: let the daemon read your code
+
+macOS guards `~/Documents`, `~/Desktop` and `~/Downloads`. The daemon is
+started by launchd, which makes it its own subject as far as those guards are
+concerned: it inherits nothing from the desktop app and has no window to ask
+you with, so it is refused silently. A repository in one of those folders
+fails to add, and `repo doctor` marks the folder `DENIED`.
+
+Archductor asks for the permission at first open, and the app's setup panel
+walks you through it. To do it by hand:
+
+1. **System Settings → Privacy & Security → Full Disk Access**
+2. Add `/Applications/archductor-desktop.app/Contents/Resources/bin/archcar`
+   (in Finder, `⌘⇧G` and paste that path). The desktop app's **Reveal daemon**
+   button opens it for you.
+3. Restart the daemon so it re-reads the grant:
+
+   ```bash
+   launchctl kickstart -k gui/$UID/ai.perceo.archductor.archcar
+   ```
+
+Confirm with `archductor service doctor`: every root should read `ok`.
+
+Repositories outside those three folders need none of this, and neither does a
+daemon on Linux — the permission does not exist there.
 
 Then write the settings file. **Do this before creating workspaces**, because
 a workspace copies configuration at creation time and it is faster to fix the

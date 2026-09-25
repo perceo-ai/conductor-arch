@@ -2023,9 +2023,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetSetupReadiness { recheck } => ArchcarResponse::SetupReadiness {
-            report: crate::doctor::setup_report(recheck),
-        },
+        ArchcarRequest::GetSetupReadiness { recheck } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            // A repository the user already added is the case where a denial is
+            // fatal rather than advisory, so the roots have to come from the DB.
+            let roots = RepositoryStore::open(&db_path)
+                .and_then(|store| store.list())
+                .map(|repos| repos.into_iter().map(|repo| repo.root_path).collect())
+                .unwrap_or_else(|_| Vec::new());
+            ArchcarResponse::SetupReadiness {
+                report: crate::doctor::setup_report(recheck, &roots),
+            }
+        }
         ArchcarRequest::CreateChatThread {
             workspace,
             provider,
@@ -4856,6 +4865,33 @@ fn command_failure_message(
 /// Clone a remote repository into `dest`. GitHub remotes go through `gh` so the
 /// desktop Clone tab uses the same local GitHub CLI auth it used to list repos.
 /// The caller then registers the cloned path with `RepositoryStore::add`.
+/// A clone failure, with an OS refusal of the destination named as such.
+///
+/// A denied destination fails here, before the repository is ever registered,
+/// so the permission mapping in `RepositoryStore::add` never sees it. Raw git
+/// stderr does not tell the user their daemon lacks file access, and the
+/// desktop keys its permission card off the mapped sentence.
+fn clone_failure_message(
+    program: &str,
+    args: &[String],
+    output: &std::process::Output,
+    dest: &str,
+) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // "Permission denied (publickey)" is ssh refusing the remote, not the OS
+    // refusing the destination, and it is the one sentence that explains that
+    // user's actual problem. Never trade it for a Full Disk Access hint.
+    let authentication = stderr.contains("publickey")
+        || stderr.contains("Authentication failed")
+        || stderr.contains("Could not read from remote repository");
+    if !authentication
+        && (stderr.contains("Operation not permitted") || stderr.contains("Permission denied"))
+    {
+        return crate::repository::permission_hint(std::path::Path::new(dest));
+    }
+    command_failure_message(program, args, output)
+}
+
 fn clone_repository(url: &str, dest: &str) -> Result<()> {
     let command = clone_command_for_url(url, dest);
     let output = std::process::Command::new(command.program)
@@ -4865,7 +4901,7 @@ fn clone_repository(url: &str, dest: &str) -> Result<()> {
     anyhow::ensure!(
         output.status.success(),
         "{}",
-        command_failure_message(command.program, &command.args, &output)
+        clone_failure_message(command.program, &command.args, &output, dest)
     );
     Ok(())
 }
@@ -6288,6 +6324,86 @@ fn terminate_managed_handle(handle: &SessionHandle) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A clone into a folder macOS refuses the daemon fails before the
+    /// repository is ever registered, so the permission mapping in
+    /// `RepositoryStore::add` never runs. Without this the user is handed raw
+    /// git stderr and the desktop shows no permission card.
+    #[test]
+    fn a_clone_denied_by_the_os_says_what_to_do_about_it() {
+        let output = std::process::Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"fatal: could not create work tree dir '/Users/x/Documents/repo': Permission denied".to_vec(),
+        };
+
+        let message = clone_failure_message(
+            "git",
+            &["clone".to_owned()],
+            &output,
+            "/Users/x/Documents/repo",
+        );
+
+        assert!(
+            message.contains("archcar daemon"),
+            "unexpected message: {message}"
+        );
+        assert!(message.contains("/Users/x/Documents/repo"));
+    }
+
+    #[test]
+    fn an_ordinary_clone_failure_keeps_gits_own_words() {
+        let output = std::process::Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"fatal: repository 'https://example.invalid/x.git' not found".to_vec(),
+        };
+
+        let message = clone_failure_message("git", &["clone".to_owned()], &output, "/tmp/dest");
+
+        assert!(
+            message.contains("not found"),
+            "unexpected message: {message}"
+        );
+        assert!(!message.contains("archcar daemon"));
+    }
+
+    /// `Permission denied (publickey)` is ssh refusing the *remote*, not the OS
+    /// refusing the destination. Sending that user to Full Disk Access throws
+    /// away the only sentence that explains their real problem.
+    #[test]
+    fn an_ssh_key_rejection_is_not_a_file_access_problem() {
+        let output = std::process::Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.".to_vec(),
+        };
+
+        let message = clone_failure_message("git", &["clone".to_owned()], &output, "/tmp/dest");
+
+        assert!(
+            message.contains("publickey"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("Full Disk Access"),
+            "an ssh key rejection is not a TCC denial: {message}"
+        );
+    }
+
+    /// A non-zero `ExitStatus`, built without assuming a POSIX shell so the
+    /// core suite still runs on Windows.
+    fn failed_status() -> std::process::ExitStatus {
+        let (program, args): (&str, [&str; 2]) = if cfg!(windows) {
+            ("cmd", ["/C", "exit 1"])
+        } else {
+            ("sh", ["-c", "exit 1"])
+        };
+        std::process::Command::new(program)
+            .args(args)
+            .status()
+            .expect("spawn a process that exits non-zero")
+    }
     use super::*;
 
     fn pr_row(number: i64, state: &str) -> crate::workspace::PullRequest {

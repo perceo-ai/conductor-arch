@@ -42,6 +42,9 @@ pub struct SetupReadiness {
     pub gh: SetupCheck,
     /// One entry per chat agent in the registry, in registry order.
     pub providers: Vec<ProviderReadiness>,
+    /// What this daemon can read. Empty off macOS, and empty when nothing is
+    /// denied is still meaningful: it means the probe ran and found no problem.
+    pub file_access: Vec<crate::file_access::FileAccessProbe>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +52,9 @@ pub enum SetupBlocker {
     GithubUnavailable,
     MissingAgent,
     SelectedProviderUnavailable,
+    /// A repository the user already added sits behind a folder macOS is
+    /// refusing the daemon. Nothing about that repository can work.
+    FileAccessDenied,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +139,16 @@ impl SetupReadiness {
                     }),
                 })
                 .collect(),
+            file_access: Vec::new(),
+        }
+    }
+
+    /// `from_host` plus the folder probe, which needs the registered roots the
+    /// caller holds.
+    pub fn from_host_with_roots(registered_roots: &[std::path::PathBuf]) -> Self {
+        Self {
+            file_access: crate::file_access::probe_roots(registered_roots),
+            ..Self::from_host()
         }
     }
 
@@ -274,6 +290,13 @@ pub fn setup_blockers(readiness: &SetupReadiness) -> Vec<SetupBlocker> {
     if readiness.first_ready_launchable_provider().is_none() {
         blockers.push(SetupBlocker::MissingAgent);
     }
+    if readiness
+        .file_access
+        .iter()
+        .any(|probe| probe.registered && probe.state == crate::file_access::FileAccessState::Denied)
+    {
+        blockers.push(SetupBlocker::FileAccessDenied);
+    }
     blockers
 }
 
@@ -318,6 +341,11 @@ pub struct SetupRow {
     /// more useful than silence.
     #[serde(default = "default_true")]
     pub launchable: bool,
+    /// What a client can do about this row, when there is something to do.
+    /// `"grant_file_access"` is the only value today. Lets the UI act without
+    /// matching on the display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -330,6 +358,9 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupReport {
     pub rows: Vec<SetupRow>,
+    /// The daemon's own view of the folders it can read. Empty off macOS.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_access: Vec<crate::file_access::FileAccessProbe>,
     pub feedback: String,
     pub complete: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,7 +376,7 @@ impl SetupReport {
             .providers
             .iter()
             .find(|provider| provider.launchable && provider.check.ready);
-        let rows = vec![
+        let mut rows = vec![
             setup_row("GitHub CLI", &readiness.gh, true),
             SetupRow {
                 provider_key: ready_provider.map(|p| p.provider_key.to_owned()),
@@ -353,10 +384,33 @@ impl SetupReport {
                 ..setup_row("Coding agent", &agent_check(readiness), true)
             },
         ];
+        // Only a denial is worth a row: a granted folder is the normal case,
+        // and a permanent green row would read as a chore that never clears.
+        let denied = crate::file_access::denied(&readiness.file_access);
+        if !denied.is_empty() {
+            let blocking = denied.iter().any(|probe| probe.registered);
+            let roots = denied
+                .iter()
+                .map(|probe| probe.root.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            rows.push(SetupRow {
+                name: "File access".to_owned(),
+                detail: format!(
+                    "macOS is denying the archcar daemon access to {roots}. Grant Full Disk Access to the archcar binary."
+                ),
+                state: SetupRowState::Action,
+                required: blocking,
+                provider_key: None,
+                launchable: true,
+                action: Some("grant_file_access".to_owned()),
+            });
+        }
         Self {
             complete: setup_blockers(readiness).is_empty(),
             feedback: setup_feedback(readiness),
             rows,
+            file_access: readiness.file_access.clone(),
             refresh_error,
         }
     }
@@ -365,13 +419,16 @@ impl SetupReport {
 /// Probe host setup readiness and build a UI-ready report. When `recheck` is
 /// true, refresh the process environment first so a just-installed tool is
 /// picked up (mirrors the GTK "Recheck" button).
-pub fn setup_report(recheck: bool) -> SetupReport {
+pub fn setup_report(recheck: bool, registered_roots: &[std::path::PathBuf]) -> SetupReport {
     let refresh_error = if recheck {
         refresh_process_environment().err()
     } else {
         None
     };
-    SetupReport::from_readiness(&SetupReadiness::from_host(), refresh_error)
+    SetupReport::from_readiness(
+        &SetupReadiness::from_host_with_roots(registered_roots),
+        refresh_error,
+    )
 }
 
 fn setup_row(name: &str, check: &SetupCheck, required: bool) -> SetupRow {
@@ -389,6 +446,7 @@ fn setup_row(name: &str, check: &SetupCheck, required: bool) -> SetupRow {
         required,
         provider_key: None,
         launchable: true,
+        action: None,
     }
 }
 
@@ -422,6 +480,9 @@ fn setup_feedback(readiness: &SetupReadiness) -> String {
             "Install and sign in to {}, then press Recheck.",
             or_list(&readiness.launchable_names()),
         ),
+        [SetupBlocker::FileAccessDenied] => {
+            "Grant the archcar daemon Full Disk Access, then press Recheck.".to_owned()
+        }
         [SetupBlocker::SelectedProviderUnavailable] => {
             "Choose a ready provider or sign in to the selected provider, then press Recheck."
                 .to_owned()
@@ -877,6 +938,82 @@ fn is_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::file_access::{FileAccessProbe, FileAccessState};
+    use std::path::PathBuf;
+
+    fn probe(root: &str, state: FileAccessState, registered: bool) -> FileAccessProbe {
+        FileAccessProbe {
+            root: PathBuf::from(root),
+            state,
+            detail: format!("{root} detail"),
+            registered,
+        }
+    }
+
+    // Review Focus 4: nothing denied means no row at all.
+    #[test]
+    fn no_file_access_row_when_nothing_is_denied() {
+        let mut ready = readiness(
+            SetupCheck::ready("gh ok"),
+            &[("Codex", SetupCheck::ready("ok"))],
+        );
+        ready.file_access = vec![probe("/Users/x/Documents", FileAccessState::Granted, false)];
+
+        let report = SetupReport::from_readiness(&ready, None);
+
+        assert!(report.rows.iter().all(|row| row.name != "File access"));
+    }
+
+    #[test]
+    fn a_denied_root_adds_an_actionable_row() {
+        let mut ready = readiness(
+            SetupCheck::ready("gh ok"),
+            &[("Codex", SetupCheck::ready("ok"))],
+        );
+        ready.file_access = vec![probe("/Users/x/Documents", FileAccessState::Denied, false)];
+
+        let report = SetupReport::from_readiness(&ready, None);
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.name == "File access")
+            .expect("file access row");
+
+        assert_eq!(row.state, SetupRowState::Action);
+        assert_eq!(row.action.as_deref(), Some("grant_file_access"));
+        assert!(row.detail.contains("Documents"));
+        assert!(!row.required, "an unregistered root must not block setup");
+        assert_eq!(report.file_access.len(), 1);
+    }
+
+    #[test]
+    fn a_denied_registered_root_blocks_setup() {
+        let mut ready = readiness(
+            SetupCheck::ready("gh ok"),
+            &[("Codex", SetupCheck::ready("ok"))],
+        );
+        ready.file_access = vec![probe(
+            "/Users/x/Documents/repo",
+            FileAccessState::Denied,
+            true,
+        )];
+
+        assert_eq!(setup_blockers(&ready), vec![SetupBlocker::FileAccessDenied]);
+
+        let report = SetupReport::from_readiness(&ready, None);
+        let row = report
+            .rows
+            .iter()
+            .find(|row| row.name == "File access")
+            .expect("file access row");
+        assert!(row.required);
+        assert!(!report.complete);
+        assert!(
+            report.feedback.contains("Full Disk Access"),
+            "unexpected feedback: {}",
+            report.feedback
+        );
+    }
 
     /// Builds readiness from the live registry so these tests keep covering
     /// every agent as the registry grows. Anything not named is treated as not
@@ -897,6 +1034,7 @@ mod tests {
                         .unwrap_or_else(|| SetupCheck::missing("missing")),
                 })
                 .collect(),
+            file_access: Vec::new(),
         }
     }
 

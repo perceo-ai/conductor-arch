@@ -200,7 +200,30 @@ archductor service status
 archductor service doctor
 archductor service token --rotate
 archductor service uninstall
+```
 
+`service doctor` answers for **the daemon**, not for your shell — the two differ
+in exactly the cases worth diagnosing. It prints the PATH the service unit
+recorded, every tool resolved against it, and on macOS a `file access` section:
+
+```
+file access:
+     ok  /Users/you/Desktop
+ DENIED  /Users/you/Documents
+  Grant Full Disk Access to the archcar binary, then restart the daemon.
+```
+
+A `DENIED` root is macOS refusing the daemon, not a broken repository. Grant
+Full Disk Access to
+`/Applications/archductor-desktop.app/Contents/Resources/bin/archcar`, then
+`launchctl kickstart -k gui/$UID/ai.perceo.archductor.archcar`.
+
+If no daemon is running, the section is labeled *probed by this shell, not the
+daemon* — your shell usually has access the daemon lacks, so treat that reading
+as unproven. The command never starts a daemon to answer, because a daemon it
+started would inherit your shell's access and report the wrong thing.
+
+```bash
 archductor remote connect ssh://you@server --label build
 archductor remote list
 archductor remote use build

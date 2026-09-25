@@ -22,6 +22,7 @@ import {
 } from "./pairing.js";
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
+import * as fileAccess from "./fileAccess.js";
 // CommonJS package: the named export is not reachable through ESM interop.
 import electronUpdater from "electron-updater";
 import {
@@ -756,6 +757,13 @@ ipcMain.handle("fs:path-exists", async (_evt, p: string) => {
     return { exists: false };
   }
 });
+
+// macOS denies a launchd-started daemon the protected folders with no prompt,
+// and offers no API to ask for them. These three are the whole remedy: reveal
+// the binary, open the pane it has to be dragged into, restart it afterwards.
+ipcMain.handle("file-access:open-settings", () => fileAccess.openSettings());
+ipcMain.handle("file-access:reveal-daemon", () => fileAccess.revealDaemon());
+ipcMain.handle("file-access:restart-daemon", () => fileAccess.restartDaemon());
 
 // Open a URL in the default browser or a path in the OS default handler
 // (editor/file manager). Used by the PR status bar, the top-bar editor button,

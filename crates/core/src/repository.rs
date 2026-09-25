@@ -50,10 +50,16 @@ impl RepositoryStore {
     }
 
     pub fn add(&self, input: AddRepository) -> Result<Repository> {
-        let input_path = input
-            .root_path
-            .canonicalize()
-            .with_context(|| format!("resolve repository path {}", input.root_path.display()))?;
+        let input_path = input.root_path.canonicalize().map_err(|err| {
+            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                anyhow::anyhow!("{}", permission_hint(&input.root_path))
+            } else {
+                anyhow::Error::new(err).context(format!(
+                    "resolve repository path {}",
+                    input.root_path.display()
+                ))
+            }
+        })?;
         let root_path = resolve_git_repository_root(&input_path)?;
         ensure_repository_config(&root_path)?;
 
@@ -216,6 +222,54 @@ fn row_to_repository(row: &rusqlite::Row<'_>) -> rusqlite::Result<Repository> {
     })
 }
 
+/// The sentence every surface shows when the daemon is refused a path.
+///
+/// Shared so the desktop can match on it and swap in its own card: the CLI
+/// prints it verbatim, and the renderer keys off "Full Disk Access".
+pub fn permission_hint(path: &Path) -> String {
+    permission_hint_for(path, cfg!(target_os = "macos"))
+}
+
+/// The wording, with the platform passed in so both branches stay testable on
+/// any host.
+///
+/// Only macOS has TCC and a Full Disk Access pane. Saying "macOS" to a Linux
+/// user sends them looking for a setting that does not exist — and the desktop
+/// keys its permission card off that exact phrase, so the wrong sentence would
+/// also pop a macOS-only card on Linux.
+fn permission_hint_for(path: &Path, macos: bool) -> String {
+    if macos {
+        return format!(
+            "macOS is denying the archcar daemon access to {}. Grant Full Disk Access to the archcar binary, then restart the daemon.",
+            path.display()
+        );
+    }
+    format!(
+        "{} cannot be read by the archcar daemon (permission denied).",
+        path.display()
+    )
+}
+
+/// True when a git failure (or an io error) is macOS refusing the daemon.
+fn is_permission_denied(stderr: &str) -> bool {
+    stderr.contains("Operation not permitted") || stderr.contains("Permission denied")
+}
+
+/// Build the error text for a `git` invocation that exited non-zero.
+///
+/// Separated from the call so the mapping is testable without arranging a real
+/// TCC denial, which no test can do.
+fn git_failure_message(path: &Path, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if is_permission_denied(stderr) {
+        return permission_hint(path);
+    }
+    if stderr.is_empty() {
+        return format!("{} is not a Git repository", path.display());
+    }
+    format!("{} is not a Git repository (git: {stderr})", path.display())
+}
+
 fn resolve_git_repository_root(path: &Path) -> Result<PathBuf> {
     let output = Command::new("git")
         .arg("-C")
@@ -225,8 +279,8 @@ fn resolve_git_repository_root(path: &Path) -> Result<PathBuf> {
         .context("run git rev-parse")?;
     anyhow::ensure!(
         output.status.success(),
-        "{} is not a Git repository",
-        path.display()
+        "{}",
+        git_failure_message(path, &String::from_utf8_lossy(&output.stderr))
     );
     let root = path_from_git_stdout(output.stdout)?;
     root.canonicalize()
@@ -380,5 +434,78 @@ mod tests {
         let path = path_from_git_stdout(b"/tmp/demo\r\n".to_vec()).unwrap();
 
         assert_eq!(path, PathBuf::from("/tmp/demo"));
+    }
+
+    #[test]
+    fn a_plain_directory_still_reports_not_a_git_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_git_repository_root(dir.path()).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("is not a Git repository"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("Full Disk Access"),
+            "an ordinary non-repository must not mention permissions: {message}"
+        );
+    }
+
+    #[test]
+    fn git_stderr_travels_with_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_git_repository_root(dir.path()).unwrap_err();
+        let message = format!("{err:#}");
+        // git's own words, whatever they are on this host, must be present.
+        assert!(
+            message.contains("git:"),
+            "git's stderr should be quoted: {message}"
+        );
+    }
+
+    #[test]
+    fn a_permission_denial_names_the_fix_instead() {
+        let message = git_failure_message(
+            Path::new("/Users/someone/Documents/repo"),
+            "fatal: cannot change to '/Users/someone/Documents/repo': Operation not permitted",
+        );
+        assert!(
+            message.contains("archcar daemon"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("is not a Git repository"),
+            "a denial is not a missing repository: {message}"
+        );
+    }
+
+    // Review Focus 3: no dangling "(git: )" when git said nothing.
+    #[test]
+    fn an_empty_stderr_leaves_the_plain_message() {
+        let message = git_failure_message(Path::new("/tmp/x"), "  \n");
+        assert_eq!(message, "/tmp/x is not a Git repository");
+    }
+
+    #[test]
+    fn off_macos_a_denial_does_not_invoke_full_disk_access() {
+        // There is no TCC here. Telling a Linux user to grant Full Disk Access
+        // sends them looking for a System Settings pane that does not exist —
+        // and the desktop keys its macOS permission card off that exact phrase.
+        let hint = permission_hint_for(Path::new("/srv/locked-repo"), false);
+        assert!(hint.contains("/srv/locked-repo"));
+        assert!(hint.contains("archcar"));
+        assert!(
+            !hint.contains("Full Disk Access"),
+            "unexpected hint: {hint}"
+        );
+        assert!(!hint.contains("macOS"), "unexpected hint: {hint}");
+    }
+
+    #[test]
+    fn on_macos_the_hint_names_the_path_the_daemon_and_the_pane() {
+        let hint = permission_hint_for(Path::new("/Users/someone/Documents/repo"), true);
+        assert!(hint.contains("/Users/someone/Documents/repo"));
+        assert!(hint.contains("archcar"));
+        assert!(hint.contains("Full Disk Access"));
     }
 }

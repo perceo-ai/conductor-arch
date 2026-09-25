@@ -1501,7 +1501,7 @@ fn run_cli() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
-        Command::Setup { recheck } => print_setup(doctor::setup_report(recheck)),
+        Command::Setup { recheck } => print_setup(doctor::setup_report(recheck, &[])),
         Command::Settings { command } => match command {
             AppSettingsCommand::Export { output } => {
                 let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
@@ -2644,6 +2644,12 @@ fn run_cli() -> Result<()> {
                 }
                 RepoCommand::Doctor { name: _ } => {
                     print_doctor(doctor::report_from_host());
+                    let roots: Vec<std::path::PathBuf> = store
+                        .list()?
+                        .into_iter()
+                        .map(|repo| repo.root_path)
+                        .collect();
+                    print_daemon_file_access(&paths, &roots);
                 }
                 RepoCommand::Update { name } => {
                     let repo = store.update(&name)?;
@@ -3324,7 +3330,11 @@ fn run_cli() -> Result<()> {
             }
             ServiceCommand::Uninstall => print_service_status(&service::uninstall(&paths)?),
             ServiceCommand::Status => print_service_status(&service::status(&paths)?),
-            ServiceCommand::Doctor => print_service_doctor(&service::doctor(&paths)?),
+            ServiceCommand::Doctor => {
+                print_service_doctor(&service::doctor(&paths)?);
+                println!();
+                print_daemon_file_access(&paths, &[]);
+            }
             ServiceCommand::Token { rotate } => {
                 let token = if rotate {
                     remote::rotate_token(&paths)?
@@ -5200,6 +5210,73 @@ fn print_service_status(status: &service::ServiceStatus) {
     }
 }
 
+/// Render the file-access section. Split from printing so the wording is
+/// testable — the states it describes cannot be arranged in a test.
+fn file_access_lines(
+    probes: &[archductor_core::file_access::FileAccessProbe],
+    probed_by_daemon: bool,
+) -> Vec<String> {
+    use archductor_core::file_access::FileAccessState;
+    if probes.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["file access:".to_owned()];
+    if !probed_by_daemon {
+        lines.push(
+            "  (probed by this shell, not the daemon — start archcar for the real answer)"
+                .to_owned(),
+        );
+    }
+    for probe in probes {
+        let mark = match probe.state {
+            FileAccessState::Granted => "ok",
+            FileAccessState::Denied => "DENIED",
+            FileAccessState::Absent => "--",
+        };
+        lines.push(format!("{mark:>7}  {}", probe.root.display()));
+    }
+    if probes
+        .iter()
+        .any(|probe| probe.state == FileAccessState::Denied)
+    {
+        lines.push(
+            "  Grant Full Disk Access to the archcar binary, then restart the daemon.".to_owned(),
+        );
+    }
+    lines
+}
+
+/// Ask the daemon what it can read, falling back to a labeled local probe.
+///
+/// The daemon's answer is the only one that counts: this shell has file access
+/// the daemon may not, so a local probe would report "granted" for exactly the
+/// folders that are broken.
+fn print_daemon_file_access(paths: &AppPaths, fallback_roots: &[std::path::PathBuf]) {
+    let client = ArchcarClient::from_paths(paths);
+    // Never `send` here: that spawns a sidecar when nothing is listening, and a
+    // sidecar spawned by this shell inherits this shell's file access — it
+    // would report "ok" for exactly the folders the real daemon is refused,
+    // with no sign that the answer came from somewhere else.
+    match client.send_without_spawning(ArchcarRequest::GetSetupReadiness { recheck: false }) {
+        Ok(ArchcarResponse::SetupReadiness { report }) => {
+            print_file_access(&report.file_access, true)
+        }
+        _ => print_file_access(
+            &archductor_core::file_access::probe_roots(fallback_roots),
+            false,
+        ),
+    }
+}
+
+fn print_file_access(
+    probes: &[archductor_core::file_access::FileAccessProbe],
+    probed_by_daemon: bool,
+) {
+    for line in file_access_lines(probes, probed_by_daemon) {
+        println!("{line}");
+    }
+}
+
 fn print_service_doctor(report: &service::ServiceDoctorReport) {
     print_service_status(&report.status);
     println!();
@@ -6318,6 +6395,61 @@ fn print_setup(report: doctor::SetupReport) {
 
 #[cfg(test)]
 mod tests {
+    /// `service doctor` exists to expose a daemon whose file access differs from
+    /// the calling shell's. Spawning a daemon to answer the question defeats it:
+    /// the child inherits the shell's grants and reports "ok" for the very
+    /// folders the real daemon is refused.
+    #[test]
+    fn diagnostics_never_spawn_the_daemon_they_are_diagnosing() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split_once("fn print_daemon_file_access(")
+            .expect("print_daemon_file_access exists")
+            .1
+            .split_once("\nfn ")
+            .expect("function ends")
+            .0;
+        assert!(
+            body.contains("send_without_spawning"),
+            "print_daemon_file_access must not use the spawning send: {body}"
+        );
+    }
+
+    #[test]
+    fn file_access_lines_mark_denied_roots_and_say_who_probed() {
+        use archductor_core::file_access::{FileAccessProbe, FileAccessState};
+        let probes = vec![
+            FileAccessProbe {
+                root: std::path::PathBuf::from("/Users/x/Desktop"),
+                state: FileAccessState::Granted,
+                detail: "readable".to_owned(),
+                registered: false,
+            },
+            FileAccessProbe {
+                root: std::path::PathBuf::from("/Users/x/Documents"),
+                state: FileAccessState::Denied,
+                detail: "denied".to_owned(),
+                registered: true,
+            },
+        ];
+
+        let daemon = super::file_access_lines(&probes, true);
+        assert!(daemon
+            .iter()
+            .any(|line| line.contains("DENIED") && line.contains("Documents")));
+        assert!(daemon
+            .iter()
+            .any(|line| line.contains("ok") && line.contains("Desktop")));
+
+        let shell = super::file_access_lines(&probes, false);
+        assert!(
+            shell
+                .iter()
+                .any(|line| line.contains("probed by this shell, not the daemon")),
+            "a shell-side probe must say so: {shell:?}"
+        );
+    }
+
     #[test]
     fn mcp_client_config_points_at_this_binary_and_the_serve_subcommand() {
         let config = super::mcp_client_config_json("/usr/local/bin/archductor");

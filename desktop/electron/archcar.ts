@@ -531,7 +531,7 @@ function connectWindows(endpoint: string): Promise<net.Socket> {
   });
 }
 
-function archcarBinary(): string {
+export function archcarBinary(): string {
   // 1. Explicit override.
   const override = process.env.ARCHDUCTOR_ARCHCAR_BIN;
   if (override && override.trim().length > 0) return override;
@@ -553,6 +553,46 @@ function archcarBinary(): string {
 // call can retry (and re-verify the connection) after a failure.
 const daemonAttempts = new Map<string, Promise<void>>();
 
+// The pid of the archcar this app spawned, when it spawned one. A daemon owned
+// by a launchd unit is restarted with `launchctl`; this one can only be killed,
+// and the next request re-spawns it. Tracked so the macOS file-access card has
+// something to restart on the (common) no-service install.
+let spawnedPid: number | null = null;
+
+/** The pid of the daemon this app spawned, or null when launchd owns it. */
+export function spawnedDaemonPid(): number | null {
+  return spawnedPid;
+}
+
+/**
+ * Remember the daemon this app spawned, and forget it the moment it exits.
+ *
+ * A pid outlives the process it named: if the daemon dies on its own and the OS
+ * reuses the number, signalling it later would hit an unrelated process.
+ */
+export function trackSpawnedDaemon(child: { pid?: number; once: (event: "exit", cb: () => void) => unknown }): void {
+  const pid = child.pid ?? null;
+  spawnedPid = pid;
+  child.once("exit", () => {
+    if (spawnedPid === pid) spawnedPid = null;
+  });
+}
+
+/**
+ * Kill the daemon this app spawned so the next request starts a fresh one that
+ * re-reads its macOS grants. Returns false when this app did not spawn it.
+ */
+export function killSpawnedDaemon(): boolean {
+  if (spawnedPid === null) return false;
+  try {
+    process.kill(spawnedPid, "SIGTERM");
+  } catch {
+    // Already gone; the next request re-spawns either way.
+  }
+  spawnedPid = null;
+  return true;
+}
+
 function ensureDaemon(endpoint: string): Promise<void> {
   let attempt = daemonAttempts.get(endpoint);
   if (!attempt) {
@@ -573,6 +613,14 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
     // not up yet
   }
   // Spawn detached; it binds the endpoint itself.
+  //
+  // macOS file access: whether this child inherits the app's TCC responsibility
+  // — and so its Documents/Desktop/Downloads grants, and the ability to raise
+  // the consent prompt — is UNVERIFIED. A launchd-started daemon definitely
+  // does not (it is its own TCC subject), which is why the permission card in
+  // SetupModal exists. Settle this from the packaged .app with the LaunchAgent
+  // removed; a dev run inherits the terminal's grants and proves nothing.
+  // See docs/superpowers/specs/2026-09-25-macos-file-access-design.md §7.
   const binary = archcarBinary();
   const child = spawn(binary, [], {
     detached: true,
@@ -593,6 +641,7 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
   child.once("error", (err: NodeJS.ErrnoException) => {
     spawned.failure = err;
   });
+  trackSpawnedDaemon(child);
   child.unref();
 
   for (let i = 0; i < STARTUP_ATTEMPTS; i++) {

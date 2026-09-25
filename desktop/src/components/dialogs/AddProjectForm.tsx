@@ -9,6 +9,7 @@ import {
   type GithubRepo
 } from "@/bridge/client";
 import {  useSubmit, joinPath, relTime, RepoCardAvatar } from "./DialogShared";
+import { PermissionCard, isPermissionError } from "../PermissionCard";
 
 // Global modal host. Renders the form for the active dialog spec. Every form
 // calls into `actions.*`, which logs the action, sends the archcar request, and
@@ -197,6 +198,21 @@ export function AddProjectForm(props: { onDone: () => void }) {
         <input value={name()} onInput={(e) => setName(e.currentTarget.value)} placeholder="derived from folder" />
       </label>
       <Show when={error()}>{(msg) => <div class="dialog-error">{msg()}</div>}</Show>
+      <Show when={error() && isPermissionError(error()!)}>
+        <PermissionCard
+          probes={[
+            {
+              // In clone mode the refused path is the destination, not the
+              // local-path field, which is empty on that tab.
+              root: mode() === "clone" ? dest() : path().trim(),
+              state: "denied",
+              detail: error()!,
+              registered: false,
+            },
+          ]}
+          remoteAddress={remoteAddress()}
+        />
+      </Show>
       <div class="dialog-actions">
         <button class="ui-button" onClick={props.onDone}>Cancel</button>
         <button class="ui-button-primary" disabled={busy()} onClick={() => submit()}>
