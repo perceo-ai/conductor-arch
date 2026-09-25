@@ -992,7 +992,11 @@ mod tests {
             SetupCheck::ready("gh ok"),
             &[("Codex", SetupCheck::ready("ok"))],
         );
-        ready.file_access = vec![probe("/Users/x/Documents/repo", FileAccessState::Denied, true)];
+        ready.file_access = vec![probe(
+            "/Users/x/Documents/repo",
+            FileAccessState::Denied,
+            true,
+        )];
 
         assert_eq!(setup_blockers(&ready), vec![SetupBlocker::FileAccessDenied]);
 
