@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const spawnedPid = vi.fn((): number | null => null);
 const killSpawnedDaemon = vi.fn(() => false);
@@ -22,6 +22,10 @@ const { FULL_DISK_ACCESS_URL, restartArgs, restartDaemon } = await import("./fil
 // The deep link and the launchctl invocation are the whole contract here: both
 // are strings macOS either accepts or silently ignores, so they are pinned.
 describe("fileAccess", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("deep-links the Full Disk Access pane", () => {
     expect(FULL_DISK_ACCESS_URL).toBe(
       "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
@@ -43,7 +47,7 @@ describe("fileAccess", () => {
   it("kills the spawned child when there is no launchd unit", async () => {
     killSpawnedDaemon.mockReturnValueOnce(true);
 
-    const res = await restartDaemon(kickstartFails);
+    const res = await restartDaemon(kickstartFails, "darwin");
 
     expect(killSpawnedDaemon).toHaveBeenCalled();
     expect(res.ok).toBe(true);
@@ -52,9 +56,16 @@ describe("fileAccess", () => {
   it("only asks the user to quit when there is nothing it can restart", async () => {
     killSpawnedDaemon.mockReturnValueOnce(false);
 
-    const res = await restartDaemon(kickstartFails);
+    const res = await restartDaemon(kickstartFails, "darwin");
 
     expect(res.ok).toBe(false);
     expect(res.error).toContain("quit and reopen");
+  });
+
+  it("does nothing off macOS, where there is no such permission", async () => {
+    const res = await restartDaemon(kickstartFails, "linux");
+
+    expect(res.ok).toBe(false);
+    expect(kickstartFails).not.toHaveBeenCalled();
   });
 });

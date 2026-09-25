@@ -55,8 +55,12 @@ const runCommand: CommandRunner = (command, args) => execFileAsync(command, args
 
 export async function restartDaemon(
   run: CommandRunner = runCommand,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<FileAccessResult> {
-  if (process.platform !== "darwin") return { ok: false, error: "macOS only" };
+  // The platform is a parameter so both branches stay testable on any host.
+  // These tests run on Linux in the release workflow, where a darwin-only
+  // function would otherwise assert nothing at all.
+  if (platform !== "darwin") return { ok: false, error: "macOS only" };
   const uid = typeof process.getuid === "function" ? process.getuid() : -1;
   if (uid < 0) return { ok: false, error: "cannot determine the launchd user domain" };
   try {
