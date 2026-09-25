@@ -3046,7 +3046,13 @@ fn run_cli() -> Result<()> {
                 }
                 PrCommand::View { workspace } => {
                     match store.refresh_pull_request_state(&workspace)? {
-                        Some(pr) => println!("#{} {} (state: {})", pr.number, pr.url, pr.state),
+                        Some(pr) => println!(
+                            "#{} {} (state: {}, checks: {})",
+                            pr.number,
+                            pr.url,
+                            pr.state,
+                            pr.checks_state.as_deref().unwrap_or("unknown")
+                        ),
                         None => println!("No pull request recorded for {workspace}"),
                     }
                 }
@@ -4369,10 +4375,11 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::ChecksSummary { workspace, summary } => {
             println!("checks_summary {workspace}");
             println!(
-                "changed_files={} run={} check={} session={} active_sessions={} todos={}/{} review={} ahead={} conflicts={}",
+                "changed_files={} run={} check={} pr_checks={} session={} active_sessions={} todos={}/{} review={} ahead={} conflicts={}",
                 summary.changed_files,
                 summary.run_status.as_deref().unwrap_or("-"),
                 summary.check_status.as_deref().unwrap_or("-"),
+                summary.pull_request_checks.as_deref().unwrap_or("-"),
                 summary.session_status.as_deref().unwrap_or("-"),
                 summary.active_sessions,
                 summary.open_todos,
@@ -5068,7 +5075,13 @@ fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
         summary.active_sessions
     );
     match summary.pull_request {
-        Some(pr) => println!("PR:        #{} {} ({})", pr.number, pr.url, pr.state),
+        Some(pr) => {
+            println!("PR:        #{} {} ({})", pr.number, pr.url, pr.state);
+            println!(
+                "PR checks: {}",
+                pr.checks_state.as_deref().unwrap_or("unknown (refresh with: archductor pr view)")
+            );
+        }
         None => println!("PR:        none"),
     }
     println!(

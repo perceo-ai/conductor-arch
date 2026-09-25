@@ -1773,6 +1773,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             .pull_request
                             .as_ref()
                             .map(|pr| pr.state.clone()),
+                        pull_request_checks: summary
+                            .pull_request
+                            .as_ref()
+                            .and_then(|pr| pr.checks_state.clone()),
                         conflicting_workspaces: summary.conflicting_workspaces.len(),
                     },
                 },
@@ -4540,7 +4544,10 @@ fn pull_request_changed_event(
     let changed = match (before, after) {
         (None, None) => false,
         (Some(before), Some(after)) => {
-            before.number != after.number || before.state != after.state || before.url != after.url
+            before.number != after.number
+                || before.state != after.state
+                || before.url != after.url
+                || before.checks_state != after.checks_state
         }
         _ => true,
     };
@@ -5285,6 +5292,7 @@ fn workspace_summary_from_status_line(
         diff_deletions,
         pull_request_number: pull_request.as_ref().map(|pr| pr.number),
         pull_request_state: pull_request.as_ref().map(|pr| pr.state.clone()),
+        pull_request_checks: pull_request.as_ref().and_then(|pr| pr.checks_state.clone()),
         pull_request_url: pull_request.map(|pr| pr.url),
         branch_ahead: branch_push_state.as_ref().map(|s| s.ahead),
         branch_behind: branch_push_state.map(|s| s.behind),
@@ -6433,6 +6441,7 @@ mod tests {
             number,
             url: format!("https://github.com/example/demo/pull/{number}"),
             state: state.to_owned(),
+            checks_state: None,
             created_at: "0".to_owned(),
             updated_at: "0".to_owned(),
         }
@@ -6462,6 +6471,14 @@ mod tests {
             Some(&pr_row(77, "open"))
         )
         .is_none());
+        // CI rollup moved (e.g. pending -> passing): news — the PR chip's
+        // checks state renders from this row.
+        let mut passing = pr_row(77, "open");
+        passing.checks_state = Some("passing".to_owned());
+        assert!(
+            pull_request_changed_event("berlin", Some(&pr_row(77, "open")), Some(&passing))
+                .is_some()
+        );
         // Still no PR anywhere: silence.
         assert!(pull_request_changed_event("berlin", None, None).is_none());
     }

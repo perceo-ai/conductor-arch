@@ -243,6 +243,43 @@ pub(crate) fn parse_pull_request_readiness(output: &str) -> Result<PullRequestRe
     })
 }
 
+/// Collapse a PR's check runs to one word: `failing` beats `pending` beats
+/// `passing`; no checks at all is `None` (unknown, not passing — a repo with
+/// no CI configured must not render as green).
+pub(crate) fn summarize_check_runs(checks: &[PullRequestCheckRun]) -> Option<String> {
+    if checks.is_empty() {
+        return None;
+    }
+    if checks.iter().any(PullRequestCheckRun::is_failure) {
+        return Some("failing".to_owned());
+    }
+    if checks.iter().any(PullRequestCheckRun::is_pending) {
+        return Some("pending".to_owned());
+    }
+    if checks.iter().all(PullRequestCheckRun::is_success) {
+        return Some("passing".to_owned());
+    }
+    None
+}
+
+/// `gh pr view --json state,statusCheckRollup` → (state, rollup summary).
+/// The two are fetched in one call so the PR chip's state and its checks can
+/// never disagree about which snapshot they came from.
+pub(crate) fn parse_pull_request_state_and_checks(
+    output: &str,
+) -> (Option<String>, Option<String>) {
+    let Ok(value) = serde_json::from_str::<Value>(output) else {
+        return (None, None);
+    };
+    let state = json_string(&value, "state").map(|state| state.to_ascii_lowercase());
+    let checks = json_array_or_nodes(value.get("statusCheckRollup"))
+        .into_iter()
+        .filter(|item| !is_deployment_rollup_item(item))
+        .filter_map(parse_pull_request_rollup_check)
+        .collect::<Vec<_>>();
+    (state, summarize_check_runs(&checks))
+}
+
 pub(crate) fn parse_pull_request_review_threads(
     output: &str,
 ) -> Result<Vec<PullRequestReviewThread>> {
@@ -900,6 +937,52 @@ mod tests {
             checks: Vec::new(),
             deployments: Vec::new(),
         }
+    }
+
+    fn run(status: &str) -> PullRequestCheckRun {
+        PullRequestCheckRun {
+            name: "check".to_owned(),
+            status: status.to_owned(),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn summarize_check_runs_ranks_failure_over_pending_over_passing() {
+        assert_eq!(summarize_check_runs(&[]), None);
+        assert_eq!(
+            summarize_check_runs(&[run("SUCCESS"), run("SUCCESS")]).as_deref(),
+            Some("passing")
+        );
+        assert_eq!(
+            summarize_check_runs(&[run("SUCCESS"), run("IN_PROGRESS")]).as_deref(),
+            Some("pending")
+        );
+        assert_eq!(
+            summarize_check_runs(&[run("SUCCESS"), run("IN_PROGRESS"), run("FAILURE")]).as_deref(),
+            Some("failing")
+        );
+        // A status outside the known vocabulary must not read as green.
+        assert_eq!(summarize_check_runs(&[run("SUCCESS"), run("NEUTRAL")]), None);
+    }
+
+    #[test]
+    fn parse_pull_request_state_and_checks_reads_one_gh_snapshot() {
+        let (state, checks) = parse_pull_request_state_and_checks(
+            r#"{"state":"OPEN","statusCheckRollup":[
+                {"name":"unit","conclusion":"SUCCESS"},
+                {"name":"desktop","status":"IN_PROGRESS"}
+            ]}"#,
+        );
+        assert_eq!(state.as_deref(), Some("open"));
+        assert_eq!(checks.as_deref(), Some("pending"));
+
+        let (state, checks) =
+            parse_pull_request_state_and_checks(r#"{"state":"MERGED","statusCheckRollup":[]}"#);
+        assert_eq!(state.as_deref(), Some("merged"));
+        assert_eq!(checks, None);
+
+        assert_eq!(parse_pull_request_state_and_checks("not json"), (None, None));
     }
 
     #[test]
