@@ -2023,9 +2023,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
-        ArchcarRequest::GetSetupReadiness { recheck } => ArchcarResponse::SetupReadiness {
-            report: crate::doctor::setup_report(recheck),
-        },
+        ArchcarRequest::GetSetupReadiness { recheck } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            // A repository the user already added is the case where a denial is
+            // fatal rather than advisory, so the roots have to come from the DB.
+            let roots = RepositoryStore::open(&db_path)
+                .and_then(|store| store.list())
+                .map(|repos| repos.into_iter().map(|repo| repo.root_path).collect())
+                .unwrap_or_else(|_| Vec::new());
+            ArchcarResponse::SetupReadiness {
+                report: crate::doctor::setup_report(recheck, &roots),
+            }
+        }
         ArchcarRequest::CreateChatThread {
             workspace,
             provider,

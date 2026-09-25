@@ -1501,7 +1501,7 @@ fn run_cli() -> Result<()> {
 
     match cli.command {
         Command::Doctor => print_doctor(doctor::report_from_host()),
-        Command::Setup { recheck } => print_setup(doctor::setup_report(recheck)),
+        Command::Setup { recheck } => print_setup(doctor::setup_report(recheck, &[])),
         Command::Settings { command } => match command {
             AppSettingsCommand::Export { output } => {
                 let contents = app_shared_settings_to_toml(&paths.shared_settings_path())?;
