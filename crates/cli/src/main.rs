@@ -5253,7 +5253,11 @@ fn file_access_lines(
 /// folders that are broken.
 fn print_daemon_file_access(paths: &AppPaths, fallback_roots: &[std::path::PathBuf]) {
     let client = ArchcarClient::from_paths(paths);
-    match client.send(ArchcarRequest::GetSetupReadiness { recheck: false }) {
+    // Never `send` here: that spawns a sidecar when nothing is listening, and a
+    // sidecar spawned by this shell inherits this shell's file access — it
+    // would report "ok" for exactly the folders the real daemon is refused,
+    // with no sign that the answer came from somewhere else.
+    match client.send_without_spawning(ArchcarRequest::GetSetupReadiness { recheck: false }) {
         Ok(ArchcarResponse::SetupReadiness { report }) => {
             print_file_access(&report.file_access, true)
         }
@@ -6391,6 +6395,26 @@ fn print_setup(report: doctor::SetupReport) {
 
 #[cfg(test)]
 mod tests {
+    /// `service doctor` exists to expose a daemon whose file access differs from
+    /// the calling shell's. Spawning a daemon to answer the question defeats it:
+    /// the child inherits the shell's grants and reports "ok" for the very
+    /// folders the real daemon is refused.
+    #[test]
+    fn diagnostics_never_spawn_the_daemon_they_are_diagnosing() {
+        let source = include_str!("main.rs");
+        let body = source
+            .split_once("fn print_daemon_file_access(")
+            .expect("print_daemon_file_access exists")
+            .1
+            .split_once("\nfn ")
+            .expect("function ends")
+            .0;
+        assert!(
+            body.contains("send_without_spawning"),
+            "print_daemon_file_access must not use the spawning send: {body}"
+        );
+    }
+
     #[test]
     fn file_access_lines_mark_denied_roots_and_say_who_probed() {
         use archductor_core::file_access::{FileAccessProbe, FileAccessState};

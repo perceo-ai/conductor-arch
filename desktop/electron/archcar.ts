@@ -553,6 +553,32 @@ export function archcarBinary(): string {
 // call can retry (and re-verify the connection) after a failure.
 const daemonAttempts = new Map<string, Promise<void>>();
 
+// The pid of the archcar this app spawned, when it spawned one. A daemon owned
+// by a launchd unit is restarted with `launchctl`; this one can only be killed,
+// and the next request re-spawns it. Tracked so the macOS file-access card has
+// something to restart on the (common) no-service install.
+let spawnedPid: number | null = null;
+
+/** The pid of the daemon this app spawned, or null when launchd owns it. */
+export function spawnedDaemonPid(): number | null {
+  return spawnedPid;
+}
+
+/**
+ * Kill the daemon this app spawned so the next request starts a fresh one that
+ * re-reads its macOS grants. Returns false when this app did not spawn it.
+ */
+export function killSpawnedDaemon(): boolean {
+  if (spawnedPid === null) return false;
+  try {
+    process.kill(spawnedPid, "SIGTERM");
+  } catch {
+    // Already gone; the next request re-spawns either way.
+  }
+  spawnedPid = null;
+  return true;
+}
+
 function ensureDaemon(endpoint: string): Promise<void> {
   let attempt = daemonAttempts.get(endpoint);
   if (!attempt) {
@@ -601,6 +627,7 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
   child.once("error", (err: NodeJS.ErrnoException) => {
     spawned.failure = err;
   });
+  spawnedPid = child.pid ?? null;
   child.unref();
 
   for (let i = 0; i < STARTUP_ATTEMPTS; i++) {

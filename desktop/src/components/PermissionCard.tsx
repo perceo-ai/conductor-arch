@@ -1,4 +1,4 @@
-import { For, Show, createSignal } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 
 import { fileAccess } from "@/bridge/client";
 import type { FileAccessProbe } from "@/bridge/protocol";
@@ -11,6 +11,8 @@ import type { FileAccessProbe } from "@/bridge/protocol";
 // do nothing for a remote host, so the buttons are withheld and the card says
 // where the work has to happen.
 
+const POLL_MS = 2000;
+
 /** True when a daemon error is macOS refusing it a path. */
 export function isPermissionError(message: string): boolean {
   return message.includes("Full Disk Access");
@@ -19,11 +21,38 @@ export function isPermissionError(message: string): boolean {
 export function PermissionCard(props: {
   probes: FileAccessProbe[];
   remoteAddress: string | null;
+  /** Re-probe the daemon; polled while the card is up. Omitted where the
+   *  probes are synthetic, as in a failed "add repository". */
+  onPoll?: () => Promise<unknown>;
 }) {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
 
   const roots = () => props.probes.filter((probe) => probe.state === "denied");
+
+  // A grant happens in System Settings, outside this app, with no event to
+  // listen for, so the card polls to clear itself. The poll lives here because
+  // this component exists only while something is denied — and it chains off
+  // the previous answer rather than firing on a timer, because a recheck runs
+  // subprocess probes that can outlast the interval and pile up.
+  onMount(() => {
+    if (!props.onPoll) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      try {
+        await props.onPoll!();
+      } catch {
+        // A failed recheck is not worth surfacing; the next one may work.
+      }
+      if (!stopped) timer = setTimeout(() => void tick(), POLL_MS);
+    };
+    timer = setTimeout(() => void tick(), POLL_MS);
+    onCleanup(() => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    });
+  });
 
   const run = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setError(null);

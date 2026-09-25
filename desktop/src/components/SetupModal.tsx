@@ -1,4 +1,4 @@
-import { createEffect, createResource, createSignal, onCleanup, Show } from "solid-js";
+import { createResource, createSignal, Show } from "solid-js";
 
 import { setupStore } from "@/store";
 import { remoteDaemon } from "@/bridge/client";
@@ -28,16 +28,18 @@ export default function SetupModal() {
     }
   });
 
-  // A grant happens in System Settings, outside this app, with no event to
-  // listen for. Polling is the only way the card can clear itself.
-  createEffect(() => {
-    const denied = (setupStore.report()?.file_access ?? []).some(
-      (probe) => probe.state === "denied",
-    );
-    if (!denied) return;
-    const timer = setInterval(() => void setupStore.recheck().catch(() => undefined), 2000);
-    onCleanup(() => clearInterval(timer));
-  });
+  // Denied folders are worth the gate on their own. They do not block chat, so
+  // `blocked()` is false for them — but "add a repository" is the first thing a
+  // new user does, and it is exactly what a denial breaks. Asking at first open
+  // is the whole point of the permission flow.
+  const deniedRoots = () =>
+    (setupStore.report()?.file_access ?? []).filter((probe) => probe.state === "denied");
+
+  // A denial keeps chat working, so the gate it raises has to be escapable.
+  // Dismissal lasts for this run: the card comes back next launch, and the
+  // "File access" readiness row keeps saying so in the meantime.
+  const [dismissed, setDismissed] = createSignal(false);
+  const fileAccessOnly = () => !setupStore.blocked() && deniedRoots().length > 0;
 
   const onRecheck = async () => {
     setError(null);
@@ -74,14 +76,18 @@ export default function SetupModal() {
   };
 
   return (
-    <Show when={setupStore.blocked()}>
+    <Show when={setupStore.blocked() || (fileAccessOnly() && !dismissed())}>
       <div class="modal-scrim setup-scrim">
         <div class="modal-body setup-modal">
           <div class="setup-title">Finish setup</div>
           <p class="setup-copy">
             <Show
               when={remote()?.address}
-              fallback="Archductor needs the GitHub CLI and at least one signed-in coding agent before chat features can run."
+              fallback={
+                fileAccessOnly()
+                  ? "Archductor needs permission to read the folders your repositories live in."
+                  : "Archductor needs the GitHub CLI and at least one signed-in coding agent before chat features can run."
+              }
             >
               {`These tools are checked on the remote daemon at ${remote()?.address}, not on this machine. Install or authenticate them there, or disconnect to use this machine instead.`}
             </Show>
@@ -92,6 +98,7 @@ export default function SetupModal() {
           <PermissionCard
             probes={setupStore.report()?.file_access ?? []}
             remoteAddress={remote()?.address ?? null}
+            onPoll={() => setupStore.recheck()}
           />
 
           <p class="setup-feedback">
@@ -102,6 +109,11 @@ export default function SetupModal() {
           </Show>
 
           <div class="setup-actions">
+            <Show when={fileAccessOnly()}>
+              <button class="ui-button-secondary" onClick={() => setDismissed(true)}>
+                Not now
+              </button>
+            </Show>
             <Show when={remote()?.source === "profile"}>
               <button class="ui-button-secondary" disabled={busy()} onClick={() => void onDisconnect()}>
                 Disconnect

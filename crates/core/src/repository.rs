@@ -227,8 +227,25 @@ fn row_to_repository(row: &rusqlite::Row<'_>) -> rusqlite::Result<Repository> {
 /// Shared so the desktop can match on it and swap in its own card: the CLI
 /// prints it verbatim, and the renderer keys off "Full Disk Access".
 pub fn permission_hint(path: &Path) -> String {
+    permission_hint_for(path, cfg!(target_os = "macos"))
+}
+
+/// The wording, with the platform passed in so both branches stay testable on
+/// any host.
+///
+/// Only macOS has TCC and a Full Disk Access pane. Saying "macOS" to a Linux
+/// user sends them looking for a setting that does not exist — and the desktop
+/// keys its permission card off that exact phrase, so the wrong sentence would
+/// also pop a macOS-only card on Linux.
+fn permission_hint_for(path: &Path, macos: bool) -> String {
+    if macos {
+        return format!(
+            "macOS is denying the archcar daemon access to {}. Grant Full Disk Access to the archcar binary, then restart the daemon.",
+            path.display()
+        );
+    }
     format!(
-        "macOS is denying the archcar daemon access to {}. Grant Full Disk Access to the archcar binary, then restart the daemon.",
+        "{} cannot be read by the archcar daemon (permission denied).",
         path.display()
     )
 }
@@ -453,7 +470,7 @@ mod tests {
             "fatal: cannot change to '/Users/someone/Documents/repo': Operation not permitted",
         );
         assert!(
-            message.contains("Full Disk Access"),
+            message.contains("archcar daemon"),
             "unexpected message: {message}"
         );
         assert!(
@@ -470,8 +487,23 @@ mod tests {
     }
 
     #[test]
-    fn permission_hint_names_the_path_and_the_daemon() {
-        let hint = permission_hint(Path::new("/Users/someone/Documents/repo"));
+    fn off_macos_a_denial_does_not_invoke_full_disk_access() {
+        // There is no TCC here. Telling a Linux user to grant Full Disk Access
+        // sends them looking for a System Settings pane that does not exist —
+        // and the desktop keys its macOS permission card off that exact phrase.
+        let hint = permission_hint_for(Path::new("/srv/locked-repo"), false);
+        assert!(hint.contains("/srv/locked-repo"));
+        assert!(hint.contains("archcar"));
+        assert!(
+            !hint.contains("Full Disk Access"),
+            "unexpected hint: {hint}"
+        );
+        assert!(!hint.contains("macOS"), "unexpected hint: {hint}");
+    }
+
+    #[test]
+    fn on_macos_the_hint_names_the_path_the_daemon_and_the_pane() {
+        let hint = permission_hint_for(Path::new("/Users/someone/Documents/repo"), true);
         assert!(hint.contains("/Users/someone/Documents/repo"));
         assert!(hint.contains("archcar"));
         assert!(hint.contains("Full Disk Access"));

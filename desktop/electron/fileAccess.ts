@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 
 import { shell } from "electron";
 
-import { archcarBinary } from "./archcar";
+import { archcarBinary, killSpawnedDaemon } from "./archcar";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,13 +48,25 @@ export function revealDaemon(): FileAccessResult {
  * launchd unit owns the daemon, kickstart it; otherwise the daemon is the child
  * this app spawned, and killing it is enough — the next request re-spawns it.
  */
-export async function restartDaemon(): Promise<FileAccessResult> {
+/** Runs a command; the seam the restart path is tested through. */
+export type CommandRunner = (command: string, args: string[]) => Promise<unknown>;
+
+const runCommand: CommandRunner = (command, args) => execFileAsync(command, args);
+
+export async function restartDaemon(
+  run: CommandRunner = runCommand,
+): Promise<FileAccessResult> {
   if (process.platform !== "darwin") return { ok: false, error: "macOS only" };
-  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const uid = typeof process.getuid === "function" ? process.getuid() : -1;
+  if (uid < 0) return { ok: false, error: "cannot determine the launchd user domain" };
   try {
-    await execFileAsync("launchctl", restartArgs(uid));
+    await run("launchctl", restartArgs(uid));
     return { ok: true };
   } catch (err) {
+    // No launchd unit is the ordinary case: the daemon is then the child this
+    // app spawned, which launchctl knows nothing about. Killing it is the
+    // restart — the next request spawns a fresh one that re-reads its grants.
+    if (killSpawnedDaemon()) return { ok: true };
     return {
       ok: false,
       error: `${(err as Error).message} — quit and reopen Archductor to restart the daemon.`,
