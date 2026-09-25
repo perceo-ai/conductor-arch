@@ -135,3 +135,44 @@
     display: flex;
     justify-content: flex-end;
 }
+
+
+/* The macOS file-access card: shown inside the setup gate and beside a failed
+   "add repository" whose cause was a denial rather than a missing repo. */
+.permission-card {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--lc-border, #2a2a2a);
+  border-radius: 8px;
+  background: var(--lc-surface-raised, #1a1a1a);
+}
+
+.permission-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.permission-copy {
+  margin: 0 0 8px;
+  color: var(--lc-text-muted, #9a9a9a);
+}
+
+.permission-roots {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-family: var(--lc-mono, ui-monospace, monospace);
+  font-size: 12px;
+}
+
+.permission-steps {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  color: var(--lc-text-muted, #9a9a9a);
+  font-size: 12px;
+}
+
+.permission-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}

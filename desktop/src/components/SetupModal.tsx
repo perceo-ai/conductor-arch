@@ -1,8 +1,9 @@
-import { createResource, createSignal, Show } from "solid-js";
+import { createEffect, createResource, createSignal, onCleanup, Show } from "solid-js";
 
 import { setupStore } from "@/store";
 import { remoteDaemon } from "@/bridge/client";
 import { SetupStatusList } from "./SetupReadiness";
+import { PermissionCard } from "./PermissionCard";
 
 // Blocking first-run setup gate. Shown while archcar reports outstanding setup
 // blockers (GitHub CLI + a signed-in Codex/Claude). Ported from the retired GTK
@@ -25,6 +26,17 @@ export default function SetupModal() {
     } catch {
       return null;
     }
+  });
+
+  // A grant happens in System Settings, outside this app, with no event to
+  // listen for. Polling is the only way the card can clear itself.
+  createEffect(() => {
+    const denied = (setupStore.report()?.file_access ?? []).some(
+      (probe) => probe.state === "denied",
+    );
+    if (!denied) return;
+    const timer = setInterval(() => void setupStore.recheck().catch(() => undefined), 2000);
+    onCleanup(() => clearInterval(timer));
   });
 
   const onRecheck = async () => {
@@ -76,6 +88,11 @@ export default function SetupModal() {
           </p>
 
           <SetupStatusList rows={setupStore.report()?.rows ?? []} />
+
+          <PermissionCard
+            probes={setupStore.report()?.file_access ?? []}
+            remoteAddress={remote()?.address ?? null}
+          />
 
           <p class="setup-feedback">
             {setupStore.report()?.feedback ?? "Checking your setup…"}
