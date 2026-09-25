@@ -573,6 +573,14 @@ async function ensureDaemonOnce(endpoint: string): Promise<void> {
     // not up yet
   }
   // Spawn detached; it binds the endpoint itself.
+  //
+  // macOS file access: whether this child inherits the app's TCC responsibility
+  // — and so its Documents/Desktop/Downloads grants, and the ability to raise
+  // the consent prompt — is UNVERIFIED. A launchd-started daemon definitely
+  // does not (it is its own TCC subject), which is why the permission card in
+  // SetupModal exists. Settle this from the packaged .app with the LaunchAgent
+  // removed; a dev run inherits the terminal's grants and proves nothing.
+  // See docs/superpowers/specs/2026-09-25-macos-file-access-design.md §7.
   const binary = archcarBinary();
   const child = spawn(binary, [], {
     detached: true,

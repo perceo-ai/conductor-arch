@@ -160,15 +160,30 @@ own host.
 
 `ensureDaemonOnce` already spawns `archcar` as a detached child of the Electron
 app when no service unit is installed. A child spawned that way is expected to
-inherit the app's TCC responsibility, which means macOS shows the ordinary
-"would like to access files in your Documents folder" prompt and the app's
-grant covers the daemon.
+inherit the app's TCC responsibility, which would mean macOS shows the ordinary
+"would like to access files in your Documents folder" prompt and the app's grant
+covers the daemon.
 
-This is treated as a bonus, not a foundation: it is verified during
-implementation, and if it holds, users on the child-spawn path never see the
-Full Disk Access step. The design does not depend on it, because depending on
-it would make the good path exclusive to GUI-attached daemons — exactly what
-goal 3 rules out.
+**This remains undetermined.** It cannot be settled from a development run: a
+daemon spawned by `npm run dev` inherits the *terminal's* grants, not the app's,
+so it sees the protected folders either way and proves nothing. The honest
+experiment needs the packaged `.app` launched from Finder with the LaunchAgent
+removed:
+
+```
+archductor service uninstall
+open /Applications/archductor-desktop.app
+# add a repository under ~/Documents from the UI
+archductor service install   # restore the agent afterwards
+```
+
+A prompt plus a successful add means the child inherits; the permission error
+with no prompt means it does not.
+
+The design does not depend on the answer either way, because depending on it
+would make the good path exclusive to GUI-attached daemons — exactly what goal 3
+rules out. The answer only changes how often users meet the Full Disk Access
+step.
 
 ## Testing
 
