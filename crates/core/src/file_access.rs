@@ -174,7 +174,7 @@ mod tests {
             return;
         }
 
-        let probes = probe_roots(&[documents.clone()]);
+        let probes = probe_roots(std::slice::from_ref(&documents));
 
         let probe = probes
             .iter()

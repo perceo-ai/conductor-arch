@@ -4878,7 +4878,15 @@ fn clone_failure_message(
     dest: &str,
 ) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("Operation not permitted") || stderr.contains("Permission denied") {
+    // "Permission denied (publickey)" is ssh refusing the remote, not the OS
+    // refusing the destination, and it is the one sentence that explains that
+    // user's actual problem. Never trade it for a Full Disk Access hint.
+    let authentication = stderr.contains("publickey")
+        || stderr.contains("Authentication failed")
+        || stderr.contains("Could not read from remote repository");
+    if !authentication
+        && (stderr.contains("Operation not permitted") || stderr.contains("Permission denied"))
+    {
         return crate::repository::permission_hint(std::path::Path::new(dest));
     }
     command_failure_message(program, args, output)
@@ -6360,11 +6368,41 @@ mod tests {
         assert!(!message.contains("archcar daemon"));
     }
 
+    /// `Permission denied (publickey)` is ssh refusing the *remote*, not the OS
+    /// refusing the destination. Sending that user to Full Disk Access throws
+    /// away the only sentence that explains their real problem.
+    #[test]
+    fn an_ssh_key_rejection_is_not_a_file_access_problem() {
+        let output = std::process::Output {
+            status: failed_status(),
+            stdout: Vec::new(),
+            stderr: b"git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.".to_vec(),
+        };
+
+        let message = clone_failure_message("git", &["clone".to_owned()], &output, "/tmp/dest");
+
+        assert!(
+            message.contains("publickey"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("Full Disk Access"),
+            "an ssh key rejection is not a TCC denial: {message}"
+        );
+    }
+
+    /// A non-zero `ExitStatus`, built without assuming a POSIX shell so the
+    /// core suite still runs on Windows.
     fn failed_status() -> std::process::ExitStatus {
-        std::process::Command::new("sh")
-            .args(["-c", "exit 1"])
+        let (program, args): (&str, [&str; 2]) = if cfg!(windows) {
+            ("cmd", ["/C", "exit 1"])
+        } else {
+            ("sh", ["-c", "exit 1"])
+        };
+        std::process::Command::new(program)
+            .args(args)
             .status()
-            .expect("run sh")
+            .expect("spawn a process that exits non-zero")
     }
     use super::*;
 

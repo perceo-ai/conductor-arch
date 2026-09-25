@@ -199,6 +199,9 @@ archductor service install
 archductor service status
 archductor service doctor
 archductor service token --rotate
+archductor service uninstall
+```
+
 `service doctor` answers for **the daemon**, not for your shell — the two differ
 in exactly the cases worth diagnosing. It prints the PATH the service unit
 recorded, every tool resolved against it, and on macOS a `file access` section:
@@ -220,8 +223,7 @@ daemon* — your shell usually has access the daemon lacks, so treat that readin
 as unproven. The command never starts a daemon to answer, because a daemon it
 started would inherit your shell's access and report the wrong thing.
 
-archductor service uninstall
-
+```bash
 archductor remote connect ssh://you@server --label build
 archductor remote list
 archductor remote use build
