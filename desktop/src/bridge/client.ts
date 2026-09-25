@@ -70,6 +70,9 @@ interface ArchductorApi {
     { ok: true; avatarUrl: string } | { ok: false; error: string }
   >;
   openExternal(target: string): Promise<{ ok: boolean; error?: string }>;
+  fileAccessOpenSettings(): Promise<{ ok: boolean; error?: string }>;
+  fileAccessRevealDaemon(): Promise<{ ok: boolean; error?: string }>;
+  fileAccessRestartDaemon(): Promise<{ ok: boolean; error?: string }>;
   openWorkspaceApp(opts: { rootPath: string; appId: WorkspaceOpenAppId }): Promise<{ ok: boolean; error?: string }>;
   checkForUpdates(): Promise<
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
@@ -176,6 +179,13 @@ export const repoAvatar = (opts: { rootPath: string; remoteName?: string }) =>
 
 /** Open a URL in the browser or a filesystem path in the OS default app. */
 export const openExternal = (target: string) => api().openExternal(target);
+
+/** The three things a user can do about a macOS file-access denial. */
+export const fileAccess = {
+  openSettings: () => api().fileAccessOpenSettings(),
+  revealDaemon: () => api().fileAccessRevealDaemon(),
+  restartDaemon: () => api().fileAccessRestartDaemon(),
+};
 
 /** Open a workspace in a registered local editor app. */
 export const openWorkspaceApp = (opts: { rootPath: string; appId: WorkspaceOpenAppId }) =>

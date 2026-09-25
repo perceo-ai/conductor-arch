@@ -531,7 +531,7 @@ function connectWindows(endpoint: string): Promise<net.Socket> {
   });
 }
 
-function archcarBinary(): string {
+export function archcarBinary(): string {
   // 1. Explicit override.
   const override = process.env.ARCHDUCTOR_ARCHCAR_BIN;
   if (override && override.trim().length > 0) return override;

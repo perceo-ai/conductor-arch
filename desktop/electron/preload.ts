@@ -55,6 +55,16 @@ const api = {
   /** Ensure the event subscription is running. Idempotent. */
   ensureEvents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("archcar:subscribe"),
 
+  /** Open System Settings at Full Disk Access. macOS has no programmatic ask. */
+  fileAccessOpenSettings: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("file-access:open-settings"),
+  /** Reveal the archcar binary so it can be dragged into the pane. */
+  fileAccessRevealDaemon: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("file-access:reveal-daemon"),
+  /** Restart the daemon so it picks up a grant just made. */
+  fileAccessRestartDaemon: (): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("file-access:restart-daemon"),
+
   /** Open a native folder picker; resolves to the chosen path or null if cancelled. */
   selectFolder: (opts?: { title?: string; defaultPath?: string }): Promise<string | null> =>
     ipcRenderer.invoke("dialog:select-folder", opts),
