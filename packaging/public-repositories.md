@@ -46,6 +46,8 @@ For a release `vX.Y.Z`, collect:
 - GitHub release containing CLI `.deb`, CLI `.rpm`, desktop `.deb`, desktop
   `.rpm`, AppImage, source tarball, and checksums
 - `dist/SHA256SUMS` from the Linux release build
+- `desktop/release/SHA256SUMS` generated for the Electron desktop `.deb` and
+  `.rpm` artifacts before publishing them to package repositories
 - Perceo package-signing key fingerprint and public key URL
 - public base URLs:
   - APT: `https://packages.perceo.ai/apt`
@@ -90,14 +92,18 @@ Required packages:
 Human validation:
 
 ```bash
-curl -fsSL https://packages.perceo.ai/apt/archductor-archive-keyring.gpg \
-  | sudo gpg --dearmor -o /usr/share/keyrings/archductor-archive-keyring.gpg
+curl -fsSLo /tmp/archductor-archive-keyring.gpg \
+  https://packages.perceo.ai/apt/archductor-archive-keyring.gpg
+sudo install -Dm644 /tmp/archductor-archive-keyring.gpg \
+  /usr/share/keyrings/archductor-archive-keyring.gpg
 echo "deb [arch=amd64 signed-by=/usr/share/keyrings/archductor-archive-keyring.gpg] https://packages.perceo.ai/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/archductor.list
 sudo apt update
 sudo apt install archductor archductor-desktop
 archductor doctor
-archductor-desktop --version
+archductor archcar repositories
+archductor archcar workspaces
+xvfb-run -a sh -c 'archductor-desktop >/tmp/archductor-desktop.log 2>&1 & pid=$!; sleep 10; if ! kill -0 "$pid"; then cat /tmp/archductor-desktop.log; exit 1; fi; kill "$pid"; wait "$pid" || true'
 sudo apt install --only-upgrade archductor archductor-desktop
 sudo apt remove archductor-desktop archductor
 ```
@@ -105,10 +111,11 @@ sudo apt remove archductor-desktop archductor
 Publication checklist:
 
 - Sign the repository metadata with the Perceo APT key.
-- Publish the binary public key at the repository root.
+- Publish the binary public key at the repository root as
+  `archductor-archive-keyring.gpg`.
 - Verify `apt update` fetches `InRelease` without trust warnings.
-- Verify install, upgrade, removal, and reinstall on a fresh Debian or Ubuntu
-  VM.
+- Verify install, actual desktop launch, sidecar RPCs, upgrade, removal, and
+  reinstall on a fresh Debian or Ubuntu VM.
 - Document rollback as publishing the previous version as the newest repository
   candidate or removing the bad version and regenerating signed metadata.
 
@@ -157,7 +164,9 @@ sudo curl -fsSL -o /etc/yum.repos.d/archductor.repo \
 sudo dnf makecache --repo archductor
 sudo dnf install archductor archductor-desktop
 archductor doctor
-archductor-desktop --version
+archductor archcar repositories
+archductor archcar workspaces
+xvfb-run -a sh -c 'archductor-desktop >/tmp/archductor-desktop.log 2>&1 & pid=$!; sleep 10; if ! kill -0 "$pid"; then cat /tmp/archductor-desktop.log; exit 1; fi; kill "$pid"; wait "$pid" || true'
 sudo dnf upgrade archductor archductor-desktop
 sudo dnf remove archductor-desktop archductor
 ```
@@ -167,8 +176,9 @@ Publication checklist:
 - Sign RPM packages with the Perceo RPM key.
 - Generate or update repository metadata with `createrepo_c`.
 - Sign repository metadata when `repo_gpgcheck=1` is advertised.
-- Verify install, upgrade, removal, and reinstall on fresh Fedora and openSUSE
-  VMs before advertising support for both `dnf` and `zypper`.
+- Verify install, actual desktop launch, sidecar RPCs, upgrade, removal, and
+  reinstall on fresh Fedora and openSUSE VMs before advertising support for both
+  `dnf` and `zypper`.
 - Document rollback as publishing a higher-release rebuild of the previous
   version or removing the bad package and regenerating signed metadata.
 

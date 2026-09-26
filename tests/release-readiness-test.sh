@@ -51,6 +51,12 @@ grep -Fq "Signed-By: /usr/share/keyrings/archductor-archive-keyring.gpg" "$repo_
     || fail "APT source template must use a scoped signed-by keyring"
 grep -Fq "repo_gpgcheck=1" "$repo_root/packaging/rpm/archductor.repo" \
     || fail "DNF repo template must require signed repository metadata"
+grep -Fq "sudo install -Dm644 /tmp/archductor-archive-keyring.gpg" "$repo_root/packaging/public-repositories.md" \
+    || fail "APT validation must install the binary key directly"
+grep -Fq "archductor archcar repositories" "$repo_root/packaging/public-repositories.md" \
+    || fail "package-channel validation must include sidecar RPC smoke"
+grep -Fq "xvfb-run -a sh -c 'archductor-desktop" "$repo_root/packaging/public-repositories.md" \
+    || fail "package-channel validation must launch the desktop app"
 
 output="$("$script" --help)"
 [[ "$output" == *"Usage: scripts/release-readiness.sh"* ]] \
@@ -103,17 +109,56 @@ output="$("$public_repo_script" --version 0.1.0 --metadata-only)"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 mkdir -p "$tmpdir/cli-dist" "$tmpdir/desktop-dist"
-touch \
-    "$tmpdir/cli-dist/archductor_0.1.0_amd64.deb" \
-    "$tmpdir/cli-dist/archductor-0.1.0-1.x86_64.rpm" \
-    "$tmpdir/cli-dist/SHA256SUMS" \
-    "$tmpdir/desktop-dist/archductor-desktop_0.1.0_amd64.deb" \
-    "$tmpdir/desktop-dist/archductor-desktop-0.1.0.x86_64.rpm"
+touch "$tmpdir/cli-dist/archductor_0.1.0_amd64.deb"
+set +e
+output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
+    --cli-dist "$tmpdir/cli-dist" \
+    --desktop-dist "$tmpdir/desktop-dist" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 1 ]] || fail "empty public repository artifact check exited $status, expected 1"
+[[ "$output" == *"missing or empty artifact"* ]] \
+    || fail "empty public repository artifact check did not reject zero-byte artifacts"
+
+printf 'cli deb\n' > "$tmpdir/cli-dist/archductor_0.1.0_amd64.deb"
+printf 'cli rpm\n' > "$tmpdir/cli-dist/archductor-0.1.0-1.x86_64.rpm"
+(
+    cd "$tmpdir/cli-dist"
+    shasum -a 256 archductor_0.1.0_amd64.deb archductor-0.1.0-1.x86_64.rpm > SHA256SUMS
+)
+printf 'desktop deb\n' > "$tmpdir/desktop-dist/archductor-desktop_0.1.0_amd64.deb"
+printf 'desktop rpm\n' > "$tmpdir/desktop-dist/archductor-desktop-0.1.0.x86_64.rpm"
+(
+    cd "$tmpdir/desktop-dist"
+    shasum -a 256 \
+        archductor-desktop_0.1.0_amd64.deb \
+        archductor-desktop-0.1.0.x86_64.rpm > SHA256SUMS
+)
 output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
     --cli-dist "$tmpdir/cli-dist" \
     --desktop-dist "$tmpdir/desktop-dist")"
 [[ "$output" == *"public repository listing artifacts: ok"* ]] \
     || fail "public repository artifact check did not pass"
+
+printf 'corrupt\n' >> "$tmpdir/cli-dist/archductor_0.1.0_amd64.deb"
+set +e
+output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
+    --cli-dist "$tmpdir/cli-dist" \
+    --desktop-dist "$tmpdir/desktop-dist" 2>&1)"
+status=$?
+set -e
+[[ "$status" -eq 1 ]] || fail "corrupt public repository artifact check exited $status, expected 1"
+[[ "$output" == *"checksum mismatch"* ]] \
+    || fail "corrupt public repository artifact check did not explain checksum mismatch"
+(
+    cd "$tmpdir/cli-dist"
+    shasum -a 256 archductor_0.1.0_amd64.deb archductor-0.1.0-1.x86_64.rpm > SHA256SUMS
+)
+output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
+    --cli-dist "$tmpdir/cli-dist" \
+    --desktop-dist "$tmpdir/desktop-dist")"
+[[ "$output" == *"public repository listing artifacts: ok"* ]] \
+    || fail "public repository artifact check did not pass after checksum refresh"
 
 mkdir -p "$tmpdir/scripts" "$tmpdir/packaging/homebrew/Formula"
 cp "$homebrew_script" "$tmpdir/scripts/update-homebrew-formula.sh"

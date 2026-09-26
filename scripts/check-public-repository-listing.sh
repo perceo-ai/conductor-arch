@@ -89,16 +89,52 @@ check_contains() {
     grep -Fq "$needle" "$repo_root/$path" || fail "$path does not contain: $needle"
 }
 
-check_glob() {
-    local pattern="$1"
-    compgen -G "$pattern" >/dev/null || fail "missing artifact matching: $pattern"
-}
-
 abs_dir() {
     case "$1" in
         /*) printf '%s\n' "$1" ;;
         *) printf '%s/%s\n' "$repo_root" "$1" ;;
     esac
+}
+
+checksum_for() {
+    local path="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$path" | awk '{print $1}'
+    else
+        shasum -a 256 "$path" | awk '{print $1}'
+    fi
+}
+
+checksum_entry_for() {
+    local sums="$1"
+    local filename="$2"
+    awk -v filename="$filename" '
+        $2 == filename || $2 == "./" filename {
+            print $1
+            found = 1
+            exit
+        }
+        END {
+            if (!found) exit 1
+        }
+    ' "$sums"
+}
+
+check_artifact() {
+    local artifact="$1"
+    local sums="$2"
+    local filename
+    local expected
+    local actual
+
+    filename="$(basename "$artifact")"
+    [ -s "$artifact" ] || fail "missing or empty artifact: $artifact"
+    [ -s "$sums" ] || fail "missing or empty checksum manifest: $sums"
+    expected="$(checksum_entry_for "$sums" "$filename")" \
+        || fail "checksum manifest $sums has no entry for $filename"
+    actual="$(checksum_for "$artifact")"
+    [ "$actual" = "$expected" ] \
+        || fail "checksum mismatch for $filename"
 }
 
 check_file packaging/public-repositories.md
@@ -129,11 +165,12 @@ fi
 
 cli_dist_abs="$(abs_dir "$cli_dist")"
 desktop_dist_abs="$(abs_dir "$desktop_dist")"
+cli_sums="$cli_dist_abs/SHA256SUMS"
+desktop_sums="$desktop_dist_abs/SHA256SUMS"
 
-check_glob "$cli_dist_abs/archductor_${version}_amd64.deb"
-check_glob "$cli_dist_abs/archductor-${version}-1.x86_64.rpm"
-check_glob "$cli_dist_abs/SHA256SUMS"
-check_glob "$desktop_dist_abs/archductor-desktop_${version}_amd64.deb"
-check_glob "$desktop_dist_abs/archductor-desktop-${version}.x86_64.rpm"
+check_artifact "$cli_dist_abs/archductor_${version}_amd64.deb" "$cli_sums"
+check_artifact "$cli_dist_abs/archductor-${version}-1.x86_64.rpm" "$cli_sums"
+check_artifact "$desktop_dist_abs/archductor-desktop_${version}_amd64.deb" "$desktop_sums"
+check_artifact "$desktop_dist_abs/archductor-desktop-${version}.x86_64.rpm" "$desktop_sums"
 
 echo "public repository listing artifacts: ok"
