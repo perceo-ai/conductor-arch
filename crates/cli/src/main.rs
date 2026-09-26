@@ -5079,7 +5079,9 @@ fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
             println!("PR:        #{} {} ({})", pr.number, pr.url, pr.state);
             println!(
                 "PR checks: {}",
-                pr.checks_state.as_deref().unwrap_or("unknown (refresh with: archductor pr view)")
+                pr.checks_state
+                    .as_deref()
+                    .unwrap_or("unknown (refresh with: archductor pr view)")
             );
         }
         None => println!("PR:        none"),

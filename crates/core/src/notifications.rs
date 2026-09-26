@@ -86,6 +86,16 @@ impl NotificationDeviceStore {
             .ok_or_else(|| anyhow!("notification device was not stored"))
     }
 
+    /// Drop every registration. Token rotation is documented as "revoke a
+    /// phone": a revoked phone must stop receiving pushes even though APNs
+    /// itself would still accept its device token. Connected phones re-register
+    /// the next time they pair with the new daemon token.
+    pub fn clear(&self) -> Result<usize> {
+        let conn = self.open()?;
+        let removed = conn.execute("DELETE FROM notification_devices", [])?;
+        Ok(removed)
+    }
+
     pub fn list(&self) -> Result<Vec<NotificationDevice>> {
         let conn = self.open()?;
         let mut stmt = conn.prepare(
@@ -112,6 +122,11 @@ impl NotificationDeviceStore {
     }
 
     fn open(&self) -> Result<Connection> {
+        // Token rotation can run before the daemon has ever created the data
+        // dir (fresh install, CLI-only host); opening must not fail on that.
+        if let Some(parent) = self.db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let conn = Connection::open(&self.db_path)?;
         crate::storage::migrate_workspace_db(&conn)?;
         Ok(conn)
@@ -214,11 +229,28 @@ impl ApnsConfig {
         let key_path = PathBuf::from(std::env::var("ARCHDUCTOR_APNS_KEY_PATH").ok()?);
         let topic = std::env::var("ARCHDUCTOR_APNS_TOPIC")
             .unwrap_or_else(|_| DEFAULT_APNS_TOPIC.to_owned());
+        // The environment must be chosen explicitly. Defaulting to the
+        // sandbox silently strands Release builds: they register production
+        // device tokens, and the sandbox endpoint will never reach them.
         let endpoint = match std::env::var("ARCHDUCTOR_APNS_ENDPOINT").ok() {
             Some(endpoint) => endpoint,
             None => match std::env::var("ARCHDUCTOR_APNS_ENV").as_deref() {
                 Ok("production") => "https://api.push.apple.com".to_owned(),
-                _ => "https://api.sandbox.push.apple.com".to_owned(),
+                Ok("development") | Ok("sandbox") => {
+                    "https://api.sandbox.push.apple.com".to_owned()
+                }
+                Ok(other) => {
+                    warn!(
+                        "ARCHDUCTOR_APNS_ENV must be \"production\", \"development\", or \"sandbox\" (got {other:?}); APNs disabled"
+                    );
+                    return None;
+                }
+                Err(_) => {
+                    warn!(
+                        "APNs signing settings are present but ARCHDUCTOR_APNS_ENV is unset; set it to \"production\" or \"development\" (APNs disabled until then)"
+                    );
+                    return None;
+                }
             },
         };
         Some(Self {
@@ -303,6 +335,12 @@ fn send_apns_to_device(config: &ApnsConfig, jwt: &str, payload: &str, token: &st
         .arg("--silent")
         .arg("--show-error")
         .arg("--http2")
+        // One notification per thread: a stalled APNs connection must release
+        // the thread rather than pile up blocked curl children.
+        .arg("--connect-timeout")
+        .arg("10")
+        .arg("--max-time")
+        .arg("30")
         .arg("--write-out")
         .arg("\n%{http_code}")
         .arg("--config")
@@ -508,6 +546,68 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(store.list().unwrap().len(), 1);
         assert_eq!(second.platform, "ios");
+    }
+
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn apns_config_requires_an_explicit_environment() {
+        let _guard = env_lock().lock().unwrap();
+        let vars = [
+            ("ARCHDUCTOR_APNS_TEAM_ID", Some("TEAM")),
+            ("ARCHDUCTOR_APNS_KEY_ID", Some("KEY")),
+            ("ARCHDUCTOR_APNS_KEY_PATH", Some("/tmp/AuthKey.p8")),
+            ("ARCHDUCTOR_APNS_TOPIC", None),
+            ("ARCHDUCTOR_APNS_ENDPOINT", None),
+            ("ARCHDUCTOR_APNS_ENV", None),
+        ];
+        let saved: Vec<_> = vars
+            .iter()
+            .map(|(name, _)| (*name, std::env::var(name).ok()))
+            .collect();
+        for (name, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        // Signing settings alone are not enough: without an environment the
+        // daemon must stay silent rather than guess the sandbox and strand
+        // production tokens.
+        assert!(ApnsConfig::from_env().is_none());
+
+        std::env::set_var("ARCHDUCTOR_APNS_ENV", "nonsense");
+        assert!(ApnsConfig::from_env().is_none());
+
+        std::env::set_var("ARCHDUCTOR_APNS_ENV", "development");
+        assert_eq!(
+            ApnsConfig::from_env().unwrap().endpoint,
+            "https://api.sandbox.push.apple.com"
+        );
+
+        std::env::set_var("ARCHDUCTOR_APNS_ENV", "production");
+        assert_eq!(
+            ApnsConfig::from_env().unwrap().endpoint,
+            "https://api.push.apple.com"
+        );
+
+        // An explicit endpoint override still wins.
+        std::env::set_var("ARCHDUCTOR_APNS_ENDPOINT", "https://apns.test.local");
+        assert_eq!(
+            ApnsConfig::from_env().unwrap().endpoint,
+            "https://apns.test.local"
+        );
+
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
     }
 
     #[test]

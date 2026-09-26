@@ -132,7 +132,10 @@ export function loadThread(threadId: number): void {
 }
 
 export function applyEvent(event: ArchcarEvent) {
-  const notification = notificationForArchcarEvent(event);
+  // OS banners are for the window you are not looking at. While Archductor is
+  // focused the chat itself shows the turn ending / ask arriving, and a native
+  // notification on top of it is pure noise.
+  const notification = nav.windowFocused() ? null : notificationForArchcarEvent(event);
   if (notification) void notify(notification);
 
   switch (event.type) {

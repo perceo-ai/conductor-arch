@@ -963,7 +963,10 @@ mod tests {
             Some("failing")
         );
         // A status outside the known vocabulary must not read as green.
-        assert_eq!(summarize_check_runs(&[run("SUCCESS"), run("NEUTRAL")]), None);
+        assert_eq!(
+            summarize_check_runs(&[run("SUCCESS"), run("NEUTRAL")]),
+            None
+        );
     }
 
     #[test]
@@ -982,7 +985,10 @@ mod tests {
         assert_eq!(state.as_deref(), Some("merged"));
         assert_eq!(checks, None);
 
-        assert_eq!(parse_pull_request_state_and_checks("not json"), (None, None));
+        assert_eq!(
+            parse_pull_request_state_and_checks("not json"),
+            (None, None)
+        );
     }
 
     #[test]

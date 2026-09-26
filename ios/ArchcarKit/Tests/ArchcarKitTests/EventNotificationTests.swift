@@ -63,3 +63,17 @@ import Testing
 @Test func notificationDescriptorIgnoresUnrelatedEvents() {
     #expect(EventNotificationDescriptor.from(.sessionMessagesUpdated(threadID: 9)) == nil)
 }
+
+@Test func remotePushIsSuppressedOnlyWhileTheSocketIsDelivering() {
+    // Connected: the socket already scheduled the local copy of this event.
+    #expect(!NotificationPresentationPolicy.shouldPresent(
+        isRemotePush: true, hasLiveDaemonSession: true))
+    // Disconnected foreground (e.g. reconnect in flight): the push is the only copy.
+    #expect(NotificationPresentationPolicy.shouldPresent(
+        isRemotePush: true, hasLiveDaemonSession: false))
+    // Local notifications always present; they exist only while connected.
+    #expect(NotificationPresentationPolicy.shouldPresent(
+        isRemotePush: false, hasLiveDaemonSession: true))
+    #expect(NotificationPresentationPolicy.shouldPresent(
+        isRemotePush: false, hasLiveDaemonSession: false))
+}

@@ -22,6 +22,7 @@ final class AppModel {
 
     init(directory: DaemonDirectory = DaemonDirectory()) {
         self.directory = directory
+        localNotifications.hasLiveDaemonSession = { [weak self] in self?.session != nil }
     }
 
     func load() async {
@@ -73,7 +74,7 @@ final class AppModel {
         await store.refresh()
         observation = Task { await store.observe() }
         notificationObservation = Task { await observeNotifications(session: session) }
-        await localNotifications.registerForRemoteNotificationsIfAllowed()
+        await localNotifications.requestAuthorizationAndRegister()
     }
 
     func refreshSavedList() async {

@@ -64,11 +64,18 @@ ARCHDUCTOR_APNS_KEY_ID=YOUR_KEY_ID
 ARCHDUCTOR_APNS_KEY_PATH=/absolute/path/AuthKey_YOUR_KEY_ID.p8
 ```
 
+And pick the APNs environment explicitly (there is no default — a TestFlight
+or App Store build registers production tokens, and the sandbox endpoint can
+never reach them):
+
+```sh
+ARCHDUCTOR_APNS_ENV=production        # or development (Xcode/debug builds)
+```
+
 Optional settings:
 
 ```sh
 ARCHDUCTOR_APNS_TOPIC=ai.perceo.archductor.ios
-ARCHDUCTOR_APNS_ENV=production        # default is the APNs sandbox
 ARCHDUCTOR_APNS_ENDPOINT=https://...  # test override
 ```
 
@@ -93,6 +100,10 @@ the point was to lock someone out.
 ```sh
 archductor service token --rotate
 ```
+
+Rotation also forgets every registered notification device, so revoked phones
+stop receiving APNs pushes. Phones you keep re-register their device token the
+next time they connect with the new daemon token.
 
 That invalidates every paired client at once, including the desktop, so pair
 them again afterwards.

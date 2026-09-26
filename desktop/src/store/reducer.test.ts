@@ -163,6 +163,25 @@ describe("applyEvent chat attention", () => {
   });
 });
 
+describe("applyEvent native notifications", () => {
+  it("sends OS notifications only while the window is unfocused", async () => {
+    const { applyEvent } = await import("./reducer");
+    const { nav } = await import("./nav");
+
+    // Focused: the user is watching the chat; no banner on top of it.
+    nav.setWindowFocused(true);
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "completed" });
+    expect(api.notify).not.toHaveBeenCalled();
+
+    nav.setWindowFocused(false);
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "completed" });
+    expect(api.notify).toHaveBeenCalledTimes(1);
+    expect(api.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Chat finished" }),
+    );
+  });
+});
+
 describe("applyEvent workspace renames", () => {
   it("follows a server-side rename so the open workspace does not go blank", async () => {
     const { applyEvent } = await import("./reducer");
