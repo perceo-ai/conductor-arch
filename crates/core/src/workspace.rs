@@ -10,6 +10,7 @@ use crate::github_pr::{
     parse_github_deployment_entries, parse_github_deployment_latest_status,
     parse_pull_request_check_runs, parse_pull_request_number, parse_pull_request_readiness,
     parse_pull_request_review_thread_mutation, parse_pull_request_review_threads,
+    parse_pull_request_state_and_checks,
 };
 use crate::harness;
 use crate::linear::fetch_linear_issue;
@@ -1259,6 +1260,9 @@ pub struct PullRequest {
     pub number: i64,
     pub url: String,
     pub state: String,
+    /// GitHub CI rollup at the last PR sync: "passing" | "failing" | "pending".
+    /// `None` when the PR has no checks or the sync predates this column.
+    pub checks_state: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -5333,15 +5337,19 @@ mutation($threadId: ID!) {{
                 .map(|(url, state)| self.record_pull_request_with_state(workspace.id, &url, &state))
                 .transpose();
         }
-        let args = self.gh_pr_args_for_workspace(&workspace, "view", &["--json", "state"])?;
-        let state = command_output_owned(&workspace.path, "gh", &args)?;
-        let state = extract_json_string_field(&state, "state")
-            .map(|state| state.to_ascii_lowercase())
-            .unwrap_or_else(|| "open".to_owned());
+        let args = self.gh_pr_args_for_workspace(
+            &workspace,
+            "view",
+            &["--json", "state,statusCheckRollup"],
+        )?;
+        let output = command_output_owned(&workspace.path, "gh", &args)?;
+        let (state, checks_state) = parse_pull_request_state_and_checks(&output);
+        let state = state.unwrap_or_else(|| "open".to_owned());
         let now = timestamp();
         self.conn.execute(
-            "UPDATE pull_requests SET state = ?1, updated_at = ?2 WHERE workspace_id = ?3",
-            params![state, now, workspace.id],
+            "UPDATE pull_requests SET state = ?1, checks_state = ?2, updated_at = ?3
+             WHERE workspace_id = ?4",
+            params![state, checks_state, now, workspace.id],
         )?;
         self.pull_request_by_workspace_id(workspace.id)
     }
@@ -5502,7 +5510,7 @@ mutation($threadId: ID!) {{
 
     fn pull_request_by_workspace_id(&self, workspace_id: i64) -> Result<Option<PullRequest>> {
         let result = self.conn.query_row(
-            "SELECT id, workspace_id, provider, number, url, state, created_at, updated_at
+            "SELECT id, workspace_id, provider, number, url, state, checks_state, created_at, updated_at
              FROM pull_requests WHERE workspace_id = ?1",
             [workspace_id],
             row_to_pull_request,
@@ -10710,8 +10718,9 @@ fn row_to_pull_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequest>
         number: row.get(3)?,
         url: row.get(4)?,
         state: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        checks_state: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -22310,8 +22319,8 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--commen
   printf 'alice: looks good\n'
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "state" ]; then
-  printf '{"state":"merged"}\n'
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ] && [ "$5" = "state,statusCheckRollup" ]; then
+  printf '{"state":"MERGED","statusCheckRollup":[{"name":"unit","conclusion":"SUCCESS"},{"name":"lint","conclusion":"SUCCESS"}]}\n'
   exit 0
 fi
 if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "42" ] && [ "$4" = "--json" ]; then
@@ -22366,13 +22375,20 @@ exit 1
             .pull_request_readiness_text("berlin")
             .unwrap()
             .contains("Review decision: APPROVED"));
+        let refreshed = store.refresh_pull_request_state("berlin").unwrap().unwrap();
+        assert_eq!(refreshed.state, "merged");
+        // The same sync that refreshes PR state records the CI rollup, so the
+        // PR chip stops answering "checks unknown" for checks GitHub knows.
+        assert_eq!(refreshed.checks_state.as_deref(), Some("passing"));
         assert_eq!(
             store
-                .refresh_pull_request_state("berlin")
+                .checks_summary("berlin")
                 .unwrap()
+                .pull_request
                 .unwrap()
-                .state,
-            "merged"
+                .checks_state
+                .as_deref(),
+            Some("passing")
         );
 
         restore_path(old_path);
@@ -22394,8 +22410,8 @@ if [ "$1" = "pr" ] && [ "$2" = "list" ] && [ "$3" = "--head" ] && [ "$4" = "lc/b
   printf '[{"url":"https://github.com/example/demo/pull/131"}]\n'
   exit 0
 fi
-if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "131" ] && [ "$4" = "--json" ] && [ "$5" = "state" ]; then
-  printf '{"state":"open"}\n'
+if [ "$1" = "pr" ] && [ "$2" = "view" ] && [ "$3" = "131" ] && [ "$4" = "--json" ] && [ "$5" = "state,statusCheckRollup" ]; then
+  printf '{"state":"OPEN","statusCheckRollup":[{"name":"unit","status":"IN_PROGRESS"}]}\n'
   exit 0
 fi
 echo "unexpected gh args: $*" >&2
@@ -22435,15 +22451,11 @@ exit 1
             .unwrap()
             .is_some());
 
-        // Second refresh: the row exists now, so it goes through `pr view`.
-        assert_eq!(
-            store
-                .refresh_pull_request_state("berlin")
-                .unwrap()
-                .unwrap()
-                .state,
-            "open"
-        );
+        // Second refresh: the row exists now, so it goes through `pr view`
+        // and picks up the CI rollup alongside the state.
+        let refreshed = store.refresh_pull_request_state("berlin").unwrap().unwrap();
+        assert_eq!(refreshed.state, "open");
+        assert_eq!(refreshed.checks_state.as_deref(), Some("pending"));
 
         restore_path(old_path);
     }

@@ -31,6 +31,8 @@ export interface WorkspaceRow {
   branchBehind?: number;
   prNumber?: number;
   prState?: string;
+  /** GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending"). */
+  prChecks?: string;
   prUrl?: string;
   updatedAt: string;
 }
@@ -68,6 +70,7 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
     branchBehind: s.branch_behind,
     prNumber: s.pull_request_number,
     prState: s.pull_request_state,
+    prChecks: s.pull_request_checks,
     prUrl: s.pull_request_url,
     updatedAt: s.updated_at,
   };

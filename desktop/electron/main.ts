@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from "electron";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
@@ -21,7 +21,7 @@ import {
   renderPairingQr,
 } from "./pairing.js";
 import { resolveWindowIconPath } from "./icon.js";
-import { externalNavigationUrl, isExternalOpenTarget } from "./externalNavigation.js";
+import { externalNavigationUrl, isAppShellNavigation, isExternalOpenTarget } from "./externalNavigation.js";
 import * as fileAccess from "./fileAccess.js";
 // CommonJS package: the named export is not reachable through ESM interop.
 import electronUpdater from "electron-updater";
@@ -258,11 +258,14 @@ function createWindow() {
     if (isExternalOpenTarget(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
+  const contents = win.webContents;
   win.webContents.on("will-navigate", (event, url) => {
-    const external = externalNavigationUrl(url, DEV_SERVER_URL ?? null);
-    if (!external) return;
+    if (isAppShellNavigation(url, DEV_SERVER_URL ?? null, contents.getURL())) return;
+    // Nothing else may replace the SPA — a file link in chat would otherwise
+    // render the raw file in place of the app. Web links still reach the OS.
     event.preventDefault();
-    void shell.openExternal(external);
+    const external = externalNavigationUrl(url, DEV_SERVER_URL ?? null);
+    if (external) void shell.openExternal(external);
   });
 
   win.on("focus", () => sendToRenderer("window:focus", true));
@@ -764,6 +767,18 @@ ipcMain.handle("fs:path-exists", async (_evt, p: string) => {
 ipcMain.handle("file-access:open-settings", () => fileAccess.openSettings());
 ipcMain.handle("file-access:reveal-daemon", () => fileAccess.revealDaemon());
 ipcMain.handle("file-access:restart-daemon", () => fileAccess.restartDaemon());
+
+ipcMain.handle("app:notify", (_evt, opts: { title?: string; body?: string }) => {
+  try {
+    if (!Notification.isSupported()) return { ok: false, error: "notifications not supported" };
+    const title = opts?.title?.trim();
+    if (!title) return { ok: false, error: "missing notification title" };
+    new Notification({ title, body: opts?.body ?? "" }).show();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+});
 
 // Open a URL in the default browser or a path in the OS default handler
 // (editor/file manager). Used by the PR status bar, the top-bar editor button,
