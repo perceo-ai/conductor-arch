@@ -29,7 +29,8 @@ import {
 } from "./store";
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
-import { installExternalLinkHandler } from "./lib/externalLinks";
+import { installExternalLinkHandler, workspaceFilePath } from "./lib/externalLinks";
+import { openFileInCenter } from "./pages/openFileBridge";
 import {
   parseKeybindingOverrides,
   resolveShortcut,
@@ -156,9 +157,18 @@ export default function App() {
   });
 
   // Links inside rendered markdown (chat, plans, briefings) are real anchors;
-  // without this they navigate the renderer away from the app shell.
+  // without this they navigate the renderer away from the app shell. File links
+  // open in the selected workspace's file tab, like a Browse-panel click.
   onMount(() => {
-    const dispose = installExternalLinkHandler(document, (url) => void openExternal(url));
+    const dispose = installExternalLinkHandler(
+      document,
+      (url) => void openExternal(url),
+      (href) => {
+        const ws = activeWorkspace();
+        const path = ws && workspaceFilePath(href, ws.path);
+        if (ws && path) openFileInCenter(ws.name, path);
+      },
+    );
     onCleanup(dispose);
   });
 

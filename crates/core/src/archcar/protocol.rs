@@ -926,6 +926,11 @@ pub enum ArchcarRequest {
     ListDiffContributions {
         workspace: String,
     },
+    RegisterNotificationDevice {
+        platform: String,
+        token: String,
+        app_bundle: String,
+    },
     Subscribe,
 }
 
@@ -1547,6 +1552,9 @@ pub struct ArchcarWorkspaceSummary {
     pub pull_request_number: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_state: Option<String>,
+    /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_checks: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1660,6 +1668,9 @@ pub struct ArchcarChecksSummary {
     pub pull_request_number: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_state: Option<String>,
+    /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_checks: Option<String>,
     pub conflicting_workspaces: usize,
 }
 
@@ -2307,6 +2318,14 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::UninstallService => "uninstall_service".to_owned(),
         ArchcarRequest::GetRemoteAccess => "get_remote_access".to_owned(),
         ArchcarRequest::RotateRemoteToken => "rotate_remote_token".to_owned(),
+        ArchcarRequest::RegisterNotificationDevice {
+            platform,
+            token,
+            app_bundle,
+        } => format!(
+            "register_notification_device platform={platform} bundle={app_bundle} token_chars={}",
+            token.chars().count()
+        ),
         ArchcarRequest::StartBackgroundTask { input } => format!(
             "start_background_task repository={} provider={} open_pr={} prompt_chars={}",
             input.repository,

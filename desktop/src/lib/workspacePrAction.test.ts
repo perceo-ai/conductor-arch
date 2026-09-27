@@ -103,6 +103,30 @@ describe("deriveWorkspacePrAction", () => {
     }
   });
 
+  it("uses the stored GitHub rollup when no local check process has run", () => {
+    // The daemon records the CI rollup on the pull_requests row at each PR
+    // sync. A workspace whose checks only run on GitHub (no local check
+    // script) used to sit on "Checks unknown" forever.
+    expect(
+      deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "passing" }),
+    ).toMatchObject({ title: "Ready to merge", action: "merge", state: "ready" });
+    expect(
+      deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "failing" }),
+    ).toMatchObject({ title: "Checks failing", action: "view", state: "checks-failed" });
+    expect(
+      deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "pending" }),
+    ).toMatchObject({ title: "Checks running", action: "view", state: "checks-running" });
+    // A live local check status still wins over the stored rollup.
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        checkStatus: "running",
+        prChecks: "passing",
+      }),
+    ).toMatchObject({ state: "checks-running" });
+  });
+
   it("routes explicit failed checks to review instead of merge", () => {
     for (const input of [{ checkStatus: "failed" }]) {
       expect(

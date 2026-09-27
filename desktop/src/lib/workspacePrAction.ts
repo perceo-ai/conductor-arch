@@ -38,6 +38,8 @@ export interface WorkspacePrActionInput {
   changedFiles?: number | null;
   branchChanged?: boolean;
   checkStatus?: string | null;
+  /** GitHub CI rollup stored at the last PR sync ("passing" | "failing" | "pending"). */
+  prChecks?: string | null;
   checkExitCode?: number | null;
   branchAhead?: number | null;
   sourceBranchAhead?: number | null;
@@ -58,6 +60,7 @@ export function workspacePrActionInput(
     | {
         prNumber?: number | null;
         prState?: string | null;
+        prChecks?: string | null;
         changedFiles?: number | null;
         additions?: number | null;
         deletions?: number | null;
@@ -73,6 +76,7 @@ export function workspacePrActionInput(
     changedFiles: row?.changedFiles,
     branchChanged: (row?.additions ?? 0) > 0 || (row?.deletions ?? 0) > 0,
     checkStatus: checks?.check_status,
+    prChecks: checks?.pull_request_checks ?? row?.prChecks,
     checkExitCode: checks?.check_exit_code,
     branchAhead: checks?.branch_ahead ?? row?.branchAhead,
     sourceBranchAhead: checks?.source_branch_ahead,
@@ -84,7 +88,10 @@ export function workspacePrActionInput(
 export function deriveWorkspacePrAction(input: WorkspacePrActionInput): WorkspacePrActionState {
   const prNumber = input.prNumber ?? 0;
   const prState = (input.prState ?? "").toLowerCase();
-  const check = (input.checkStatus ?? "").toLowerCase();
+  // Local check-script status when one has run; otherwise the GitHub CI
+  // rollup recorded at the last PR sync. Without the fallback a workspace
+  // whose checks only run on GitHub sat on "Checks unknown" forever.
+  const check = (input.checkStatus ?? input.prChecks ?? "").toLowerCase();
   const ahead = input.branchAhead ?? input.sourceBranchAhead ?? 0;
   const behind = input.branchBehind ?? 0;
   const conflicts = input.conflicts ?? 0;
@@ -92,6 +99,7 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
   const checksPassed =
     check === "success" ||
     check === "passed" ||
+    check === "passing" ||
     check === "pass";
   const checksFailed =
     check === "failing" ||

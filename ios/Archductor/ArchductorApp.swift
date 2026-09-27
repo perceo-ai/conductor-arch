@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct ArchductorApp: App {
+    @UIApplicationDelegateAdaptor(RemoteNotificationDelegate.self) private var notificationDelegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -16,7 +17,12 @@ struct ArchductorApp: App {
         WindowGroup {
             RootTabView()
                 .environment(model)
-                .task { await model.load() }
+                .task {
+                    RemoteNotificationDelegate.onDeviceToken = { token in
+                        Task { await model.registerRemoteDeviceToken(token) }
+                    }
+                    await model.load()
+                }
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
