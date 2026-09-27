@@ -192,9 +192,12 @@ artifacts for inspection.
 Release readiness requires more than attached artifacts. Before a public
 release, add or verify publishing pipelines for every supported Linux package
 channel: AppImage/GitHub releases, `.deb` repositories for APT, `.rpm`
-repositories for DNF or zypper, AUR, Flatpak, Nix, and Homebrew. Each channel
-should be tag-driven where supported, publish checksums where supported, and
-have documented rollback or yanking steps.
+repositories for DNF or zypper, AUR, Flatpak, Nix, and Homebrew. Use
+`packaging/public-repositories.md` for the APT, DNF, and Homebrew listing
+checklist and `scripts/check-public-repository-listing.sh` for the local
+metadata/artifact gate. Each channel should be tag-driven where supported,
+publish checksums where supported, and have documented rollback or yanking
+steps.
 
 The release pipeline must also build the website as a subset of `perceo.ai`, or
 treat that website build as a required release gate. The site should include

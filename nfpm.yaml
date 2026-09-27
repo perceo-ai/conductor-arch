@@ -10,8 +10,8 @@ description: |
   Archductor is a parallel coding-agent workflow tool built around Git worktrees.
   Each task gets its own isolated workspace: a branch, a directory, a terminal,
   agent sessions, run scripts, diffs, checks, and a pull request path.
-vendor: archductor
-homepage: https://github.com/pranavkannepalli/conductor-arch
+vendor: Perceo
+homepage: https://github.com/perceo-ai/conductor-arch
 license: Apache-2.0
 
 contents:

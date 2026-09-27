@@ -1,0 +1,7 @@
+[archductor]
+name=Archductor
+baseurl=https://packages.perceo.ai/rpm/x86_64
+enabled=1
+gpgcheck=1
+repo_gpgcheck=1
+gpgkey=https://packages.perceo.ai/rpm/RPM-GPG-KEY-archductor
