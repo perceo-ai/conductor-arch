@@ -23,9 +23,9 @@ server-hosted session.
 
 ## Set up the server
 
-Install the CLI and daemon by whichever channel you prefer — the tarball, the
-`.deb`/`.rpm`, the AUR package, Nix, or Homebrew all ship both `archductor` and
-`archcar`. Then:
+Install the CLI and daemon by whichever channel you prefer — the tarball, CLI
+AppImage, AUR package, Nix, Homebrew, or the APT/DNF `archductor` package all
+ship both `archductor` and `archcar`. Then:
 
 ```bash
 archductor service setup

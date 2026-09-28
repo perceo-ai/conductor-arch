@@ -11,13 +11,13 @@ this wrong is the most common first-run problem.
 
 | You want | Artifact | Contains |
 | --- | --- | --- |
-| The desktop app | `Archductor-<version>-<arch>.AppImage`, `.deb`, `.rpm`, `.dmg`, or the Windows installer | Electron UI **plus** the `archcar` and `archductor` binaries |
-| CLI and daemon only | `archductor-<version>-x86_64.AppImage` or `archductor-<version>-linux-x86_64.tar.gz` | `archductor` and `archcar`, no UI |
+| The desktop app | `archductor-desktop-<version>-x86_64.AppImage`, `archductor-desktop_<version>_amd64.deb`, `archductor-desktop-<version>.x86_64.rpm`, `.dmg`, or the Windows installer | Electron UI **plus** bundled `archcar` and `archductor` sidecars |
+| CLI and daemon only | `archductor-<version>-x86_64.AppImage`, `archductor-<version>-linux-x86_64.tar.gz`, Homebrew/Linuxbrew, AUR, or Nix | `archductor` and `archcar`, no UI |
 
-Capital `A` is the app; lowercase is the command line. The desktop installers
-are self-contained — they bundle Chromium, Node, and both sidecars, so the
-target machine needs no Archductor-specific runtime libraries. Only `git`,
-`gh`, and your agent CLIs have to exist on the host.
+`archductor-desktop` is the app; lowercase `archductor` is the command line. The
+desktop installers are self-contained — they bundle Chromium, Node, and both
+sidecars, so the target machine needs no Archductor-specific runtime libraries.
+Only `git`, `gh`, and your agent CLIs have to exist on the host.
 
 `archductor` with no subcommand prints help; it does not open a window. The
 GUI is a separate executable that the installers put on your desktop menu.
@@ -26,8 +26,9 @@ If you install by hand, **copy `archcar` next to `archductor`**. The CLI
 resolves the daemon as a sibling of its own executable before falling back to
 `PATH`, so a lone `archductor` in `/usr/local/bin` will fail to start a daemon.
 
-Package-manager installs (`brew`, `paru -S archductor`, `nix run`, `.deb`,
-`.rpm`) always place both.
+APT/DNF install both surfaces only when you install `archductor` and
+`archductor-desktop`. Homebrew/Linuxbrew, the CLI AppImage, tarball, AUR, and
+Nix install the CLI and daemon without the Electron desktop app.
 
 ## 2. Make the tools reachable
 
