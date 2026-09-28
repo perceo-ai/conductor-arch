@@ -168,7 +168,7 @@ desktop_dist_abs="$(abs_dir "$desktop_dist")"
 cli_sums="$cli_dist_abs/SHA256SUMS"
 desktop_sums="$desktop_dist_abs/SHA256SUMS"
 
-check_artifact "$cli_dist_abs/archductor_${version}_amd64.deb" "$cli_sums"
+check_artifact "$cli_dist_abs/archductor_${version}-1_amd64.deb" "$cli_sums"
 check_artifact "$cli_dist_abs/archductor-${version}-1.x86_64.rpm" "$cli_sums"
 check_artifact "$desktop_dist_abs/archductor-desktop_${version}_amd64.deb" "$desktop_sums"
 check_artifact "$desktop_dist_abs/archductor-desktop-${version}.x86_64.rpm" "$desktop_sums"

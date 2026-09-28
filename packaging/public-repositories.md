@@ -85,7 +85,7 @@ https://packages.perceo.ai/apt/
 
 Required packages:
 
-- CLI package from `nfpm.yaml`: `archductor_<version>_amd64.deb`
+- CLI package from `nfpm.yaml`: `archductor_<version>-1_amd64.deb`
 - desktop package from `desktop/electron-builder.yml`:
   `archductor-desktop_<version>_amd64.deb`
 
