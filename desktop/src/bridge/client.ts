@@ -74,6 +74,7 @@ interface ArchductorApi {
   fileAccessRevealDaemon(): Promise<{ ok: boolean; error?: string }>;
   fileAccessRestartDaemon(): Promise<{ ok: boolean; error?: string }>;
   openWorkspaceApp(opts: { rootPath: string; appId: WorkspaceOpenAppId }): Promise<{ ok: boolean; error?: string }>;
+  notify(opts: { id: string; title: string; body: string }): Promise<{ ok: boolean; error?: string }>;
   checkForUpdates(): Promise<
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
@@ -190,6 +191,9 @@ export const fileAccess = {
 /** Open a workspace in a registered local editor app. */
 export const openWorkspaceApp = (opts: { rootPath: string; appId: WorkspaceOpenAppId }) =>
   api().openWorkspaceApp(opts);
+
+/** Show a native desktop notification from the Electron main process. */
+export const notify = (opts: { id: string; title: string; body: string }) => api().notify(opts);
 
 /** Check GitHub releases for a newer packaged Archductor build. */
 export const checkForUpdates = () => api().checkForUpdates();

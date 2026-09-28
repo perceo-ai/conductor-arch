@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { externalHref, installExternalLinkHandler } from "./externalLinks";
+import { externalHref, installExternalLinkHandler, workspaceFilePath } from "./externalLinks";
 
 describe("externalHref", () => {
   it("accepts http, https and mailto links", () => {
@@ -25,6 +25,47 @@ describe("externalHref", () => {
     expect(externalHref("javascript:alert(1)")).toBeNull();
     expect(externalHref("file:///etc/passwd")).toBeNull();
     expect(externalHref("data:text/html,<script>x</script>")).toBeNull();
+  });
+});
+
+describe("workspaceFilePath", () => {
+  const root = "/Users/me/ws";
+
+  it("keeps a workspace-relative link as-is", () => {
+    expect(workspaceFilePath("src/main.ts", root)).toBe("src/main.ts");
+    expect(workspaceFilePath("./src/main.ts", root)).toBe("src/main.ts");
+  });
+
+  it("relativizes absolute and file:// links inside the workspace", () => {
+    expect(workspaceFilePath("/Users/me/ws/src/main.ts", root)).toBe("src/main.ts");
+    expect(workspaceFilePath("file:///Users/me/ws/src/main.ts", root)).toBe("src/main.ts");
+    expect(workspaceFilePath("/Users/me/ws/src/main.ts", "/Users/me/ws/")).toBe("src/main.ts");
+  });
+
+  it("drops line anchors and decodes escapes", () => {
+    expect(workspaceFilePath("src/main.ts#L12", root)).toBe("src/main.ts");
+    expect(workspaceFilePath("src/main.ts:12", root)).toBe("src/main.ts");
+    expect(workspaceFilePath("src/main.ts:12:4", root)).toBe("src/main.ts");
+    expect(workspaceFilePath("docs/my%20notes.md", root)).toBe("docs/my notes.md");
+  });
+
+  it("handles Windows roots", () => {
+    expect(workspaceFilePath("C:\\code\\ws\\src\\a.ts", "C:\\code\\ws")).toBe("src/a.ts");
+    expect(workspaceFilePath("file:///C:/code/ws/src/a.ts", "C:\\code\\ws")).toBe("src/a.ts");
+  });
+
+  it("refuses paths outside the workspace", () => {
+    expect(workspaceFilePath("/etc/passwd", root)).toBeNull();
+    expect(workspaceFilePath("/Users/me/ws-other/a.ts", root)).toBeNull();
+    expect(workspaceFilePath("../outside.ts", root)).toBeNull();
+    expect(workspaceFilePath("/Users/me/ws/src/main.ts", null)).toBeNull();
+  });
+
+  it("ignores fragments, web links and the workspace root itself", () => {
+    expect(workspaceFilePath("#section", root)).toBeNull();
+    expect(workspaceFilePath("https://example.com/a.ts", root)).toBeNull();
+    expect(workspaceFilePath("/Users/me/ws", root)).toBeNull();
+    expect(workspaceFilePath("", root)).toBeNull();
   });
 });
 
@@ -67,6 +108,43 @@ describe("installExternalLinkHandler", () => {
 
     expect(evt.defaultPrevented).toBe(false);
     expect(open).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("routes local path links to the in-app opener instead of navigating", () => {
+    const open = vi.fn();
+    const openLocal = vi.fn();
+    const dispose = installExternalLinkHandler(document, open, openLocal);
+    document.body.innerHTML = `<a id="rel" href="src/main.ts">main</a><a id="abs" href="file:///Users/me/ws/a.ts">a</a>`;
+
+    const rel = clickOn(document.getElementById("rel")!);
+    const abs = clickOn(document.getElementById("abs")!);
+
+    expect(rel.defaultPrevented).toBe(true);
+    expect(abs.defaultPrevented).toBe(true);
+    expect(openLocal).toHaveBeenNthCalledWith(1, "src/main.ts");
+    expect(openLocal).toHaveBeenNthCalledWith(2, "file:///Users/me/ws/a.ts");
+    expect(open).not.toHaveBeenCalled();
+    dispose();
+  });
+
+  it("never lets a local link navigate the renderer, even with no opener", () => {
+    const dispose = installExternalLinkHandler(document, vi.fn());
+    document.body.innerHTML = `<a id="link" href="src/main.ts">main</a>`;
+
+    expect(clickOn(document.getElementById("link")!).defaultPrevented).toBe(true);
+    dispose();
+  });
+
+  it("refuses script-ish schemes without handing them to either opener", () => {
+    const open = vi.fn();
+    const openLocal = vi.fn();
+    const dispose = installExternalLinkHandler(document, open, openLocal);
+    document.body.innerHTML = `<a id="link" href="javascript:alert(1)">x</a>`;
+
+    expect(clickOn(document.getElementById("link")!).defaultPrevented).toBe(true);
+    expect(open).not.toHaveBeenCalled();
+    expect(openLocal).not.toHaveBeenCalled();
     dispose();
   });
 

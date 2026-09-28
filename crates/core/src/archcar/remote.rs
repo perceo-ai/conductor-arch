@@ -627,7 +627,16 @@ pub fn read_token(path: &Path) -> Result<Option<String>> {
 }
 
 /// Replace the token, invalidating every client that still holds the old one.
+///
+/// Also forgets every registered notification device: rotation is the
+/// documented way to revoke a phone, and a revoked phone must stop receiving
+/// APNs pushes too, not just lose its socket. Devices are cleared before the
+/// token is written so a failure here leaves the old token (and the operator
+/// retries) instead of rotating while stale devices keep getting pushes.
 pub fn rotate_token(paths: &AppPaths) -> Result<String> {
+    crate::notifications::NotificationDeviceStore::new(&paths.database_path)
+        .clear()
+        .context("clear notification device registrations")?;
     std::fs::create_dir_all(&paths.state_dir)?;
     let token = generate_token();
     write_token(&token_path(paths), &token)?;
@@ -1232,8 +1241,17 @@ mod tests {
             Some(first.as_str())
         );
 
+        // Register a phone, then rotate: rotation is "revoke a phone", so the
+        // device registration must go with the old token.
+        let devices = crate::notifications::NotificationDeviceStore::new(&paths.database_path);
+        devices
+            .register("ios", "feedbeef", "ai.perceo.archductor.ios")
+            .unwrap();
+        assert_eq!(devices.list().unwrap().len(), 1);
+
         let rotated = rotate_token(&paths).unwrap();
         assert_ne!(rotated, first);
+        assert_eq!(devices.list().unwrap().len(), 0);
     }
 
     #[cfg(unix)]

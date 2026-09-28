@@ -20,6 +20,8 @@ export interface ArchcarWorkspaceSummary {
   diff_deletions: number;
   pull_request_number?: number;
   pull_request_state?: string;
+  /** GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending"). */
+  pull_request_checks?: string;
   pull_request_url?: string;
   branch_ahead?: number;
   branch_behind?: number;
@@ -91,6 +93,8 @@ export interface ArchcarChecksSummary {
   branch_behind?: number;
   pull_request_number?: number;
   pull_request_state?: string;
+  /** GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending"). */
+  pull_request_checks?: string;
   conflicting_workspaces: number;
 }
 

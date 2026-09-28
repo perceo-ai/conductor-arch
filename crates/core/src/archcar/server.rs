@@ -31,6 +31,7 @@ use crate::archcar::session::{
     SessionCommand, SessionHandle,
 };
 use crate::archcar::transport::{self, DuplexStream, LocalListener};
+use crate::notifications::NotificationDeviceStore;
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
 use crate::provider_interactions::{ProviderInteractionRecord, ProviderInteractionStore};
@@ -1772,6 +1773,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             .pull_request
                             .as_ref()
                             .map(|pr| pr.state.clone()),
+                        pull_request_checks: summary
+                            .pull_request
+                            .as_ref()
+                            .and_then(|pr| pr.checks_state.clone()),
                         conflicting_workspaces: summary.conflicting_workspaces.len(),
                     },
                 },
@@ -2698,6 +2703,19 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetRemoteAccess => remote_access_response(false, state),
         ArchcarRequest::RotateRemoteToken => remote_access_response(true, state),
+        ArchcarRequest::RegisterNotificationDevice {
+            platform,
+            token,
+            app_bundle,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match NotificationDeviceStore::new(db_path).register(&platform, &token, &app_bundle) {
+                Ok(_) => ArchcarResponse::Ack,
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         // ---- Background development tasks -------------------------------
         ArchcarRequest::StartBackgroundTask { input } => start_background_task(state, input),
         ArchcarRequest::ListBackgroundTasks { active_only } => with_store(state, |store| {
@@ -4526,7 +4544,10 @@ fn pull_request_changed_event(
     let changed = match (before, after) {
         (None, None) => false,
         (Some(before), Some(after)) => {
-            before.number != after.number || before.state != after.state || before.url != after.url
+            before.number != after.number
+                || before.state != after.state
+                || before.url != after.url
+                || before.checks_state != after.checks_state
         }
         _ => true,
     };
@@ -5271,6 +5292,7 @@ fn workspace_summary_from_status_line(
         diff_deletions,
         pull_request_number: pull_request.as_ref().map(|pr| pr.number),
         pull_request_state: pull_request.as_ref().map(|pr| pr.state.clone()),
+        pull_request_checks: pull_request.as_ref().and_then(|pr| pr.checks_state.clone()),
         pull_request_url: pull_request.map(|pr| pr.url),
         branch_ahead: branch_push_state.as_ref().map(|s| s.ahead),
         branch_behind: branch_push_state.map(|s| s.behind),
@@ -6192,6 +6214,11 @@ fn load_or_restore_session_handle(
 }
 
 fn broadcast(state: &mut ServerState, event: ArchcarEvent) {
+    if crate::notifications::event_notification(&event).is_some() {
+        let db_path = state.db_path.clone();
+        let notification_event = event.clone();
+        std::thread::spawn(move || crate::notifications::notify_event(db_path, notification_event));
+    }
     state
         .subscribers
         .retain(|subscriber| subscriber.send(event.clone()).is_ok());
@@ -6414,6 +6441,7 @@ mod tests {
             number,
             url: format!("https://github.com/example/demo/pull/{number}"),
             state: state.to_owned(),
+            checks_state: None,
             created_at: "0".to_owned(),
             updated_at: "0".to_owned(),
         }
@@ -6443,6 +6471,14 @@ mod tests {
             Some(&pr_row(77, "open"))
         )
         .is_none());
+        // CI rollup moved (e.g. pending -> passing): news — the PR chip's
+        // checks state renders from this row.
+        let mut passing = pr_row(77, "open");
+        passing.checks_state = Some("passing".to_owned());
+        assert!(
+            pull_request_changed_event("berlin", Some(&pr_row(77, "open")), Some(&passing))
+                .is_some()
+        );
         // Still no PR anywhere: silence.
         assert!(pull_request_changed_event("berlin", None, None).is_none());
     }

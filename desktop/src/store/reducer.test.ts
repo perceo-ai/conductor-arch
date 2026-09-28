@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface MockApi {
   request: ReturnType<typeof vi.fn>;
+  notify: ReturnType<typeof vi.fn>;
   log: ReturnType<typeof vi.fn>;
 }
 
@@ -31,6 +32,7 @@ beforeEach(() => {
       if (req.type === "list_workspaces") return { type: "workspaces", workspaces: [] };
       return { type: "ack" };
     }),
+    notify: vi.fn(async () => ({ ok: true })),
     log: vi.fn(),
   };
   (globalThis as unknown as { window: { archductor: MockApi } }).window = { archductor: api };
@@ -158,6 +160,25 @@ describe("applyEvent chat attention", () => {
 
     applyEvent({ type: "turn_completed", session_id: 12, thread_id: 1, status: "success" });
     expect(chatStore.slice(1).completedTurnAttention).toBe(false);
+  });
+});
+
+describe("applyEvent native notifications", () => {
+  it("sends OS notifications only while the window is unfocused", async () => {
+    const { applyEvent } = await import("./reducer");
+    const { nav } = await import("./nav");
+
+    // Focused: the user is watching the chat; no banner on top of it.
+    nav.setWindowFocused(true);
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "completed" });
+    expect(api.notify).not.toHaveBeenCalled();
+
+    nav.setWindowFocused(false);
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "completed" });
+    expect(api.notify).toHaveBeenCalledTimes(1);
+    expect(api.notify).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Chat finished" }),
+    );
   });
 });
 

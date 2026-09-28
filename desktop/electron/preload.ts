@@ -117,6 +117,10 @@ const api = {
   openWorkspaceApp: (opts: { rootPath: string; appId: "cursor" | "vscode" }): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("shell:open-workspace-app", opts),
 
+  /** Show a native OS notification from the main process. */
+  notify: (opts: { id: string; title: string; body: string }): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke("app:notify", opts),
+
   /**
    * Shows a pairing QR for the iOS app in its own isolated window.
    *

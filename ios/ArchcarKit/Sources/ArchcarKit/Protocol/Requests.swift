@@ -29,3 +29,21 @@ public struct GetRemoteAccessRequest: ArchcarRequestBody {
     public static let typeName = "get_remote_access"
     public init() {}
 }
+
+public struct RegisterNotificationDeviceRequest: ArchcarRequestBody {
+    public static let typeName = "register_notification_device"
+    public let platform: String
+    public let token: String
+    public let appBundle: String
+
+    public init(platform: String = "ios", token: String, appBundle: String) {
+        self.platform = platform
+        self.token = token
+        self.appBundle = appBundle
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case platform, token
+        case appBundle = "app_bundle"
+    }
+}

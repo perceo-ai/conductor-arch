@@ -50,6 +50,38 @@ No desktop nearby? Use **Or enter it by hand** with the address from
 non-loopback address makes the app ask you to confirm you understand the token
 is sent in the clear.
 
+## Enable push notifications
+
+The iOS app asks for notification permission and registers its APNs device token
+with the daemon when it is connected. The daemon sends remote pushes only when
+APNs signing settings are present; otherwise it keeps local notifications only.
+
+Set these in the daemon environment:
+
+```sh
+ARCHDUCTOR_APNS_TEAM_ID=YOUR_TEAM_ID
+ARCHDUCTOR_APNS_KEY_ID=YOUR_KEY_ID
+ARCHDUCTOR_APNS_KEY_PATH=/absolute/path/AuthKey_YOUR_KEY_ID.p8
+```
+
+And pick the APNs environment explicitly (there is no default — a TestFlight
+or App Store build registers production tokens, and the sandbox endpoint can
+never reach them):
+
+```sh
+ARCHDUCTOR_APNS_ENV=production        # or development (Xcode/debug builds)
+```
+
+Optional settings:
+
+```sh
+ARCHDUCTOR_APNS_TOPIC=ai.perceo.archductor.ios
+ARCHDUCTOR_APNS_ENDPOINT=https://...  # test override
+```
+
+The machine running the daemon also needs `openssl` and a `curl` build with
+HTTP/2 support. Keep the `.p8` key out of this repository.
+
 ## Turn phone access off
 
 ```sh
@@ -68,6 +100,10 @@ the point was to lock someone out.
 ```sh
 archductor service token --rotate
 ```
+
+Rotation also forgets every registered notification device, so revoked phones
+stop receiving APNs pushes. Phones you keep re-register their device token the
+next time they connect with the new daemon token.
 
 That invalidates every paired client at once, including the desktop, so pair
 them again afterwards.
