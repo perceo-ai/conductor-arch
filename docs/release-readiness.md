@@ -46,6 +46,7 @@ The release workflow must produce:
 - AppImage
 - `archductor-<version>-windows-x86_64.zip`
 - `SHA256SUMS`
+- `SHA256SUMS-desktop-linux.txt`
 - `SHA256SUMS-windows.txt`
 - Trivy release-artifact scan result
 - provenance attestations

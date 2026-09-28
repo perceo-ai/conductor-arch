@@ -52,7 +52,7 @@ scripts/release-readiness.sh --version 0.1.0 --package
 
 ```bash
 VERSION=0.1.0 nfpm package --packager deb --target dist/
-sudo dpkg -i dist/archductor_0.1.0_amd64.deb
+sudo dpkg -i dist/archductor_0.1.0-1_amd64.deb
 ```
 
 ### .rpm (Fedora / openSUSE)

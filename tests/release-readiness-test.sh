@@ -109,7 +109,7 @@ output="$("$public_repo_script" --version 0.1.0 --metadata-only)"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 mkdir -p "$tmpdir/cli-dist" "$tmpdir/desktop-dist"
-touch "$tmpdir/cli-dist/archductor_0.1.0_amd64.deb"
+touch "$tmpdir/cli-dist/archductor_0.1.0-1_amd64.deb"
 set +e
 output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
     --cli-dist "$tmpdir/cli-dist" \
@@ -120,11 +120,11 @@ set -e
 [[ "$output" == *"missing or empty artifact"* ]] \
     || fail "empty public repository artifact check did not reject zero-byte artifacts"
 
-printf 'cli deb\n' > "$tmpdir/cli-dist/archductor_0.1.0_amd64.deb"
+printf 'cli deb\n' > "$tmpdir/cli-dist/archductor_0.1.0-1_amd64.deb"
 printf 'cli rpm\n' > "$tmpdir/cli-dist/archductor-0.1.0-1.x86_64.rpm"
 (
     cd "$tmpdir/cli-dist"
-    shasum -a 256 archductor_0.1.0_amd64.deb archductor-0.1.0-1.x86_64.rpm > SHA256SUMS
+    shasum -a 256 archductor_0.1.0-1_amd64.deb archductor-0.1.0-1.x86_64.rpm > SHA256SUMS
 )
 printf 'desktop deb\n' > "$tmpdir/desktop-dist/archductor-desktop_0.1.0_amd64.deb"
 printf 'desktop rpm\n' > "$tmpdir/desktop-dist/archductor-desktop-0.1.0.x86_64.rpm"
@@ -140,7 +140,7 @@ output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
 [[ "$output" == *"public repository listing artifacts: ok"* ]] \
     || fail "public repository artifact check did not pass"
 
-printf 'corrupt\n' >> "$tmpdir/cli-dist/archductor_0.1.0_amd64.deb"
+printf 'corrupt\n' >> "$tmpdir/cli-dist/archductor_0.1.0-1_amd64.deb"
 set +e
 output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
     --cli-dist "$tmpdir/cli-dist" \
@@ -152,7 +152,7 @@ set -e
     || fail "corrupt public repository artifact check did not explain checksum mismatch"
 (
     cd "$tmpdir/cli-dist"
-    shasum -a 256 archductor_0.1.0_amd64.deb archductor-0.1.0-1.x86_64.rpm > SHA256SUMS
+    shasum -a 256 archductor_0.1.0-1_amd64.deb archductor-0.1.0-1.x86_64.rpm > SHA256SUMS
 )
 output="$("$public_repo_script" --version 0.1.0 --require-artifacts \
     --cli-dist "$tmpdir/cli-dist" \
