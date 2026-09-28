@@ -50,8 +50,8 @@ For a release `vX.Y.Z`, collect:
   `.rpm` artifacts before publishing them to package repositories
 - Perceo package-signing key fingerprint and public key URL
 - public base URLs:
-  - APT: `https://packages.perceo.ai/apt`
-  - DNF: `https://packages.perceo.ai/rpm`
+  - APT: `https://www.perceo.ai/apt`
+  - DNF: `https://www.perceo.ai/rpm`
   - Homebrew tap: `https://github.com/perceo-ai/homebrew-tap`
 
 Before publishing, run:
@@ -75,7 +75,7 @@ Client source template: `packaging/apt/archductor.sources`.
 Recommended layout:
 
 ```text
-https://packages.perceo.ai/apt/
+https://www.perceo.ai/apt/
   archductor-archive-keyring.gpg
   dists/stable/InRelease
   dists/stable/Release
@@ -93,10 +93,10 @@ Human validation:
 
 ```bash
 curl -fsSLo /tmp/archductor-archive-keyring.gpg \
-  https://packages.perceo.ai/apt/archductor-archive-keyring.gpg
+  https://www.perceo.ai/apt/archductor-archive-keyring.gpg
 sudo install -Dm644 /tmp/archductor-archive-keyring.gpg \
   /usr/share/keyrings/archductor-archive-keyring.gpg
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/archductor-archive-keyring.gpg] https://packages.perceo.ai/apt stable main" \
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/archductor-archive-keyring.gpg] https://www.perceo.ai/apt stable main" \
   | sudo tee /etc/apt/sources.list.d/archductor.list
 sudo apt update
 sudo apt install archductor archductor-desktop
@@ -129,7 +129,7 @@ Client repo template: `packaging/rpm/archductor.repo`.
 Recommended layout:
 
 ```text
-https://packages.perceo.ai/rpm/
+https://www.perceo.ai/rpm/
   RPM-GPG-KEY-archductor
   archductor.repo
   x86_64/
@@ -149,18 +149,18 @@ Example repo file:
 ```ini
 [archductor]
 name=Archductor
-baseurl=https://packages.perceo.ai/rpm/x86_64
+baseurl=https://www.perceo.ai/rpm/x86_64
 enabled=1
 gpgcheck=1
 repo_gpgcheck=1
-gpgkey=https://packages.perceo.ai/rpm/RPM-GPG-KEY-archductor
+gpgkey=https://www.perceo.ai/rpm/RPM-GPG-KEY-archductor
 ```
 
 Human validation:
 
 ```bash
 sudo curl -fsSL -o /etc/yum.repos.d/archductor.repo \
-  https://packages.perceo.ai/rpm/archductor.repo
+  https://www.perceo.ai/rpm/archductor.repo
 sudo dnf makecache --repo archductor
 sudo dnf install archductor archductor-desktop
 archductor doctor
