@@ -62,5 +62,7 @@ describe("macOS signing configuration", () => {
     expect(workflow).toContain("desktop/release/SHA256SUMS-desktop-linux.txt");
     expect(workflow).toContain("sha256sum ./*.deb ./*.rpm > SHA256SUMS");
     expect(workflow).toContain("cp SHA256SUMS SHA256SUMS-desktop-linux.txt");
+    expect(workflow).toContain("if [ -f desktop/release/SHA256SUMS-desktop-linux.txt ]; then");
+    expect(workflow).toContain("files+=(desktop/release/SHA256SUMS-desktop-linux.txt)");
   });
 });

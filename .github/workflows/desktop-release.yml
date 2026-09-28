@@ -272,7 +272,10 @@ jobs:
           # no new version even though the installers are right there. The mac
           # zip is what Squirrel.Mac actually installs from (dmg = first
           # install only), so latest-mac.yml points at it.
-          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.zip desktop/release/*.exe desktop/release/latest*.yml desktop/release/*.blockmap desktop/release/SHA256SUMS-desktop-linux.txt)
+          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.zip desktop/release/*.exe desktop/release/latest*.yml desktop/release/*.blockmap)
+          if [ -f desktop/release/SHA256SUMS-desktop-linux.txt ]; then
+            files+=(desktop/release/SHA256SUMS-desktop-linux.txt)
+          fi
           if [ ${#files[@]} -eq 0 ]; then
             echo "no installers produced on $MATRIX_OS" >&2
             exit 0
