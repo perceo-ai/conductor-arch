@@ -78,10 +78,12 @@ Linear live validation requires `LINEAR_API_KEY`. GitHub validation requires
 Do not announce support for a channel until install, upgrade, launch, checksum,
 and rollback or yank paths are validated for that channel.
 
-APT, DNF, and Homebrew listing work is tracked in
-`packaging/public-repositories.md`. Perceo-owned repositories can be automated;
-official Debian, Ubuntu, Fedora, and Homebrew/core submissions require human
-ownership of submission, maintainer review, and policy commitments. Run
+Perceo-owned APT and DNF repositories are published from `perceo-site` at
+`https://www.perceo.ai/apt` and `https://www.perceo.ai/rpm`. The Homebrew tap is
+`perceo-ai/homebrew-tap` and installs the CLI/headless package. Official Debian,
+Ubuntu, Fedora, and Homebrew/core submissions require human ownership of
+submission, maintainer review, and policy commitments. Keep the operational
+checklist in `packaging/public-repositories.md` current. Run
 `scripts/check-public-repository-listing.sh --version <version> --metadata-only`
 before cutting a release branch, then rerun it with `--require-artifacts` on the
 release host after package artifacts exist.
@@ -89,19 +91,21 @@ release host after package artifacts exist.
 | Channel | Launch Requirement |
 | --- | --- |
 | GitHub/AppImage | Tag workflow attaches AppImage and checksum; AppImage runs the `archductor` CLI and forwards args. |
-| Debian/Ubuntu | `.deb` installs with `dpkg` or `apt`, runs `archductor doctor`, and has upgrade/removal notes. |
-| Fedora/openSUSE | `.rpm` installs with `rpm`, `dnf`, or `zypper`, runs `archductor doctor`, and has upgrade/removal notes. |
+| Debian/Ubuntu | Perceo APT repo installs `archductor archductor-desktop`, runs `archductor doctor`, launches `archductor-desktop`, and has upgrade/removal notes. |
+| Fedora/openSUSE | Perceo DNF repo installs `archductor archductor-desktop`, runs `archductor doctor`, launches `archductor-desktop`, and has upgrade/removal notes. |
 | AUR | `PKGBUILD` uses the release tag and real checksum, `makepkg -si` passes on Arch, and update/yank process is documented. |
 | Flatpak/Flathub | `packaging/flatpak/ai.perceo.Archductor.yml` builds locally, metadata validates, screenshots are current, Flathub review accepts the broad filesystem access requirement, and the Flathub package runs `archductor doctor`. |
 | Nix | `nix build` and `nix run .#archductor -- doctor` pass on Linux, and the flake is referenced from install docs before a nixpkgs submission. |
-| Homebrew | `perceo-ai/homebrew-tap` formula installs on Linuxbrew, `brew test archductor` passes, and tag publish refreshes the formula checksum. |
+| Homebrew | `perceo-ai/homebrew-tap` formula installs CLI/headless Archductor on Linuxbrew, `brew test archductor` passes, and tag publish refreshes the formula checksum. |
 | Windows ZIP | Archive contains the CLI and archcar sidecar, extracts cleanly, runs CLI, verifies checksum, upgrades safely, and passes the Windows workflow checklist. Preview until proven on real Windows. |
 
 ## Website Gate
 
-The `perceo.ai` Archductor page must ship before public launch or be a
-required release gate. The fuller product, site, video, and marketing launch
-requirements live in `docs/perceo-suite-release-prd.md`. The page needs:
+The `perceo.ai` Archductor page and static package repository files live in
+`perceo-site`. Treat that build as a release gate when package commands,
+repository hostnames, or supported channels change. The fuller product, site,
+video, and marketing launch requirements live in
+`docs/perceo-suite-release-prd.md`. The page needs:
 
 - Archductor product page with the real workflow
 - download/install instructions for supported channels only

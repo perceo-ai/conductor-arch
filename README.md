@@ -35,21 +35,41 @@ is a preview target until its manual package checklist passes.
 
 ## Install
 
-### AppImage
+### Linux desktop
 
 ```bash
-curl -Lo archductor.AppImage \
-  https://github.com/perceo-ai/conductor-arch/releases/latest/download/archductor-x86_64.AppImage
-chmod +x archductor.AppImage
-sudo mv archductor.AppImage /usr/local/bin/archductor
-archductor
+# Debian / Ubuntu
+curl -fsSLo /tmp/archductor-archive-keyring.gpg \
+  https://www.perceo.ai/apt/archductor-archive-keyring.gpg
+sudo install -Dm644 /tmp/archductor-archive-keyring.gpg \
+  /usr/share/keyrings/archductor-archive-keyring.gpg
+sudo curl -fsSLo /etc/apt/sources.list.d/archductor.sources \
+  https://www.perceo.ai/apt/archductor.sources
+sudo apt update
+sudo apt install archductor archductor-desktop
+
+# Fedora
+sudo curl -fsSLo /etc/yum.repos.d/archductor.repo \
+  https://www.perceo.ai/rpm/archductor.repo
+sudo dnf makecache --repo archductor
+sudo dnf install archductor archductor-desktop
 ```
 
-The AppImage runs the `archductor` CLI and forwards its arguments to it.
+For a manual desktop install, download the `archductor-desktop-*` artifact for
+your platform from the GitHub release. The Linux desktop AppImage is named
+`archductor-desktop-<version>-x86_64.AppImage`.
 
-### Package managers
+### CLI and daemon
 
 ```bash
+# AppImage
+VERSION=0.8.3
+curl -Lo archductor.AppImage \
+  https://github.com/perceo-ai/conductor-arch/releases/download/v${VERSION}/archductor-${VERSION}-x86_64.AppImage
+chmod +x archductor.AppImage
+sudo mv archductor.AppImage /usr/local/bin/archductor
+archductor doctor
+
 # Arch Linux AUR
 paru -S archductor
 
@@ -60,6 +80,10 @@ nix run github:perceo-ai/conductor-arch#archductor -- doctor
 brew tap perceo-ai/tap
 brew install archductor
 ```
+
+Homebrew/Linuxbrew installs the CLI and `archcar` daemon, not the Electron
+desktop app. APT/DNF install the desktop only when `archductor-desktop` is part
+of the install command.
 
 Flatpak packaging uses app ID `ai.perceo.Archductor` and remains experimental (🚧) until the sandbox passes Flathub review.
 

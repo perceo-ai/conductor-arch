@@ -189,17 +189,18 @@ explicit version such as `0.1.0`. Manual dispatch does not create a GitHub
 release unless it runs on a tag, but it still builds and uploads package
 artifacts for inspection.
 
-Release readiness requires more than attached artifacts. Before a public
-release, add or verify publishing pipelines for every supported Linux package
-channel: AppImage/GitHub releases, `.deb` repositories for APT, `.rpm`
-repositories for DNF or zypper, AUR, Flatpak, Nix, and Homebrew. Use
+Release readiness requires more than attached artifacts. The Perceo-owned APT
+and DNF repositories are published from `perceo-site` at
+`https://www.perceo.ai/apt` and `https://www.perceo.ai/rpm`; the Homebrew tap is
+`perceo-ai/homebrew-tap` and installs the CLI/headless package. Use
 `packaging/public-repositories.md` for the APT, DNF, and Homebrew listing
 checklist and `scripts/check-public-repository-listing.sh` for the local
-metadata/artifact gate. Each channel should be tag-driven where supported,
-publish checksums where supported, and have documented rollback or yanking
-steps.
+metadata/artifact gate. Official Debian, Ubuntu, Fedora, and Homebrew/core
+submissions remain human-owned. Each channel should be tag-driven where
+supported, publish checksums where supported, and have documented rollback or
+yanking steps.
 
-The release pipeline must also build the website as a subset of `perceo.ai`, or
-treat that website build as a required release gate. The site should include
-release downloads, install instructions, supported Linux targets, known limits,
-and links to the GitHub release artifacts.
+The release pipeline must also keep the `perceo.ai` site and static package
+repository files current. Treat the site build as a required release gate when
+package commands, repository hostnames, supported channels, known limits, or
+GitHub release artifact names change.
