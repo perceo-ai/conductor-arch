@@ -1,5 +1,5 @@
 Types: deb
-URIs: https://packages.perceo.ai/apt
+URIs: https://www.perceo.ai/apt
 Suites: stable
 Components: main
 Architectures: amd64
