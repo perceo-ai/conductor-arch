@@ -51,4 +51,14 @@ describe("macOS signing configuration", () => {
       expect(workflow).toContain(secret);
     }
   });
+
+  it("release workflow carries Linux desktop package checksums", () => {
+    const workflow = fs.readFileSync(
+      path.resolve(desktopRoot, "../.github/workflows/desktop-release.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain("Generate Linux package checksums");
+    expect(workflow).toContain("desktop/release/SHA256SUMS");
+    expect(workflow).toContain("sha256sum ./*.deb ./*.rpm > SHA256SUMS");
+  });
 });

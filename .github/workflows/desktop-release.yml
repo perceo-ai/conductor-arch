@@ -233,6 +233,11 @@ jobs:
           fi
           pnpm exec electron-builder "--$EB_PLATFORM" --publish never
 
+      - name: Generate Linux package checksums
+        if: runner.os == 'Linux'
+        working-directory: desktop/release
+        run: sha256sum ./*.deb ./*.rpm > SHA256SUMS
+
       - name: Collect artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -246,6 +251,7 @@ jobs:
             desktop/release/*.exe
             desktop/release/latest*.yml
             desktop/release/*.blockmap
+            desktop/release/SHA256SUMS
           if-no-files-found: warn
 
       - name: Attach to release
@@ -263,7 +269,7 @@ jobs:
           # no new version even though the installers are right there. The mac
           # zip is what Squirrel.Mac actually installs from (dmg = first
           # install only), so latest-mac.yml points at it.
-          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.zip desktop/release/*.exe desktop/release/latest*.yml desktop/release/*.blockmap)
+          files=(desktop/release/*.AppImage desktop/release/*.deb desktop/release/*.rpm desktop/release/*.dmg desktop/release/*.zip desktop/release/*.exe desktop/release/latest*.yml desktop/release/*.blockmap desktop/release/SHA256SUMS)
           if [ ${#files[@]} -eq 0 ]; then
             echo "no installers produced on $MATRIX_OS" >&2
             exit 0
