@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -241,6 +241,9 @@ impl ArchcarServer {
         }
         let shutdown_for_signal = Arc::clone(&shutdown);
         ctrlc::set_handler(move || {
+            // A stop request outranks a pending update restart: re-executing
+            // after SIGTERM would leave systemd waiting to SIGKILL us.
+            SIGNALLED.store(true, Ordering::SeqCst);
             shutdown_for_signal.store(true, Ordering::SeqCst);
         })
         .context("install archcar shutdown handler")?;
@@ -281,7 +284,11 @@ impl ArchcarServer {
             let _ = handler.join();
         }
         let shutdown_result = shutdown_managed_sessions(&self.state, "Archcar is shutting down.");
-        if serve_error.is_none() && RESTART_REQUESTED.load(Ordering::SeqCst) {
+        if serve_error.is_none()
+            && RESTART_REQUESTED.load(Ordering::SeqCst)
+            && !SIGNALLED.load(Ordering::SeqCst)
+        {
+            wait_for_in_flight_requests(Duration::from_secs(30));
             self.restart_in_place(remote_handoff.as_ref());
         }
         match (serve_error, shutdown_result) {
@@ -467,6 +474,7 @@ fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: A
             if shutdown.load(Ordering::SeqCst) || state.lock().unwrap().shutting_down {
                 break;
             }
+            let _in_flight = InFlight::enter();
             match tick_background_tasks(&state) {
                 Ok(tasks) if !tasks.is_empty() => {
                     for task in tasks {
@@ -490,6 +498,27 @@ fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: A
 /// the service manager (launchd `KeepAlive`, systemd `Restart=always`) or the
 /// desktop app starts the new binary instead.
 static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// SIGINT/SIGTERM arrived; never restart after that.
+static SIGNALLED: AtomicBool = AtomicBool::new(false);
+/// One update at a time: two would share a staging directory and the staged
+/// `.archcar.new`, and one could publish a binary the other is still writing.
+static UPDATE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Let requests that were already running finish before the process image is
+/// replaced. Bounded: a stuck request must not block an update forever.
+fn wait_for_in_flight_requests(limit: Duration) {
+    let deadline = std::time::Instant::now() + limit;
+    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let left = IN_FLIGHT.load(Ordering::SeqCst);
+    if left > 0 {
+        warn!(
+            requests = left,
+            "archcar restarting with requests still in flight"
+        );
+    }
+}
 
 /// Give the reply that announced the update time to reach the caller — a
 /// remote client's connection is not one `serve` joins before exiting.
@@ -510,10 +539,16 @@ fn apply_update(
     version: Option<&str>,
     force: bool,
 ) -> Result<crate::self_update::AppliedUpdate> {
-    let busy = busy_agent_workspaces(state);
-    if !force && !busy.is_empty() {
-        let mut busy: Vec<_> = busy.into_iter().collect();
+    let Ok(_updating) = UPDATE_LOCK.try_lock() else {
+        anyhow::bail!("an update is already in progress on this daemon");
+    };
+    let busy_now = || {
+        let mut busy: Vec<_> = busy_agent_workspaces(state).into_iter().collect();
         busy.sort();
+        busy
+    };
+    let busy = busy_now();
+    if !force && !busy.is_empty() {
         anyhow::bail!(
             "agents are mid-turn in {}; updating restarts the daemon and would stop them. \
              Retry when they finish, or force it",
@@ -522,6 +557,17 @@ fn apply_update(
     }
     let binary = crate::self_update::running_binary()?;
     let update = crate::self_update::apply(&AppPaths::from_env(), &binary, version)?;
+    // A download can take minutes; a turn that started meanwhile wins. The new
+    // binary is on disk, so the next apply only restarts.
+    let busy = busy_now();
+    if !force && !busy.is_empty() {
+        anyhow::bail!(
+            "installed v{} but agents started in {} meanwhile; the restart onto it is deferred. \
+             Apply again once they finish, or force it",
+            update.to_version,
+            busy.join(", ")
+        );
+    }
     info!(
         from = %update.from_version,
         to = %update.to_version,
@@ -738,7 +784,28 @@ fn archcar_rpc_log_payload_for_flag(raw_payload: &str, enabled: bool) -> Option<
     enabled.then(|| crate::redaction::redact_sensitive_text(raw_payload))
 }
 
+/// Requests (and background-task ticks) being handled right now. A restart in
+/// place waits for this to reach zero: `exec` would otherwise cut a remote
+/// client's request off halfway, and those handler threads are not joined.
+static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+struct InFlight;
+
+impl InFlight {
+    fn enter() -> Self {
+        IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
+    let _in_flight = InFlight::enter();
     if archcar_request_is_mutating(&request) && state.lock().unwrap().shutting_down {
         return ArchcarResponse::Error {
             message: "archcar is shutting down".to_owned(),

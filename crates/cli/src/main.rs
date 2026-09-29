@@ -6824,7 +6824,14 @@ mod tests {
 
     #[test]
     fn remote_update_targets_one_client_or_all_but_not_both() {
-        match command_of(&["archductor", "remote", "update", "build", "--version", "0.8.3"]) {
+        match command_of(&[
+            "archductor",
+            "remote",
+            "update",
+            "build",
+            "--version",
+            "0.8.3",
+        ]) {
             Command::Remote {
                 command:
                     RemoteCommand::Update {

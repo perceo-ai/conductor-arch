@@ -7,7 +7,9 @@ import { daemonUpdateSummary } from "@/lib/daemonUpdate";
 // daemon downloads and restarts itself, no SSH session. The CLI equivalent is
 // `archductor remote update <client>`.
 export function DaemonUpdateCard() {
-  const [status, { refetch, mutate }] = createResource(async () => {
+  // Keyed on the selected client: switching daemons with Settings open must
+  // not leave one daemon's version above a button that updates another.
+  const [status, { refetch, mutate }] = createResource(() => clientsStore.activeLabel(), async () => {
     try {
       return await actions.daemonUpdateStatus();
     } catch {

@@ -929,8 +929,9 @@ pub fn normalize_remote_url(url: &str) -> String {
         None => rest,
     };
     // `ssh://git@host:22/owner/repo`: the port is how to reach the host, not
-    // part of the repository path.
-    if let Some((host, path)) = rest.split_once('/') {
+    // part of the repository path. Only with a scheme — in scp-style
+    // `git@host:1234/repo`, `1234` is the owner.
+    if let Some((host, path)) = rest.split_once('/').filter(|_| url.contains("://")) {
         if let Some((host, port)) = host.split_once(':') {
             if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
                 return format!("{host}/{path}").to_lowercase();
@@ -938,6 +939,14 @@ pub fn normalize_remote_url(url: &str) -> String {
         }
     }
     rest.replacen(':', "/", 1).to_lowercase()
+}
+
+/// A host that cannot be a real hostname: an `~/.ssh/config` alias.
+fn looks_like_host_alias(normalized: &str) -> bool {
+    let host = normalized
+        .split_once('/')
+        .map_or(normalized, |(host, _)| host);
+    !host.contains('.') && host != "localhost"
 }
 
 /// The repository path of a normalized remote URL, without its host.
@@ -7542,7 +7551,12 @@ mutation($threadId: ID!) {{
             if found == wanted {
                 return Ok(Some(name));
             }
-            if remote_url_path(&found) == wanted_path {
+            // Only across an alias: `github.com/acme/app` and
+            // `gitlab.com/acme/app` are different repositories that merely
+            // share a path.
+            if remote_url_path(&found) == wanted_path
+                && (looks_like_host_alias(&found) || looks_like_host_alias(&wanted))
+            {
                 same_path.push(name);
             }
         }
@@ -7574,9 +7588,11 @@ mutation($threadId: ID!) {{
         let repository = self.load_repository(repository_name)?;
         let remote = repository.remote_name.as_str();
         let source_branch = source_branch.trim();
+        // It comes from another machine and reaches `git fetch` as an
+        // argument: a branch name, never an option.
         anyhow::ensure!(
-            !source_branch.is_empty(),
-            "a source branch is required to import"
+            validate_branch_name(source_branch).is_ok(),
+            "`{source_branch}` is not a branch name"
         );
         anyhow::ensure!(
             fetch_remote_source_branch(&repository.root_path, remote, source_branch)?,
@@ -17267,6 +17283,18 @@ CUSTOM_VALUE = "from-settings"
         assert!(message.contains("lc/unpushed"), "{message}");
         assert!(message.contains("push"), "{message}");
         assert!(store.get_by_name("berlin").is_err());
+
+        // A "branch" from the other machine never reaches git as an option.
+        let err = store
+            .import_from_remote_branch(
+                "demo",
+                "berlin",
+                "lc/x",
+                "--upload-pack=touch /tmp/pwn",
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("not a branch name"), "{err}");
     }
 
     #[test]
@@ -25228,6 +25256,11 @@ spotlight_testing = true
             normalize_remote_url("ssh://git@github.com:22/perceo-ai/conductor-arch.git"),
             normalize_remote_url("git@github.com:perceo-ai/conductor-arch.git")
         );
+        // scp-style has no port: a numeric first segment is the owner.
+        assert_eq!(
+            normalize_remote_url("git@host:1234/repo.git"),
+            "host/1234/repo"
+        );
     }
 
     #[test]
@@ -25297,6 +25330,13 @@ spotlight_testing = true
         }
         let store = WorkspaceStore::open(&db_path).unwrap();
 
+        // Two real hosts sharing a path are different repositories.
+        assert_eq!(
+            store
+                .find_repository_by_remote_url("https://bitbucket.org/perceo-ai/app")
+                .unwrap(),
+            None
+        );
         // An exact host match still wins over the ambiguity.
         assert_eq!(
             store

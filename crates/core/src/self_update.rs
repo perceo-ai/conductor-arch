@@ -170,7 +170,9 @@ pub fn classify(binary: &Path, facts: &ChannelFacts) -> (InstallChannel, bool, O
             say("run `brew upgrade archductor` on that machine, then apply to restart"),
         );
     }
-    if path.contains(".app/Contents/") {
+    // macOS bundle, or the Linux desktop packages' `resources/bin` — the
+    // deb/rpm there is `archductor-desktop`, whose upgrade is the app's.
+    if path.contains(".app/Contents/") || path.contains("/resources/bin/") {
         return (
             InstallChannel::DesktopApp,
             false,
@@ -295,7 +297,10 @@ fn status_with(
 /// restarts the daemon afterwards, whether or not anything was downloaded.
 pub fn apply(paths: &AppPaths, binary: &Path, requested: Option<&str>) -> Result<AppliedUpdate> {
     let status = status(paths, binary);
-    if status.restart_pending {
+    let requested_on_disk = requested.is_none_or(|version| {
+        Some(version.trim().trim_start_matches('v')) == status.on_disk_version.as_deref()
+    });
+    if status.restart_pending && requested_on_disk {
         return Ok(AppliedUpdate {
             to_version: status.on_disk_version.clone().unwrap_or_default(),
             from_version: status.current_version,
@@ -312,7 +317,16 @@ pub fn apply(paths: &AppPaths, binary: &Path, requested: Option<&str>) -> Result
     // Install what the status reported — the version the caller saw and
     // agreed to — and ask the network only when the daemon has no answer yet.
     let target = match requested {
-        Some(version) => version.trim().trim_start_matches('v').to_owned(),
+        Some(version) => {
+            let version = version.trim().trim_start_matches('v');
+            // It reaches a URL and a directory name next to the binaries, and
+            // it arrives from a client: accept a version, nothing path-like.
+            ensure!(
+                is_release_version(version),
+                "`{version}` is not a release version"
+            );
+            version.to_owned()
+        }
         None => match status.latest_version.clone() {
             Some(latest) => latest,
             None => update_check::fetch_latest_tag()
@@ -342,6 +356,24 @@ pub fn apply(paths: &AppPaths, binary: &Path, requested: Option<&str>) -> Result
     })
 }
 
+/// `MAJOR.MINOR.PATCH`, optionally `-prerelease` of letters, digits, and dots.
+fn is_release_version(version: &str) -> bool {
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        && pre.is_none_or(|pre| {
+            !pre.is_empty()
+                && !pre.contains("..")
+                && pre.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+        })
+}
+
 fn download_base() -> String {
     std::env::var(DOWNLOAD_BASE_ENV)
         .ok()
@@ -362,6 +394,10 @@ pub fn tarball_name(version: &str, os: &str, arch: &str) -> String {
 /// and the swap itself is two same-directory renames. The previous binaries
 /// stay beside them as `*.previous` for a manual rollback.
 pub fn install_release(dir: &Path, version: &str, base: &str, os: &str, arch: &str) -> Result<()> {
+    ensure!(
+        is_release_version(version),
+        "`{version}` is not a release version"
+    );
     let asset = tarball_name(version, os, arch);
     let staging = dir.join(format!(".archductor-update-{version}"));
     let _ = std::fs::remove_dir_all(&staging);
@@ -369,6 +405,11 @@ pub fn install_release(dir: &Path, version: &str, base: &str, os: &str, arch: &s
         .with_context(|| format!("create staging directory {}", staging.display()))?;
     let result = stage_and_swap(dir, version, base, &asset, &staging);
     let _ = std::fs::remove_dir_all(&staging);
+    if result.is_err() {
+        for name in ["archcar", "archductor"] {
+            let _ = std::fs::remove_file(dir.join(format!(".{name}.new")));
+        }
+    }
     result
 }
 
@@ -656,6 +697,16 @@ mod tests {
             channel("/tmp/.mount_archdXYZ/usr/bin/archcar", &facts).0,
             InstallChannel::AppImage
         );
+        // The Linux desktop deb puts its daemon under /opt and dpkg owns it,
+        // but upgrading it means upgrading the app, not `archductor`.
+        let desktop_deb = ChannelFacts {
+            package_owner: Some(InstallChannel::Apt),
+            ..release_facts()
+        };
+        assert_eq!(
+            channel("/opt/Archductor/resources/bin/archcar", &desktop_deb).0,
+            InstallChannel::DesktopApp
+        );
     }
 
     #[test]
@@ -888,6 +939,29 @@ mod tests {
             without_deleted_suffix(PathBuf::from("/usr/bin/archcar")),
             PathBuf::from("/usr/bin/archcar")
         );
+    }
+
+    #[test]
+    fn only_a_release_version_reaches_a_url_or_a_path() {
+        for good in ["0.8.3", "10.0.1", "0.9.0-rc.1"] {
+            assert!(is_release_version(good), "{good}");
+        }
+        for bad in [
+            "../../etc",
+            "0.8",
+            "0.8.3/../../x",
+            "0.8.3-../x",
+            "0.8.x",
+            "",
+            "0.8.3-",
+            "0.8.3 && rm",
+        ] {
+            assert!(!is_release_version(bad), "{bad}");
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let err = install_release(temp.path(), "../../x", "file:///nowhere", "linux", "x86_64")
+            .unwrap_err();
+        assert!(err.to_string().contains("not a release version"), "{err}");
     }
 
     #[test]

@@ -39,6 +39,11 @@ fn adopt(value: &str) -> Option<OwnedFd> {
     // SAFETY: probing with F_GETFD; the borrow ends before any ownership claim.
     let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
     rustix::io::fcntl_getfd(borrowed).ok()?;
+    // Close-on-exec was cleared for the handoff; put it back, or every agent,
+    // git, and script process this daemon spawns inherits the listening
+    // sockets — and keeps them open after the daemon is gone, so clients
+    // queue on a socket nobody will ever accept from.
+    rustix::io::fcntl_setfd(borrowed, rustix::io::FdFlags::CLOEXEC).ok()?;
     // SAFETY: the descriptor is open, and was handed to this image for it
     // alone to own; nothing else in this process refers to it.
     Some(unsafe { OwnedFd::from_raw_fd(fd) })
@@ -88,6 +93,10 @@ mod tests {
         // A client that connects "mid-restart" is queued, not refused.
         let mut client = UnixStream::connect(&path).unwrap();
         let adopted = UnixListener::from(adopt(&number).expect("fd is open"));
+        // Children the new image spawns must not inherit the listener.
+        assert!(rustix::io::fcntl_getfd(&adopted)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC));
         let (mut served, _) = adopted.accept().unwrap();
         client.write_all(b"ping").unwrap();
         let mut buffer = [0_u8; 4];
