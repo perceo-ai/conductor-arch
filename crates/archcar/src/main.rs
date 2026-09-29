@@ -19,7 +19,12 @@ fn main() -> Result<()> {
         .skip(1)
         .any(|arg| arg == "--version" || arg == "-V")
     {
-        println!("archcar {}", env!("CARGO_PKG_VERSION"));
+        // The release version, not CARGO_PKG_VERSION (which is never bumped):
+        // self-update compares this against the running daemon.
+        println!(
+            "archcar {}",
+            archductor_core::update_check::current_version()
+        );
         return Ok(());
     }
     let paths = AppPaths::from_env();

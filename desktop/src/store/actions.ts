@@ -7,7 +7,7 @@
 
 import { send, sendLocal } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
-import type { ArchcarResponse } from "@/bridge/protocol";
+import type { AppliedDaemonUpdate, ArchcarResponse, DaemonUpdateStatus } from "@/bridge/protocol";
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { nav } from "./nav";
@@ -57,9 +57,76 @@ export interface CreateWorkspaceInput {
   baseRef?: string;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function daemonUpdateStatus(): Promise<DaemonUpdateStatus> {
+  const res = ensureOk(await send({ type: "get_update_status" }));
+  if (res.type !== "update_status") throw new Error("the daemon did not report its version");
+  return res.status;
+}
+
 export const actions = {
   /** Re-pull workspaces + repositories (archcar has no inventory-changed event). */
   refreshInventory,
+
+  daemonUpdateStatus,
+
+  /**
+   * Update the connected daemon — this machine's or a remote one — and wait
+   * for it to come back on the new version. The daemon restarts itself after
+   * answering, so requests fail for a moment; those failures are the restart,
+   * not an error.
+   */
+  async updateDaemon(
+    options: { force?: boolean; pollMs?: number; timeoutMs?: number } = {},
+  ): Promise<AppliedDaemonUpdate> {
+    logAction("apply_update", { force: options.force ?? false });
+    const res = ensureOk(await send({ type: "apply_update", force: options.force }));
+    if (res.type !== "update_applied") throw new Error("the daemon did not apply an update");
+    const pollMs = options.pollMs ?? 1000;
+    const deadline = Date.now() + (options.timeoutMs ?? 60_000);
+    await sleep(pollMs * 2);
+    while (Date.now() < deadline) {
+      try {
+        if ((await daemonUpdateStatus()).current_version === res.update.to_version) {
+          await refreshInventory();
+          return res.update;
+        }
+      } catch {
+        // Still restarting.
+      }
+      await sleep(pollMs);
+    }
+    throw new Error(
+      `the daemon did not come back on v${res.update.to_version} within a minute; check its service`,
+    );
+  },
+
+  async setDaemonAutoUpdate(enabled: boolean): Promise<DaemonUpdateStatus> {
+    logAction("set_auto_update", { enabled });
+    const res = ensureOk(await send({ type: "set_auto_update", enabled }));
+    if (res.type !== "update_status") throw new Error("the daemon did not confirm the setting");
+    return res.status;
+  },
+
+  /**
+   * The app updates itself, and with it the daemon binary it bundles — but a
+   * daemon kept alive by launchd keeps running the old one. On launch, move
+   * this machine's bundled daemon onto the binary the app just installed.
+   * Never forced: agents mid-turn win, and the next launch tries again.
+   */
+  async finishBundledDaemonUpdate(isRemote: boolean, pollMs?: number): Promise<boolean> {
+    if (isRemote) return false;
+    try {
+      const status = await daemonUpdateStatus();
+      if (status.channel !== "desktop_app" || !status.restart_pending) return false;
+      await this.updateDaemon({ pollMs });
+      return true;
+    } catch {
+      // An older daemon without the RPC, or agents are busy; both are fine.
+      return false;
+    }
+  },
 
   revealPanel(panelId: PanelId, options: { activate?: boolean } = {}) {
     const descriptor = panelDescriptor(panelId);
@@ -226,14 +293,20 @@ export const actions = {
     }
 
     let threadId = input.threadId;
-    if (threadId === "latest") {
-      const threads = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
-      threadId =
-        threads.type === "chat_threads"
-          ? threads.threads
-              .filter((thread) => !thread.archived_at)
-              .sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0]?.id
-          : undefined;
+    let provider: string | undefined;
+    if (threadId != null) {
+      const listed = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
+      const threads = listed.type === "chat_threads" ? listed.threads : [];
+      const thread =
+        threadId === "latest"
+          ? threads
+              .filter((candidate) => !candidate.archived_at)
+              .sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0]
+          : threads.find((candidate) => candidate.id === threadId);
+      if (threadId === "latest") threadId = thread?.id;
+      // The chat continues under the agent it was held with; the daemon would
+      // otherwise default an imported chat to Codex.
+      provider = thread?.provider;
     }
     let transcript: { role: string; content: string; created_at: string }[] = [];
     let chatTitle: string | undefined;
@@ -269,6 +342,7 @@ export const actions = {
       name: source.name,
       transcript,
       chat_title: chatTitle,
+      provider,
     });
     if (imported.type === "error" && imported.message.startsWith("no repository here has remote")) {
       throw new MissingLocalRepositoryError(repositoryUrl, source.repository_name);

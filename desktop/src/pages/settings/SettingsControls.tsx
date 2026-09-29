@@ -25,7 +25,7 @@ export const SETTINGS_SECTIONS: Array<{
   },
   { id: "agents", label: "Agents", group: "Agents & environment", icon: "brain", keywords: ["model", "skills", "mcp", "environment", "recovery"] },
   { id: "repository", label: "Repository behavior", group: "Repositories", icon: "folder", keywords: ["git", "worktree", "branch", "push", "remote"] },
-  { id: "advanced", label: "Advanced", group: "More", icon: "wrench", keywords: ["toml", "config", "settings file", "logs"] },
+  { id: "advanced", label: "Advanced", group: "More", icon: "wrench", keywords: ["toml", "config", "settings file", "logs", "update", "daemon", "version"] },
 ];
 export function SettingsNavButton(props: {
   active: boolean;

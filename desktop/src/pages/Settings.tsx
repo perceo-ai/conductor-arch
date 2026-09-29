@@ -24,6 +24,7 @@ import { SkillsCard } from "./settings/SkillsCard";
 import { RemoteDaemonCard } from "./settings/RemoteDaemonCard";
 import { PairPhoneCard } from "./settings/PairPhoneCard";
 import { BackgroundServiceCard } from "./settings/BackgroundServiceCard";
+import { DaemonUpdateCard } from "./settings/DaemonUpdateCard";
 import { McpRegistrationCard } from "./settings/McpRegistrationCard";
 
 // Settings page — two panes per scope:
@@ -733,6 +734,10 @@ export function SettingsPage() {
                   </div>
                 }
               />
+              {/* The daemon is updated separately from the app: it may be a
+                  server's, and even this machine's keeps running its old binary
+                  until restarted. */}
+              <DaemonUpdateCard />
             </SettingsSectionBlock>
           </div>
         </Show>

@@ -85,6 +85,10 @@ const BACKGROUND_TASK_TICK: Duration = Duration::from_secs(10);
 /// limited to `update_check::REFRESH_INTERVAL`; this only bounds how fast the
 /// thread notices shutdown.
 const UPDATE_CHECK_TICK: Duration = Duration::from_secs(60);
+/// How often an opted-in daemon retries a pending update that agents were
+/// busy for. Each try runs a few short probes (the on-disk binary's version,
+/// the package owner), so not every tick.
+const AUTO_UPDATE_RETRY: Duration = Duration::from_secs(5 * 60);
 /// How long an idle accept loop waits before re-checking the shutdown flag.
 /// This is no longer per-connection latency — `wait_for_connection` returns as
 /// soon as a client arrives — so it only bounds shutdown responsiveness.
@@ -171,12 +175,35 @@ impl ArchcarServer {
         if let Some(parent) = endpoint_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let listener = transport::bind(&endpoint_path)
-            .with_context(|| format!("bind archcar endpoint {}", endpoint_path.display()))?;
-        let remote = match remote::configured_listen_addr(&paths) {
-            Some(Ok(addr)) => Some(bind_remote_listener(&paths, addr)?),
-            Some(Err(err)) => return Err(err),
-            None => None,
+        // After an in-place restart the previous image hands its sockets over;
+        // adopting them is what keeps clients from ever finding the endpoint
+        // missing (see `handoff`).
+        #[cfg(unix)]
+        let inherited_local = super::handoff::take_inherited(super::handoff::LOCAL_FD_ENV)
+            .map(std::os::unix::net::UnixListener::from);
+        #[cfg(not(unix))]
+        let inherited_local: Option<transport::LocalListener> = None;
+        #[cfg(unix)]
+        let inherited_remote = super::handoff::take_inherited(super::handoff::REMOTE_FD_ENV)
+            .map(std::net::TcpListener::from);
+        #[cfg(not(unix))]
+        let inherited_remote: Option<std::net::TcpListener> = None;
+        let listener = match inherited_local {
+            Some(listener) => {
+                info!(endpoint = %endpoint_path.display(), "archcar adopted its listener across a restart");
+                listener
+            }
+            None => transport::bind(&endpoint_path)
+                .with_context(|| format!("bind archcar endpoint {}", endpoint_path.display()))?,
+        };
+        let remote = match (inherited_remote, remote::configured_listen_addr(&paths)) {
+            (Some(listener), Some(Ok(_))) => {
+                info!("archcar adopted its remote listener across a restart");
+                Some(adopt_remote_listener(&paths, listener)?)
+            }
+            (_, Some(Ok(addr))) => Some(bind_remote_listener(&paths, addr)?),
+            (_, Some(Err(err))) => return Err(err),
+            (_, None) => None,
         };
         let state = Arc::new(Mutex::new(ServerState {
             remote_listen: remote.as_ref().map(|listener| listener.addr),
@@ -202,7 +229,13 @@ impl ArchcarServer {
         let shutdown = Arc::new(AtomicBool::new(false));
         spawn_queued_input_startup_sweep(&self.state);
         spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
-        spawn_update_check_refresher(Arc::clone(&shutdown));
+        spawn_update_check_refresher(&self.state, Arc::clone(&shutdown));
+        // Kept for an in-place restart: the listener thread drops its own
+        // handle on shutdown, which would close the socket before the handoff.
+        let remote_handoff = self
+            .remote
+            .as_ref()
+            .and_then(|remote| remote.listener.try_clone().ok());
         if let Some(remote) = self.remote.take() {
             spawn_remote_listener(remote, &self.state, Arc::clone(&shutdown));
         }
@@ -215,7 +248,7 @@ impl ArchcarServer {
         let mut handlers = Vec::new();
         let mut serve_error = None;
 
-        while !shutdown.load(Ordering::SeqCst) {
+        while !shutdown.load(Ordering::SeqCst) && !RESTART_REQUESTED.load(Ordering::SeqCst) {
             match transport::accept(&self.listener, &self.endpoint_path) {
                 Ok((stream, _)) => {
                     let state = self.state.clone();
@@ -241,11 +274,16 @@ impl ArchcarServer {
             }
         }
 
+        // Stop the background threads too when the loop ended for a restart.
+        shutdown.store(true, Ordering::SeqCst);
         begin_shutdown(&self.state);
         for handler in handlers {
             let _ = handler.join();
         }
         let shutdown_result = shutdown_managed_sessions(&self.state, "Archcar is shutting down.");
+        if serve_error.is_none() && RESTART_REQUESTED.load(Ordering::SeqCst) {
+            self.restart_in_place(remote_handoff.as_ref());
+        }
         match (serve_error, shutdown_result) {
             (Some(err), Ok(())) => Err(err),
             (Some(err), Err(cleanup_err)) => {
@@ -256,9 +294,37 @@ impl ArchcarServer {
     }
 }
 
+impl ArchcarServer {
+    /// Become the updated binary without closing the sockets. Returns only if
+    /// that failed; exiting then leaves the restart to the service manager
+    /// (or the next client), which is how every restart worked before this.
+    #[cfg(unix)]
+    fn restart_in_place(&self, remote: Option<&std::net::TcpListener>) {
+        let binary = match crate::self_update::running_binary() {
+            Ok(binary) => binary,
+            Err(err) => {
+                warn!(error = %format!("{err:#}"), "archcar cannot find its binary to restart in place");
+                return;
+            }
+        };
+        info!(binary = %binary.display(), "archcar restarting in place");
+        let err = super::handoff::reexec(&binary, &self.listener, remote);
+        warn!(error = %err, "archcar could not restart in place; exiting instead");
+    }
+
+    #[cfg(not(unix))]
+    fn restart_in_place(&self, _remote: Option<&std::net::TcpListener>) {}
+}
+
 fn bind_remote_listener(paths: &AppPaths, addr: std::net::SocketAddr) -> Result<RemoteListener> {
+    adopt_remote_listener(paths, remote::bind(addr)?)
+}
+
+fn adopt_remote_listener(
+    paths: &AppPaths,
+    listener: std::net::TcpListener,
+) -> Result<RemoteListener> {
     let token = remote::ensure_token(paths)?;
-    let listener = remote::bind(addr)?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
     if remote::is_public_addr(&addr) {
@@ -418,18 +484,67 @@ fn spawn_background_task_supervisor(state: &Arc<Mutex<ServerState>>, shutdown: A
     });
 }
 
+/// Set once an update is in place: the accept loop winds down exactly as it
+/// does on SIGTERM, then the process re-executes the new binary in place,
+/// keeping its sockets (`handoff`). Where that is not possible it exits, and
+/// the service manager (launchd `KeepAlive`, systemd `Restart=always`) or the
+/// desktop app starts the new binary instead.
+static RESTART_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Give the reply that announced the update time to reach the caller — a
+/// remote client's connection is not one `serve` joins before exiting.
+fn schedule_restart() {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(750));
+        RESTART_REQUESTED.store(true, Ordering::SeqCst);
+    });
+}
+
+/// Update this daemon, then restart it.
+///
+/// A restart ends every managed session, so it waits for agents to finish
+/// their turns unless the caller says otherwise; idle sessions resume from
+/// their native session ids on the next turn.
+fn apply_update(
+    state: &Arc<Mutex<ServerState>>,
+    version: Option<&str>,
+    force: bool,
+) -> Result<crate::self_update::AppliedUpdate> {
+    let busy = busy_agent_workspaces(state);
+    if !force && !busy.is_empty() {
+        let mut busy: Vec<_> = busy.into_iter().collect();
+        busy.sort();
+        anyhow::bail!(
+            "agents are mid-turn in {}; updating restarts the daemon and would stop them. \
+             Retry when they finish, or force it",
+            busy.join(", ")
+        );
+    }
+    let binary = crate::self_update::running_binary()?;
+    let update = crate::self_update::apply(&AppPaths::from_env(), &binary, version)?;
+    info!(
+        from = %update.from_version,
+        to = %update.to_version,
+        downloaded = update.downloaded,
+        "archcar updated; restarting"
+    );
+    schedule_restart();
+    Ok(update)
+}
+
 /// Keep the "is this machine behind the latest release?" cache warm.
 ///
 /// The daemon owns this because it is the only always-on process: a CLI
 /// command is too short-lived to pay for a GitHub round trip, so it reads the
 /// cache this thread writes. Failures are silent by design — see
 /// `update_check`.
-fn spawn_update_check_refresher(shutdown: Arc<AtomicBool>) {
+fn spawn_update_check_refresher(state: &Arc<Mutex<ServerState>>, shutdown: Arc<AtomicBool>) {
     // Nothing consumes the cache in a dev build, so don't poll GitHub from
     // every developer machine either.
     if !crate::update_check::is_release_build() {
         return;
     }
+    let state = Arc::clone(state);
     std::thread::spawn(move || {
         let paths = AppPaths::from_env();
         while !shutdown.load(Ordering::SeqCst) {
@@ -439,18 +554,44 @@ fn spawn_update_check_refresher(shutdown: Arc<AtomicBool>) {
             ) {
                 debug!(latest_tag = %cache.latest_tag, "update check cache refreshed");
             }
+            auto_update_if_idle(&state, &paths);
             // Sleep in short slices so shutdown is not delayed by the long
-            // refresh interval.
+            // refresh interval, and so an update deferred for busy agents is
+            // retried within minutes rather than at the next refresh.
             let mut waited = Duration::ZERO;
+            let mut since_auto_update = Duration::ZERO;
             while waited < crate::update_check::REFRESH_INTERVAL {
                 if shutdown.load(Ordering::SeqCst) {
                     return;
                 }
                 std::thread::sleep(UPDATE_CHECK_TICK);
                 waited += UPDATE_CHECK_TICK;
+                since_auto_update += UPDATE_CHECK_TICK;
+                if since_auto_update >= AUTO_UPDATE_RETRY {
+                    since_auto_update = Duration::ZERO;
+                    auto_update_if_idle(&state, &paths);
+                }
             }
         }
     });
+}
+
+/// Apply a pending update when the user opted in and nothing would be cut off.
+/// Busy now is retried every `AUTO_UPDATE_RETRY`.
+fn auto_update_if_idle(state: &Arc<Mutex<ServerState>>, paths: &AppPaths) {
+    if !crate::self_update::auto_update_enabled(paths) {
+        return;
+    }
+    let Ok(binary) = crate::self_update::running_binary() else {
+        return;
+    };
+    if !crate::self_update::status(paths, &binary).actionable() {
+        return;
+    }
+    match apply_update(state, None, false) {
+        Ok(_) => {}
+        Err(err) => debug!(error = %format!("{err:#}"), "auto-update deferred"),
+    }
 }
 
 /// Deliver messages that were queued before this daemon started.
@@ -2674,6 +2815,35 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             }
             Err(message) => ArchcarResponse::Error { message },
         },
+        ArchcarRequest::GetUpdateStatus => match crate::self_update::running_binary() {
+            Ok(binary) => ArchcarResponse::UpdateStatus {
+                status: crate::self_update::status(&AppPaths::from_env(), &binary),
+            },
+            Err(err) => ArchcarResponse::Error {
+                message: err.to_string(),
+            },
+        },
+        ArchcarRequest::ApplyUpdate { version, force } => {
+            match apply_update(state, version.as_deref(), force) {
+                Ok(update) => ArchcarResponse::UpdateApplied { update },
+                Err(err) => ArchcarResponse::Error {
+                    message: format!("{err:#}"),
+                },
+            }
+        }
+        ArchcarRequest::SetAutoUpdate { enabled } => {
+            let paths = AppPaths::from_env();
+            match crate::self_update::set_auto_update(&paths, enabled)
+                .and_then(|()| crate::self_update::running_binary())
+            {
+                Ok(binary) => ArchcarResponse::UpdateStatus {
+                    status: crate::self_update::status(&paths, &binary),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetServiceStatus => match crate::service::status(&AppPaths::from_env()) {
             Ok(status) => ArchcarResponse::ServiceStatus { status },
             Err(err) => ArchcarResponse::Error {
@@ -5007,6 +5177,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetSetupReadiness { .. }
             | ArchcarRequest::GetPullRequestDraft { .. }
             | ArchcarRequest::GetServiceStatus
+            | ArchcarRequest::GetUpdateStatus
             | ArchcarRequest::ServiceDoctor
             | ArchcarRequest::GetRemoteAccess
             | ArchcarRequest::ListBackgroundTasks { .. }
@@ -6443,6 +6614,48 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git {args:?}: {output:?}");
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A test binary is a development build: it reports as one and refuses to
+    /// update or restart itself, saying why.
+    #[test]
+    fn a_development_daemon_reports_itself_and_refuses_to_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: temp.path().join("state.db"),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        let ArchcarResponse::UpdateStatus { status } =
+            dispatch_request(ArchcarRequest::GetUpdateStatus, &state)
+        else {
+            panic!("no update status");
+        };
+        assert_eq!(
+            status.channel,
+            crate::self_update::InstallChannel::Development
+        );
+        assert!(!status.actionable());
+
+        let ArchcarResponse::Error { message } = dispatch_request(
+            ArchcarRequest::ApplyUpdate {
+                version: Some("999.0.0".to_owned()),
+                force: false,
+            },
+            &state,
+        ) else {
+            panic!("a development build must not update");
+        };
+        assert!(message.contains("development build"), "{message}");
+        assert!(!RESTART_REQUESTED.load(Ordering::SeqCst));
     }
 
     /// Taking over a workspace lands on the source's commits, under the local

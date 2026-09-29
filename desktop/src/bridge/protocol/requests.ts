@@ -127,6 +127,9 @@ export type ArchcarRequest =
   | { type: "get_setup_readiness"; recheck?: boolean }
   // Daemon background service + remote access.
   | { type: "get_service_status" }
+  | { type: "get_update_status" }
+  | { type: "apply_update"; version?: string; force?: boolean }
+  | { type: "set_auto_update"; enabled: boolean }
   | { type: "service_doctor" }
   | { type: "install_service"; input: { listen?: string; archcar_path?: string } }
   | { type: "uninstall_service" }

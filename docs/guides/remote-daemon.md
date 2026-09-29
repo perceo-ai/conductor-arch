@@ -214,6 +214,52 @@ shown only while a remote client is selected. It carries the workspace's most
 recently active chat, and when this machine has no clone it asks for a folder
 to clone into.
 
+## Updating daemons
+
+Every daemon updates itself, so you update a server from your laptop instead
+of logging in to reinstall:
+
+```bash
+archductor remote update --all --check   # versions of this machine and every saved daemon
+archductor remote update build           # update one, without switching to it
+archductor remote update --all           # update them all
+```
+
+Each daemon reports how it was installed, and that decides what "update" means:
+
+| Installed from | What `remote update` does |
+| --- | --- |
+| Release tarball (`linux-x86_64`) | Downloads the release, checks it against the release's `SHA256SUMS`, swaps `archductor` and `archcar` in place, and restarts |
+| apt, rpm, AUR, Homebrew, Nix, AppImage | Prints that channel's upgrade command to run on the server; once the new binary is on disk, `remote update` restarts the daemon onto it |
+| Desktop app | The app updates itself; on its next launch it restarts its own daemon onto the new binary |
+
+The restart goes through the service manager — the daemon exits and systemd
+(`Restart=always`) or launchd (`KeepAlive`) starts the new binary — and
+`remote update` waits until the daemon answers on the new version before it
+reports success. The previous binaries stay beside the new ones as
+`archductor.previous` and `archcar.previous`. A restart ends managed agent
+sessions, so an update is refused while an agent is mid-turn; `--force` does it
+anyway. A download that fails its checksum replaces nothing.
+
+To stop thinking about it, let a daemon update itself when a release is out
+and no agent is working:
+
+```bash
+archductor remote use build
+archductor archcar auto-update on    # or off; `archductor archcar update-status` shows it
+```
+
+The desktop app has the same controls under Settings → Advanced → Updates, for
+whichever daemon the client switcher has selected.
+
+A daemon from before this feature cannot be updated remotely — it does not
+understand the request, and `remote update` says so. Install the new release
+on it by hand once and restart its service.
+
+`ARCHDUCTOR_UPDATE_BASE_URL` points downloads at a mirror laid out like GitHub's
+(`<base>/v<version>/archductor-<version>-<os>-<arch>.tar.gz` plus `SHA256SUMS`).
+A mirror may serve targets GitHub releases do not, such as `linux-aarch64`.
+
 ## MCP against a remote
 
 Because MCP tools are archcar requests, an MCP client pointed at a machine with

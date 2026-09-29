@@ -304,6 +304,8 @@ describe("actions.importWorkspaceFromRemote", () => {
     expect(api.request.mock.calls.find((c) => c[0].type === "get_chat_transcript")?.[0]).toMatchObject({
       thread_id: 3,
     });
+    // It keeps talking to the same agent rather than the daemon's default.
+    expect(api.requestLocal.mock.calls[0][0]).toMatchObject({ provider: "claude" });
   });
 
   it("names the missing clone, then clones on this machine before importing", async () => {
@@ -348,5 +350,122 @@ describe("actions.importWorkspaceFromRemote", () => {
       actions.importWorkspaceFromRemote({ workspace: "parser" }),
     ).rejects.toThrow("no remote URL");
     expect(api.requestLocal).not.toHaveBeenCalled();
+  });
+});
+
+describe("actions.updateDaemon", () => {
+  const status = (current: string) => ({
+    type: "update_status",
+    status: {
+      current_version: current,
+      latest_version: "0.8.3",
+      update_available: current !== "0.8.3",
+      channel: "tarball",
+      binary_path: "/srv/bin/archcar",
+      restart_pending: false,
+      can_self_update: true,
+      auto_update: false,
+    },
+  });
+
+  it("applies, rides out the restart, and returns once the new version answers", async () => {
+    let calls = 0;
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "apply_update")
+        return response({
+          type: "update_applied",
+          update: { from_version: "0.8.2", to_version: "0.8.3", downloaded: true },
+        });
+      if (req.type === "get_update_status") {
+        calls += 1;
+        // First poll: the daemon is mid-restart. Second: still the old one.
+        if (calls === 1) throw new Error("connect ECONNREFUSED");
+        return response(status(calls === 2 ? "0.8.2" : "0.8.3"));
+      }
+      return response({ type: "workspaces", workspaces: [] });
+    });
+    const { actions } = await import("./actions");
+
+    const update = await actions.updateDaemon({ pollMs: 1, timeoutMs: 1000 });
+
+    expect(update.to_version).toBe("0.8.3");
+    expect(calls).toBe(3);
+  });
+
+  it("surfaces the daemon's refusal (agents mid-turn) as an error", async () => {
+    routeByType({
+      apply_update: { type: "error", message: "agents are mid-turn in berlin" },
+    });
+    const { actions } = await import("./actions");
+    await expect(actions.updateDaemon({ pollMs: 1 })).rejects.toThrow("mid-turn in berlin");
+  });
+
+  it("fails loudly when the daemon never comes back on the new version", async () => {
+    api.request.mockImplementation(async (req: { type: string }) =>
+      req.type === "apply_update"
+        ? response({
+            type: "update_applied",
+            update: { from_version: "0.8.2", to_version: "0.8.3", downloaded: true },
+          })
+        : response(status("0.8.2")),
+    );
+    const { actions } = await import("./actions");
+    await expect(actions.updateDaemon({ pollMs: 1, timeoutMs: 20 })).rejects.toThrow(
+      "did not come back on v0.8.3",
+    );
+  });
+});
+
+describe("actions.finishBundledDaemonUpdate", () => {
+  function daemon(overrides: Record<string, unknown>) {
+    return {
+      type: "update_status",
+      status: {
+        current_version: "0.8.2",
+        update_available: false,
+        channel: "desktop_app",
+        binary_path: "/Applications/archductor-desktop.app/Contents/Resources/bin/archcar",
+        restart_pending: false,
+        can_self_update: false,
+        auto_update: false,
+        ...overrides,
+      },
+    };
+  }
+
+  it("restarts this machine's bundled daemon onto the binary the app installed", async () => {
+    let applied = false;
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "apply_update") {
+        applied = true;
+        return response({
+          type: "update_applied",
+          update: { from_version: "0.8.2", to_version: "0.8.3", downloaded: false },
+        });
+      }
+      if (req.type === "get_update_status")
+        return response(
+          applied
+            ? daemon({ current_version: "0.8.3" })
+            : daemon({ restart_pending: true, on_disk_version: "0.8.3" }),
+        );
+      return response({ type: "workspaces", workspaces: [] });
+    });
+    const { actions } = await import("./actions");
+    await expect(actions.finishBundledDaemonUpdate(false, 1)).resolves.toBe(true);
+    expect(applied).toBe(true);
+  });
+
+  it("leaves remote daemons, other channels, and daemons without the RPC alone", async () => {
+    const { actions } = await import("./actions");
+    await expect(actions.finishBundledDaemonUpdate(true)).resolves.toBe(false);
+
+    routeByType({ get_update_status: daemon({ channel: "tarball", restart_pending: true }) });
+    await expect(actions.finishBundledDaemonUpdate(false)).resolves.toBe(false);
+
+    api.request.mockRejectedValue(new Error("empty response from archcar sidecar"));
+    await expect(actions.finishBundledDaemonUpdate(false)).resolves.toBe(false);
+    const types = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
+    expect(types).not.toContain("apply_update");
   });
 });

@@ -9,6 +9,7 @@ use crate::codex_tui::{CodexContextUsage, CodexInlineEvent};
 use crate::doctor::SetupReport;
 use crate::provider_events::ProviderEventRecord;
 use crate::provider_interactions::ProviderInteractionRecord;
+use crate::self_update::{AppliedUpdate, UpdateStatus};
 use crate::service::{InstallService, ServiceDoctorReport, ServiceStatus};
 use crate::session_state::AgentSessionState;
 use crate::workspace::{
@@ -786,6 +787,23 @@ pub enum ArchcarRequest {
         session_profile: bool,
     },
     GetServiceStatus,
+    /// The daemon's version, how it was installed, and what updating it would
+    /// take. Answered by the daemon because only it knows where it lives.
+    GetUpdateStatus,
+    /// Bring this daemon to `version` (default: the latest release) and
+    /// restart it. Downloads only for a tarball install; any channel restarts
+    /// onto a newer binary already on disk. Refused while an agent is mid-turn
+    /// unless `force`, because a restart ends managed sessions.
+    ApplyUpdate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default)]
+        force: bool,
+    },
+    /// Let the daemon apply updates itself while no agent is mid-turn.
+    SetAutoUpdate {
+        enabled: bool,
+    },
     /// Resolve the tools the daemon needs against the *service's* PATH rather
     /// than the caller's, which is the difference that makes a service-hosted
     /// daemon fail where the shell succeeds.
@@ -1290,6 +1308,14 @@ pub enum ArchcarResponse {
     },
     ServiceStatus {
         status: ServiceStatus,
+    },
+    UpdateStatus {
+        status: UpdateStatus,
+    },
+    /// The update is in place and the daemon restarts right after answering;
+    /// the service manager (or the desktop app) starts the new binary.
+    UpdateApplied {
+        update: AppliedUpdate,
     },
     ServiceDoctorReport {
         report: ServiceDoctorReport,
@@ -2315,6 +2341,12 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             }
         ),
         ArchcarRequest::GetServiceStatus => "get_service_status".to_owned(),
+        ArchcarRequest::GetUpdateStatus => "get_update_status".to_owned(),
+        ArchcarRequest::ApplyUpdate { version, force } => format!(
+            "apply_update version={} force={force}",
+            version.as_deref().unwrap_or("latest")
+        ),
+        ArchcarRequest::SetAutoUpdate { enabled } => format!("set_auto_update enabled={enabled}"),
         ArchcarRequest::ServiceDoctor => "service_doctor".to_owned(),
         ArchcarRequest::InstallService { input } => format!(
             "install_service listen={}",
@@ -2838,6 +2870,19 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "pull_request_draft workspace={workspace} title_chars={} body_chars={}",
             title.chars().count(),
             body.chars().count()
+        ),
+        ArchcarResponse::UpdateStatus { status } => format!(
+            "update_status current={} latest={} channel={} restart_pending={} can_self_update={} auto_update={}",
+            status.current_version,
+            status.latest_version.as_deref().unwrap_or("unknown"),
+            status.channel.label(),
+            status.restart_pending,
+            status.can_self_update,
+            status.auto_update
+        ),
+        ArchcarResponse::UpdateApplied { update } => format!(
+            "update_applied from={} to={} downloaded={}",
+            update.from_version, update.to_version, update.downloaded
         ),
         ArchcarResponse::ServiceStatus { status } => format!(
             "service_status manager={} installed={} running={} boot_persistent={}",
