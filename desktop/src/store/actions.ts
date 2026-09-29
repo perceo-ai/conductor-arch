@@ -29,6 +29,20 @@ function ensureOk(res: ArchcarResponse): ArchcarResponse {
   return res;
 }
 
+/**
+ * This machine has no clone of the repository a remote workspace belongs to.
+ * Choosing where to clone it is the user's call, so the caller asks and retries
+ * with `cloneInto`.
+ */
+export class MissingLocalRepositoryError extends Error {
+  constructor(
+    readonly repositoryUrl: string,
+    readonly repositoryName: string,
+  ) {
+    super(`this machine has no clone of ${repositoryUrl}`);
+  }
+}
+
 export interface AddRepositoryInput {
   path: string;
   name?: string;
@@ -176,16 +190,24 @@ export const actions = {
    * remote, then writes to the *local* daemon via `sendLocal`. Using `send` for
    * the write would recreate the workspace on the machine it came from.
    *
-   * Fails with the daemon's own message when this machine has no clone of the
-   * repository; picking a directory to clone into is the user's call, not ours.
+   * The branch is the work, and it crosses machines through the git remote:
+   * the source must be committed, and is pushed here before the import so the
+   * local workspace starts at its tip. Uncommitted changes are refused rather
+   * than committed — what goes into someone else's branch is their call.
+   *
+   * Throws `MissingLocalRepositoryError` when this machine has no clone and no
+   * `cloneInto` was given; picking a directory is the user's call, not ours.
+   * `threadId: "latest"` carries the workspace's most recently active chat.
    */
   async importWorkspaceFromRemote(input: {
     workspace: string;
-    threadId?: number;
+    threadId?: number | "latest";
+    cloneInto?: string;
   }): Promise<{ workspace: string; threadId?: number }> {
     logAction("import_workspace_from_remote", {
       workspace: input.workspace,
       thread_id: input.threadId ?? "none",
+      clone_into: input.cloneInto ?? "none",
     });
     const remoteWorkspaces = ensureOk(await send({ type: "list_workspaces" }));
     if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
@@ -203,27 +225,55 @@ export const actions = {
       );
     }
 
+    let threadId = input.threadId;
+    if (threadId === "latest") {
+      const threads = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
+      threadId =
+        threads.type === "chat_threads"
+          ? threads.threads
+              .filter((thread) => !thread.archived_at)
+              .sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0]?.id
+          : undefined;
+    }
     let transcript: { role: string; content: string; created_at: string }[] = [];
     let chatTitle: string | undefined;
-    if (input.threadId != null) {
-      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: input.threadId }));
+    if (threadId != null) {
+      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: threadId }));
       if (chat.type === "chat_transcript") {
         transcript = chat.messages;
         chatTitle = chat.title;
       }
     }
 
-    const imported = ensureOk(
-      await sendLocal({
-        type: "import_workspace_from_remote",
-        repository_url: repositoryUrl,
-        branch: source.branch,
-        base_ref: source.base_ref,
-        name: source.name,
-        transcript,
-        chat_title: chatTitle,
-      }),
+    const changes = ensureOk(
+      await send({ type: "get_workspace_changes", workspace: source.name, scope: "uncommitted" }),
     );
+    if (changes.type === "workspace_changes" && changes.files.length > 0) {
+      const shown = changes.files.slice(0, 5).map((file) => file.path);
+      if (changes.files.length > shown.length) shown.push("…");
+      throw new Error(
+        `${source.name} has ${changes.files.length} uncommitted file(s) on the remote: ${shown.join(", ")}. Commit them there first, then copy again.`,
+      );
+    }
+    ensureOk(await send({ type: "push_branch", workspace: source.name }));
+
+    if (input.cloneInto) {
+      ensureOk(await sendLocal({ type: "clone_repository", url: repositoryUrl, dest: input.cloneInto }));
+    }
+    const imported = await sendLocal({
+      type: "import_workspace_from_remote",
+      repository_url: repositoryUrl,
+      branch: source.branch,
+      source_branch: source.branch,
+      base_ref: source.base_ref,
+      name: source.name,
+      transcript,
+      chat_title: chatTitle,
+    });
+    if (imported.type === "error" && imported.message.startsWith("no repository here has remote")) {
+      throw new MissingLocalRepositoryError(repositoryUrl, source.repository_name);
+    }
+    ensureOk(imported);
     if (imported.type !== "workspace_imported") throw new Error("import returned no workspace");
     return { workspace: imported.workspace, threadId: imported.thread_id };
   },

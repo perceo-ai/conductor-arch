@@ -5531,6 +5531,11 @@ fn run_remote_import(
         None => (Vec::new(), None),
     };
 
+    // The branch is the work. It crosses machines through the git remote, so
+    // the source has to have committed and pushed it before there is anything
+    // here to start from.
+    publish_source_branch(&source, &profile.label, &remote_workspace.name)?;
+
     let local = archductor_core::archcar::client::ArchcarClient::local(paths);
     if let Some(dest) = clone_into {
         // Clone through the local daemon rather than shelling out here, so the
@@ -5545,16 +5550,66 @@ fn run_remote_import(
             response => print_archcar_response(response),
         }
     }
-    print_archcar_response(local.send(ArchcarRequest::ImportWorkspaceFromRemote {
+    match local.send(ArchcarRequest::ImportWorkspaceFromRemote {
         repository_url,
-        branch: branch.unwrap_or(remote_workspace.branch),
+        branch: branch.unwrap_or_else(|| remote_workspace.branch.clone()),
+        source_branch: Some(remote_workspace.branch),
         base_ref: Some(remote_workspace.base_ref),
         name: name.or(Some(remote_workspace.name)),
         transcript,
         chat_title,
         provider: None,
-    })?);
+    })? {
+        ArchcarResponse::Error { message } => anyhow::bail!("{message}"),
+        response => print_archcar_response(response),
+    }
     Ok(())
+}
+
+/// Get a remote workspace's branch onto its git remote before importing it.
+///
+/// Refuses on uncommitted changes rather than committing them: what goes into
+/// a commit on someone else's branch is their call, and a takeover that
+/// silently leaves files behind is the bug this exists to fix.
+fn publish_source_branch(
+    source: &archductor_core::archcar::client::ArchcarClient,
+    label: &str,
+    workspace: &str,
+) -> Result<()> {
+    match source.send(ArchcarRequest::GetWorkspaceChanges {
+        workspace: workspace.to_owned(),
+        scope: WorkspaceChangeScope::Uncommitted,
+    })? {
+        ArchcarResponse::WorkspaceChanges { files, .. } if !files.is_empty() => {
+            let mut shown: Vec<&str> = files.iter().take(5).map(|f| f.path.as_str()).collect();
+            if files.len() > shown.len() {
+                shown.push("…");
+            }
+            anyhow::bail!(
+                "`{workspace}` on {label} has {} uncommitted file(s): {}. Commit them there \
+                 first (`archductor archcar commit {workspace} \"<message>\" --stage-all` \
+                 while connected to {label}), then retry",
+                files.len(),
+                shown.join(", ")
+            );
+        }
+        ArchcarResponse::WorkspaceChanges { .. } => {}
+        ArchcarResponse::Error { message } => anyhow::bail!("{label}: {message}"),
+        other => anyhow::bail!(
+            "unexpected response reading changes: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+    println!("pushing {workspace}'s branch from {label}");
+    match source.send(ArchcarRequest::PushBranch {
+        workspace: workspace.to_owned(),
+        force: false,
+    })? {
+        ArchcarResponse::Error { message } => {
+            anyhow::bail!("could not push `{workspace}` on {label}: {message}")
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Headless server bootstrap: one command to go from a fresh box to a daemon

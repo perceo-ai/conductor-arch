@@ -196,6 +196,8 @@ export type ArchcarRequest =
       type: "import_workspace_from_remote";
       repository_url: string;
       branch: string;
+      /** The branch as the git remote knows it; the workspace starts at its tip. */
+      source_branch?: string;
       base_ref?: string;
       name?: string;
       transcript?: { role: string; content: string; created_at: string }[];

@@ -928,7 +928,28 @@ pub fn normalize_remote_url(url: &str) -> String {
         Some((_userinfo, host_and_path)) => host_and_path,
         None => rest,
     };
+    // `ssh://git@host:22/owner/repo`: the port is how to reach the host, not
+    // part of the repository path.
+    if let Some((host, path)) = rest.split_once('/') {
+        if let Some((host, port)) = host.split_once(':') {
+            if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+                return format!("{host}/{path}").to_lowercase();
+            }
+        }
+    }
     rest.replacen(':', "/", 1).to_lowercase()
+}
+
+/// The repository path of a normalized remote URL, without its host.
+///
+/// An `~/.ssh/config` Host alias (`git@git-personal:owner/repo`) hides the real
+/// host, so two machines cloning one repository — one through an alias, one
+/// over https — agree only on this part.
+fn remote_url_path(normalized: &str) -> &str {
+    normalized
+        .split_once('/')
+        .map(|(_host, path)| path)
+        .unwrap_or(normalized)
 }
 
 /// Name a fork after its source without stacking "(fork)" forever when someone
@@ -7511,15 +7532,82 @@ mutation($threadId: ID!) {{
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let wanted_path = remote_url_path(&wanted);
+        let mut same_path = Vec::new();
         for (name, root_path, remote_name) in rows {
             let Some(found) = repository_remote_url(Path::new(&root_path), &remote_name) else {
                 continue;
             };
-            if normalize_remote_url(&found) == wanted {
+            let found = normalize_remote_url(&found);
+            if found == wanted {
                 return Ok(Some(name));
             }
+            if remote_url_path(&found) == wanted_path {
+                same_path.push(name);
+            }
         }
-        Ok(None)
+        // No exact match: fall back to the host-less path, but only when it
+        // names one repository. Two clones of `owner/app` on different hosts
+        // are different repositories, and guessing between them is worse than
+        // asking.
+        Ok(match same_path.len() {
+            1 => same_path.pop(),
+            _ => None,
+        })
+    }
+
+    /// Recreate a workspace from another machine at the tip of its branch.
+    ///
+    /// The source daemon pushes the branch first; this fetches it and starts
+    /// the worktree there. `base_ref` stays the source's diff base, so review
+    /// here shows the same work it showed there rather than an empty branch.
+    /// Refuses when the remote has no such branch, because silently starting
+    /// from the base is exactly how a takeover used to lose the work.
+    pub fn import_from_remote_branch(
+        &self,
+        repository_name: &str,
+        name: &str,
+        branch: &str,
+        source_branch: &str,
+        base_ref: Option<&str>,
+    ) -> Result<Workspace> {
+        let repository = self.load_repository(repository_name)?;
+        let remote = repository.remote_name.as_str();
+        let source_branch = source_branch.trim();
+        anyhow::ensure!(
+            !source_branch.is_empty(),
+            "a source branch is required to import"
+        );
+        anyhow::ensure!(
+            fetch_remote_source_branch(&repository.root_path, remote, source_branch)?,
+            "branch {source_branch} is not on {remote}; push it from the machine that has it \
+             (`archductor remote import` does this for you) and retry"
+        );
+        let start_point = format!("{remote}/{source_branch}");
+
+        let workspace = self.create_lifecycle_job(CreateWorkspace {
+            repository_name: repository_name.to_owned(),
+            name: name.to_owned(),
+            branch: branch.to_owned(),
+            base_ref: Some(start_point.clone()),
+        })?;
+        git_dynamic(
+            &workspace.path,
+            &[
+                "branch",
+                "--set-upstream-to",
+                start_point.as_str(),
+                workspace.branch.as_str(),
+            ],
+        )?;
+        let base_ref = base_ref.map(str::trim).filter(|base| !base.is_empty());
+        if let Some(base_ref) = base_ref {
+            self.conn.execute(
+                "UPDATE workspaces SET base_ref = ?1, updated_at = ?2 WHERE id = ?3",
+                params![base_ref, timestamp(), workspace.id],
+            )?;
+        }
+        self.get_by_id(workspace.id)
     }
 
     /// Create a chat in `workspace` seeded with a conversation from elsewhere.
@@ -17075,6 +17163,112 @@ CUSTOM_VALUE = "from-settings"
         );
     }
 
+    /// A bare origin, this machine's registered clone of it, and a second
+    /// clone standing in for the machine the workspace is taken over from.
+    fn takeover_fixture(temp: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let origin = temp.join("origin.git");
+        Command::new("git")
+            .args(["init", "-q", "--bare", "--initial-branch", "main"])
+            .arg(&origin)
+            .status()
+            .unwrap();
+        let local = init_repo(temp.join("demo"));
+        git_output(
+            &local,
+            ["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git_output(&local, ["push", "-q", "-u", "origin", "main"]);
+        let source = temp.join("source");
+        Command::new("git")
+            .args(["clone", "-q"])
+            .arg(&origin)
+            .arg(&source)
+            .status()
+            .unwrap();
+        let db_path = temp.join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: local,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.join("workspaces/demo")),
+            })
+            .unwrap();
+        (db_path, source, origin)
+    }
+
+    #[test]
+    fn import_from_remote_branch_starts_at_the_source_tip() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db_path, source, _origin) = takeover_fixture(temp.path());
+        git_output(&source, ["checkout", "-q", "-b", "lc/work"]);
+        fs::write(source.join("work.txt"), "from the server\n").unwrap();
+        git_output(&source, ["add", "work.txt"]);
+        git_output(
+            &source,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "server work",
+            ],
+        );
+        git_output(&source, ["push", "-q", "origin", "lc/work"]);
+        let source_tip = git_output(&source, ["rev-parse", "HEAD"]);
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .import_from_remote_branch("demo", "berlin", "lc/work", "lc/work", Some("origin/main"))
+            .unwrap();
+
+        assert_eq!(
+            git_output(&workspace.path, ["rev-parse", "HEAD"]),
+            source_tip
+        );
+        assert!(workspace.path.join("work.txt").exists());
+        // The diff base stays the source's base, so review shows the work
+        // rather than an empty branch.
+        assert_eq!(workspace.base_ref, "origin/main");
+        assert_eq!(store.get_by_name("berlin").unwrap().base_ref, "origin/main");
+        assert_eq!(
+            git_output(
+                &workspace.path,
+                [
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}"
+                ]
+            )
+            .trim(),
+            "origin/lc/work"
+        );
+    }
+
+    #[test]
+    fn import_from_remote_branch_refuses_a_branch_the_remote_lacks() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db_path, _source, _origin) = takeover_fixture(temp.path());
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let err = store
+            .import_from_remote_branch("demo", "berlin", "lc/unpushed", "lc/unpushed", None)
+            .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("lc/unpushed"), "{message}");
+        assert!(message.contains("push"), "{message}");
+        assert!(store.get_by_name("berlin").is_err());
+    }
+
     #[test]
     fn patch_changed_paths_handles_quoted_diff_paths() {
         let patch = "diff --git \"a/path with spaces.txt\" \"b/path with spaces.txt\"\n\
@@ -25025,6 +25219,98 @@ spotlight_testing = true
         assert_eq!(
             ssh,
             normalize_remote_url("https://oauth2:abc123@github.com/perceo-ai/conductor-arch.git")
+        );
+    }
+
+    #[test]
+    fn an_explicit_ssh_port_is_not_part_of_the_repository_path() {
+        assert_eq!(
+            normalize_remote_url("ssh://git@github.com:22/perceo-ai/conductor-arch.git"),
+            normalize_remote_url("git@github.com:perceo-ai/conductor-arch.git")
+        );
+    }
+
+    #[test]
+    fn a_host_alias_matches_the_same_repository_by_path() {
+        // `git@git-personal:...` is an ~/.ssh/config Host alias on one machine;
+        // the other clones over https. The alias hides the real host, so only
+        // the owner/repo path can join them.
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        git_output(
+            &repo_path,
+            [
+                "remote",
+                "add",
+                "origin",
+                "git@git-personal:perceo-ai/conductor-arch.git",
+            ],
+        );
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+
+        assert_eq!(
+            store
+                .find_repository_by_remote_url("https://github.com/perceo-ai/conductor-arch.git")
+                .unwrap()
+                .as_deref(),
+            Some("demo")
+        );
+        assert_eq!(
+            store
+                .find_repository_by_remote_url("https://github.com/someone-else/conductor-arch")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_path_only_match_must_be_unambiguous() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        for (name, url) in [
+            ("github-copy", "git@github.com:perceo-ai/app.git"),
+            ("gitlab-copy", "git@gitlab.com:perceo-ai/app.git"),
+        ] {
+            let repo_path = init_repo(temp.path().join(name));
+            git_output(&repo_path, ["remote", "add", "origin", url]);
+            RepositoryStore::open(&db_path)
+                .unwrap()
+                .add(AddRepository {
+                    name: Some(name.to_owned()),
+                    root_path: repo_path,
+                    default_branch: Some("main".to_owned()),
+                    remote_name: "origin".to_owned(),
+                    workspace_parent_path: Some(temp.path().join("workspaces").join(name)),
+                })
+                .unwrap();
+        }
+        let store = WorkspaceStore::open(&db_path).unwrap();
+
+        // An exact host match still wins over the ambiguity.
+        assert_eq!(
+            store
+                .find_repository_by_remote_url("https://gitlab.com/perceo-ai/app")
+                .unwrap()
+                .as_deref(),
+            Some("gitlab-copy")
+        );
+        // An alias that could be either is not guessed at.
+        assert_eq!(
+            store
+                .find_repository_by_remote_url("git@work-alias:perceo-ai/app.git")
+                .unwrap(),
+            None
         );
     }
 

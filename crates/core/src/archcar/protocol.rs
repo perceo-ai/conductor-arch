@@ -564,6 +564,11 @@ pub enum ArchcarRequest {
     ImportWorkspaceFromRemote {
         repository_url: String,
         branch: String,
+        /// The branch as the git remote knows it — what the source workspace
+        /// pushed. Defaults to `branch`; differs only when the caller renames
+        /// the branch locally. The workspace starts at its tip.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_branch: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

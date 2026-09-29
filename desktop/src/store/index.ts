@@ -14,7 +14,7 @@ export { workspacesStore } from "./workspaces";
 export type { WorkspaceRow } from "./workspaces";
 export { repositoriesStore } from "./repositories";
 export type { RepositoryRow } from "./repositories";
-export { actions } from "./actions";
+export { actions, MissingLocalRepositoryError } from "./actions";
 export { dialogs } from "./dialogs";
 export type { DialogSpec, ConfirmSpec } from "./dialogs";
 export { setupStore } from "./setup";

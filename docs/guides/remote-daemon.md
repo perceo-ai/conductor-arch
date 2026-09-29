@@ -188,12 +188,31 @@ archductor remote import fix-auth --thread-id 12 --clone-into ~/src/my-app
 Omit `--thread-id` to import the workspace without a chat. `--name` and
 `--branch` rename it locally.
 
+The branch travels through the git remote, not between the daemons. Import
+pushes the source workspace's branch from the server first (`git push -u`,
+which also sets the server copy's upstream to it), then starts the local
+workspace at that tip with the same diff base, so review shows the same work on
+both machines. Uncommitted changes on the server stop the import with the list
+of files — commit them there first; what goes into a commit on that branch is
+not the import's call.
+
+Repositories are matched by remote URL across the forms two machines use
+(`git@github.com:`, `https://github.com/`, `ssh://…:22/`). A clone made through
+an `~/.ssh/config` Host alias (`git@git-personal:you/app.git`) matches by its
+`owner/repo` path when exactly one local repository has that path; if two do,
+the import asks rather than guessing. `--clone-into` clones with the *server's*
+URL, so if that uses a Host alias this machine lacks, clone the repository
+yourself, register it here (`archductor remote use local`, then
+`archductor repo add <path>`), and import with `--from <client>`.
+
 Without `--clone-into` the import stops and asks rather than picking a directory
 on your disk. With it, the whole first-time flow is one command — which matters
 precisely here, since `repo add` is refused while a remote profile is active.
 
 In the app this is "Copy to this machine" on a workspace's right-click menu,
-shown only while a remote client is selected.
+shown only while a remote client is selected. It carries the workspace's most
+recently active chat, and when this machine has no clone it asks for a folder
+to clone into.
 
 ## MCP against a remote
 

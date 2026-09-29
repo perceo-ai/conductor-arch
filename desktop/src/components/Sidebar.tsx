@@ -1,6 +1,16 @@
 import { createResource, createSignal, For, Show } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs, actions, toastsStore, prefsStore, clientsStore } from "@/store";
-import { repoAvatar, openExternal } from "@/bridge/client";
+import {
+  nav,
+  workspacesStore,
+  repositoriesStore,
+  dialogs,
+  actions,
+  toastsStore,
+  prefsStore,
+  clientsStore,
+  MissingLocalRepositoryError,
+} from "@/store";
+import { repoAvatar, openExternal, selectFolder } from "@/bridge/client";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import ResizeHandle from "./ResizeHandle";
 import { createPersistedWidth } from "@/lib/persistedWidth";
@@ -32,6 +42,30 @@ function runAction(label: string, p: Promise<unknown>): void {
   void p.catch((err) => toastsStore.error(`${label} failed: ${(err as Error).message}`));
 }
 
+/**
+ * "Copy to this machine": take over a remote workspace with its latest chat.
+ * A first copy on a machine with no clone of the repository asks where to put
+ * one, then retries — the same flow as `remote import --clone-into`.
+ */
+async function copyWorkspaceToThisMachine(name: string): Promise<void> {
+  let imported: { workspace: string };
+  try {
+    imported = await actions.importWorkspaceFromRemote({ workspace: name, threadId: "latest" });
+  } catch (err) {
+    if (!(err instanceof MissingLocalRepositoryError)) throw err;
+    const parent = await selectFolder({
+      title: `This machine has no clone of ${err.repositoryName}. Choose where to clone it`,
+    });
+    if (!parent) return;
+    imported = await actions.importWorkspaceFromRemote({
+      workspace: name,
+      threadId: "latest",
+      cloneInto: `${parent.replace(/\/+$/, "")}/${err.repositoryName}`,
+    });
+  }
+  toastsStore.push(`Copied ${name} to this machine as ${imported.workspace}`);
+}
+
 // Right-click actions for a workspace row — GTK parity (Rename / Duplicate /
 // Archive|Restore / Delete) plus Open and a "More…" escape hatch to the full
 // actions dialog (branch ops, link dir, default provider). Uses in-app dialogs
@@ -48,13 +82,7 @@ function workspaceMenuItems(name: string): ContextMenuItem[] {
           {
             label: "Copy to this machine",
             icon: "arrow-down-circle" as const,
-            run: () =>
-              runAction(
-                "Copy to this machine",
-                actions
-                  .importWorkspaceFromRemote({ workspace: name })
-                  .then(() => undefined),
-              ),
+            run: () => runAction("Copy to this machine", copyWorkspaceToThisMachine(name)),
           },
         ]
       : []),

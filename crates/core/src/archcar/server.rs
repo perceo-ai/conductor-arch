@@ -2075,6 +2075,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::ImportWorkspaceFromRemote {
             repository_url,
             branch,
+            source_branch,
             base_ref,
             name,
             transcript,
@@ -2084,6 +2085,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             state,
             &repository_url,
             &branch,
+            source_branch.as_deref(),
             base_ref,
             name,
             &transcript,
@@ -4709,6 +4711,7 @@ fn import_workspace_from_remote(
     state: &Arc<Mutex<ServerState>>,
     repository_url: &str,
     branch: &str,
+    source_branch: Option<&str>,
     base_ref: Option<String>,
     name: Option<String>,
     transcript: &[crate::archcar::protocol::ArchcarChatTranscriptMessage],
@@ -4719,6 +4722,8 @@ fn import_workspace_from_remote(
     let repository = store
         .find_repository_by_remote_url(repository_url)?
         .ok_or_else(|| {
+            // The desktop keys its "choose where to clone" prompt off this
+            // prefix (`MissingLocalRepositoryError`); keep it stable.
             anyhow::anyhow!(
                 "no repository here has remote {repository_url} — rerun with \
                  `--clone-into <dir>` to clone and register it in one step"
@@ -4727,14 +4732,15 @@ fn import_workspace_from_remote(
 
     let branch = branch.trim();
     anyhow::ensure!(!branch.is_empty(), "a branch is required to import");
-    let workspace = store.create_lifecycle_job(CreateWorkspace {
-        repository_name: repository.clone(),
+    let workspace = store.import_from_remote_branch(
+        &repository,
         // An empty name lets the backend generate one, same as the New
         // workspace dialog.
-        name: name.unwrap_or_default(),
-        branch: branch.to_owned(),
-        base_ref,
-    })?;
+        name.as_deref().unwrap_or_default(),
+        branch,
+        source_branch.unwrap_or(branch),
+        base_ref.as_deref(),
+    )?;
 
     let mut thread_id = None;
     if !transcript.is_empty() {
@@ -4752,9 +4758,11 @@ fn import_workspace_from_remote(
     }
 
     Ok(ArchcarResponse::WorkspaceImported {
+        // The branch actually checked out, which gains a `-v2` suffix when
+        // this machine already has one by that name.
+        branch: workspace.branch,
         workspace: workspace.name,
         repository,
-        branch: branch.to_owned(),
         thread_id,
         copied_messages: transcript.len(),
     })
@@ -6415,6 +6423,142 @@ mod tests {
         assert!(
             !message.contains("Full Disk Access"),
             "an ssh key rejection is not a TCC denial: {message}"
+        );
+    }
+
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// Taking over a workspace lands on the source's commits, under the local
+    /// branch name the caller asked for, and reports the branch it actually
+    /// created — which differs once this machine already has that name.
+    #[test]
+    fn importing_a_workspace_starts_at_the_pushed_source_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let origin = temp.path().join("origin.git");
+        std::fs::create_dir(&origin).unwrap();
+        git_in(
+            &origin,
+            &["init", "-q", "--bare", "--initial-branch", "main"],
+        );
+        let repo_path = temp.path().join("demo");
+        std::fs::create_dir(&repo_path).unwrap();
+        git_in(&repo_path, &["init", "-q", "--initial-branch", "main"]);
+        std::fs::write(repo_path.join("README.md"), "demo\n").unwrap();
+        git_in(&repo_path, &["add", "."]);
+        git_in(&repo_path, &["commit", "-qm", "initial"]);
+        git_in(
+            &repo_path,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git_in(&repo_path, &["push", "-q", "-u", "origin", "main"]);
+        // The machine the workspace is taken over from.
+        let source = temp.path().join("source");
+        git_in(
+            temp.path(),
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                source.to_str().unwrap(),
+            ],
+        );
+        git_in(&source, &["checkout", "-q", "-b", "lc/work"]);
+        std::fs::write(source.join("work.txt"), "server work\n").unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-qm", "server work"]);
+        git_in(&source, &["push", "-q", "origin", "lc/work"]);
+        let source_tip = git_in(&source, &["rev-parse", "HEAD"]);
+
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+        let import = || {
+            dispatch_request(
+                ArchcarRequest::ImportWorkspaceFromRemote {
+                    repository_url: origin.to_string_lossy().into_owned(),
+                    branch: "lc/mine".to_owned(),
+                    source_branch: Some("lc/work".to_owned()),
+                    base_ref: Some("origin/main".to_owned()),
+                    name: Some("berlin".to_owned()),
+                    transcript: vec![crate::archcar::protocol::ArchcarChatTranscriptMessage {
+                        role: "user".to_owned(),
+                        content: "port the parser".to_owned(),
+                        created_at: "0".to_owned(),
+                    }],
+                    chat_title: Some("From the server".to_owned()),
+                    provider: Some("claude".to_owned()),
+                },
+                &state,
+            )
+        };
+
+        let ArchcarResponse::WorkspaceImported {
+            workspace,
+            branch,
+            thread_id,
+            copied_messages,
+            ..
+        } = import()
+        else {
+            panic!("import failed");
+        };
+        assert_eq!(branch, "lc/mine");
+        assert_eq!(copied_messages, 1);
+        assert!(thread_id.is_some());
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let imported = store.get_by_name(&workspace).unwrap();
+        assert_eq!(git_in(&imported.path, &["rev-parse", "HEAD"]), source_tip);
+        assert_eq!(imported.base_ref, "origin/main");
+
+        let ArchcarResponse::WorkspaceImported { branch: again, .. } = import() else {
+            panic!("second import failed");
+        };
+        assert_ne!(again, "lc/mine", "the response names the branch it created");
+        assert_eq!(
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .filter(|w| w.branch == again)
+                .count(),
+            1
         );
     }
 
