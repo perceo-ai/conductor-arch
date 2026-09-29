@@ -568,10 +568,11 @@ fn apply_update(
     // A download can take minutes; a turn that started meanwhile wins. The new
     // binary is on disk, so the next apply only restarts. Refuse new work
     // *before* the last look, so no turn can start between it and the restart.
-    state.lock().unwrap().shutting_down = true;
+    let was_shutting_down = std::mem::replace(&mut state.lock().unwrap().shutting_down, true);
     let busy = busy_now();
     if !force && !busy.is_empty() {
-        state.lock().unwrap().shutting_down = false;
+        // Only undo our own gate: a real shutdown that began meanwhile stays.
+        state.lock().unwrap().shutting_down = was_shutting_down;
         anyhow::bail!(
             "installed v{} but agents started in {} meanwhile; the restart onto it is deferred. \
              Apply again once they finish, or force it",

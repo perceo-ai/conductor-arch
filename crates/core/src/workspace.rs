@@ -7599,7 +7599,9 @@ mutation($threadId: ID!) {{
         // A failed fetch is fatal here, unlike for a base branch: a stale
         // remote-tracking ref from an earlier fetch would start the workspace
         // at old commits and look like success.
-        let refspec = format!("refs/heads/{source_branch}:refs/remotes/{start_point}");
+        // Forced (`+`): a source that rebased since this clone last fetched is
+        // still the work to take over, and the tip check below pins it.
+        let refspec = format!("+refs/heads/{source_branch}:refs/remotes/{start_point}");
         git_dynamic(&repository.root_path, &["fetch", remote, refspec.as_str()]).with_context(
             || {
                 format!(
@@ -17325,6 +17327,56 @@ CUSTOM_VALUE = "from-settings"
         let message = format!("{err:#}");
         assert!(message.contains("deadbeef1"), "{message}");
         assert!(store.get_by_name("berlin").is_err());
+    }
+
+    #[test]
+    fn import_from_remote_branch_follows_a_rebased_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db_path, source, _origin) = takeover_fixture(temp.path());
+        let commit = |dir: &Path, file: &str| {
+            fs::write(dir.join(file), file).unwrap();
+            git_output(dir, ["add", file]);
+            git_output(
+                dir,
+                [
+                    "-c",
+                    "user.name=A",
+                    "-c",
+                    "user.email=a@e.t",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-q",
+                    "-m",
+                    file,
+                ],
+            );
+        };
+        git_output(&source, ["checkout", "-q", "-b", "lc/work"]);
+        commit(&source, "one.txt");
+        git_output(&source, ["push", "-q", "origin", "lc/work"]);
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .import_from_remote_branch("demo", "first", "lc/first", "lc/work", None, None)
+            .unwrap();
+
+        // The source rewrites its branch; this clone's tracking ref now diverges.
+        git_output(&source, ["reset", "-q", "--hard", "HEAD~1"]);
+        commit(&source, "two.txt");
+        git_output(&source, ["push", "-q", "--force", "origin", "lc/work"]);
+        let tip = git_output(&source, ["rev-parse", "HEAD"]);
+
+        let workspace = store
+            .import_from_remote_branch(
+                "demo",
+                "second",
+                "lc/second",
+                "lc/work",
+                Some(tip.trim()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(git_output(&workspace.path, ["rev-parse", "HEAD"]), tip);
     }
 
     #[test]
