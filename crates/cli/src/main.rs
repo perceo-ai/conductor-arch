@@ -246,6 +246,29 @@ enum RemoteCommand {
         #[arg(long, value_name = "DIR")]
         clone_into: Option<String>,
     },
+    /// Update saved daemons from here, without switching to them.
+    ///
+    /// Each daemon updates itself: a tarball install downloads the release and
+    /// swaps its binaries; any install restarts onto a newer binary its package
+    /// manager or the desktop app already put on disk; anything else prints the
+    /// command that will. Waits for each daemon to come back on the new version.
+    Update {
+        /// Saved client name or id, or `local` for this machine. Defaults to the
+        /// active one.
+        client: Option<String>,
+        /// Every saved client, plus this machine.
+        #[arg(long, conflicts_with = "client")]
+        all: bool,
+        /// Report versions only; change nothing.
+        #[arg(long)]
+        check: bool,
+        /// Install this version instead of the latest release.
+        #[arg(long)]
+        version: Option<String>,
+        /// Restart even if agents are mid-turn (their turns are stopped).
+        #[arg(long)]
+        force: bool,
+    },
     /// Show where archcar requests from this machine currently go.
     Status,
     /// Switch back to this machine's local daemon (saved clients are kept).
@@ -418,6 +441,22 @@ enum ArchcarCommand {
     /// Tools the connected daemon can reach through its own PATH. The remote
     /// counterpart of `archductor service doctor`.
     ServiceDoctor,
+    /// Version, install channel, and update state of the connected daemon.
+    UpdateStatus,
+    /// Update the connected daemon and restart it. `archductor remote update`
+    /// does the same for any saved client without switching to it.
+    Update {
+        #[arg(long)]
+        version: Option<String>,
+        /// Restart even if agents are mid-turn.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Let the connected daemon apply updates itself while agents are idle.
+    AutoUpdate {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// List repositories, workspaces, and active chat strips in one request.
     InventorySnapshot,
     /// List repositories with workspace counts.
@@ -1861,6 +1900,17 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::ServiceStatus => {
                     print_archcar_response(client.send(ArchcarRequest::GetServiceStatus)?);
+                }
+                ArchcarCommand::UpdateStatus => {
+                    print_archcar_response(client.send(ArchcarRequest::GetUpdateStatus)?);
+                }
+                ArchcarCommand::Update { version, force } => {
+                    update_daemon(&client, "the connected daemon", false, version, force)?;
+                }
+                ArchcarCommand::AutoUpdate { state } => {
+                    print_archcar_response(client.send(ArchcarRequest::SetAutoUpdate {
+                        enabled: state == "on",
+                    })?);
                 }
                 ArchcarCommand::ServiceDoctor => {
                     print_archcar_response(client.send(ArchcarRequest::ServiceDoctor)?);
@@ -3464,6 +3514,13 @@ fn run_cli() -> Result<()> {
                 branch,
                 clone_into,
             )?,
+            RemoteCommand::Update {
+                client,
+                all,
+                check,
+                version,
+                force,
+            } => run_remote_update(&paths, client.as_deref(), all, check, version, force)?,
             RemoteCommand::Status => {
                 let env_remote = std::env::var(remote::REMOTE_ENV)
                     .ok()
@@ -4516,6 +4573,20 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("{prompt}");
         }
         ArchcarResponse::ServiceStatus { status } => print_service_status(&status),
+        ArchcarResponse::UpdateStatus { status } => print_update_status(&status),
+        ArchcarResponse::UpdateApplied { update } => {
+            if update.downloaded {
+                println!(
+                    "installed v{} (was v{}); the daemon is restarting",
+                    update.to_version, update.from_version
+                );
+            } else {
+                println!(
+                    "restarting onto v{} already on disk (was v{})",
+                    update.to_version, update.from_version
+                );
+            }
+        }
         ArchcarResponse::ServiceDoctorReport { report } => print_service_doctor(&report),
         ArchcarResponse::RemoteAccess {
             listen,
@@ -5530,6 +5601,25 @@ fn run_remote_import(
         },
         None => (Vec::new(), None),
     };
+    // The chat continues under the agent it was held with; the daemon would
+    // otherwise default an imported chat to Codex.
+    let provider = match thread_id {
+        Some(thread_id) => match source.send(ArchcarRequest::ListChatThreads {
+            workspace: remote_workspace.name.clone(),
+        })? {
+            ArchcarResponse::ChatThreads { threads, .. } => threads
+                .into_iter()
+                .find(|thread| thread.id == thread_id)
+                .map(|thread| thread.provider),
+            _ => None,
+        },
+        None => None,
+    };
+
+    // The branch is the work. It crosses machines through the git remote, so
+    // the source has to have committed and pushed it before there is anything
+    // here to start from.
+    let source_commit = publish_source_branch(&source, &profile.label, &remote_workspace.name)?;
 
     let local = archductor_core::archcar::client::ArchcarClient::local(paths);
     if let Some(dest) = clone_into {
@@ -5545,16 +5635,248 @@ fn run_remote_import(
             response => print_archcar_response(response),
         }
     }
-    print_archcar_response(local.send(ArchcarRequest::ImportWorkspaceFromRemote {
+    match local.send(ArchcarRequest::ImportWorkspaceFromRemote {
         repository_url,
-        branch: branch.unwrap_or(remote_workspace.branch),
+        branch: branch.unwrap_or_else(|| remote_workspace.branch.clone()),
+        source_branch: Some(remote_workspace.branch),
+        source_commit,
         base_ref: Some(remote_workspace.base_ref),
         name: name.or(Some(remote_workspace.name)),
         transcript,
         chat_title,
-        provider: None,
-    })?);
+        provider,
+    })? {
+        ArchcarResponse::Error { message } => anyhow::bail!("{message}"),
+        response => print_archcar_response(response),
+    }
     Ok(())
+}
+
+fn print_update_status(status: &archductor_core::self_update::UpdateStatus) {
+    println!(
+        "version v{} ({} install, {})",
+        status.current_version,
+        status.channel.label(),
+        status.binary_path
+    );
+    match (&status.latest_version, status.update_available) {
+        (Some(latest), true) => println!("latest  v{latest} — update available"),
+        (Some(latest), false) => println!("latest  v{latest} — up to date"),
+        (None, _) => println!("latest  unknown (the daemon has not checked yet)"),
+    }
+    if status.restart_pending {
+        println!(
+            "pending v{} is on disk; applying restarts onto it",
+            status.on_disk_version.as_deref().unwrap_or("?")
+        );
+    }
+    if !status.can_self_update && !status.restart_pending {
+        if let Some(guidance) = &status.guidance {
+            println!("how     {guidance}");
+        }
+    }
+    println!("auto    {}", if status.auto_update { "on" } else { "off" });
+}
+
+/// Update one daemon and wait for it to come back on the new version.
+///
+/// A daemon that cannot update itself is reported with its channel's upgrade
+/// command, not treated as a failure; one that does not come back is.
+fn update_daemon(
+    client: &archductor_core::archcar::client::ArchcarClient,
+    label: &str,
+    check: bool,
+    version: Option<String>,
+    force: bool,
+) -> Result<()> {
+    // A daemon from before remote updates cannot parse the request and closes
+    // the connection without a word; say that rather than "empty response".
+    let response = client
+        .send(ArchcarRequest::GetUpdateStatus)
+        .map_err(|err| {
+            if format!("{err:#}").contains("empty response") {
+                anyhow::anyhow!(
+                    "{label} predates remote updates: install the new release on it by hand \
+                 once and restart its service; `archductor remote update` handles it after that"
+                )
+            } else {
+                err.context(format!("{label} did not answer"))
+            }
+        })?;
+    let status = match response {
+        ArchcarResponse::UpdateStatus { status } => status,
+        ArchcarResponse::Error { message } => anyhow::bail!("{label}: {message}"),
+        other => anyhow::bail!(
+            "{label} did not answer the update status request ({}); it predates remote \
+             updates, so update it by hand once",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+    print_update_status(&status);
+    if check {
+        return Ok(());
+    }
+    if version.is_none() && !status.actionable() {
+        if status.update_available {
+            println!("{label}: not updated — see `how` above");
+        } else {
+            println!("{label}: nothing to do");
+        }
+        return Ok(());
+    }
+    let update = match client.send(ArchcarRequest::ApplyUpdate { version, force })? {
+        ArchcarResponse::UpdateApplied { update } => update,
+        ArchcarResponse::Error { message } => anyhow::bail!("{label}: {message}"),
+        other => anyhow::bail!(
+            "{label}: unexpected response applying the update: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+    print_archcar_response(ArchcarResponse::UpdateApplied {
+        update: update.clone(),
+    });
+    // The old process answers first and restarts a moment later, so wait for
+    // that before trusting an answer to be the new one. Never spawn a daemon
+    // while waiting: one started in a restart gap takes the socket and the
+    // service manager's restart then fails against it.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Ok(ArchcarResponse::UpdateStatus { status }) =
+            client.send_without_spawning(ArchcarRequest::GetUpdateStatus)
+        {
+            if status.current_version == update.to_version {
+                println!("{label}: running v{}", status.current_version);
+                return Ok(());
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "{label} did not come back on v{} within a minute; check its service \
+                 (`archductor archcar service-status`) — the previous binaries are kept \
+                 beside the new ones as *.previous",
+                update.to_version
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+/// `archductor remote update`: update saved daemons without switching to them.
+fn run_remote_update(
+    paths: &AppPaths,
+    client: Option<&str>,
+    all: bool,
+    check: bool,
+    version: Option<String>,
+    force: bool,
+) -> Result<()> {
+    use archductor_core::archcar::client::ArchcarClient;
+    let clients = remote::load_clients(paths)?;
+    let is_local = |key: &str| matches!(key, "local" | "this-machine");
+    let mut targets: Vec<(String, ArchcarClient)> = Vec::new();
+    if all {
+        targets.push(("this machine".to_owned(), ArchcarClient::local(paths)));
+        for profile in &clients.clients {
+            targets.push((
+                profile.label.clone(),
+                ArchcarClient::from_saved_client(profile)?,
+            ));
+        }
+    } else {
+        match client {
+            Some(key) if is_local(key) => {
+                targets.push(("this machine".to_owned(), ArchcarClient::local(paths)))
+            }
+            Some(key) => {
+                let profile = clients
+                    .find(key)
+                    .ok_or_else(|| anyhow::anyhow!("no saved client named `{key}`"))?;
+                targets.push((
+                    profile.label.clone(),
+                    ArchcarClient::from_saved_client(profile)?,
+                ));
+            }
+            None => match clients.active() {
+                Some(profile) => targets.push((
+                    profile.label.clone(),
+                    ArchcarClient::from_saved_client(profile)?,
+                )),
+                None => targets.push(("this machine".to_owned(), ArchcarClient::local(paths))),
+            },
+        }
+    }
+
+    let mut failures = Vec::new();
+    for (label, client) in &targets {
+        println!("== {label}");
+        if let Err(err) = update_daemon(client, label, check, version.clone(), force) {
+            eprintln!("{err:#}");
+            failures.push(label.clone());
+        }
+    }
+    anyhow::ensure!(
+        failures.is_empty(),
+        "update failed for {}",
+        failures.join(", ")
+    );
+    Ok(())
+}
+
+/// Get a remote workspace's branch onto its git remote before importing it.
+///
+/// Refuses on uncommitted changes rather than committing them: what goes into
+/// a commit on someone else's branch is their call, and a takeover that
+/// silently leaves files behind is the bug this exists to fix.
+fn publish_source_branch(
+    source: &archductor_core::archcar::client::ArchcarClient,
+    label: &str,
+    workspace: &str,
+) -> Result<Option<String>> {
+    match source.send(ArchcarRequest::GetWorkspaceChanges {
+        workspace: workspace.to_owned(),
+        scope: WorkspaceChangeScope::Uncommitted,
+    })? {
+        ArchcarResponse::WorkspaceChanges { files, .. } if !files.is_empty() => {
+            let mut shown: Vec<&str> = files.iter().take(5).map(|f| f.path.as_str()).collect();
+            if files.len() > shown.len() {
+                shown.push("…");
+            }
+            anyhow::bail!(
+                "`{workspace}` on {label} has {} uncommitted file(s): {}. Commit them there \
+                 first (`archductor archcar commit {workspace} \"<message>\" --stage-all` \
+                 while connected to {label}), then retry",
+                files.len(),
+                shown.join(", ")
+            );
+        }
+        ArchcarResponse::WorkspaceChanges { .. } => {}
+        ArchcarResponse::Error { message } => anyhow::bail!("{label}: {message}"),
+        other => anyhow::bail!(
+            "unexpected response reading changes: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+    println!("pushing {workspace}'s branch from {label}");
+    if let ArchcarResponse::Error { message } = source.send(ArchcarRequest::PushBranch {
+        workspace: workspace.to_owned(),
+        force: false,
+    })? {
+        anyhow::bail!("could not push `{workspace}` on {label}: {message}");
+    }
+    // The commit just pushed, so this machine can check it lands on exactly
+    // that — not a stale mirror or a different repository sharing the path.
+    Ok(
+        match source.send(ArchcarRequest::GetRecentCommits {
+            workspace: workspace.to_owned(),
+            limit: Some(1),
+        })? {
+            ArchcarResponse::RecentCommits { log, .. } => {
+                log.split_whitespace().next().map(str::to_owned)
+            }
+            _ => None,
+        },
+    )
 }
 
 /// Headless server bootstrap: one command to go from a fresh box to a daemon
@@ -6512,6 +6834,46 @@ mod tests {
     }
 
     #[test]
+    fn remote_update_targets_one_client_or_all_but_not_both() {
+        match command_of(&[
+            "archductor",
+            "remote",
+            "update",
+            "build",
+            "--version",
+            "0.8.3",
+        ]) {
+            Command::Remote {
+                command:
+                    RemoteCommand::Update {
+                        client,
+                        all,
+                        check,
+                        version,
+                        force,
+                    },
+            } => {
+                assert_eq!(client.as_deref(), Some("build"));
+                assert_eq!(version.as_deref(), Some("0.8.3"));
+                assert!(!all && !check && !force);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        assert!(try_parse(["archductor", "remote", "update", "build", "--all"]).is_err());
+    }
+
+    #[test]
+    fn auto_update_takes_on_or_off_only() {
+        assert!(matches!(
+            command_of(&["archductor", "archcar", "auto-update", "on"]),
+            Command::Archcar {
+                command: ArchcarCommand::AutoUpdate { .. }
+            }
+        ));
+        assert!(try_parse(["archductor", "archcar", "auto-update", "maybe"]).is_err());
+    }
+
+    #[test]
     fn direct_store_commands_are_named_so_a_remote_profile_can_refuse_them() {
         for (args, expected) in [
             (vec!["archductor", "status"], "status"),
@@ -6532,6 +6894,8 @@ mod tests {
         for args in [
             vec!["archductor", "archcar", "workspaces"],
             vec!["archductor", "remote", "status"],
+            vec!["archductor", "remote", "update", "--all", "--check"],
+            vec!["archductor", "archcar", "update-status"],
             vec!["archductor", "doctor"],
             vec!["archductor", "mcp", "serve"],
         ] {

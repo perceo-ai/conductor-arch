@@ -133,6 +133,8 @@ export type ArchcarResponse =
   | { type: "workspace_removed"; name: string }
   | { type: "review_comment_added"; comment: ReviewComment }
   | { type: "service_status"; status: ServiceStatus }
+  | { type: "update_status"; status: DaemonUpdateStatus }
+  | { type: "update_applied"; update: AppliedDaemonUpdate }
   | { type: "service_doctor_report"; report: ServiceDoctorReport }
   | { type: "remote_access"; listen?: string; token: string; token_path: string }
   | { type: "mcp_registration"; clients: McpClientRegistration[] }
@@ -170,6 +172,38 @@ export interface McpClientRegistration {
   installed: boolean;
   registered: boolean;
   detail?: string;
+}
+
+/** Mirrors `self_update::UpdateStatus`: the daemon describing its own install. */
+export interface DaemonUpdateStatus {
+  current_version: string;
+  latest_version?: string;
+  checked_at?: number;
+  update_available: boolean;
+  channel:
+    | "tarball"
+    | "desktop_app"
+    | "homebrew"
+    | "nix"
+    | "apt"
+    | "rpm"
+    | "pacman"
+    | "app_image"
+    | "development"
+    | "unsupported";
+  binary_path: string;
+  on_disk_version?: string;
+  /** A newer binary is already on disk; applying only restarts onto it. */
+  restart_pending: boolean;
+  can_self_update: boolean;
+  guidance?: string;
+  auto_update: boolean;
+}
+
+export interface AppliedDaemonUpdate {
+  from_version: string;
+  to_version: string;
+  downloaded: boolean;
 }
 
 export interface ServiceStatus {

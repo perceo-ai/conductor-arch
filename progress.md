@@ -27,6 +27,26 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Remote takeover and daemon updates (2026-09-29)
+
+**Taking over a workspace from another machine** (`remote import`, the app's
+"Copy to this machine") created the local branch fresh from the base ref, so it
+brought the chat across and none of the commits. The client now refuses a
+source with uncommitted changes, pushes the source branch, and the local daemon
+starts the worktree at the fetched tip, keeping the source's diff base.
+Repository matching falls back to a unique host-less `owner/repo` path, so an
+`~/.ssh/config` Host alias on one machine matches https on another. The app's
+copy carries the latest chat under its original provider, and asks for a clone
+folder on a first copy.
+
+**Daemons update themselves** (`GetUpdateStatus` / `ApplyUpdate` /
+`SetAutoUpdate`, `archductor remote update [CLIENT|--all]`, Settings → Advanced
+→ Updates). A tarball install downloads, verifies against `SHA256SUMS`, and
+swaps its binaries; every channel restarts onto a newer binary already on disk
+(package manager, desktop app); the service manager brings the new process up.
+Refused while an agent is mid-turn unless forced; opt-in auto-update applies
+when idle. Daemons older than this need one manual update.
+
 ## iOS client, phase 0 (2026-09-20)
 
 `ios/` holds a native SwiftUI client for archcar. P0 is in: pair with a daemon

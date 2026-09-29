@@ -229,8 +229,15 @@ archductor remote list
 archductor remote use build
 archductor remote status
 archductor remote import fix-auth --thread-id 12 --clone-into ~/src/my-app
+archductor remote update --all --check   # every daemon's version and how it updates
+archductor remote update build           # update one daemon in place and restart it
 archductor remote disconnect
 ```
+
+`remote update` works on any saved daemon without switching to it; see
+[Running the daemon on a server](remote-daemon.md#updating-daemons) for what it
+does per install channel, and `archductor archcar auto-update on` to let a
+daemon keep itself current.
 
 ## MCP and skills
 

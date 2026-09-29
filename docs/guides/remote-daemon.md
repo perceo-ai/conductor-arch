@@ -188,12 +188,77 @@ archductor remote import fix-auth --thread-id 12 --clone-into ~/src/my-app
 Omit `--thread-id` to import the workspace without a chat. `--name` and
 `--branch` rename it locally.
 
+The branch travels through the git remote, not between the daemons. Import
+pushes the source workspace's branch from the server first (`git push -u`,
+which also sets the server copy's upstream to it), then starts the local
+workspace at that tip with the same diff base, so review shows the same work on
+both machines. Uncommitted changes on the server stop the import with the list
+of files — commit them there first; what goes into a commit on that branch is
+not the import's call.
+
+Repositories are matched by remote URL across the forms two machines use
+(`git@github.com:`, `https://github.com/`, `ssh://…:22/`). A clone made through
+an `~/.ssh/config` Host alias (`git@git-personal:you/app.git`) matches by its
+`owner/repo` path when exactly one local repository has that path; if two do,
+the import asks rather than guessing. `--clone-into` clones with the *server's*
+URL, so if that uses a Host alias this machine lacks, clone the repository
+yourself, register it here (`archductor remote use local`, then
+`archductor repo add <path>`), and import with `--from <client>`.
+
 Without `--clone-into` the import stops and asks rather than picking a directory
 on your disk. With it, the whole first-time flow is one command — which matters
 precisely here, since `repo add` is refused while a remote profile is active.
 
 In the app this is "Copy to this machine" on a workspace's right-click menu,
-shown only while a remote client is selected.
+shown only while a remote client is selected. It carries the workspace's most
+recently active chat, and when this machine has no clone it asks for a folder
+to clone into.
+
+## Updating daemons
+
+Every daemon updates itself, so you update a server from your laptop instead
+of logging in to reinstall:
+
+```bash
+archductor remote update --all --check   # versions of this machine and every saved daemon
+archductor remote update build           # update one, without switching to it
+archductor remote update --all           # update them all
+```
+
+Each daemon reports how it was installed, and that decides what "update" means:
+
+| Installed from | What `remote update` does |
+| --- | --- |
+| Release tarball (`linux-x86_64`) | Downloads the release, checks it against the release's `SHA256SUMS`, swaps `archductor` and `archcar` in place, and restarts |
+| apt, rpm, AUR, Homebrew, Nix, AppImage | Prints that channel's upgrade command to run on the server; once the new binary is on disk, `remote update` restarts the daemon onto it |
+| Desktop app | The app updates itself; on its next launch it restarts its own daemon onto the new binary |
+
+The restart goes through the service manager — the daemon exits and systemd
+(`Restart=always`) or launchd (`KeepAlive`) starts the new binary — and
+`remote update` waits until the daemon answers on the new version before it
+reports success. The previous binaries stay beside the new ones as
+`archductor.previous` and `archcar.previous`. A restart ends managed agent
+sessions, so an update is refused while an agent is mid-turn; `--force` does it
+anyway. A download that fails its checksum replaces nothing.
+
+To stop thinking about it, let a daemon update itself when a release is out
+and no agent is working:
+
+```bash
+archductor remote use build
+archductor archcar auto-update on    # or off; `archductor archcar update-status` shows it
+```
+
+The desktop app has the same controls under Settings → Advanced → Updates, for
+whichever daemon the client switcher has selected.
+
+A daemon from before this feature cannot be updated remotely — it does not
+understand the request, and `remote update` says so. Install the new release
+on it by hand once and restart its service.
+
+`ARCHDUCTOR_UPDATE_BASE_URL` points downloads at a mirror laid out like GitHub's
+(`<base>/v<version>/archductor-<version>-<os>-<arch>.tar.gz` plus `SHA256SUMS`).
+A mirror may serve targets GitHub releases do not, such as `linux-aarch64`.
 
 ## MCP against a remote
 

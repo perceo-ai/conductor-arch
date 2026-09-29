@@ -153,6 +153,9 @@ export default function App() {
       // The provider registry belongs to whichever daemon we are pointed at, so
       // it is pulled per connection rather than baked into the renderer.
       providersStore.load().catch(() => undefined);
+      // After the app updated itself, its bundled daemon is still the old
+      // process; move it onto the new binary once agents are idle.
+      void actions.finishBundledDaemonUpdate().catch(() => undefined);
     });
   });
 

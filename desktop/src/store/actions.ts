@@ -7,7 +7,7 @@
 
 import { send, sendLocal } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
-import type { ArchcarResponse } from "@/bridge/protocol";
+import type { AppliedDaemonUpdate, ArchcarResponse, DaemonUpdateStatus } from "@/bridge/protocol";
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { nav } from "./nav";
@@ -29,6 +29,20 @@ function ensureOk(res: ArchcarResponse): ArchcarResponse {
   return res;
 }
 
+/**
+ * This machine has no clone of the repository a remote workspace belongs to.
+ * Choosing where to clone it is the user's call, so the caller asks and retries
+ * with `cloneInto`.
+ */
+export class MissingLocalRepositoryError extends Error {
+  constructor(
+    readonly repositoryUrl: string,
+    readonly repositoryName: string,
+  ) {
+    super(`this machine has no clone of ${repositoryUrl}`);
+  }
+}
+
 export interface AddRepositoryInput {
   path: string;
   name?: string;
@@ -43,9 +57,95 @@ export interface CreateWorkspaceInput {
   baseRef?: string;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** `send` follows the client switcher; `sendLocal` is always this machine. */
+type Transport = typeof send;
+
+async function daemonUpdateStatus(transport: Transport = send): Promise<DaemonUpdateStatus> {
+  const res = ensureOk(await transport({ type: "get_update_status" }));
+  if (res.type !== "update_status") throw new Error("the daemon did not report its version");
+  return res.status;
+}
+
 export const actions = {
   /** Re-pull workspaces + repositories (archcar has no inventory-changed event). */
   refreshInventory,
+
+  daemonUpdateStatus,
+
+  /**
+   * Update the connected daemon — this machine's or a remote one — and wait
+   * for it to come back on the new version. The daemon restarts itself after
+   * answering, so requests fail for a moment; those failures are the restart,
+   * not an error.
+   */
+  async updateDaemon(
+    options: {
+      force?: boolean;
+      pollMs?: number;
+      timeoutMs?: number;
+      transport?: Transport;
+      /** False once the user switched to another daemon mid-update. */
+      stillTargeted?: () => boolean;
+    } = {},
+  ): Promise<AppliedDaemonUpdate> {
+    logAction("apply_update", { force: options.force ?? false });
+    const transport = options.transport ?? send;
+    const res = ensureOk(await transport({ type: "apply_update", force: options.force }));
+    if (res.type !== "update_applied") throw new Error("the daemon did not apply an update");
+    const pollMs = options.pollMs ?? 1000;
+    const deadline = Date.now() + (options.timeoutMs ?? 60_000);
+    await sleep(pollMs * 2);
+    while (Date.now() < deadline) {
+      try {
+        if (options.stillTargeted && !options.stillTargeted()) {
+          // Polls would now reach a different daemon and time out wrongly.
+          throw new Error(
+            `switched daemons during the update; v${res.update.to_version} was being installed on the previous one`,
+          );
+        }
+        if ((await daemonUpdateStatus(transport)).current_version === res.update.to_version) {
+          await refreshInventory();
+          return res.update;
+        }
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("switched daemons")) throw err;
+        // Still restarting.
+      }
+      await sleep(pollMs);
+    }
+    throw new Error(
+      `the daemon did not come back on v${res.update.to_version} within a minute; check its service`,
+    );
+  },
+
+  async setDaemonAutoUpdate(enabled: boolean): Promise<DaemonUpdateStatus> {
+    logAction("set_auto_update", { enabled });
+    const res = ensureOk(await send({ type: "set_auto_update", enabled }));
+    if (res.type !== "update_status") throw new Error("the daemon did not confirm the setting");
+    return res.status;
+  },
+
+  /**
+   * The app updates itself, and with it the daemon binary it bundles — but a
+   * daemon kept alive by launchd keeps running the old one. On launch, move
+   * this machine's bundled daemon onto the binary the app just installed.
+   * Never forced: agents mid-turn win, and the next launch tries again.
+   */
+  async finishBundledDaemonUpdate(pollMs?: number): Promise<boolean> {
+    // Always this machine's daemon, whichever client is selected: the app's
+    // own bundled daemon is local by definition.
+    try {
+      const status = await daemonUpdateStatus(sendLocal);
+      if (status.channel !== "desktop_app" || !status.restart_pending) return false;
+      await this.updateDaemon({ pollMs, transport: sendLocal });
+      return true;
+    } catch {
+      // An older daemon without the RPC, or agents are busy; both are fine.
+      return false;
+    }
+  },
 
   revealPanel(panelId: PanelId, options: { activate?: boolean } = {}) {
     const descriptor = panelDescriptor(panelId);
@@ -176,16 +276,24 @@ export const actions = {
    * remote, then writes to the *local* daemon via `sendLocal`. Using `send` for
    * the write would recreate the workspace on the machine it came from.
    *
-   * Fails with the daemon's own message when this machine has no clone of the
-   * repository; picking a directory to clone into is the user's call, not ours.
+   * The branch is the work, and it crosses machines through the git remote:
+   * the source must be committed, and is pushed here before the import so the
+   * local workspace starts at its tip. Uncommitted changes are refused rather
+   * than committed — what goes into someone else's branch is their call.
+   *
+   * Throws `MissingLocalRepositoryError` when this machine has no clone and no
+   * `cloneInto` was given; picking a directory is the user's call, not ours.
+   * `threadId: "latest"` carries the workspace's most recently active chat.
    */
   async importWorkspaceFromRemote(input: {
     workspace: string;
-    threadId?: number;
+    threadId?: number | "latest";
+    cloneInto?: string;
   }): Promise<{ workspace: string; threadId?: number }> {
     logAction("import_workspace_from_remote", {
       workspace: input.workspace,
       thread_id: input.threadId ?? "none",
+      clone_into: input.cloneInto ?? "none",
     });
     const remoteWorkspaces = ensureOk(await send({ type: "list_workspaces" }));
     if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
@@ -203,27 +311,67 @@ export const actions = {
       );
     }
 
+    let threadId = input.threadId;
+    let provider: string | undefined;
+    if (threadId != null) {
+      const listed = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
+      const threads = listed.type === "chat_threads" ? listed.threads : [];
+      const thread =
+        threadId === "latest"
+          ? threads
+              .filter((candidate) => !candidate.archived_at)
+              .sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0]
+          : threads.find((candidate) => candidate.id === threadId);
+      if (threadId === "latest") threadId = thread?.id;
+      // The chat continues under the agent it was held with; the daemon would
+      // otherwise default an imported chat to Codex.
+      provider = thread?.provider;
+    }
     let transcript: { role: string; content: string; created_at: string }[] = [];
     let chatTitle: string | undefined;
-    if (input.threadId != null) {
-      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: input.threadId }));
+    if (threadId != null) {
+      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: threadId }));
       if (chat.type === "chat_transcript") {
         transcript = chat.messages;
         chatTitle = chat.title;
       }
     }
 
-    const imported = ensureOk(
-      await sendLocal({
-        type: "import_workspace_from_remote",
-        repository_url: repositoryUrl,
-        branch: source.branch,
-        base_ref: source.base_ref,
-        name: source.name,
-        transcript,
-        chat_title: chatTitle,
-      }),
+    const changes = ensureOk(
+      await send({ type: "get_workspace_changes", workspace: source.name, scope: "uncommitted" }),
     );
+    if (changes.type === "workspace_changes" && changes.files.length > 0) {
+      const shown = changes.files.slice(0, 5).map((file) => file.path);
+      if (changes.files.length > shown.length) shown.push("…");
+      throw new Error(
+        `${source.name} has ${changes.files.length} uncommitted file(s) on the remote: ${shown.join(", ")}. Commit them there first, then copy again.`,
+      );
+    }
+    ensureOk(await send({ type: "push_branch", workspace: source.name }));
+    // The commit just pushed: this machine refuses a branch anywhere else — a
+    // stale mirror, or a same-path repository an ssh alias matched.
+    const head = await send({ type: "get_recent_commits", workspace: source.name, limit: 1 });
+    const sourceCommit = head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
+
+    if (input.cloneInto) {
+      ensureOk(await sendLocal({ type: "clone_repository", url: repositoryUrl, dest: input.cloneInto }));
+    }
+    const imported = await sendLocal({
+      type: "import_workspace_from_remote",
+      repository_url: repositoryUrl,
+      branch: source.branch,
+      source_branch: source.branch,
+      source_commit: sourceCommit,
+      base_ref: source.base_ref,
+      name: source.name,
+      transcript,
+      chat_title: chatTitle,
+      provider,
+    });
+    if (imported.type === "error" && imported.message.startsWith("no repository here has remote")) {
+      throw new MissingLocalRepositoryError(repositoryUrl, source.repository_name);
+    }
+    ensureOk(imported);
     if (imported.type !== "workspace_imported") throw new Error("import returned no workspace");
     return { workspace: imported.workspace, threadId: imported.thread_id };
   },

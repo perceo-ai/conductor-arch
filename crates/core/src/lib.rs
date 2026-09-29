@@ -32,6 +32,7 @@ pub mod pty;
 pub mod redaction;
 pub mod repository;
 pub mod runtime_session_store;
+pub mod self_update;
 pub mod service;
 pub mod session_event;
 pub mod session_kind;

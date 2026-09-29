@@ -127,6 +127,9 @@ export type ArchcarRequest =
   | { type: "get_setup_readiness"; recheck?: boolean }
   // Daemon background service + remote access.
   | { type: "get_service_status" }
+  | { type: "get_update_status" }
+  | { type: "apply_update"; version?: string; force?: boolean }
+  | { type: "set_auto_update"; enabled: boolean }
   | { type: "service_doctor" }
   | { type: "install_service"; input: { listen?: string; archcar_path?: string } }
   | { type: "uninstall_service" }
@@ -196,6 +199,10 @@ export type ArchcarRequest =
       type: "import_workspace_from_remote";
       repository_url: string;
       branch: string;
+      /** The branch as the git remote knows it; the workspace starts at its tip. */
+      source_branch?: string;
+      /** The commit the source pushed; anything else here is refused. */
+      source_commit?: string;
       base_ref?: string;
       name?: string;
       transcript?: { role: string; content: string; created_at: string }[];

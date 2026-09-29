@@ -147,6 +147,12 @@ The daemon refreshes that check in the background, so the CLI never waits on
 the network. Set `ARCHDUCTOR_NO_UPDATE_NOTICE=1` to silence it. Builds from
 source say nothing: they have no release version to compare.
 
+Daemons — including a server's — update from wherever you are:
+`archductor remote update --all` (or Settings → Advanced → Updates in the app).
+A tarball install downloads and swaps its own binaries; package-managed installs
+restart onto whatever their package manager installed. See
+[Updating daemons](docs/guides/remote-daemon.md#updating-daemons).
+
 ## Requirements
 
 | Tool | Required for |

@@ -1,4 +1,6 @@
 pub mod client;
+#[cfg(unix)]
+pub mod handoff;
 pub mod harness;
 pub mod harness_contract;
 pub mod protocol;
