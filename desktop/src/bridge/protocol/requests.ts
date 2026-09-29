@@ -201,6 +201,8 @@ export type ArchcarRequest =
       branch: string;
       /** The branch as the git remote knows it; the workspace starts at its tip. */
       source_branch?: string;
+      /** The commit the source pushed; anything else here is refused. */
+      source_commit?: string;
       base_ref?: string;
       name?: string;
       transcript?: { role: string; content: string; created_at: string }[];

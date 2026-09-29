@@ -227,6 +227,8 @@ describe("actions.importWorkspaceFromRemote", () => {
         });
       if (req.type === "get_workspace_changes")
         return response({ type: "workspace_changes", workspace: "parser", scope: "uncommitted", files: [] });
+      if (req.type === "get_recent_commits")
+        return response({ type: "recent_commits", workspace: "parser", log: "4ed0c0e (HEAD -> lc/parser) port it" });
       return response({ type: "workspace_updated", name: "parser" });
     });
     api.requestLocal.mockImplementation(async (req: { type: string }) => {
@@ -246,6 +248,8 @@ describe("actions.importWorkspaceFromRemote", () => {
     });
     expect(api.requestLocal.mock.calls[0][0]).toMatchObject({
       source_branch: "lc/parser",
+      // The pushed commit, so this machine refuses any other tip.
+      source_commit: "4ed0c0e",
       base_ref: "main",
     });
   });
@@ -400,6 +404,21 @@ describe("actions.updateDaemon", () => {
     await expect(actions.updateDaemon({ pollMs: 1 })).rejects.toThrow("mid-turn in berlin");
   });
 
+  it("stops polling once the user switches to another daemon", async () => {
+    api.request.mockImplementation(async (req: { type: string }) =>
+      req.type === "apply_update"
+        ? response({
+            type: "update_applied",
+            update: { from_version: "0.8.2", to_version: "0.8.3", downloaded: true },
+          })
+        : response(status("0.8.2")),
+    );
+    const { actions } = await import("./actions");
+    await expect(
+      actions.updateDaemon({ pollMs: 1, timeoutMs: 1000, stillTargeted: () => false }),
+    ).rejects.toThrow("switched daemons");
+  });
+
   it("fails loudly when the daemon never comes back on the new version", async () => {
     api.request.mockImplementation(async (req: { type: string }) =>
       req.type === "apply_update"
@@ -433,9 +452,9 @@ describe("actions.finishBundledDaemonUpdate", () => {
     };
   }
 
-  it("restarts this machine's bundled daemon onto the binary the app installed", async () => {
+  it("restarts this machine's bundled daemon even while a remote client is selected", async () => {
     let applied = false;
-    api.request.mockImplementation(async (req: { type: string }) => {
+    api.requestLocal.mockImplementation(async (req: { type: string }) => {
       if (req.type === "apply_update") {
         applied = true;
         return response({
@@ -452,20 +471,21 @@ describe("actions.finishBundledDaemonUpdate", () => {
       return response({ type: "workspaces", workspaces: [] });
     });
     const { actions } = await import("./actions");
-    await expect(actions.finishBundledDaemonUpdate(false, 1)).resolves.toBe(true);
+    await expect(actions.finishBundledDaemonUpdate(1)).resolves.toBe(true);
     expect(applied).toBe(true);
+    // Nothing went to the selected (possibly remote) daemon.
+    const remoteTypes = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
+    expect(remoteTypes).not.toContain("apply_update");
   });
 
-  it("leaves remote daemons, other channels, and daemons without the RPC alone", async () => {
+  it("leaves other channels and daemons without the RPC alone", async () => {
     const { actions } = await import("./actions");
-    await expect(actions.finishBundledDaemonUpdate(true)).resolves.toBe(false);
+    api.requestLocal.mockResolvedValue(response(daemon({ channel: "tarball", restart_pending: true })));
+    await expect(actions.finishBundledDaemonUpdate(1)).resolves.toBe(false);
 
-    routeByType({ get_update_status: daemon({ channel: "tarball", restart_pending: true }) });
-    await expect(actions.finishBundledDaemonUpdate(false)).resolves.toBe(false);
-
-    api.request.mockRejectedValue(new Error("empty response from archcar sidecar"));
-    await expect(actions.finishBundledDaemonUpdate(false)).resolves.toBe(false);
-    const types = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
+    api.requestLocal.mockRejectedValue(new Error("empty response from archcar sidecar"));
+    await expect(actions.finishBundledDaemonUpdate(1)).resolves.toBe(false);
+    const types = api.requestLocal.mock.calls.map((c) => (c[0] as { type: string }).type);
     expect(types).not.toContain("apply_update");
   });
 });

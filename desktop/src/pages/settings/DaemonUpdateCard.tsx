@@ -39,7 +39,11 @@ export function DaemonUpdateCard() {
 
   const apply = (force = false) =>
     run("Updating daemon", async () => {
-      const update = await actions.updateDaemon({ force });
+      const target = clientsStore.activeLabel();
+      const update = await actions.updateDaemon({
+        force,
+        stillTargeted: () => clientsStore.activeLabel() === target,
+      });
       return `Now running v${update.to_version} (was v${update.from_version}).`;
     });
 

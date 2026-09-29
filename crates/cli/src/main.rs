@@ -5619,7 +5619,7 @@ fn run_remote_import(
     // The branch is the work. It crosses machines through the git remote, so
     // the source has to have committed and pushed it before there is anything
     // here to start from.
-    publish_source_branch(&source, &profile.label, &remote_workspace.name)?;
+    let source_commit = publish_source_branch(&source, &profile.label, &remote_workspace.name)?;
 
     let local = archductor_core::archcar::client::ArchcarClient::local(paths);
     if let Some(dest) = clone_into {
@@ -5639,6 +5639,7 @@ fn run_remote_import(
         repository_url,
         branch: branch.unwrap_or_else(|| remote_workspace.branch.clone()),
         source_branch: Some(remote_workspace.branch),
+        source_commit,
         base_ref: Some(remote_workspace.base_ref),
         name: name.or(Some(remote_workspace.name)),
         transcript,
@@ -5831,7 +5832,7 @@ fn publish_source_branch(
     source: &archductor_core::archcar::client::ArchcarClient,
     label: &str,
     workspace: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     match source.send(ArchcarRequest::GetWorkspaceChanges {
         workspace: workspace.to_owned(),
         scope: WorkspaceChangeScope::Uncommitted,
@@ -5857,15 +5858,25 @@ fn publish_source_branch(
         ),
     }
     println!("pushing {workspace}'s branch from {label}");
-    match source.send(ArchcarRequest::PushBranch {
+    if let ArchcarResponse::Error { message } = source.send(ArchcarRequest::PushBranch {
         workspace: workspace.to_owned(),
         force: false,
     })? {
-        ArchcarResponse::Error { message } => {
-            anyhow::bail!("could not push `{workspace}` on {label}: {message}")
-        }
-        _ => Ok(()),
+        anyhow::bail!("could not push `{workspace}` on {label}: {message}");
     }
+    // The commit just pushed, so this machine can check it lands on exactly
+    // that — not a stale mirror or a different repository sharing the path.
+    Ok(
+        match source.send(ArchcarRequest::GetRecentCommits {
+            workspace: workspace.to_owned(),
+            limit: Some(1),
+        })? {
+            ArchcarResponse::RecentCommits { log, .. } => {
+                log.split_whitespace().next().map(str::to_owned)
+            }
+            _ => None,
+        },
+    )
 }
 
 /// Headless server bootstrap: one command to go from a fresh box to a daemon

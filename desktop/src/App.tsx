@@ -26,7 +26,6 @@ import {
   repositoriesStore,
   layoutStore,
   updateStore,
-  clientsStore,
 } from "./store";
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
@@ -156,10 +155,7 @@ export default function App() {
       providersStore.load().catch(() => undefined);
       // After the app updated itself, its bundled daemon is still the old
       // process; move it onto the new binary once agents are idle.
-      void clientsStore
-        .refresh()
-        .then(() => actions.finishBundledDaemonUpdate(clientsStore.isRemote()))
-        .catch(() => undefined);
+      void actions.finishBundledDaemonUpdate().catch(() => undefined);
     });
   });
 

@@ -7583,6 +7583,7 @@ mutation($threadId: ID!) {{
         name: &str,
         branch: &str,
         source_branch: &str,
+        source_commit: Option<&str>,
         base_ref: Option<&str>,
     ) -> Result<Workspace> {
         let repository = self.load_repository(repository_name)?;
@@ -7594,12 +7595,35 @@ mutation($threadId: ID!) {{
             validate_branch_name(source_branch).is_ok(),
             "`{source_branch}` is not a branch name"
         );
-        anyhow::ensure!(
-            fetch_remote_source_branch(&repository.root_path, remote, source_branch)?,
-            "branch {source_branch} is not on {remote}; push it from the machine that has it \
-             (`archductor remote import` does this for you) and retry"
-        );
         let start_point = format!("{remote}/{source_branch}");
+        // A failed fetch is fatal here, unlike for a base branch: a stale
+        // remote-tracking ref from an earlier fetch would start the workspace
+        // at old commits and look like success.
+        let refspec = format!("refs/heads/{source_branch}:refs/remotes/{start_point}");
+        git_dynamic(&repository.root_path, &["fetch", remote, refspec.as_str()]).with_context(
+            || {
+                format!(
+                    "could not fetch branch {source_branch} from {remote}; push it from the \
+                     machine that has it (`archductor remote import` does this for you) and retry"
+                )
+            },
+        )?;
+        // The other machine names the commit it pushed. Anything else here —
+        // a lagging mirror, or an alias that matched a different repository
+        // with a same-named branch — is not the workspace being taken over.
+        if let Some(expected) = source_commit.map(str::trim).filter(|sha| !sha.is_empty()) {
+            let tip =
+                git_output_dynamic(&repository.root_path, &["rev-parse", start_point.as_str()])?;
+            let tip = tip.trim();
+            anyhow::ensure!(
+                expected.len() >= 7
+                    && expected.bytes().all(|b| b.is_ascii_hexdigit())
+                    && tip.starts_with(&expected.to_ascii_lowercase()),
+                "{start_point} here is at {} but the source workspace is at {expected}; this \
+                 clone is either behind that remote or a different repository with the same path",
+                &tip[..tip.len().min(12)]
+            );
+        }
 
         let workspace = self.create_lifecycle_job(CreateWorkspace {
             repository_name: repository_name.to_owned(),
@@ -17242,7 +17266,14 @@ CUSTOM_VALUE = "from-settings"
 
         let store = WorkspaceStore::open(&db_path).unwrap();
         let workspace = store
-            .import_from_remote_branch("demo", "berlin", "lc/work", "lc/work", Some("origin/main"))
+            .import_from_remote_branch(
+                "demo",
+                "berlin",
+                "lc/work",
+                "lc/work",
+                Some(&source_tip.trim()[..7]),
+                Some("origin/main"),
+            )
             .unwrap();
 
         assert_eq!(
@@ -17269,6 +17300,33 @@ CUSTOM_VALUE = "from-settings"
         );
     }
 
+    /// The branch here is not at the commit the source pushed: a clone of a
+    /// different repository that shares the path (matched through an alias),
+    /// or a mirror that lags. Either way it is not the workspace.
+    #[test]
+    fn import_from_remote_branch_refuses_a_tip_other_than_the_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db_path, source, _origin) = takeover_fixture(temp.path());
+        git_output(&source, ["checkout", "-q", "-b", "lc/work"]);
+        git_output(&source, ["push", "-q", "origin", "lc/work"]);
+
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let err = store
+            .import_from_remote_branch(
+                "demo",
+                "berlin",
+                "lc/work",
+                "lc/work",
+                Some("deadbeef1"),
+                None,
+            )
+            .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("deadbeef1"), "{message}");
+        assert!(store.get_by_name("berlin").is_err());
+    }
+
     #[test]
     fn import_from_remote_branch_refuses_a_branch_the_remote_lacks() {
         let temp = tempfile::tempdir().unwrap();
@@ -17276,7 +17334,7 @@ CUSTOM_VALUE = "from-settings"
 
         let store = WorkspaceStore::open(&db_path).unwrap();
         let err = store
-            .import_from_remote_branch("demo", "berlin", "lc/unpushed", "lc/unpushed", None)
+            .import_from_remote_branch("demo", "berlin", "lc/unpushed", "lc/unpushed", None, None)
             .unwrap_err();
 
         let message = format!("{err:#}");
@@ -17291,6 +17349,7 @@ CUSTOM_VALUE = "from-settings"
                 "berlin",
                 "lc/x",
                 "--upload-pack=touch /tmp/pwn",
+                None,
                 None,
             )
             .unwrap_err();

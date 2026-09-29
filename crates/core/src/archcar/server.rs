@@ -197,11 +197,19 @@ impl ArchcarServer {
                 .with_context(|| format!("bind archcar endpoint {}", endpoint_path.display()))?,
         };
         let remote = match (inherited_remote, remote::configured_listen_addr(&paths)) {
-            (Some(listener), Some(Ok(_))) => {
-                info!("archcar adopted its remote listener across a restart");
+            // Only the listener the configuration still asks for: if the
+            // address changed (say, public to loopback) since it was bound,
+            // keeping the old one would leave the daemon exposed.
+            (Some(listener), Some(Ok(addr))) if listener.local_addr().ok() == Some(addr) => {
+                info!(%addr, "archcar adopted its remote listener across a restart");
                 Some(adopt_remote_listener(&paths, listener)?)
             }
-            (_, Some(Ok(addr))) => Some(bind_remote_listener(&paths, addr)?),
+            (inherited, Some(Ok(addr))) => {
+                // Close a stale inherited listener before binding: the new
+                // address may share its port.
+                drop(inherited);
+                Some(bind_remote_listener(&paths, addr)?)
+            }
             (_, Some(Err(err))) => return Err(err),
             (_, None) => None,
         };
@@ -558,9 +566,12 @@ fn apply_update(
     let binary = crate::self_update::running_binary()?;
     let update = crate::self_update::apply(&AppPaths::from_env(), &binary, version)?;
     // A download can take minutes; a turn that started meanwhile wins. The new
-    // binary is on disk, so the next apply only restarts.
+    // binary is on disk, so the next apply only restarts. Refuse new work
+    // *before* the last look, so no turn can start between it and the restart.
+    state.lock().unwrap().shutting_down = true;
     let busy = busy_now();
     if !force && !busy.is_empty() {
+        state.lock().unwrap().shutting_down = false;
         anyhow::bail!(
             "installed v{} but agents started in {} meanwhile; the restart onto it is deferred. \
              Apply again once they finish, or force it",
@@ -2284,6 +2295,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             repository_url,
             branch,
             source_branch,
+            source_commit,
             base_ref,
             name,
             transcript,
@@ -2294,6 +2306,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             &repository_url,
             &branch,
             source_branch.as_deref(),
+            source_commit.as_deref(),
             base_ref,
             name,
             &transcript,
@@ -4949,6 +4962,7 @@ fn import_workspace_from_remote(
     repository_url: &str,
     branch: &str,
     source_branch: Option<&str>,
+    source_commit: Option<&str>,
     base_ref: Option<String>,
     name: Option<String>,
     transcript: &[crate::archcar::protocol::ArchcarChatTranscriptMessage],
@@ -4976,6 +4990,7 @@ fn import_workspace_from_remote(
         name.as_deref().unwrap_or_default(),
         branch,
         source_branch.unwrap_or(branch),
+        source_commit,
         base_ref.as_deref(),
     )?;
 
@@ -6795,6 +6810,7 @@ mod tests {
                     repository_url: origin.to_string_lossy().into_owned(),
                     branch: "lc/mine".to_owned(),
                     source_branch: Some("lc/work".to_owned()),
+                    source_commit: Some(source_tip.clone()),
                     base_ref: Some("origin/main".to_owned()),
                     name: Some("berlin".to_owned()),
                     transcript: vec![crate::archcar::protocol::ArchcarChatTranscriptMessage {

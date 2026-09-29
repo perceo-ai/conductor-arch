@@ -59,8 +59,11 @@ export interface CreateWorkspaceInput {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function daemonUpdateStatus(): Promise<DaemonUpdateStatus> {
-  const res = ensureOk(await send({ type: "get_update_status" }));
+/** `send` follows the client switcher; `sendLocal` is always this machine. */
+type Transport = typeof send;
+
+async function daemonUpdateStatus(transport: Transport = send): Promise<DaemonUpdateStatus> {
+  const res = ensureOk(await transport({ type: "get_update_status" }));
   if (res.type !== "update_status") throw new Error("the daemon did not report its version");
   return res.status;
 }
@@ -78,21 +81,36 @@ export const actions = {
    * not an error.
    */
   async updateDaemon(
-    options: { force?: boolean; pollMs?: number; timeoutMs?: number } = {},
+    options: {
+      force?: boolean;
+      pollMs?: number;
+      timeoutMs?: number;
+      transport?: Transport;
+      /** False once the user switched to another daemon mid-update. */
+      stillTargeted?: () => boolean;
+    } = {},
   ): Promise<AppliedDaemonUpdate> {
     logAction("apply_update", { force: options.force ?? false });
-    const res = ensureOk(await send({ type: "apply_update", force: options.force }));
+    const transport = options.transport ?? send;
+    const res = ensureOk(await transport({ type: "apply_update", force: options.force }));
     if (res.type !== "update_applied") throw new Error("the daemon did not apply an update");
     const pollMs = options.pollMs ?? 1000;
     const deadline = Date.now() + (options.timeoutMs ?? 60_000);
     await sleep(pollMs * 2);
     while (Date.now() < deadline) {
       try {
-        if ((await daemonUpdateStatus()).current_version === res.update.to_version) {
+        if (options.stillTargeted && !options.stillTargeted()) {
+          // Polls would now reach a different daemon and time out wrongly.
+          throw new Error(
+            `switched daemons during the update; v${res.update.to_version} was being installed on the previous one`,
+          );
+        }
+        if ((await daemonUpdateStatus(transport)).current_version === res.update.to_version) {
           await refreshInventory();
           return res.update;
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("switched daemons")) throw err;
         // Still restarting.
       }
       await sleep(pollMs);
@@ -115,12 +133,13 @@ export const actions = {
    * this machine's bundled daemon onto the binary the app just installed.
    * Never forced: agents mid-turn win, and the next launch tries again.
    */
-  async finishBundledDaemonUpdate(isRemote: boolean, pollMs?: number): Promise<boolean> {
-    if (isRemote) return false;
+  async finishBundledDaemonUpdate(pollMs?: number): Promise<boolean> {
+    // Always this machine's daemon, whichever client is selected: the app's
+    // own bundled daemon is local by definition.
     try {
-      const status = await daemonUpdateStatus();
+      const status = await daemonUpdateStatus(sendLocal);
       if (status.channel !== "desktop_app" || !status.restart_pending) return false;
-      await this.updateDaemon({ pollMs });
+      await this.updateDaemon({ pollMs, transport: sendLocal });
       return true;
     } catch {
       // An older daemon without the RPC, or agents are busy; both are fine.
@@ -329,6 +348,10 @@ export const actions = {
       );
     }
     ensureOk(await send({ type: "push_branch", workspace: source.name }));
+    // The commit just pushed: this machine refuses a branch anywhere else — a
+    // stale mirror, or a same-path repository an ssh alias matched.
+    const head = await send({ type: "get_recent_commits", workspace: source.name, limit: 1 });
+    const sourceCommit = head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
 
     if (input.cloneInto) {
       ensureOk(await sendLocal({ type: "clone_repository", url: repositoryUrl, dest: input.cloneInto }));
@@ -338,6 +361,7 @@ export const actions = {
       repository_url: repositoryUrl,
       branch: source.branch,
       source_branch: source.branch,
+      source_commit: sourceCommit,
       base_ref: source.base_ref,
       name: source.name,
       transcript,

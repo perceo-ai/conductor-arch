@@ -461,13 +461,31 @@ fn stage_and_swap(
         std::fs::copy(&source, &staged).with_context(|| format!("stage {}", staged.display()))?;
         make_executable(&staged)?;
     }
+    // The rollback copy must exist before anything is replaced; without it a
+    // bad release has nothing to go back to.
     for name in BINARIES {
         let target = dir.join(name);
         if target.exists() {
-            let _ = std::fs::copy(&target, dir.join(format!("{name}.previous")));
+            std::fs::copy(&target, dir.join(format!("{name}.previous")))
+                .with_context(|| format!("back up {} before replacing it", target.display()))?;
         }
-        std::fs::rename(dir.join(format!(".{name}.new")), &target)
-            .with_context(|| format!("replace {}", target.display()))?;
+    }
+    // The two binaries move as a unit: if the second rename fails, the first
+    // goes back, so the CLI and the daemon never come from different releases.
+    for (index, name) in BINARIES.iter().enumerate() {
+        let target = dir.join(name);
+        if let Err(err) = std::fs::rename(dir.join(format!(".{name}.new")), &target) {
+            for done in &BINARIES[..index] {
+                let _ = std::fs::copy(
+                    dir.join(format!("{done}.previous")),
+                    dir.join(format!(".{done}.restore")),
+                )
+                .and_then(|_| {
+                    std::fs::rename(dir.join(format!(".{done}.restore")), dir.join(done))
+                });
+            }
+            return Err(err).with_context(|| format!("replace {}", target.display()));
+        }
     }
     Ok(())
 }
@@ -908,6 +926,31 @@ mod tests {
             Some("0.8.2")
         );
         assert!(!bin.join("archcar.previous").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_binary_is_replaced_without_a_rollback_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = fake_release(temp.path(), "0.8.3");
+        let bin = temp.path().join("install/bin");
+        old_install(&bin);
+        // `archductor` cannot be copied aside (it is a directory here), so
+        // there would be nothing to roll back to.
+        std::fs::remove_file(bin.join("archductor")).unwrap();
+        std::fs::create_dir_all(bin.join("archductor/inside")).unwrap();
+
+        let err = install_release(&bin, "0.8.3", &base, "linux", "x86_64").unwrap_err();
+
+        assert!(format!("{err:#}").contains("back up"), "{err:#}");
+        assert_eq!(
+            binary_version(&bin.join("archcar")).as_deref(),
+            Some("0.8.2")
+        );
+        assert!(
+            !bin.join(".archcar.new").exists(),
+            "staged binaries are cleaned up"
+        );
     }
 
     #[cfg(unix)]

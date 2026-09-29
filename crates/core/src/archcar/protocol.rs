@@ -570,6 +570,11 @@ pub enum ArchcarRequest {
         /// the branch locally. The workspace starts at its tip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_branch: Option<String>,
+        /// The commit the source pushed. The import refuses a branch that is
+        /// anywhere else here — a stale mirror, or a same-path repository an
+        /// ssh alias matched by mistake.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_commit: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_ref: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
