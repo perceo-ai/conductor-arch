@@ -6123,8 +6123,9 @@ mutation($threadId: ID!) {{
         ensure_clean_git_tree(&workspace.path, "checkout branch")?;
         git_dynamic(&workspace.path, &["checkout", branch])?;
         let now = timestamp();
+        // A branch someone checked out is one they chose.
         self.conn.execute(
-            "UPDATE workspaces SET branch = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE workspaces SET branch = ?1, branch_generated = 0, updated_at = ?2 WHERE id = ?3",
             params![branch, now, workspace.id],
         )?;
         let updated = self.get_by_name(name)?;
@@ -6137,7 +6138,37 @@ mutation($threadId: ID!) {{
         Ok(updated)
     }
 
+    /// Rename a workspace's branch at someone's explicit request. The new
+    /// branch is theirs, so automatic naming will not move it again.
     pub fn rename_branch(&self, name: &str, new_branch: &str) -> Result<Workspace> {
+        self.move_branch(name, new_branch, false)
+    }
+
+    /// Replace a codename branch with a name Archductor or an agent picked.
+    ///
+    /// Every automatic rename goes through here, so none can bypass the origin
+    /// check: a branch the creator asked for, checked out, or renamed is left
+    /// alone and `None` is returned. The proposal is normalised onto the
+    /// configured prefix.
+    fn rename_codename_branch(
+        &self,
+        workspace: &Workspace,
+        proposed: &str,
+    ) -> Result<Option<Workspace>> {
+        if !self.workspace_branch_is_codename_derived(workspace)? {
+            return Ok(None);
+        }
+        let branch = self.metadata_branch_name(workspace, proposed)?;
+        if branch == workspace.branch {
+            return Ok(None);
+        }
+        self.move_branch(&workspace.name, &branch, true).map(Some)
+    }
+
+    /// The rename itself. Only `rename_branch` and `rename_codename_branch`
+    /// call this; anything else would skip either the origin record or the
+    /// origin check.
+    fn move_branch(&self, name: &str, new_branch: &str, generated: bool) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         validate_branch_name(new_branch)?;
         ensure_clean_git_tree(&workspace.path, "rename branch")?;
@@ -6145,8 +6176,10 @@ mutation($threadId: ID!) {{
         let old_branch = workspace.branch.clone();
         let now = timestamp();
         self.conn.execute(
-            "UPDATE workspaces SET branch = ?1, updated_at = ?2 WHERE id = ?3",
-            params![new_branch, now, workspace.id],
+            "UPDATE workspaces
+                SET branch = ?1, branch_generated = ?2, updated_at = ?3
+              WHERE id = ?4",
+            params![new_branch, generated, now, workspace.id],
         )?;
         let updated = self.get_by_name(name)?;
         self.record_workspace_event(
@@ -8332,27 +8365,18 @@ mutation($threadId: ID!) {{
             directive.branch_name.is_some() || directive.workspace_name.is_some();
         if has_workspace_metadata && !self.workspace_agent_metadata_applied(workspace.id)? {
             let mut workspace = workspace;
-            // Every naming route lands here: the live metadata block,
-            // `set_workspace_context`, and the dedicated naming call. A branch
-            // the creator chose is theirs whichever route asks to rename it.
-            let branch_name = match directive.branch_name.as_deref() {
-                Some(branch_name) if self.workspace_branch_is_codename_derived(&workspace)? => {
-                    Some(branch_name)
-                }
-                _ => None,
-            };
-            if let Some(branch_name) = branch_name {
-                let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
-                if branch_name != workspace.branch {
-                    match self.rename_branch(&workspace.name, &branch_name) {
-                        Ok(updated) => workspace = updated,
-                        Err(err) => warn!(
-                            workspace = %workspace.name,
-                            branch = %branch_name,
-                            error = %err,
-                            "failed to apply archductor branch metadata"
-                        ),
-                    }
+            // The live metadata block, `set_workspace_context`, and the
+            // dedicated naming call all land here.
+            if let Some(branch_name) = directive.branch_name.as_deref() {
+                match self.rename_codename_branch(&workspace, branch_name) {
+                    Ok(Some(updated)) => workspace = updated,
+                    Ok(None) => {}
+                    Err(err) => warn!(
+                        workspace = %workspace.name,
+                        branch = %branch_name,
+                        error = %err,
+                        "failed to apply archductor branch metadata"
+                    ),
                 }
             }
 
@@ -8629,19 +8653,15 @@ mutation($threadId: ID!) {{
             return Ok(());
         };
         let mut workspace = workspace;
-        if self.workspace_branch_is_codename_derived(&workspace)? {
-            let branch = self.metadata_branch_name(&workspace, &derived)?;
-            if branch != workspace.branch {
-                match self.rename_branch(&workspace.name, &branch) {
-                    Ok(updated) => workspace = updated,
-                    Err(err) => warn!(
-                        workspace = %workspace.name,
-                        branch = %branch,
-                        error = %err,
-                        "failed to apply derived branch name"
-                    ),
-                }
-            }
+        match self.rename_codename_branch(&workspace, &derived) {
+            Ok(Some(updated)) => workspace = updated,
+            Ok(None) => {}
+            Err(err) => warn!(
+                workspace = %workspace.name,
+                branch = %derived,
+                error = %err,
+                "failed to apply derived branch name"
+            ),
         }
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let name = self.metadata_workspace_name(&repository, workspace.id, &derived)?;
@@ -27217,56 +27237,6 @@ spotlight_testing = true
         let renamed = store.get_by_name("retry-failed-billing-webhooks").unwrap();
         assert_eq!(renamed.branch, "helix");
 
-        // Nor does the agent, through the live metadata block or through
-        // `set_workspace_context`: both reach the same rename path.
-        let pinned = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "pinned".to_owned(),
-                branch: "pinned".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        let thread = store
-            .create_chat_thread("pinned", "codex", "New chat", None)
-            .unwrap();
-        store
-            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
-            .unwrap();
-        store
-            .append_agent_chat_message_with_metadata(
-                thread.id,
-                "<archductor_metadata>{\"branch_name\":\"lc/agent-pick\"}</archductor_metadata>\nOn it.",
-                "agent_screen_parse",
-            )
-            .unwrap();
-        // The directive was applied (the workspace is now marked named); only
-        // the branch rename was refused.
-        assert!(store.workspace_agent_metadata_applied(pinned.id).unwrap());
-        assert_eq!(store.get_by_id(pinned.id).unwrap().branch, "pinned");
-        let tooled = store
-            .create(CreateWorkspace {
-                repository_name: "demo".to_owned(),
-                name: "tooled".to_owned(),
-                branch: "tooled".to_owned(),
-                base_ref: Some("main".to_owned()),
-            })
-            .unwrap();
-        store
-            .apply_agent_context_metadata(
-                "tooled",
-                None,
-                ArchductorMetadataDirective {
-                    workspace_name: Some("tool named".to_owned()),
-                    branch_name: Some("tool-named".to_owned()),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
-        let tooled = store.get_by_id(tooled.id).unwrap();
-        assert_eq!(tooled.name, "tool-named");
-        assert_eq!(tooled.branch, "tooled");
-
         // The dedicated naming call does not get to move it either, even if the
         // model answers with a branch it was not asked for.
         let orbit = store
@@ -27322,6 +27292,102 @@ spotlight_testing = true
             .unwrap();
         assert_eq!(chosen.branch, "lc/tidy-the-metrics");
         assert!(!store.workspace_branch_is_codename_derived(&chosen).unwrap());
+    }
+
+    #[test]
+    fn an_agent_cannot_rename_a_branch_the_creator_chose() {
+        let (_temp, store) = test_workspace_store();
+        let agent_says = |workspace: &str, directive: &str| {
+            let thread = store
+                .create_chat_thread(workspace, "codex", "New chat", None)
+                .unwrap();
+            store
+                .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+                .unwrap();
+            store
+                .append_agent_chat_message_with_metadata(
+                    thread.id,
+                    &format!("<archductor_metadata>{directive}</archductor_metadata>\nOn it."),
+                    "agent_screen_parse",
+                )
+                .unwrap();
+        };
+
+        // Same directive, two workspaces: the codename is renamed, the chosen
+        // branch is not. The first half proves the directive is applied at all.
+        let codename = codename_workspace(&store, "helix");
+        agent_says("helix", r#"{"branch_name":"lc/agent-pick"}"#);
+        assert_eq!(
+            store.get_by_id(codename.id).unwrap().branch,
+            "lc/agent-pick"
+        );
+
+        let chosen = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "pinned".to_owned(),
+                branch: "pinned".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        agent_says("pinned", r#"{"branch_name":"lc/agent-pick-two"}"#);
+        assert!(store.workspace_agent_metadata_applied(chosen.id).unwrap());
+        assert_eq!(store.get_by_id(chosen.id).unwrap().branch, "pinned");
+
+        // `set_workspace_context` reaches the store through the same entry
+        // point; the workspace may be renamed, the branch stays.
+        let tooled = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tooled".to_owned(),
+                branch: "tooled".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .apply_agent_context_metadata(
+                "tooled",
+                None,
+                ArchductorMetadataDirective {
+                    workspace_name: Some("tool named".to_owned()),
+                    branch_name: Some("tool-named".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let tooled = store.get_by_id(tooled.id).unwrap();
+        assert_eq!(tooled.name, "tool-named");
+        assert_eq!(tooled.branch, "tooled");
+    }
+
+    #[test]
+    fn a_branch_the_user_renamed_or_checked_out_is_theirs() {
+        let (_temp, store) = test_workspace_store();
+        let rename_via_agent = |workspace: &str| {
+            store
+                .apply_agent_context_metadata(
+                    workspace,
+                    None,
+                    ArchductorMetadataDirective {
+                        branch_name: Some("agent-pick".to_owned()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        };
+
+        // Renamed by hand to exactly what a prefixed codename looks like.
+        let renamed = codename_workspace(&store, "helix");
+        store.rename_branch("helix", "lc/helix").unwrap();
+        rename_via_agent("helix");
+        assert_eq!(store.get_by_id(renamed.id).unwrap().branch, "lc/helix");
+
+        // Checked out by hand, onto a branch named like the workspace.
+        let checked_out = codename_workspace(&store, "orbit");
+        store.create_branch("orbit", "lc/orbit").unwrap();
+        store.checkout_branch("orbit", "lc/orbit").unwrap();
+        rename_via_agent("orbit");
+        assert_eq!(store.get_by_id(checked_out.id).unwrap().branch, "lc/orbit");
     }
 
     #[test]
