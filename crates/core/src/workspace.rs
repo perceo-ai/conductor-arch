@@ -8315,7 +8315,16 @@ mutation($threadId: ID!) {{
             directive.branch_name.is_some() || directive.workspace_name.is_some();
         if has_workspace_metadata && !self.workspace_agent_metadata_applied(workspace.id)? {
             let mut workspace = workspace;
-            if let Some(branch_name) = directive.branch_name.as_deref() {
+            // Every naming route lands here: the live metadata block,
+            // `set_workspace_context`, and the dedicated naming call. A branch
+            // the creator chose is theirs whichever route asks to rename it.
+            let branch_name = match directive.branch_name.as_deref() {
+                Some(branch_name) if self.workspace_branch_is_codename_derived(&workspace)? => {
+                    Some(branch_name)
+                }
+                _ => None,
+            };
+            if let Some(branch_name) = branch_name {
                 let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
                 if branch_name != workspace.branch {
                     match self.rename_branch(&workspace.name, &branch_name) {
@@ -8461,9 +8470,7 @@ mutation($threadId: ID!) {{
             workspace_name: workspace_untouched
                 .then(|| names.workspace_name.clone())
                 .flatten(),
-            // Only a codename branch was offered; an answer for any other
-            // branch is not ours to apply.
-            branch_name: (workspace_untouched && context.wants_branch_name)
+            branch_name: workspace_untouched
                 .then(|| names.branch_name.clone())
                 .flatten(),
             chat_title: title_untouched.then(|| names.chat_title.clone()).flatten(),
@@ -8819,8 +8826,12 @@ mutation($threadId: ID!) {{
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
         let prefix = configured_branch_prefix(&settings);
+        // Older codenames carried the prefix of their day, which is the default
+        // one for any repository that has since configured its own.
+        let default_prefix = normalize_branch_prefix(None);
         Ok(workspace.branch == workspace.name
-            || workspace.branch == format!("{prefix}/{}", workspace.name))
+            || workspace.branch == format!("{prefix}/{}", workspace.name)
+            || workspace.branch == format!("{default_prefix}/{}", workspace.name))
     }
 
     fn workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<bool> {
@@ -26473,9 +26484,10 @@ spotlight_testing = true
     #[test]
     fn agent_metadata_directive_renames_workspace_branch_and_chat_without_persisting_marker() {
         let (_temp, store) = test_workspace_store();
-        let workspace = store.get_by_name("berlin").unwrap();
+        codename_workspace(&store, "helix");
+        let workspace = store.get_by_name("helix").unwrap();
         let thread = store
-            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .create_chat_thread("helix", "codex", "New Chat", None)
             .unwrap();
         store
             .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
@@ -26514,6 +26526,8 @@ spotlight_testing = true
             "[customization.workspace_defaults]\nbranch_prefix = \"team\"\n",
         )
         .unwrap();
+        // An older workspace: prefixed codename branch, origin never recorded.
+        forget_branch_origin(&store, "berlin");
         let thread = store
             .create_chat_thread("berlin", "codex", "New Chat", None)
             .unwrap();
@@ -26580,8 +26594,9 @@ spotlight_testing = true
     #[test]
     fn workspace_metadata_directives_only_rename_workspace_and_branch_once() {
         let (_temp, store) = test_workspace_store();
+        codename_workspace(&store, "helix");
         let thread = store
-            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .create_chat_thread("helix", "codex", "New Chat", None)
             .unwrap();
         store
             .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
@@ -26610,8 +26625,9 @@ spotlight_testing = true
     #[test]
     fn later_agent_metadata_directives_are_hidden_and_can_retitle_chat() {
         let (_temp, store) = test_workspace_store();
+        codename_workspace(&store, "helix");
         let thread = store
-            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .create_chat_thread("helix", "codex", "New Chat", None)
             .unwrap();
         store
             .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
@@ -26676,9 +26692,10 @@ spotlight_testing = true
     #[test]
     fn agent_metadata_directive_renames_workspace_only_once_but_titles_each_new_chat() {
         let (_temp, store) = test_workspace_store();
-        let workspace = store.get_by_name("berlin").unwrap();
+        codename_workspace(&store, "helix");
+        let workspace = store.get_by_name("helix").unwrap();
         let first = store
-            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .create_chat_thread("helix", "codex", "New Chat", None)
             .unwrap();
         store
             .append_chat_message(first.id, "user", "Fix billing webhook", "user_send")
@@ -27157,6 +27174,56 @@ spotlight_testing = true
         }
         let renamed = store.get_by_name("retry-failed-billing-webhooks").unwrap();
         assert_eq!(renamed.branch, "helix");
+
+        // Nor does the agent, through the live metadata block or through
+        // `set_workspace_context`: both reach the same rename path.
+        let pinned = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "pinned".to_owned(),
+                branch: "pinned".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("pinned", "codex", "New chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"branch_name\":\"lc/agent-pick\"}</archductor_metadata>\nOn it.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+        // The directive was applied (the workspace is now marked named); only
+        // the branch rename was refused.
+        assert!(store.workspace_agent_metadata_applied(pinned.id).unwrap());
+        assert_eq!(store.get_by_id(pinned.id).unwrap().branch, "pinned");
+        let tooled = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "tooled".to_owned(),
+                branch: "tooled".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+            .apply_agent_context_metadata(
+                "tooled",
+                None,
+                ArchductorMetadataDirective {
+                    workspace_name: Some("tool named".to_owned()),
+                    branch_name: Some("tool-named".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let tooled = store.get_by_id(tooled.id).unwrap();
+        assert_eq!(tooled.name, "tool-named");
+        assert_eq!(tooled.branch, "tooled");
 
         // The dedicated naming call does not get to move it either, even if the
         // model answers with a branch it was not asked for.
@@ -29151,6 +29218,18 @@ spotlight_testing = true
                 base_ref: Some("main".to_owned()),
             })
             .unwrap()
+    }
+
+    /// Make a workspace look like one created before branch origin was
+    /// recorded, which falls back to comparing its branch with its name.
+    fn forget_branch_origin(store: &WorkspaceStore, name: &str) {
+        store
+            .conn
+            .execute(
+                "UPDATE workspaces SET branch_generated = NULL WHERE name = ?1",
+                [name],
+            )
+            .unwrap();
     }
 
     fn test_workspace_store() -> (tempfile::TempDir, WorkspaceStore) {

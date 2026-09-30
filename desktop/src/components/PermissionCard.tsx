@@ -68,7 +68,10 @@ export function PermissionCard(props: {
       // second one; re-armed if it fails, so coming back again retries it.
       setAwaitingGrant(false);
       void run(async () => {
-        const res = await fileAccess.restartDaemon();
+        // A rejected call is a failed restart too, and must re-arm the same way.
+        const res = await fileAccess
+          .restartDaemon()
+          .catch((err: unknown) => ({ ok: false, error: String(err) }));
         if (!res.ok) {
           setAwaitingGrant(true);
           return res;

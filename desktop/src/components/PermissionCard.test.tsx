@@ -95,6 +95,20 @@ describe("PermissionCard", () => {
     expect(restartDaemon).toHaveBeenCalledTimes(2);
   });
 
+  it("treats a rejected restart as a failed one", async () => {
+    restartDaemon.mockRejectedValueOnce(new Error("ipc handler threw"));
+    const host = mount(null);
+
+    button(host, "Allow access")!.click();
+    await vi.waitFor(() => expect(openSettings).toHaveBeenCalled());
+    await Promise.resolve();
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(host.textContent).toContain("ipc handler threw"));
+
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(restartDaemon).toHaveBeenCalledTimes(2));
+  });
+
   it("offers no local buttons for a remote daemon", () => {
     const host = mount("server:7420");
 
