@@ -1519,7 +1519,7 @@ impl ClaudeStreamParser {
                 message_content_text(&draft.raw_json, "text", "text")
             }
             ClaudeProviderEventKind::ToolResult | ClaudeProviderEventKind::DeferredResult => {
-                message_content_text(&draft.raw_json, "tool_result", "content")
+                tool_result_text(&draft.raw_json)
             }
             ClaudeProviderEventKind::Result => string_at(&draft.raw_json, &["result"]),
             _ => None,
@@ -1624,6 +1624,57 @@ fn message_content_text(value: &Value, block_type: &str, field: &str) -> Option<
         .filter_map(|block| block.get(field).and_then(Value::as_str))
         .collect::<String>();
     (!text.is_empty()).then_some(text)
+}
+
+/// The text of every tool result in a user record. `content` is a plain
+/// string for most built-in tools but an array of blocks for MCP tools, Agent
+/// reports, and tool searches; reading only strings left those cards showing
+/// the call's input instead of what came back.
+fn tool_result_text(value: &Value) -> Option<String> {
+    let text = value
+        .pointer("/message/content")?
+        .as_array()?
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        .filter_map(|block| tool_result_content_text(block.get("content")?))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn tool_result_content_text(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => {
+            let text = blocks
+                .iter()
+                .filter_map(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("text") => string_at(block, &["text"]),
+                    Some("tool_reference") => {
+                        string_at(block, &["tool_name"]).map(|name| format!("Loaded {name}"))
+                    }
+                    // An image result has no text; the card's own title names
+                    // what was read.
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn tool_result_is_error(value: &Value) -> bool {
+    value
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .is_some_and(|content| {
+            content.iter().any(|block| {
+                block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    && block.get("is_error").and_then(Value::as_bool) == Some(true)
+            })
+        })
 }
 
 fn reasoning_blocks_from(value: &Value) -> Vec<ClaudeReasoningBlockDraft> {
@@ -1956,6 +2007,17 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
             ProviderEventPhase::Progress
         }
         ClaudeProviderEventKind::RateLimit => ProviderEventPhase::Failed,
+        // The end of a streamed tool_use block is the end of the call's
+        // arguments, not of the tool: it has not run yet. Completing the card
+        // here meant a long command never read as running.
+        ClaudeProviderEventKind::ToolResult
+            if string_at(raw_json, &["event", "type"]).as_deref() == Some("content_block_stop") =>
+        {
+            ProviderEventPhase::Progress
+        }
+        ClaudeProviderEventKind::ToolResult if tool_result_is_error(raw_json) => {
+            ProviderEventPhase::Failed
+        }
         ClaudeProviderEventKind::MessageStop
         | ClaudeProviderEventKind::ContentBlockStop
         | ClaudeProviderEventKind::ToolResult
@@ -2759,6 +2821,86 @@ mod tests {
             ));
 
         assert_eq!(event.normalized_payload["title"], "Read /repo/cli.py");
+    }
+
+    fn provider_events_for(native: &str) -> Vec<ProviderEventDraft> {
+        parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .map(|draft| {
+                draft.into_provider_event_draft(ProviderEventContext::runtime(
+                    None,
+                    Some(1),
+                    Some(2),
+                    "claude",
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn array_tool_results_carry_their_text() {
+        // Real claude 2.1.283 records: Agent reports and MCP results arrive as
+        // an array of blocks, not a string. Reading only strings left the card
+        // showing the call's input JSON instead of what came back.
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","parent_tool_use_id":null,"message":{"role":"user","content":[{"tool_use_id":"toolu_agent","type":"tool_result","content":[{"type":"text","text":"Found three drop points."},{"type":"text","text":"agentId: a1"}]}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","parent_tool_use_id":null,"message":{"role":"user","content":[{"tool_use_id":"toolu_search","type":"tool_result","content":[{"tool_name":"mcp__archivum__record_work","type":"tool_reference"}]}]}}"#,
+            "\n",
+        );
+
+        let events = provider_events_for(native);
+
+        assert_eq!(
+            events[0].normalized_payload["body"],
+            "Found three drop points.\nagentId: a1"
+        );
+        assert_eq!(
+            events[1].normalized_payload["body"],
+            "Loaded mcp__archivum__record_work"
+        );
+    }
+
+    #[test]
+    fn a_tool_result_marked_as_an_error_is_a_failed_card() {
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"content":"Exit code 1","is_error":true,"tool_use_id":"toolu_1","type":"tool_result"}]}}"#,
+            "\n",
+        );
+
+        let events = provider_events_for(native);
+
+        assert_eq!(events[0].phase, ProviderEventPhase::Failed);
+        assert_eq!(events[0].normalized_payload["body"], "Exit code 1");
+    }
+
+    #[test]
+    fn a_tool_call_runs_until_its_result_arrives() {
+        // content_block_stop closes the call's arguments; the tool has not run
+        // yet, so the card must still read as running.
+        let native = concat!(
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}}"#,
+            "\n",
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"content_block_stop","index":0}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"}]}}"#,
+            "\n",
+        );
+
+        let phases = provider_events_for(native)
+            .into_iter()
+            .map(|event| event.phase)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            phases,
+            vec![
+                ProviderEventPhase::Started,
+                ProviderEventPhase::Progress,
+                ProviderEventPhase::Completed
+            ]
+        );
     }
 
     #[test]

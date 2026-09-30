@@ -22,6 +22,7 @@ export interface ArchcarWorkspaceSummary {
   pull_request_state?: string;
   /** GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending"). */
   pull_request_checks?: string;
+  pull_request_check_counts?: PullRequestCheckCounts;
   pull_request_url?: string;
   branch_ahead?: number;
   branch_behind?: number;
@@ -95,7 +96,18 @@ export interface ArchcarChecksSummary {
   pull_request_state?: string;
   /** GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending"). */
   pull_request_checks?: string;
+  pull_request_check_counts?: PullRequestCheckCounts;
   conflicting_workspaces: number;
+}
+
+/** How a PR's check runs split at the last sync. `total` counts runs in an
+ *  unrecognised state too, so they still weigh against "X/Y passed". */
+export interface PullRequestCheckCounts {
+  total: number;
+  passed: number;
+  failed: number;
+  pending: number;
+  skipped: number;
 }
 
 export interface DiffFileSummary {

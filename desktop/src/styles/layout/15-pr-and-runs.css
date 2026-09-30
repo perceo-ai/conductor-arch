@@ -51,6 +51,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ws-pr-status-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--lc-text-muted, #7a7a7a);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .ws-pr-refresh {
   flex: 0 0 auto;
   background: transparent;

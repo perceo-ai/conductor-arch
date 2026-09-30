@@ -1,4 +1,4 @@
-import { Show, createMemo, createResource, createSignal, onCleanup, onMount } from "solid-js";
+import { Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
 import { nav, threadsStore, workspacesStore, toastsStore } from "@/store";
 import type { ArchcarChatThread, ArchcarChecksSummary, SessionKind, WorkspaceGitAction } from "@/bridge/protocol";
@@ -53,6 +53,32 @@ export default function WorkspacePrBar(props: { workspace: string }) {
 
   const row = () => workspacesStore.row(props.workspace);
   const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checksNow())));
+
+  // The stored rollup otherwise only moves at agent turn boundaries, and CI
+  // finishes minutes after the turn that pushed. While this workspace's PR is
+  // open and its checks unsettled, re-read them from GitHub: once on arrival,
+  // then every minute. The daemon broadcasts any change, which is what moves
+  // the sidebar row too.
+  let prSyncInFlight = false;
+  async function syncPrChecks() {
+    const ws = props.workspace;
+    const unsettled = st().state === "checks-running" || st().state === "checks-unknown";
+    if (prSyncInFlight || !row()?.prNumber || !unsettled) return;
+    prSyncInFlight = true;
+    try {
+      await send({ type: "refresh_pull_request", workspace: ws });
+      if (ws === props.workspace) void refetchChecks();
+    } catch {
+      // No gh, no network: keep showing the last sync.
+    } finally {
+      prSyncInFlight = false;
+    }
+  }
+  createEffect(on(() => props.workspace, () => void syncPrChecks()));
+  onMount(() => {
+    const timer = window.setInterval(() => void syncPrChecks(), 60_000);
+    onCleanup(() => window.clearInterval(timer));
+  });
   const actionShortcut = (): ShortcutAction | undefined => {
     if (st().action === "create") return "create-pr";
     if (st().action === "push") return "push-branch";
@@ -148,7 +174,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
           [`workspace-git-state-motion-${WORKSPACE_PR_STATE_MOTION[st().state]}`]:
             WORKSPACE_PR_STATE_MOTION[st().state] != null,
         }}
-        title={st().title}
+        title={st().detail ? `${st().title} · ${st().detail}` : st().title}
       >
         <Icon name={WORKSPACE_PR_STATE_ICON[st().state]} />
       </span>
@@ -166,6 +192,9 @@ export default function WorkspacePrBar(props: { workspace: string }) {
         </button>
       </Show>
       <span class="ws-pr-status-title">{st().title}</span>
+      <Show when={st().detail}>
+        <span class="ws-pr-status-detail" title={st().detail}>{st().detail}</span>
+      </Show>
       <button
         class="ws-pr-action-button"
         disabled={st().action === "none" || busy()}

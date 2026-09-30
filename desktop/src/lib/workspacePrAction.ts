@@ -1,4 +1,4 @@
-import type { ArchcarChecksSummary } from "@/bridge/protocol";
+import type { ArchcarChecksSummary, PullRequestCheckCounts } from "@/bridge/protocol";
 // Type-only, so this stays a compile-time check that every state maps to a
 // glyph that actually exists — a missing one is a build error, not a blank
 // square someone notices in a screenshot.
@@ -40,6 +40,8 @@ export interface WorkspacePrActionInput {
   checkStatus?: string | null;
   /** GitHub CI rollup stored at the last PR sync ("passing" | "failing" | "pending"). */
   prChecks?: string | null;
+  /** Per-outcome split of that rollup, for "X/Y passed, Z running". */
+  prCheckCounts?: PullRequestCheckCounts | null;
   checkExitCode?: number | null;
   branchAhead?: number | null;
   sourceBranchAhead?: number | null;
@@ -49,6 +51,8 @@ export interface WorkspacePrActionInput {
 
 export interface WorkspacePrActionState {
   title: string;
+  /** Check tally behind the title ("11/20 passed, 8 running"), when GitHub gave one. */
+  detail?: string;
   cssClass: string;
   actionLabel?: string;
   action: WorkspacePrActionKind;
@@ -61,6 +65,7 @@ export function workspacePrActionInput(
         prNumber?: number | null;
         prState?: string | null;
         prChecks?: string | null;
+        prCheckCounts?: PullRequestCheckCounts | null;
         changedFiles?: number | null;
         additions?: number | null;
         deletions?: number | null;
@@ -77,6 +82,7 @@ export function workspacePrActionInput(
     branchChanged: (row?.additions ?? 0) > 0 || (row?.deletions ?? 0) > 0,
     checkStatus: checks?.check_status,
     prChecks: checks?.pull_request_checks ?? row?.prChecks,
+    prCheckCounts: checks?.pull_request_check_counts ?? row?.prCheckCounts,
     checkExitCode: checks?.check_exit_code,
     branchAhead: checks?.branch_ahead ?? row?.branchAhead,
     sourceBranchAhead: checks?.source_branch_ahead,
@@ -85,13 +91,45 @@ export function workspacePrActionInput(
   };
 }
 
+/** Local check-script states that are process lifecycle, not a verdict. An
+ *  exit — even exit 0 — says nothing about the PR's revision. */
+const LOCAL_NON_VERDICTS = new Set(["exited", "stopped"]);
+
+/** "11/20 passed, 1 failed, 8 running" — skipped runs stay out of the
+ *  denominator, as on GitHub. Mirrors `PullRequestCheckCounts::label` in core. */
+export function checkCountsLabel(counts: PullRequestCheckCounts): string {
+  const parts = [`${counts.passed}/${counts.total - counts.skipped} passed`];
+  if (counts.failed > 0) parts.push(`${counts.failed} failed`);
+  if (counts.pending > 0) parts.push(`${counts.pending} running`);
+  if (counts.skipped > 0) parts.push(`${counts.skipped} skipped`);
+  return parts.join(", ");
+}
+
 export function deriveWorkspacePrAction(input: WorkspacePrActionInput): WorkspacePrActionState {
+  const state = deriveWorkspacePrActionState(input);
+  // Only tally where the state is about checks; "Merge conflicts · 3/3
+  // passed" would bury the thing that needs doing.
+  const aboutChecks =
+    state.state === "checks-failed" ||
+    state.state === "checks-running" ||
+    state.state === "checks-unknown" ||
+    state.state === "ready";
+  return aboutChecks && input.prCheckCounts && input.prCheckCounts.total > 0
+    ? { ...state, detail: checkCountsLabel(input.prCheckCounts) }
+    : state;
+}
+
+function deriveWorkspacePrActionState(input: WorkspacePrActionInput): WorkspacePrActionState {
   const prNumber = input.prNumber ?? 0;
   const prState = (input.prState ?? "").toLowerCase();
-  // Local check-script status when one has run; otherwise the GitHub CI
-  // rollup recorded at the last PR sync. Without the fallback a workspace
-  // whose checks only run on GitHub sat on "Checks unknown" forever.
-  const check = (input.checkStatus ?? input.prChecks ?? "").toLowerCase();
+  // A live local check verdict when there is one; otherwise the GitHub CI
+  // rollup recorded at the last PR sync. A finished local run ("exited") is
+  // not a verdict and must not hide GitHub's — that is what kept every
+  // workspace that had ever run its check script on "Checks unknown".
+  const local = (input.checkStatus ?? "").toLowerCase();
+  const check = (
+    local && !LOCAL_NON_VERDICTS.has(local) ? local : (input.prChecks ?? "")
+  ).toLowerCase();
   const ahead = input.branchAhead ?? input.sourceBranchAhead ?? 0;
   const behind = input.branchBehind ?? 0;
   const conflicts = input.conflicts ?? 0;
@@ -203,16 +241,18 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
       action: "view",
       state: "behind-base",
     };
+  // Not a warning: most often the PR simply has no CI, or no sync has read it
+  // yet. Muted, and a PR glyph rather than a question mark on every row.
   if (!checksPassed)
     return {
-      title: "Checks unknown",
-      cssClass: "ws-pr-status-pending",
+      title: "No checks reported",
+      cssClass: "ws-pr-status-muted",
       actionLabel: "Review",
       action: "view",
       state: "checks-unknown",
     };
   return {
-    title: "Ready to merge",
+    title: "Checks passed",
     cssClass: "ws-pr-status-ready",
     actionLabel: "Merge",
     action: "merge",
@@ -230,7 +270,7 @@ export const WORKSPACE_PR_STATE_ICON: Record<WorkspacePrStateKind, IconName> = {
   conflict: "alert-circle",
   "checks-running": "loader-circle",
   "checks-failed": "circle-x",
-  "checks-unknown": "circle-help",
+  "checks-unknown": "git-pull-request",
   "behind-base": "arrow-down-circle",
   ready: "circle-check",
   merged: "git-merge",

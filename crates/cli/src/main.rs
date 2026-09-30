@@ -3101,7 +3101,7 @@ fn run_cli() -> Result<()> {
                             pr.number,
                             pr.url,
                             pr.state,
-                            pr.checks_state.as_deref().unwrap_or("unknown")
+                            pr.checks_label().as_deref().unwrap_or("none reported")
                         ),
                         None => println!("No pull request recorded for {workspace}"),
                     }
@@ -5150,7 +5150,7 @@ fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
             println!("PR:        #{} {} ({})", pr.number, pr.url, pr.state);
             println!(
                 "PR checks: {}",
-                pr.checks_state
+                pr.checks_label()
                     .as_deref()
                     .unwrap_or("unknown (refresh with: archductor pr view)")
             );

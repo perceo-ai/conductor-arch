@@ -1997,6 +1997,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             .pull_request
                             .as_ref()
                             .and_then(|pr| pr.checks_state.clone()),
+                        pull_request_check_counts: summary
+                            .pull_request
+                            .as_ref()
+                            .and_then(|pr| pr.checks_counts),
                         conflicting_workspaces: summary.conflicting_workspaces.len(),
                     },
                 },
@@ -2642,10 +2646,22 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::RefreshPullRequest { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|s| s.refresh_pull_request_state(&workspace))
-            {
-                Ok(_) => ArchcarResponse::WorkspaceUpdated { name: workspace },
+            // Tell every client when the refresh found news, as the post-turn
+            // sync does: the desktop polls this while CI runs, and the sidebar
+            // renders from the inventory, not from this response.
+            match WorkspaceStore::open_app(&db_path).and_then(|s| {
+                let before = s.pull_request(&workspace)?;
+                let after = s.refresh_pull_request_state(&workspace)?;
+                Ok((before, after))
+            }) {
+                Ok((before, after)) => {
+                    if let Some(event) =
+                        pull_request_changed_event(&workspace, before.as_ref(), after.as_ref())
+                    {
+                        broadcast(&mut state.lock().unwrap(), event);
+                    }
+                    ArchcarResponse::WorkspaceUpdated { name: workspace }
+                }
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -4801,6 +4817,7 @@ fn pull_request_changed_event(
                 || before.state != after.state
                 || before.url != after.url
                 || before.checks_state != after.checks_state
+                || before.checks_counts != after.checks_counts
         }
         _ => true,
     };
@@ -5555,6 +5572,7 @@ fn workspace_summary_from_status_line(
         pull_request_number: pull_request.as_ref().map(|pr| pr.number),
         pull_request_state: pull_request.as_ref().map(|pr| pr.state.clone()),
         pull_request_checks: pull_request.as_ref().and_then(|pr| pr.checks_state.clone()),
+        pull_request_check_counts: pull_request.as_ref().and_then(|pr| pr.checks_counts),
         pull_request_url: pull_request.map(|pr| pr.url),
         branch_ahead: branch_push_state.as_ref().map(|s| s.ahead),
         branch_behind: branch_push_state.map(|s| s.behind),
@@ -6883,6 +6901,7 @@ mod tests {
             url: format!("https://github.com/example/demo/pull/{number}"),
             state: state.to_owned(),
             checks_state: None,
+            checks_counts: None,
             created_at: "0".to_owned(),
             updated_at: "0".to_owned(),
         }
@@ -6918,6 +6937,27 @@ mod tests {
         passing.checks_state = Some("passing".to_owned());
         assert!(
             pull_request_changed_event("berlin", Some(&pr_row(77, "open")), Some(&passing))
+                .is_some()
+        );
+        // Same rollup word, more checks finished (3/8 -> 5/8 passed): news —
+        // the chip renders the tally, not just the word.
+        let mut pending_early = pr_row(77, "open");
+        pending_early.checks_state = Some("pending".to_owned());
+        pending_early.checks_counts = Some(crate::github_pr::PullRequestCheckCounts {
+            total: 8,
+            passed: 3,
+            pending: 5,
+            ..Default::default()
+        });
+        let mut pending_later = pending_early.clone();
+        pending_later.checks_counts = Some(crate::github_pr::PullRequestCheckCounts {
+            total: 8,
+            passed: 5,
+            pending: 3,
+            ..Default::default()
+        });
+        assert!(
+            pull_request_changed_event("berlin", Some(&pending_early), Some(&pending_later))
                 .is_some()
         );
         // Still no PR anywhere: silence.

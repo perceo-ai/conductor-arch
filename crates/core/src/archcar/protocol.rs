@@ -1591,6 +1591,9 @@ pub struct ArchcarWorkspaceSummary {
     /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_checks: Option<String>,
+    /// Per-outcome split of that rollup, for "X/Y passed, Z running".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_check_counts: Option<crate::github_pr::PullRequestCheckCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1707,6 +1710,9 @@ pub struct ArchcarChecksSummary {
     /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_checks: Option<String>,
+    /// Per-outcome split of that rollup, for "X/Y passed, Z running".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_check_counts: Option<crate::github_pr::PullRequestCheckCounts>,
     pub conflicting_workspaces: usize,
 }
 
