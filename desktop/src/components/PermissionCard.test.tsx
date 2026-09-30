@@ -4,7 +4,7 @@ import { render } from "solid-js/web";
 
 const openSettings = vi.fn(async () => ({ ok: true }));
 const revealDaemon = vi.fn(async () => ({ ok: true }));
-const restartDaemon = vi.fn(async () => ({ ok: true }));
+const restartDaemon = vi.fn(async (): Promise<{ ok: boolean; error?: string }> => ({ ok: true }));
 
 vi.mock("@/bridge/client", () => ({
   fileAccess: { openSettings, revealDaemon, restartDaemon },
@@ -74,6 +74,39 @@ describe("PermissionCard", () => {
     window.dispatchEvent(new Event("focus"));
     await Promise.resolve();
     expect(restartDaemon).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a failed restart the next time the user comes back", async () => {
+    restartDaemon.mockResolvedValueOnce({ ok: false, error: "launchctl said no" });
+    const host = mount(null);
+
+    button(host, "Allow access")!.click();
+    await vi.waitFor(() => expect(openSettings).toHaveBeenCalled());
+    await Promise.resolve();
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(host.textContent).toContain("launchctl said no"));
+
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(restartDaemon).toHaveBeenCalledTimes(2));
+
+    // That one worked, so the next focus leaves the daemon alone.
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+    expect(restartDaemon).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a rejected restart as a failed one", async () => {
+    restartDaemon.mockRejectedValueOnce(new Error("ipc handler threw"));
+    const host = mount(null);
+
+    button(host, "Allow access")!.click();
+    await vi.waitFor(() => expect(openSettings).toHaveBeenCalled());
+    await Promise.resolve();
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(host.textContent).toContain("ipc handler threw"));
+
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(restartDaemon).toHaveBeenCalledTimes(2));
   });
 
   it("offers no local buttons for a remote daemon", () => {
