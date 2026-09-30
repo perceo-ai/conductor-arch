@@ -867,6 +867,37 @@ impl WorkspaceStore {
             .filter(summary_is_agent_authored))
     }
 
+    /// Store one chat's summary as its agent wrote it. It lives in the chat's
+    /// `session` scope, so the briefing's "Current chat" section reads it, and
+    /// like the workspace note it stops the auto-refresh from rewriting it.
+    pub fn save_agent_chat_summary(
+        &self,
+        workspace_name: &str,
+        thread_id: i64,
+        body_markdown: &str,
+    ) -> Result<Summary> {
+        let body = clamp_agent_summary(body_markdown);
+        anyhow::ensure!(!body.is_empty(), "summary body is required");
+        self.save_summary(
+            workspace_name,
+            "session",
+            Some(thread_id),
+            &body,
+            &[AGENT_SUMMARY_SOURCE_REF.to_owned()],
+        )
+    }
+
+    /// The chat summary an agent wrote for this thread, if any.
+    pub fn agent_chat_summary(
+        &self,
+        workspace_name: &str,
+        thread_id: i64,
+    ) -> Result<Option<Summary>> {
+        Ok(self
+            .get_summary(workspace_name, "session", Some(thread_id))?
+            .filter(summary_is_agent_authored))
+    }
+
     pub fn get_summary(
         &self,
         workspace_name: &str,

@@ -100,7 +100,24 @@ pub fn probe_roots(registered: &[PathBuf]) -> Vec<FileAccessProbe> {
         probes.push(probe_root(root, true));
     }
     probes.retain(|probe| probe.state != FileAccessState::Absent);
+    if !denied(&probes).is_empty() {
+        register_for_full_disk_access();
+    }
     probes
+}
+
+/// The file only Full Disk Access unlocks. A refused read of it is what makes
+/// macOS list the reading binary in the Full Disk Access pane, toggle off, so
+/// the user flips a switch instead of dragging the binary in by hand. There is
+/// no API that raises a consent prompt for this permission; this is the nearest
+/// thing to asking.
+const TCC_DATABASE: &str = "Library/Application Support/com.apple.TCC/TCC.db";
+
+fn register_for_full_disk_access() {
+    if let Some(home) = crate::platform::home_dir() {
+        // The outcome is irrelevant: the attempt is the registration.
+        let _ = std::fs::File::open(home.join(TCC_DATABASE));
+    }
 }
 
 /// Every probe that came back denied, in probe order.

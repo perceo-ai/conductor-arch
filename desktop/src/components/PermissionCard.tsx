@@ -4,8 +4,11 @@ import { fileAccess } from "@/bridge/client";
 import type { FileAccessProbe } from "@/bridge/protocol";
 
 // macOS denies a launchd-started daemon the protected folders silently, and
-// offers no API to ask. The pane is the only route, so this card walks it:
-// reveal the binary, open the pane, restart the daemon once the grant lands.
+// offers no API that prompts for Full Disk Access. The daemon's probe already
+// listed it in the pane (toggle off), so asking is one click: open the pane,
+// and when the user comes back to this window, restart the daemon so the grant
+// takes effect. Revealing the binary stays as a fallback for when it is not
+// listed.
 //
 // The daemon may be somewhere else entirely. A grant made on this machine would
 // do nothing for a remote host, so the buttons are withheld and the card says
@@ -30,6 +33,10 @@ export function PermissionCard(props: {
 
   const roots = () => props.probes.filter((probe) => probe.state === "denied");
 
+  // Set once the pane is open: the next time this window gains focus, the user
+  // is back from System Settings and the daemon needs a restart to see it.
+  const [awaitingGrant, setAwaitingGrant] = createSignal(false);
+
   // A grant happens in System Settings, outside this app, with no event to
   // listen for, so the card polls to clear itself. The poll lives here because
   // this component exists only while something is denied — and it chains off
@@ -53,6 +60,26 @@ export function PermissionCard(props: {
       if (timer) clearTimeout(timer);
     });
   });
+
+  onMount(() => {
+    const onFocus = () => {
+      if (!awaitingGrant()) return;
+      setAwaitingGrant(false);
+      void run(async () => {
+        const res = await fileAccess.restartDaemon();
+        if (res.ok) await props.onPoll?.().catch(() => undefined);
+        return res;
+      });
+    };
+    window.addEventListener("focus", onFocus);
+    onCleanup(() => window.removeEventListener("focus", onFocus));
+  });
+
+  const allow = async () => {
+    const res = await fileAccess.openSettings();
+    if (res.ok) setAwaitingGrant(true);
+    return res;
+  };
 
   const run = async (action: () => Promise<{ ok: boolean; error?: string }>) => {
     setError(null);
@@ -81,32 +108,21 @@ export function PermissionCard(props: {
           <For each={roots()}>{(probe) => <li>{probe.root}</li>}</For>
         </ul>
         <Show when={!props.remoteAddress}>
-          <ol class="permission-steps">
-            <li>Reveal the daemon binary in Finder.</li>
-            <li>Open Settings and drag it into Full Disk Access.</li>
-            <li>Restart the daemon.</li>
-          </ol>
+          <p class="permission-copy">
+            Turn on <strong>archcar</strong> in Full Disk Access, then come back here. The daemon
+            restarts on its own.
+          </p>
           <div class="permission-actions">
+            <button class="ui-button-primary" disabled={busy()} onClick={() => void run(allow)}>
+              Allow access ↗
+            </button>
             <button
               class="ui-button-secondary"
               disabled={busy()}
+              title="If archcar is not in the list, drag it in from Finder."
               onClick={() => void run(fileAccess.revealDaemon)}
             >
-              Reveal daemon
-            </button>
-            <button
-              class="ui-button-secondary"
-              disabled={busy()}
-              onClick={() => void run(fileAccess.openSettings)}
-            >
-              Open Settings ↗
-            </button>
-            <button
-              class="ui-button-primary"
-              disabled={busy()}
-              onClick={() => void run(fileAccess.restartDaemon)}
-            >
-              Restart daemon
+              Not listed? Reveal daemon
             </button>
           </div>
         </Show>

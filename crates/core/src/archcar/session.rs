@@ -1084,9 +1084,10 @@ fn claude_stream_session_launch(
         permission_mode: Some(claude_permission_mode_for_thread(store, thread_record.id)),
         model: sanitize_harness_text(harness.model.as_deref()),
         effort: claude_stream_effort_mode(&harness),
-        // The standing contract: what Archductor is, what the workspace summary
-        // is for, and the tool that maintains it. The SessionStart hook repeats
-        // it with fresher prose, but a system prompt survives compaction.
+        // The standing contract: what Archductor is, what the workspace and
+        // chat summaries are for, and the tools that maintain them. The
+        // SessionStart hook repeats it with fresher prose, but a system prompt
+        // survives compaction.
         append_system_prompt: Some(crate::workspace::archductor_session_system_prompt(
             workspace,
             store
@@ -1095,6 +1096,13 @@ fn claude_stream_session_launch(
                 .flatten()
                 .as_ref()
                 .map(|summary| summary.body_markdown.as_str()),
+            store
+                .agent_chat_summary(workspace, thread_record.id)
+                .ok()
+                .flatten()
+                .as_ref()
+                .map(|summary| summary.body_markdown.as_str()),
+            &store.branch_changed_files(workspace).unwrap_or_default(),
         )),
         settings_json: hook_settings,
     });
