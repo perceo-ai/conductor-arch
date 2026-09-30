@@ -40,6 +40,81 @@ pub fn shell_command(script: &str) -> Command {
     command
 }
 
+/// A process whose working directory sits inside some directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessInDirectory {
+    pub pid: u32,
+    pub command: String,
+}
+
+/// Every process whose current working directory is `dir` or below it, except
+/// this process and its ancestors (a shell that ran us from inside `dir` is not
+/// something we should refuse on). Deleting a directory out from under a live
+/// process is how a worktree "comes back": the process keeps running there and
+/// recreates it on its next write.
+///
+/// Linux reads `/proc`; other platforms have no cheap equivalent and return an
+/// empty list, so this check is best-effort outside Linux.
+pub fn processes_with_cwd_under(dir: &std::path::Path) -> Vec<ProcessInDirectory> {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(dir) = dir.canonicalize() else {
+            return Vec::new();
+        };
+        let excluded = own_process_lineage();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        let mut found = entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|pid| !excluded.contains(pid))
+            .filter_map(|pid| {
+                let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+                if !cwd.starts_with(&dir) {
+                    return None;
+                }
+                let raw = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                let command = String::from_utf8_lossy(&raw)
+                    .split('\0')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let command: String = command.chars().take(120).collect();
+                Some(ProcessInDirectory { pid, command })
+            })
+            .collect::<Vec<_>>();
+        found.sort_by_key(|process| process.pid);
+        found
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dir;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn own_process_lineage() -> std::collections::HashSet<u32> {
+    let mut lineage = std::collections::HashSet::new();
+    let mut pid = std::process::id();
+    while pid > 1 && lineage.insert(pid) {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            break;
+        };
+        // `pid (comm) state ppid …`; comm may contain spaces or parens, so
+        // parse from the last ')'.
+        let Some(ppid) = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|ppid| ppid.parse::<u32>().ok())
+        else {
+            break;
+        };
+        pid = ppid;
+    }
+    lineage
+}
+
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {

@@ -470,9 +470,10 @@ export const actions = {
   },
 
   // --- Workspace lifecycle --------------------------------------------------
-  async archiveWorkspace(workspace: string, removeWorktree = false): Promise<void> {
-    logAction("archive_workspace", { workspace, removeWorktree });
-    ensureOk(await send({ type: "archive_workspace", workspace, remove_worktree: removeWorktree }));
+  /** Hide a workspace from the sidebar. Its worktree, branch, and chats stay. */
+  async archiveWorkspace(workspace: string): Promise<void> {
+    logAction("archive_workspace", { workspace });
+    ensureOk(await send({ type: "archive_workspace", workspace }));
     await refreshInventory();
   },
 
@@ -497,18 +498,27 @@ export const actions = {
     return this.afterCreate(res);
   },
 
-  async deleteWorkspace(workspace: string, removeWorktree = false, deleteBranch = false): Promise<void> {
-    logAction("delete_workspace", { workspace, removeWorktree, deleteBranch });
-    ensureOk(
-      await send({
-        type: "delete_workspace",
-        workspace,
-        remove_worktree: removeWorktree,
-        delete_branch: deleteBranch,
-      }),
-    );
-    if (nav.selectedWorkspace() === workspace) nav.goToPage("dashboard");
-    await refreshInventory();
+  /**
+   * Remove the workspace's worktree from disk and drop its record. The branch
+   * survives unless `deleteBranch` — a different blast radius, so opt-in.
+   */
+  async deleteWorkspace(workspace: string, deleteBranch = false): Promise<void> {
+    logAction("delete_workspace", { workspace, deleteBranch });
+    try {
+      ensureOk(
+        await send({
+          type: "delete_workspace",
+          workspace,
+          keep_worktree: false,
+          delete_branch: deleteBranch,
+        }),
+      );
+      if (nav.selectedWorkspace() === workspace) nav.goToPage("dashboard");
+    } finally {
+      // A failed branch step still deleted the workspace; a refused delete
+      // changed nothing. Either way the list should show what is true now.
+      await refreshInventory();
+    }
   },
 
   // --- Branch operations ----------------------------------------------------

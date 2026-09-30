@@ -104,20 +104,34 @@ describe("actions.createWorkspace", () => {
 });
 
 describe("actions.deleteWorkspace", () => {
-  it("sends delete_workspace with cleanup flags", async () => {
+  it("removes the worktree and deletes the branch only when asked", async () => {
     routeByType({ delete_workspace: { type: "workspace_removed", name: "berlin" } });
     const { actions } = await import("./actions");
-    await actions.deleteWorkspace("berlin", true, true);
+    await actions.deleteWorkspace("berlin");
+    await actions.deleteWorkspace("berlin", true);
+
+    const calls = api.request.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .filter((p) => p.type === "delete_workspace");
+    expect(calls[0]).toMatchObject({
+      workspace: "berlin",
+      keep_worktree: false,
+      delete_branch: false,
+    });
+    expect(calls[1]).toMatchObject({ keep_worktree: false, delete_branch: true });
+  });
+});
+
+describe("actions.archiveWorkspace", () => {
+  it("only hides the workspace; it never asks to remove the worktree", async () => {
+    routeByType({ archive_workspace: { type: "workspace_updated", name: "berlin" } });
+    const { actions } = await import("./actions");
+    await actions.archiveWorkspace("berlin");
 
     const call = api.request.mock.calls
       .map((c) => c[0] as Record<string, unknown>)
-      .find((p) => p.type === "delete_workspace");
-    expect(call).toMatchObject({
-      type: "delete_workspace",
-      workspace: "berlin",
-      remove_worktree: true,
-      delete_branch: true,
-    });
+      .find((p) => p.type === "archive_workspace");
+    expect(call).toEqual({ type: "archive_workspace", workspace: "berlin" });
   });
 });
 

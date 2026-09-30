@@ -323,6 +323,9 @@ pub struct Workspace {
 pub struct WorkspaceDeleteResult {
     pub workspace: Workspace,
     pub cleanup_error: Option<String>,
+    /// Uncommitted changes (`git status --porcelain` entries) that were in the
+    /// worktree when delete force-removed it.
+    pub discarded_changes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1923,9 +1926,15 @@ impl WorkspaceStore {
         Ok(renamed)
     }
 
+    /// Archive, remove the worktree, and delete the local branch, keeping the
+    /// archived record. Overlaps `delete --delete-branch` except for the kept
+    /// record; see the CLI guide.
     pub fn discard(&self, name: &str) -> Result<Workspace> {
-        let workspace = self.archive(name, true)?;
-        let repository = self.load_repository_by_id(workspace.repository_id)?;
+        let current = self.get_by_name(name)?;
+        let repository = self.load_repository_by_id(current.repository_id)?;
+        validate_workspace_artifact_cleanup_target(&repository, &current)?;
+        let workspace = self.archive(name)?;
+        remove_workspace_worktree(&repository.root_path, &workspace.path)?;
         // Delete the local branch (ignore errors if already gone or not fully merged)
         let _ = git_dynamic(
             &repository.root_path,
@@ -2025,6 +2034,15 @@ impl WorkspaceStore {
 
         self.stop_workspace_processes(&workspace)?;
 
+        // Disk first, record second. If the worktree cannot be removed the
+        // record stays, so the failure is visible and `delete` can be rerun;
+        // dropping the record first is what left worktrees behind silently.
+        let discarded_changes = if remove_worktree {
+            remove_workspace_worktree(&repository.root_path, &workspace.path)?
+        } else {
+            0
+        };
+
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let result = (|| -> Result<()> {
             self.record_workspace_event(
@@ -2046,8 +2064,8 @@ impl WorkspaceStore {
             }
         }
 
-        let cleanup_error = if remove_worktree || delete_branch {
-            self.cleanup_deleted_workspace_artifacts(&workspace, remove_worktree, delete_branch)
+        let cleanup_error = if delete_branch {
+            delete_workspace_branch(&repository.root_path, &workspace.branch)
                 .err()
                 .map(|err| format!("{err:#}"))
         } else {
@@ -2057,6 +2075,7 @@ impl WorkspaceStore {
         Ok(WorkspaceDeleteResult {
             workspace,
             cleanup_error,
+            discarded_changes,
         })
     }
 
@@ -2072,10 +2091,7 @@ impl WorkspaceStore {
             remove_workspace_worktree(&repository.root_path, &workspace.path)?;
         }
         if delete_branch {
-            let _ = git_dynamic(
-                &repository.root_path,
-                &["branch", "-D", workspace.branch.as_str()],
-            );
+            delete_workspace_branch(&repository.root_path, &workspace.branch)?;
         }
         Ok(())
     }
@@ -2359,11 +2375,20 @@ impl WorkspaceStore {
                     job_id,
                     &serde_json::to_string(&payload)?,
                 )?;
-                self.delete_fast(
+                match self.delete_fast(
                     &payload.name,
                     payload.remove_worktree,
                     payload.delete_branch,
-                )?
+                ) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        // Nothing was deleted: the record is intact and the
+                        // caller sees the error. Retrying on the next daemon
+                        // start would delete behind the user's back.
+                        self.mark_workspace_lifecycle_job_failed(job_id, &format!("{err:#}"))?;
+                        return Err(err);
+                    }
+                }
             }
             Err(_) => {
                 let Some(workspace) = payload.workspace.clone() else {
@@ -2383,6 +2408,7 @@ impl WorkspaceStore {
                             updated_at: String::new(),
                         },
                         cleanup_error: None,
+                        discarded_changes: 0,
                     });
                 };
                 match self.cleanup_deleted_workspace_artifacts(
@@ -2393,10 +2419,12 @@ impl WorkspaceStore {
                     Ok(()) => WorkspaceDeleteResult {
                         workspace,
                         cleanup_error: None,
+                        discarded_changes: 0,
                     },
                     Err(err) => WorkspaceDeleteResult {
                         workspace,
                         cleanup_error: Some(format!("{err:#}")),
+                        discarded_changes: 0,
                     },
                 }
             }
@@ -2410,7 +2438,11 @@ impl WorkspaceStore {
         Ok(result)
     }
 
-    pub fn archive(&self, name: &str, remove_worktree: bool) -> Result<Workspace> {
+    /// Hide a workspace: stop its processes, run the archive script, and mark
+    /// it archived. The record, chats, branch, and worktree all stay, so
+    /// `restore` brings it straight back. Removing the worktree is `delete`'s
+    /// job, not this one.
+    pub fn archive(&self, name: &str) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
@@ -2427,18 +2459,6 @@ impl WorkspaceStore {
                     &self.linked_directory_env(&workspace)?,
                 )?;
             }
-        }
-
-        if remove_worktree {
-            git_dynamic(
-                &repository.root_path,
-                &[
-                    "worktree",
-                    "remove",
-                    "--force",
-                    workspace.path.to_string_lossy().as_ref(),
-                ],
-            )?;
         }
 
         let now = timestamp();
@@ -2472,8 +2492,13 @@ impl WorkspaceStore {
                 row_to_process,
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut still_running = Vec::new();
         for process in processes {
             stop_process(process.pid)?;
+            if process_alive(process.pid) {
+                still_running.push(process);
+                continue;
+            }
             let now = timestamp();
             self.conn.execute(
                 "UPDATE processes SET status = ?1, ended_at = ?2, exit_code = ?3 WHERE id = ?4",
@@ -2490,6 +2515,29 @@ impl WorkspaceStore {
                 "session.stopped",
                 &format!("Stopped session process #{}", process.id),
             )?;
+        }
+        if !still_running.is_empty() {
+            let named = still_running
+                .iter()
+                .map(|process| {
+                    format!(
+                        "{} process #{} (pid {})",
+                        process.kind.as_str(),
+                        process.id,
+                        process.pid
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let pids = still_running
+                .iter()
+                .map(|process| process.pid.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            anyhow::bail!(
+                "could not stop {named} in workspace {}; stop it with `kill -9 {pids}` and retry",
+                workspace.name
+            );
         }
         Ok(())
     }
@@ -6517,7 +6565,7 @@ mutation($threadId: ID!) {{
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
         let archived_workspace = if settings.git.archive_on_merge.unwrap_or(false) {
-            Some(self.archive(name, false)?)
+            Some(self.archive(name)?)
         } else {
             None
         };
@@ -9422,6 +9470,19 @@ mutation($threadId: ID!) {{
         })
     }
 
+    /// Point a session row at the process that replaced it. A restarted
+    /// provider keeps its session id but not its pid; stopping by the stale pid
+    /// signals nothing and leaves the new process running.
+    pub fn update_session_process_pid(&self, process_id: i64, pid: u32) -> Result<()> {
+        anyhow::ensure!(pid > 0, "session process id is required");
+        let changed = self.conn.execute(
+            "UPDATE processes SET pid = ?1 WHERE id = ?2",
+            params![i64::from(pid), process_id],
+        )?;
+        anyhow::ensure!(changed > 0, "session process {process_id} not found");
+        Ok(())
+    }
+
     pub fn list_thread_processes(&self, thread_id: i64) -> Result<Vec<ProcessRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
@@ -10512,16 +10573,106 @@ fn read_codex_rollout_session_meta(path: &Path) -> Result<Option<CodexRolloutMet
     }))
 }
 
-fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> Result<()> {
+/// Remove a workspace's worktree from disk and prove it is gone. Returns how
+/// many uncommitted changes were in it.
+///
+/// Delete means delete: a dirty or locked worktree is force-removed (`git
+/// worktree remove --force --force`), and anything git leaves behind is removed
+/// directly. What it refuses is a directory some process is still working in —
+/// that process would recreate it on its next write, which is how a "removed"
+/// worktree used to reappear — and it names those processes so they can be
+/// stopped.
+fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> Result<usize> {
     if !workspace_path.exists() {
         let _ = git_dynamic(repository_root, &["worktree", "prune"]);
-        return Ok(());
+        return Ok(0);
     }
 
-    fs::remove_dir_all(workspace_path)
-        .with_context(|| format!("remove workspace directory {}", workspace_path.display()))?;
+    let holders = crate::platform::processes_with_cwd_under(workspace_path);
+    if !holders.is_empty() {
+        let listed = holders
+            .iter()
+            .map(|process| format!("  pid {}: {}", process.pid, process.command))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let pids = holders
+            .iter()
+            .map(|process| process.pid.to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        anyhow::bail!(
+            "refusing to remove {}: {} process(es) still running inside it would recreate it:\n{listed}\nStop them (`kill {pids}`) and run delete again.",
+            workspace_path.display(),
+            holders.len()
+        );
+    }
+
+    let discarded_changes = if workspace_path.join(".git").exists() {
+        // `.context/` is Archductor's own scratch area, not the user's work.
+        git_output_dynamic(
+            workspace_path,
+            &["status", "--porcelain", "--", ".", ":(exclude).context"],
+        )
+        .map(|status| {
+            status
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        })
+        .unwrap_or(0)
+    } else {
+        0
+    };
+
+    let path_arg = workspace_path.to_string_lossy();
+    let git_error = git_dynamic(
+        repository_root,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            "--force",
+            path_arg.as_ref(),
+        ],
+    )
+    .err();
+    if workspace_path.exists() {
+        // Not a registered worktree (moved, stale metadata) or git refused;
+        // either way the directory is what has to go.
+        fs::remove_dir_all(workspace_path).with_context(|| match &git_error {
+            Some(git_error) => format!(
+                "remove workspace directory {} (git worktree remove also failed: {git_error:#})",
+                workspace_path.display()
+            ),
+            None => format!("remove workspace directory {}", workspace_path.display()),
+        })?;
+    }
     let _ = git_dynamic(repository_root, &["worktree", "prune"]);
-    Ok(())
+    anyhow::ensure!(
+        !workspace_path.exists(),
+        "workspace directory {} still exists after removal",
+        workspace_path.display()
+    );
+    Ok(discarded_changes)
+}
+
+/// Delete a workspace's local branch. A branch that is already gone is fine;
+/// any other failure (checked out elsewhere, say) is reported, not swallowed.
+fn delete_workspace_branch(repository_root: &Path, branch: &str) -> Result<()> {
+    if branch.is_empty() {
+        return Ok(());
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    if git_dynamic(
+        repository_root,
+        &["rev-parse", "--verify", "--quiet", &branch_ref],
+    )
+    .is_err()
+    {
+        return Ok(());
+    }
+    git_dynamic(repository_root, &["branch", "-D", branch])
+        .with_context(|| format!("delete branch {branch}"))
 }
 
 fn validate_workspace_artifact_cleanup_target(
@@ -13880,7 +14031,7 @@ mod tests {
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
-        store.archive("rome", true).unwrap();
+        store.discard("rome").unwrap();
         assert!(!archived.path.exists());
         let original_brief = fs::read_to_string(first.path.join(".context/brief.md")).unwrap();
         let original_notes =
@@ -16279,7 +16430,7 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
-        let archived = store.archive("berlin", false).unwrap();
+        let archived = store.archive("berlin").unwrap();
 
         assert_eq!(archived.status, "archived");
         assert!(archived.archived_at.is_some());
@@ -16341,7 +16492,7 @@ CUSTOM_VALUE = "from-settings"
             })
             .unwrap();
 
-        let err = store.archive("berlin", false).unwrap_err();
+        let err = store.archive("berlin").unwrap_err();
 
         assert!(err.to_string().contains("script failed"));
         let workspace = store.get_by_name("berlin").unwrap();
@@ -16601,7 +16752,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn fast_delete_removes_metadata_before_artifact_cleanup_failure() {
+    fn delete_keeps_metadata_when_worktree_removal_fails() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -16629,11 +16780,11 @@ CUSTOM_VALUE = "from-settings"
         fs::remove_dir_all(&workspace.path).unwrap();
         fs::write(&workspace.path, "not a directory\n").unwrap();
 
-        let deleted = store.delete_fast("berlin", true, false).unwrap();
+        let err = store.delete_fast("berlin", true, false).unwrap_err();
 
-        assert_eq!(deleted.workspace.name, "berlin");
-        assert!(deleted.cleanup_error.is_some());
-        assert!(store.get_by_name("berlin").is_err());
+        assert!(format!("{err:#}").contains("remove workspace directory"));
+        assert!(workspace.path.exists());
+        assert!(store.get_by_name("berlin").is_ok());
     }
 
     #[test]
@@ -16763,7 +16914,7 @@ CUSTOM_VALUE = "from-settings"
     }
 
     #[test]
-    fn delete_lifecycle_job_fails_after_repeated_cleanup_errors() {
+    fn delete_lifecycle_job_fails_without_retry_when_worktree_removal_fails() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -16791,37 +16942,30 @@ CUSTOM_VALUE = "from-settings"
         fs::remove_dir_all(&workspace.path).unwrap();
         fs::write(&workspace.path, "not a directory\n").unwrap();
 
-        let deleted = store.delete_lifecycle_job("berlin", true, false).unwrap();
-        assert!(deleted.cleanup_error.is_some());
+        let err = store
+            .delete_lifecycle_job("berlin", true, false)
+            .unwrap_err();
+        assert!(format!("{err:#}")
+            .to_ascii_lowercase()
+            .contains("not a directory"));
 
-        let queued: String = store
+        // Nothing was deleted, so the job fails now instead of retrying on the
+        // next daemon start behind the user's back.
+        let (status, error): (String, Option<String>) = store
             .conn
             .query_row(
-                "SELECT status FROM workspace_lifecycle_jobs WHERE kind = 'workspace.delete'",
+                "SELECT status, error FROM workspace_lifecycle_jobs WHERE kind = 'workspace.delete'",
                 [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(queued, "queued");
-
-        assert_eq!(store.recover_workspace_lifecycle_jobs().unwrap(), 1);
-        assert_eq!(store.recover_workspace_lifecycle_jobs().unwrap(), 1);
-
-        let (status, attempts, error): (String, i64, Option<String>) = store
-            .conn
-            .query_row(
-                "SELECT status, attempts, error FROM workspace_lifecycle_jobs WHERE kind = 'workspace.delete'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(status, "failed");
-        assert_eq!(attempts, 3);
         assert!(error
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase()
             .contains("not a directory"));
+        assert!(store.get_by_name("berlin").is_ok());
         assert_eq!(store.recover_workspace_lifecycle_jobs().unwrap(), 0);
     }
 
@@ -17089,6 +17233,211 @@ CUSTOM_VALUE = "from-settings"
             .output()
             .unwrap();
         assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+    }
+
+    fn demo_store_with_workspace(temp: &Path) -> (WorkspaceStore, Workspace, PathBuf) {
+        let repo_path = init_repo(temp.join("demo"));
+        let db_path = temp.join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        (store, workspace, repo_path)
+    }
+
+    fn branch_exists(repo_path: &Path, branch: &str) -> bool {
+        !git_output(repo_path, ["branch", "--list", branch])
+            .trim()
+            .is_empty()
+    }
+
+    #[test]
+    fn archive_hides_workspace_but_keeps_worktree_and_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, repo_path) = demo_store_with_workspace(temp.path());
+        fs::write(workspace.path.join("wip.txt"), "unsaved work\n").unwrap();
+
+        let archived = store.archive("berlin").unwrap();
+
+        assert_eq!(archived.status, "archived");
+        assert!(workspace.path.join(".git").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.path.join("wip.txt")).unwrap(),
+            "unsaved work\n"
+        );
+        assert!(branch_exists(&repo_path, "lc/berlin"));
+        assert!(git_output(&repo_path, ["worktree", "list"])
+            .contains(workspace.path.to_string_lossy().as_ref()));
+
+        let restored = store.restore("berlin").unwrap();
+        assert_eq!(restored.status, "active");
+        assert!(restored.archived_at.is_none());
+        assert!(workspace.path.join("wip.txt").exists());
+    }
+
+    #[test]
+    fn delete_removes_worktree_of_an_archived_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, repo_path) = demo_store_with_workspace(temp.path());
+        store.archive("berlin").unwrap();
+
+        store.delete("berlin", true, false).unwrap();
+
+        assert!(!workspace.path.exists());
+        assert!(store.get_by_name("berlin").is_err());
+        assert!(branch_exists(&repo_path, "lc/berlin"));
+        assert!(!git_output(&repo_path, ["worktree", "list"])
+            .contains(workspace.path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn delete_force_removes_dirty_and_locked_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, repo_path) = demo_store_with_workspace(temp.path());
+        fs::write(workspace.path.join("README.md"), "edited\n").unwrap();
+        fs::write(workspace.path.join("untracked.txt"), "new\n").unwrap();
+        git_output(
+            &repo_path,
+            [
+                "worktree",
+                "lock",
+                "--reason",
+                "test",
+                workspace.path.to_str().unwrap(),
+            ],
+        );
+
+        let deleted = store.delete_fast("berlin", true, false).unwrap();
+
+        assert!(!workspace.path.exists());
+        assert_eq!(deleted.discarded_changes, 2);
+        assert!(deleted.cleanup_error.is_none());
+        assert!(!git_output(&repo_path, ["worktree", "list"])
+            .contains(workspace.path.to_string_lossy().as_ref()));
+        // The branch is a separate opt-in, and the lock must not keep it
+        // "checked out" somewhere that no longer exists.
+        assert!(branch_exists(&repo_path, "lc/berlin"));
+        git_output(&repo_path, ["branch", "-D", "lc/berlin"]);
+    }
+
+    #[cfg(unix)]
+    fn spawn_sleeper_in(dir: &Path) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
+        Command::new("sleep")
+            .arg("300")
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn wait_for_exit(child: &mut std::process::Child) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_stops_running_session_before_removing_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, _repo_path) = demo_store_with_workspace(temp.path());
+        let mut child = spawn_sleeper_in(&workspace.path);
+        let process = store
+            .record_process(RecordProcessInput {
+                kind: ProcessKind::Session,
+                workspace: &workspace,
+                chat_thread_id: None,
+                command: "sleep 300",
+                pid: child.id(),
+                file_prefix: "session",
+                session: ProcessSessionMetadata {
+                    harness_metadata: None,
+                    resume_id: None,
+                },
+            })
+            .unwrap();
+        assert_eq!(process.status, ProcessStatus::Running);
+
+        store.delete("berlin", true, false).unwrap();
+
+        assert!(wait_for_exit(&mut child), "session process kept running");
+        assert!(!workspace.path.exists());
+        assert!(store.get_by_name("berlin").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn delete_refuses_while_an_untracked_process_works_in_the_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, _repo_path) = demo_store_with_workspace(temp.path());
+        let mut child = spawn_sleeper_in(&workspace.path);
+
+        let err = store.delete("berlin", true, false).unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&format!("pid {}", child.id())),
+            "error should name the process: {message}"
+        );
+        assert!(message.contains(&format!("kill {}", child.id())));
+        assert!(workspace.path.join(".git").exists());
+        assert!(store.get_by_name("berlin").is_ok());
+
+        let _ = child.kill();
+        let _ = child.wait();
+        store.delete("berlin", true, false).unwrap();
+        assert!(!workspace.path.exists());
+    }
+
+    #[test]
+    fn restarted_session_pid_is_written_back_to_its_row() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, _repo_path) = demo_store_with_workspace(temp.path());
+        let process = store
+            .record_process(RecordProcessInput {
+                kind: ProcessKind::Session,
+                workspace: &workspace,
+                chat_thread_id: None,
+                command: "claude -p",
+                pid: 4_000_001,
+                file_prefix: "session",
+                session: ProcessSessionMetadata {
+                    harness_metadata: None,
+                    resume_id: None,
+                },
+            })
+            .unwrap();
+
+        store
+            .update_session_process_pid(process.id, 4_000_002)
+            .unwrap();
+
+        assert_eq!(store.get_process(process.id).unwrap().pid, 4_000_002);
     }
 
     #[test]
@@ -28262,7 +28611,7 @@ spotlight_testing = true
             .mark_session_process_stopped(process.id, Some(SIGTERM_EXIT_CODE))
             .unwrap();
         store.rename_branch("berlin", "lc/renamed").unwrap();
-        let workspace = store.archive("berlin", false).unwrap();
+        let workspace = store.archive("berlin").unwrap();
         store
             .record_pull_request(workspace.id, "https://github.com/example/demo/pull/42")
             .unwrap();

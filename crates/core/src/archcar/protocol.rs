@@ -642,9 +642,13 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_ref: Option<String>,
     },
+    /// Hide a workspace from the active list. Touches nothing on disk.
     ArchiveWorkspace {
         workspace: String,
-        #[serde(default)]
+        /// Retired: archive no longer removes the worktree. Still parsed so an
+        /// older client that sends `false` keeps working; `true` is refused
+        /// with a pointer to `delete_workspace`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         remove_worktree: bool,
     },
     RestoreWorkspace {
@@ -677,10 +681,13 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    /// Remove a workspace's worktree from disk and drop its record.
+    /// `keep_worktree` forgets the record only (for a worktree Archductor must
+    /// not touch); `delete_branch` also deletes the local branch.
     DeleteWorkspace {
         workspace: String,
         #[serde(default)]
-        remove_worktree: bool,
+        keep_worktree: bool,
         #[serde(default)]
         delete_branch: bool,
     },
@@ -2228,10 +2235,10 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         } => format!("duplicate_workspace workspace={workspace} new_name={new_name}"),
         ArchcarRequest::DeleteWorkspace {
             workspace,
-            remove_worktree,
+            keep_worktree,
             delete_branch,
         } => format!(
-            "delete_workspace workspace={workspace} remove_worktree={remove_worktree} delete_branch={delete_branch}"
+            "delete_workspace workspace={workspace} keep_worktree={keep_worktree} delete_branch={delete_branch}"
         ),
         ArchcarRequest::CreateBranch { workspace, branch } => {
             format!("create_branch workspace={workspace} branch={branch}")
@@ -3688,10 +3695,10 @@ mod tests {
             (
                 ArchcarRequest::ArchiveWorkspace {
                     workspace: "ws".to_owned(),
-                    remove_worktree: true,
+                    remove_worktree: false,
                 },
                 "\"type\":\"archive_workspace\"",
-                "archive_workspace workspace=ws remove_worktree=true",
+                "archive_workspace workspace=ws remove_worktree=false",
             ),
             (
                 ArchcarRequest::RestoreWorkspace {
@@ -3720,11 +3727,11 @@ mod tests {
             (
                 ArchcarRequest::DeleteWorkspace {
                     workspace: "ws".to_owned(),
-                    remove_worktree: true,
+                    keep_worktree: false,
                     delete_branch: false,
                 },
                 "\"type\":\"delete_workspace\"",
-                "delete_workspace workspace=ws remove_worktree=true delete_branch=false",
+                "delete_workspace workspace=ws keep_worktree=false delete_branch=false",
             ),
         ];
 

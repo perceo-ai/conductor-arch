@@ -192,7 +192,7 @@ archductor archcar push-branch fix-auth      # PR creation needs an upstream
 archductor pr create fix-auth --title "Fix auth token expiry" --draft
 archductor pr checks fix-auth
 archductor pr merge fix-auth --method squash
-archductor workspace archive fix-auth --remove-worktree
+archductor workspace archive fix-auth
 ```
 
 `pr create --from-context` fills the title and body from the workspace's
@@ -219,8 +219,10 @@ block_on_open_todos = false
 block_on_failed_checks = true
 ```
 
-Archiving keeps the record and the transcripts; `--remove-worktree` reclaims
-the disk. `archductor workspace restore` brings it back.
+Archiving hides the workspace from the sidebar and keeps everything: record,
+transcripts, branch, and worktree. `archductor workspace restore` brings it
+back. To reclaim the disk, `archductor workspace delete fix-auth` removes the
+worktree (add `--delete-branch` to drop the local branch too).
 
 ## When it goes wrong
 

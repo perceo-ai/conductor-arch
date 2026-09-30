@@ -2502,14 +2502,25 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::ArchiveWorkspace {
             workspace,
             remove_worktree,
-        } => match open_lifecycle_workspace_store(state)
-            .and_then(|s| s.archive(&workspace, remove_worktree))
-        {
-            Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
-            Err(err) => ArchcarResponse::Error {
-                message: err.to_string(),
-            },
-        },
+        } => {
+            if remove_worktree {
+                return ArchcarResponse::Error {
+                    message: format!(
+                        "archive no longer removes the worktree; it only hides {workspace}. \
+                         Send delete_workspace to remove it from disk."
+                    ),
+                };
+            }
+            match stop_workspace_managed_sessions(state, &workspace)
+                .and_then(|()| open_lifecycle_workspace_store(state))
+                .and_then(|s| s.archive(&workspace))
+            {
+                Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
+                Err(err) => ArchcarResponse::Error {
+                    message: format!("{err:#}"),
+                },
+            }
+        }
         ArchcarRequest::RestoreWorkspace { workspace } => {
             match open_lifecycle_workspace_store(state).and_then(|s| s.restore(&workspace)) {
                 Ok(w) => ArchcarResponse::WorkspaceUpdated { name: w.name },
@@ -2559,23 +2570,27 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         },
         ArchcarRequest::DeleteWorkspace {
             workspace,
-            remove_worktree,
+            keep_worktree,
             delete_branch,
-        } => match open_lifecycle_workspace_store(state)
-            .and_then(|s| s.delete_lifecycle_job(&workspace, remove_worktree, delete_branch))
+        } => match stop_workspace_managed_sessions(state, &workspace)
+            .and_then(|()| open_lifecycle_workspace_store(state))
+            .and_then(|s| s.delete_lifecycle_job(&workspace, !keep_worktree, delete_branch))
         {
-            Ok(result) => {
-                if let Some(err) = &result.cleanup_error {
-                    // Metadata is already deleted; surface cleanup failure in logs
-                    // but still report removal so the UI drops the row.
-                    warn!(workspace = %result.workspace.name, error = %err, "workspace artifact cleanup failed after delete");
-                }
-                ArchcarResponse::WorkspaceRemoved {
+            // The worktree is gone and the record with it; only the branch
+            // step can still fail. Say so rather than reporting a clean delete.
+            Ok(result) => match result.cleanup_error {
+                Some(err) => ArchcarResponse::Error {
+                    message: format!(
+                        "deleted workspace {} but could not delete its branch: {err}",
+                        result.workspace.name
+                    ),
+                },
+                None => ArchcarResponse::WorkspaceRemoved {
                     name: result.workspace.name,
-                }
-            }
+                },
+            },
             Err(err) => ArchcarResponse::Error {
-                message: err.to_string(),
+                message: format!("{err:#}"),
             },
         },
         ArchcarRequest::CreateBranch { workspace, branch } => {
@@ -6521,11 +6536,40 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
 }
 
 fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> Result<()> {
+    shutdown_managed_sessions_where(state, reason, |_| true)
+}
+
+/// Stop this daemon's live sessions in one workspace before archive or delete
+/// touches it. The daemon holds the real child handles; stopping through them
+/// (not only by the pid in the database) is what guarantees the agent is gone
+/// before its worktree is.
+fn stop_workspace_managed_sessions(state: &Arc<Mutex<ServerState>>, workspace: &str) -> Result<()> {
+    shutdown_managed_sessions_where(state, "workspace archived or deleted", |snapshot| {
+        snapshot.workspace == workspace
+    })
+}
+
+fn shutdown_managed_sessions_where(
+    state: &Arc<Mutex<ServerState>>,
+    reason: &str,
+    matches: impl Fn(&crate::archcar::session::SessionSnapshot) -> bool,
+) -> Result<()> {
     let (db_path, handles) = {
         let guard = state.lock().unwrap();
         (
             guard.db_path.clone(),
-            guard.sessions.values().cloned().collect::<Vec<_>>(),
+            guard
+                .sessions
+                .values()
+                .filter(|handle| {
+                    handle
+                        .snapshot
+                        .lock()
+                        .ok()
+                        .is_some_and(|snapshot| matches(&snapshot))
+                })
+                .cloned()
+                .collect::<Vec<_>>(),
         )
     };
     let provider_events = ProviderEventStore::new(&db_path);
@@ -10288,6 +10332,26 @@ default = true
             "rename_workspace got {renamed:?}"
         );
 
+        let worktree = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .get_by_name("berlin2")
+            .unwrap()
+            .path;
+
+        // The retired flag is refused, not quietly honoured or dropped.
+        let refused = dispatch_request(
+            ArchcarRequest::ArchiveWorkspace {
+                workspace: "berlin2".to_owned(),
+                remove_worktree: true,
+            },
+            &state,
+        );
+        assert!(
+            matches!(refused, ArchcarResponse::Error { ref message } if message.contains("delete_workspace")),
+            "archive_workspace remove_worktree=true got {refused:?}"
+        );
+        assert!(worktree.join(".git").exists());
+
         let archived = dispatch_request(
             ArchcarRequest::ArchiveWorkspace {
                 workspace: "berlin2".to_owned(),
@@ -10298,6 +10362,10 @@ default = true
         assert!(
             matches!(archived, ArchcarResponse::WorkspaceUpdated { .. }),
             "archive_workspace got {archived:?}"
+        );
+        assert!(
+            worktree.join(".git").exists(),
+            "archive must leave the worktree on disk"
         );
 
         let restored = dispatch_request(
@@ -10314,7 +10382,7 @@ default = true
         let deleted = dispatch_request(
             ArchcarRequest::DeleteWorkspace {
                 workspace: "berlin2".to_owned(),
-                remove_worktree: true,
+                keep_worktree: false,
                 delete_branch: false,
             },
             &state,
@@ -10323,6 +10391,7 @@ default = true
             matches!(deleted, ArchcarResponse::WorkspaceRemoved { ref name } if name == "berlin2"),
             "delete_workspace got {deleted:?}"
         );
+        assert!(!worktree.exists(), "delete must remove the worktree");
 
         let listed = dispatch_request(ArchcarRequest::ListWorkspaces, &state);
         assert!(

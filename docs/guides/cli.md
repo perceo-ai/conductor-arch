@@ -78,10 +78,11 @@ archductor workspace create my-app --prompt "Add rate limiting to the public API
 archductor workspace list --active
 archductor workspace rename fix-auth auth-expiry
 archductor workspace duplicate fix-auth fix-auth-alt --branch fix/auth-alt
-archductor workspace archive fix-auth --remove-worktree
-archductor workspace restore fix-auth
-archductor workspace discard fix-auth                       # throw away the changes
-archductor workspace delete fix-auth --remove-worktree --delete-branch
+archductor workspace archive fix-auth                       # hide from the sidebar; disk untouched
+archductor workspace restore fix-auth                       # back into the sidebar
+archductor workspace delete fix-auth                        # remove the worktree from disk
+archductor workspace delete fix-auth --delete-branch        # ...and the local branch
+archductor workspace discard fix-auth                       # archive + remove worktree + delete branch
 archductor workspace timeline fix-auth --kind pr
 
 archductor workspace branch fix-auth create feature/x
@@ -93,6 +94,24 @@ archductor workspace link-dir frontend backend-api
 archductor workspace linked-dirs frontend
 archductor workspace unlink-dir frontend backend-api
 ```
+
+Archive and delete are different things:
+
+- **Archive** hides a workspace from the sidebar. Its record, chats, branch, and
+  worktree all stay; it lives in History until `restore` brings it back. It
+  stops the workspace's running sessions and runs the `archive` script, and
+  changes nothing on disk. (`--remove-worktree` is retired: it is ignored with a
+  warning.)
+- **Delete** removes the worktree from disk and drops the record, archived or
+  not. Uncommitted changes go with it — a dirty or locked worktree is
+  force-removed, and the command prints how many changes it discarded. Commits
+  stay on the branch unless you add `--delete-branch`. It stops the
+  workspace's sessions first and refuses, naming the pid and command, if any
+  other process is still working inside the worktree, since that process
+  would recreate the directory. It checks the directory is gone before it
+  reports success. `--keep-worktree` drops the record and leaves the files.
+- **Discard** is archive plus removing the worktree plus deleting the branch,
+  keeping an archived record in History. It overlaps `delete --delete-branch`.
 
 ## Sessions
 

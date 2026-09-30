@@ -2983,6 +2983,20 @@ fn run_claude_stream_session_loop(
                         "claude-stream-json",
                         "transport restarted: claude -p stream-json",
                     );
+                    // The row's pid is what archive/delete signal when they stop
+                    // the workspace. Leaving the pre-restart pid there made them
+                    // kill a dead process and report success while this agent
+                    // kept running — and recreated the worktree they removed.
+                    if let Err(err) =
+                        runtime_store.update_session_process_pid(started.session_id, pid)
+                    {
+                        warn!(
+                            session_id = started.session_id,
+                            pid,
+                            error = %format!("{err:#}"),
+                            "could not record the restarted Claude process id"
+                        );
+                    }
                     if let Ok(mut state) = snapshot.lock() {
                         state.pid = pid;
                         state.ready = true;

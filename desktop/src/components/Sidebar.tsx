@@ -25,6 +25,7 @@ import {
 } from "@/lib/workspacePrAction";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
+import { sidebarWorkspaceNames } from "@/lib/sidebarWorkspaces";
 import { runShellAction } from "@/lib/shellAction";
 import ClientSwitcher from "./ClientSwitcher";
 import PeekCard from "./PeekCard";
@@ -66,12 +67,18 @@ async function copyWorkspaceToThisMachine(name: string): Promise<void> {
   toastsStore.push(`Copied ${name} to this machine as ${imported.workspace}`);
 }
 
-// Right-click actions for a workspace row — GTK parity (Rename / Duplicate /
-// Archive|Restore / Delete) plus Open and a "More…" escape hatch to the full
-// actions dialog (branch ops, link dir, default provider). Uses in-app dialogs
-// rather than window.prompt/confirm, which are unreliable in the Electron
-// renderer (that's why "Remove" appeared to do nothing).
-function workspaceMenuItems(name: string): ContextMenuItem[] {
+// Right-click actions for a workspace — Rename / Duplicate / Archive|Restore /
+// Delete plus Open and a "More…" escape hatch to the full actions dialog (branch
+// ops, link dir, default provider). Shared by the sidebar, History, and the
+// dashboard: archived workspaces are not in the sidebar, so History and the
+// dashboard are where Restore and Delete reach them. Uses in-app dialogs rather
+// than window.prompt/confirm, which are unreliable in the Electron renderer
+// (that's why "Remove" appeared to do nothing).
+function branchLabel(name: string): string {
+  return workspacesStore.row(name)?.branch || "its branch";
+}
+
+export function workspaceMenuItems(name: string): ContextMenuItem[] {
   const archived = () => workspacesStore.row(name)?.status === "archived";
   return [
     { label: "Open", run: () => nav.selectWorkspace(name) },
@@ -126,7 +133,7 @@ function workspaceMenuItems(name: string): ContextMenuItem[] {
             dialogs.open({
               kind: "confirm",
               title: `Archive ${name}`,
-              message: `Archive "${name}"? It moves out of the active board but keeps its worktree.`,
+              message: `Archive "${name}"? It leaves the sidebar, but its worktree, branch, and chats stay on disk. Restore it from History.`,
               confirmLabel: "Archive",
               onConfirm: () => runAction("Archive", actions.archiveWorkspace(name)),
             }),
@@ -138,10 +145,12 @@ function workspaceMenuItems(name: string): ContextMenuItem[] {
         dialogs.open({
           kind: "confirm",
           title: `Delete ${name}`,
-          message: `Delete "${name}"? Removes the worktree and deletes the local branch (can discard unmerged commits).`,
+          message: `Delete "${name}"? Removes its worktree from disk, uncommitted changes included. Commits on ${branchLabel(name)} are kept unless you delete the branch too.`,
           confirmLabel: "Delete",
           destructive: true,
-          onConfirm: () => runAction("Delete", actions.deleteWorkspace(name, true, true)),
+          checkbox: { label: `Also delete the local branch ${branchLabel(name)}` },
+          onConfirm: (_value, deleteBranch) =>
+            runAction("Delete", actions.deleteWorkspace(name, deleteBranch === true)),
         }),
     },
     { label: "More actions…", run: () => dialogs.open({ kind: "workspace-actions", workspace: name }) },
@@ -315,18 +324,14 @@ function matchesFilter(name: string, query: string): boolean {
 }
 
 function ProjectGroup(props: { repo: string }) {
-  const names = () => {
-    const all = workspacesStore.state.order.filter(
-      (name) =>
-        workspacesStore.row(name)?.repository === props.repo &&
-        matchesFilter(name, workspaceFilter()),
+  const names = () =>
+    sidebarWorkspaceNames(
+      workspacesStore.state.order,
+      (name) => workspacesStore.row(name),
+      props.repo,
+      (name) => matchesFilter(name, workspaceFilter()),
+      (name) => prefsStore.isPinned(name),
     );
-    // Pinned first, otherwise the daemon's order. Stable so the list does not
-    // reshuffle while an agent updates a row.
-    const pinned = all.filter((name) => prefsStore.isPinned(name));
-    const rest = all.filter((name) => !prefsStore.isPinned(name));
-    return [...pinned, ...rest];
-  };
   return (
     <div class="project-group">
       <PeekCard

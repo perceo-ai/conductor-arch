@@ -256,11 +256,12 @@ export type ArchcarRequest =
       branch?: string;
       base_ref?: string;
     }
-  | { type: "archive_workspace"; workspace: string; remove_worktree?: boolean }
+  // Archive only hides a workspace; removing the worktree is delete_workspace.
+  | { type: "archive_workspace"; workspace: string }
   | { type: "restore_workspace"; workspace: string }
   | { type: "rename_workspace"; workspace: string; new_name: string }
   | { type: "duplicate_workspace"; workspace: string; new_name: string; branch?: string }
-  | { type: "delete_workspace"; workspace: string; remove_worktree?: boolean; delete_branch?: boolean }
+  | { type: "delete_workspace"; workspace: string; keep_worktree?: boolean; delete_branch?: boolean }
   // Branch, PR, review, checkpoint, linking, provider default.
   | { type: "create_branch"; workspace: string; branch: string }
   | { type: "checkout_branch"; workspace: string; branch: string }

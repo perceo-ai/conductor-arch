@@ -183,10 +183,11 @@ archductor session start fix-auth --kind codex
 archductor diff fix-auth
 archductor checks fix-auth
 
-# Open and merge a PR, then archive
+# Open and merge a PR, then clean up
 archductor pr create fix-auth --title "Fix auth" --draft
 archductor pr merge fix-auth --method squash
-archductor workspace archive fix-auth --remove-worktree
+archductor workspace archive fix-auth    # hide it; the worktree stays
+archductor workspace delete fix-auth     # or remove the worktree from disk
 ```
 
 Normal work happens in the desktop app; the CLI mirrors the same backend for automation and debugging. Run `archductor doctor` to check your environment.

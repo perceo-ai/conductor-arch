@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-08-24.
+Current as of 2026-09-30.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -26,6 +26,21 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
+
+## Archive hides, delete removes (2026-09-30)
+
+**Archive** now only hides a workspace from the sidebar: record, chats, branch,
+and worktree stay, and it lives in History (and the dashboard's Archived
+column) until restored. `--remove-worktree` is retired (ignored with a warning;
+the wire flag is refused). **Delete** removes the worktree from disk — dirty or
+locked trees are force-removed and the discarded-change count is printed — then
+drops the record, and errors if the directory survives. It stops the
+workspace's sessions first and refuses, naming pids, while any other process
+works inside the tree. `--delete-branch` stays opt-in.
+
+The "removed" worktrees that came back were recreated by agents archive never
+stopped: a restarted Claude stream session kept its old pid in the database, so
+the stop signalled a dead process. The restart now writes the new pid back.
 
 ## Remote takeover and daemon updates (2026-09-29)
 
