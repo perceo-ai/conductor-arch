@@ -1594,6 +1594,9 @@ pub struct ArchcarWorkspaceSummary {
     /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_checks: Option<String>,
+    /// Per-outcome split of that rollup, for "X/Y passed, Z running".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_check_counts: Option<crate::github_pr::PullRequestCheckCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1623,6 +1626,10 @@ pub struct ArchcarProjectionItem {
     /// projected from provider events, so it never sees a `chat_messages.id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline_seq: Option<i64>,
+    /// Id of the item this one belongs under: a subagent's messages and tool
+    /// calls name the Agent card that spawned them. Absent for top-level rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,
@@ -1710,6 +1717,9 @@ pub struct ArchcarChecksSummary {
     /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_checks: Option<String>,
+    /// Per-outcome split of that rollup, for "X/Y passed, Z running".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_check_counts: Option<crate::github_pr::PullRequestCheckCounts>,
     pub conflicting_workspaces: usize,
 }
 

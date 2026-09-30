@@ -107,6 +107,8 @@ archductor session stop fix-auth
 
 archductor archcar chat-threads fix-auth
 archductor archcar chat-transcript <thread-id>
+archductor archcar chat-projection <thread-id>          # the timeline the desktop draws, one line per card
+archductor archcar chat-projection <thread-id> --full   # every body in full: command output, subagent reports
 archductor archcar create-chat fix-auth
 archductor archcar close-chat <thread-id>
 archductor archcar fork-chat <thread-id> --through-message-id <id>
@@ -117,6 +119,11 @@ archductor archcar interactions list --all
 archductor archcar interactions allow <id> --always
 archductor archcar plan-mode <thread-id> --on
 ```
+
+`chat-projection` prints each card's title with a one-line preview. Rows a
+subagent produced are indented under the Agent card that spawned it, and
+backgrounded commands and agents appear as their own cards. Pass `--full` to
+print bodies untruncated, for example to read a command's whole output.
 
 ## Running and checking
 
@@ -170,7 +177,7 @@ archductor checkpoint restore fix-auth <id>
 archductor archcar push-branch fix-auth              # --force after a rebase (push with lease)
 archductor pr create fix-auth --title "Fix auth" --draft
 archductor pr create fix-auth --from-context         # title and body from the generated draft
-archductor pr view fix-auth
+archductor pr view fix-auth                          # re-reads GitHub: "checks: failing (19/20 passed, 1 failed)"
 archductor pr checks fix-auth
 archductor pr summary fix-auth --agent-prompt
 archductor pr resolve-thread fix-auth <thread-id>

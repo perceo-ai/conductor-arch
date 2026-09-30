@@ -3,6 +3,7 @@ import {
   WORKSPACE_PR_STATE_ICON,
   WORKSPACE_PR_STATE_MOTION,
   deriveWorkspacePrAction,
+  shouldSyncPullRequest,
   workspacePrActionInput,
   type WorkspacePrActionInput,
   type WorkspacePrStateKind,
@@ -67,7 +68,7 @@ describe("deriveWorkspacePrAction", () => {
         checkExitCode: 0,
       }),
     ).toMatchObject({
-      title: "Checks unknown",
+      title: "No checks reported",
       actionLabel: "Review",
       action: "view",
     });
@@ -81,7 +82,7 @@ describe("deriveWorkspacePrAction", () => {
         checkStatus: "success",
       }),
     ).toMatchObject({
-      title: "Ready to merge",
+      title: "Checks passed",
       actionLabel: "Merge",
       action: "merge",
     });
@@ -96,7 +97,7 @@ describe("deriveWorkspacePrAction", () => {
           checkStatus,
         }),
       ).toMatchObject({
-        title: "Checks unknown",
+        title: "No checks reported",
         actionLabel: "Review",
         action: "view",
       });
@@ -109,13 +110,26 @@ describe("deriveWorkspacePrAction", () => {
     // script) used to sit on "Checks unknown" forever.
     expect(
       deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "passing" }),
-    ).toMatchObject({ title: "Ready to merge", action: "merge", state: "ready" });
+    ).toMatchObject({ title: "Checks passed", action: "merge", state: "ready" });
     expect(
       deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "failing" }),
     ).toMatchObject({ title: "Checks failing", action: "view", state: "checks-failed" });
     expect(
       deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "pending" }),
     ).toMatchObject({ title: "Checks running", action: "view", state: "checks-running" });
+    // A finished local run is not a verdict and must not hide GitHub's: this
+    // is what kept any workspace that had run its check script on "unknown".
+    for (const checkStatus of ["exited", "stopped"]) {
+      expect(
+        deriveWorkspacePrAction({
+          prNumber: 42,
+          prState: "open",
+          checkStatus,
+          checkExitCode: 0,
+          prChecks: "failing",
+        }),
+      ).toMatchObject({ title: "Checks failing", state: "checks-failed" });
+    }
     // A live local check status still wins over the stored rollup.
     expect(
       deriveWorkspacePrAction({
@@ -125,6 +139,85 @@ describe("deriveWorkspacePrAction", () => {
         prChecks: "passing",
       }),
     ).toMatchObject({ state: "checks-running" });
+  });
+
+  it("reads the check tally from the summary, falling back to the row", () => {
+    const counts = { total: 21, passed: 11, failed: 1, pending: 8, skipped: 1 };
+    expect(
+      deriveWorkspacePrAction(
+        workspacePrActionInput(
+          { prNumber: 42, prState: "open", prChecks: "failing", prCheckCounts: counts },
+          undefined,
+        ),
+      ),
+    ).toMatchObject({
+      title: "Checks failing",
+      detail: "11/20 passed, 1 failed, 8 running, 1 skipped",
+    });
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prChecks: "pending",
+        prCheckCounts: { total: 20, passed: 12, failed: 0, pending: 8, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Checks running", detail: "12/20 passed, 8 running" });
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prChecks: "passing",
+        prCheckCounts: { total: 21, passed: 21, failed: 0, pending: 0, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Checks passed", detail: "21/21 passed", state: "ready" });
+    // Behind base is still waiting on GitHub, so the tally still helps.
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        branchBehind: 1,
+        prChecks: "passing",
+        prCheckCounts: { total: 21, passed: 21, failed: 0, pending: 0, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Behind base", detail: "21/21 passed" });
+    // The tally stays off states that are about local work.
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        conflicts: 1,
+        prChecks: "passing",
+        prCheckCounts: { total: 3, passed: 3, failed: 0, pending: 0, skipped: 0 },
+      }).detail,
+    ).toBeUndefined();
+  });
+
+  it("tells skipped or unrecognised checks apart from no checks at all", () => {
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prCheckCounts: { total: 1, passed: 0, failed: 0, pending: 0, skipped: 1 },
+      }),
+    ).toMatchObject({ title: "Checks skipped", detail: "1 skipped", state: "checks-unknown" });
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prCheckCounts: { total: 2, passed: 1, failed: 0, pending: 0, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Checks inconclusive", detail: "1/2 passed" });
+    expect(deriveWorkspacePrAction({ prNumber: 42, prState: "open" })).toMatchObject({
+      title: "No checks reported",
+    });
+  });
+
+  it("does not render an open PR without checks as a question mark", () => {
+    expect(WORKSPACE_PR_STATE_ICON["checks-unknown"]).not.toBe("circle-help");
+    expect(deriveWorkspacePrAction({ prNumber: 42, prState: "open" })).toMatchObject({
+      cssClass: "ws-pr-status-muted",
+      state: "checks-unknown",
+    });
   });
 
   it("routes explicit failed checks to review instead of merge", () => {
@@ -152,7 +245,7 @@ describe("deriveWorkspacePrAction", () => {
         checkExitCode: 7,
       }),
     ).toMatchObject({
-      title: "Checks unknown",
+      title: "No checks reported",
       actionLabel: "Review",
       action: "view",
     });
@@ -176,6 +269,27 @@ describe("deriveWorkspacePrAction", () => {
         action: "push",
       });
     }
+  });
+});
+
+describe("shouldSyncPullRequest", () => {
+  it("keeps polling an open PR whatever the bar is showing", () => {
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "open" })).toBe(true);
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "OPEN" })).toBe(true);
+  });
+
+  it("looks for a PR opened outside Archductor while the branch has work", () => {
+    // No PR row yet: only asking GitHub (by branch) finds one created with the
+    // gh CLI or the web UI while this workspace stays open.
+    expect(shouldSyncPullRequest({ additions: 3, deletions: 0 })).toBe(true);
+    expect(shouldSyncPullRequest({ additions: 0, deletions: 2 })).toBe(true);
+  });
+
+  it("stays quiet when there is nothing to learn", () => {
+    expect(shouldSyncPullRequest(undefined)).toBe(false);
+    expect(shouldSyncPullRequest({ additions: 0, deletions: 0 })).toBe(false);
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "merged", additions: 3 })).toBe(false);
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "closed" })).toBe(false);
   });
 });
 

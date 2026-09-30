@@ -15,6 +15,11 @@ export interface ArchcarProjectionItem {
    * projected from provider events, so it has no chat message id.
    */
   timeline_seq?: number | null;
+  /**
+   * Id of the item this one belongs under — a subagent's messages and tool
+   * calls name the Agent card that spawned them. Absent for top-level rows.
+   */
+  parent_id?: string | null;
 }
 
 export interface ArchcarChatThread {

@@ -1277,6 +1277,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             status: item.status.as_str().to_owned(),
                             stream_state: item.stream_state.as_str().to_owned(),
                             timeline_seq: item.timeline_seq,
+                            parent_id: item.parent_id,
                         })
                         .collect(),
                     }
@@ -1997,6 +1998,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             .pull_request
                             .as_ref()
                             .and_then(|pr| pr.checks_state.clone()),
+                        pull_request_check_counts: summary
+                            .pull_request
+                            .as_ref()
+                            .and_then(|pr| pr.checks_counts),
                         conflicting_workspaces: summary.conflicting_workspaces.len(),
                     },
                 },
@@ -2646,10 +2651,24 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::RefreshPullRequest { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|s| s.refresh_pull_request_state(&workspace))
-            {
-                Ok(_) => ArchcarResponse::WorkspaceUpdated { name: workspace },
+            // Tell every client only when the refresh found news, as the
+            // post-turn sync does. The desktop polls this every minute while a
+            // PR is open, so it answers `Ack`: `WorkspaceUpdated` would make
+            // every client re-pull the inventory on every poll, and twice
+            // whenever something did change.
+            match WorkspaceStore::open_app(&db_path).and_then(|s| {
+                let before = s.pull_request(&workspace)?;
+                let after = s.refresh_pull_request_state(&workspace)?;
+                Ok((before, after))
+            }) {
+                Ok((before, after)) => {
+                    if let Some(event) =
+                        pull_request_changed_event(&workspace, before.as_ref(), after.as_ref())
+                    {
+                        broadcast(&mut state.lock().unwrap(), event);
+                    }
+                    ArchcarResponse::Ack
+                }
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -4803,6 +4822,7 @@ fn pull_request_changed_event(
                 || before.state != after.state
                 || before.url != after.url
                 || before.checks_state != after.checks_state
+                || before.checks_counts != after.checks_counts
         }
         _ => true,
     };
@@ -5557,6 +5577,7 @@ fn workspace_summary_from_status_line(
         pull_request_number: pull_request.as_ref().map(|pr| pr.number),
         pull_request_state: pull_request.as_ref().map(|pr| pr.state.clone()),
         pull_request_checks: pull_request.as_ref().and_then(|pr| pr.checks_state.clone()),
+        pull_request_check_counts: pull_request.as_ref().and_then(|pr| pr.checks_counts),
         pull_request_url: pull_request.map(|pr| pr.url),
         branch_ahead: branch_push_state.as_ref().map(|s| s.ahead),
         branch_behind: branch_push_state.map(|s| s.behind),
@@ -6885,6 +6906,7 @@ mod tests {
             url: format!("https://github.com/example/demo/pull/{number}"),
             state: state.to_owned(),
             checks_state: None,
+            checks_counts: None,
             created_at: "0".to_owned(),
             updated_at: "0".to_owned(),
         }
@@ -6920,6 +6942,27 @@ mod tests {
         passing.checks_state = Some("passing".to_owned());
         assert!(
             pull_request_changed_event("berlin", Some(&pr_row(77, "open")), Some(&passing))
+                .is_some()
+        );
+        // Same rollup word, more checks finished (3/8 -> 5/8 passed): news —
+        // the chip renders the tally, not just the word.
+        let mut pending_early = pr_row(77, "open");
+        pending_early.checks_state = Some("pending".to_owned());
+        pending_early.checks_counts = Some(crate::github_pr::PullRequestCheckCounts {
+            total: 8,
+            passed: 3,
+            pending: 5,
+            ..Default::default()
+        });
+        let mut pending_later = pending_early.clone();
+        pending_later.checks_counts = Some(crate::github_pr::PullRequestCheckCounts {
+            total: 8,
+            passed: 5,
+            pending: 3,
+            ..Default::default()
+        });
+        assert!(
+            pull_request_changed_event("berlin", Some(&pending_early), Some(&pending_later))
                 .is_some()
         );
         // Still no PR anywhere: silence.
@@ -7490,6 +7533,72 @@ mod tests {
         // Nothing moved this time, so clients are left alone.
         let before = thread_naming_snapshot(&db_path, thread.id);
         broadcast_naming_changes(&state, &db_path, thread.id, before);
+        assert!(subscriber_rx.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn refresh_pull_request_without_news_leaves_clients_alone() {
+        // No PR recorded and GitHub has none for the branch. The desktop
+        // polls this every minute, so an unchanged answer must not make every
+        // client re-pull the inventory.
+        use crate::workspace::tests::{env_lock, install_fake_gh, restore_path};
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+            remote_listen: None,
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::RefreshPullRequest {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+
+        restore_path(old_path);
+        assert!(matches!(response, ArchcarResponse::Ack), "{response:?}");
         assert!(subscriber_rx.try_iter().next().is_none());
     }
 

@@ -231,7 +231,7 @@ function WorkspaceRow(props: { name: string }) {
             [`workspace-git-state-motion-${WORKSPACE_PR_STATE_MOTION[gitState().state]}`]:
               WORKSPACE_PR_STATE_MOTION[gitState().state] != null,
           }}
-          title={gitState().title}
+          title={gitState().detail ? `${gitState().title} · ${gitState().detail}` : gitState().title}
         >
           <Icon name={WORKSPACE_PR_STATE_ICON[gitState().state]} />
         </span>

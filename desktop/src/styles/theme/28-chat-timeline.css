@@ -167,3 +167,23 @@ button.chat-inline-event-expander label {
     min-height: 0;
     padding: 0;
 }
+
+/* A subagent's rows, inside the Agent card that spawned them. */
+.chat-inline-event-nested {
+    border-left: 1px solid #2a2a2a;
+    margin: 2px 0 4px 9px;
+    padding-left: 10px;
+}
+.chat-inline-event-latest {
+    color: #6f6f6f;
+    font-size: 11px;
+    margin-left: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.chat-nested-text {
+    color: #b9b9b9;
+    font-size: 13px;
+    max-width: var(--chat-measure-secondary);
+}
