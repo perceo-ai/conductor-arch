@@ -99,12 +99,14 @@ Archive and delete are different things:
 
 - **Archive** hides a workspace from the sidebar. Its record, chats, branch, and
   worktree all stay; it lives in History until `restore` brings it back. It
-  stops the workspace's running sessions and runs the `archive` script, and
-  changes nothing on disk. (`--remove-worktree` is retired: it is ignored with a
-  warning.)
+  stops the workspace's running sessions and does not remove or change the
+  worktree or branch itself — only your repository's `archive` script, if you
+  configured one, runs in it. (`--remove-worktree` is retired: it is ignored
+  with a warning.)
 - **Delete** removes the worktree from disk and drops the record, archived or
   not. Uncommitted changes go with it — a dirty or locked worktree is
-  force-removed, and the command prints how many changes it discarded. Commits
+  force-removed, and the command prints how many changes it discarded (or that
+  it could not count them). Commits
   stay on the branch unless you add `--delete-branch`. It stops the
   workspace's sessions first and refuses, naming the pid and command, if any
   other process is still working inside the worktree, since that process

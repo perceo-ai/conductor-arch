@@ -2570,29 +2570,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         },
         ArchcarRequest::DeleteWorkspace {
             workspace,
-            keep_worktree,
+            remove_worktree,
             delete_branch,
-        } => match stop_workspace_managed_sessions(state, &workspace)
-            .and_then(|()| open_lifecycle_workspace_store(state))
-            .and_then(|s| s.delete_lifecycle_job(&workspace, !keep_worktree, delete_branch))
-        {
-            // The worktree is gone and the record with it; only the branch
-            // step can still fail. Say so rather than reporting a clean delete.
-            Ok(result) => match result.cleanup_error {
-                Some(err) => ArchcarResponse::Error {
-                    message: format!(
-                        "deleted workspace {} but could not delete its branch: {err}",
-                        result.workspace.name
-                    ),
-                },
-                None => ArchcarResponse::WorkspaceRemoved {
-                    name: result.workspace.name,
-                },
-            },
-            Err(err) => ArchcarResponse::Error {
-                message: format!("{err:#}"),
-            },
-        },
+        } => delete_workspace_response(state, &workspace, remove_worktree, delete_branch),
         ArchcarRequest::CreateBranch { workspace, branch } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path)
@@ -6535,6 +6515,35 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
     }
 }
 
+fn delete_workspace_response(
+    state: &Arc<Mutex<ServerState>>,
+    workspace: &str,
+    remove_worktree: bool,
+    delete_branch: bool,
+) -> ArchcarResponse {
+    match stop_workspace_managed_sessions(state, workspace)
+        .and_then(|()| open_lifecycle_workspace_store(state))
+        .and_then(|s| s.delete_lifecycle_job(workspace, remove_worktree, delete_branch))
+    {
+        // The worktree is gone and the record with it; only the branch
+        // step can still fail. Say so rather than reporting a clean delete.
+        Ok(result) => match result.cleanup_error {
+            Some(err) => ArchcarResponse::Error {
+                message: format!(
+                    "deleted workspace {} but could not delete its branch: {err}",
+                    result.workspace.name
+                ),
+            },
+            None => ArchcarResponse::WorkspaceRemoved {
+                name: result.workspace.name,
+            },
+        },
+        Err(err) => ArchcarResponse::Error {
+            message: format!("{err:#}"),
+        },
+    }
+}
+
 fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> Result<()> {
     shutdown_managed_sessions_where(state, reason, |_| true)
 }
@@ -6597,14 +6606,26 @@ fn shutdown_managed_sessions_where(
         let _ = handle
             .command_tx
             .send(crate::archcar::session::SessionCommand::Kill);
-        if crate::platform::process_alive(snapshot.pid) {
-            crate::archcar::session::terminate_process(snapshot.pid);
-        }
-        if !wait_for_process_exit(snapshot.pid, Duration::from_secs(2)) {
-            errors.push(format!(
-                "session {} process {} did not exit during shutdown",
-                snapshot.session_id, snapshot.pid
-            ));
+        // A provider restart racing this stop can swap in a new pid after the
+        // snapshot above. The session loop will not restart once it sees the
+        // kill, so chase the current pid until it stops changing.
+        let mut pid = snapshot.pid;
+        for _ in 0..3 {
+            if crate::platform::process_alive(pid) {
+                crate::archcar::session::terminate_process(pid);
+            }
+            if !wait_for_process_exit(pid, Duration::from_secs(2)) {
+                errors.push(format!(
+                    "session {} process {} did not exit during shutdown",
+                    snapshot.session_id, pid
+                ));
+                break;
+            }
+            let current = handle.snapshot.lock().map(|state| state.pid).unwrap_or(pid);
+            if current == pid {
+                break;
+            }
+            pid = current;
         }
         if let Ok(store) = WorkspaceStore::open(&db_path) {
             if let Err(err) = store.mark_session_process_stopped(snapshot.session_id, None) {
@@ -10382,7 +10403,7 @@ default = true
         let deleted = dispatch_request(
             ArchcarRequest::DeleteWorkspace {
                 workspace: "berlin2".to_owned(),
-                keep_worktree: false,
+                remove_worktree: true,
                 delete_branch: false,
             },
             &state,

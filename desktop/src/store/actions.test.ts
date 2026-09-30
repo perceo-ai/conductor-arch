@@ -115,10 +115,37 @@ describe("actions.deleteWorkspace", () => {
       .filter((p) => p.type === "delete_workspace");
     expect(calls[0]).toMatchObject({
       workspace: "berlin",
-      keep_worktree: false,
+      remove_worktree: true,
       delete_branch: false,
     });
-    expect(calls[1]).toMatchObject({ keep_worktree: false, delete_branch: true });
+    expect(calls[1]).toMatchObject({ remove_worktree: true, delete_branch: true });
+  });
+});
+
+describe("actions.deleteWorkspace when the inventory refresh fails", () => {
+  function routeWithFailingRefresh(deleteResponse: unknown) {
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "delete_workspace") return response(deleteResponse);
+      if (req.type === "list_workspaces" || req.type === "list_repositories") {
+        throw new Error("daemon went away");
+      }
+      return response({ type: "ack" });
+    });
+  }
+
+  it("still reports a successful delete as a success", async () => {
+    routeWithFailingRefresh({ type: "workspace_removed", name: "berlin" });
+    const { actions } = await import("./actions");
+    await expect(actions.deleteWorkspace("berlin")).resolves.toBeUndefined();
+  });
+
+  it("surfaces the delete's own error, not the refresh's", async () => {
+    routeWithFailingRefresh({
+      type: "error",
+      message: "refusing to remove /w/berlin: 1 process(es) still running inside it",
+    });
+    const { actions } = await import("./actions");
+    await expect(actions.deleteWorkspace("berlin")).rejects.toThrow(/refusing to remove/);
   });
 });
 

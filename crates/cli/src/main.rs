@@ -138,7 +138,8 @@ enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
-    /// Hide a workspace from the sidebar. Nothing on disk changes.
+    /// Hide a workspace from the sidebar. The worktree, branch, and chats stay;
+    /// the repository's `archive` script, if any, still runs.
     Archive {
         name: String,
         /// Retired: archive no longer touches the disk. Use `workspace delete`.
@@ -1224,7 +1225,8 @@ enum WorkspaceCommand {
         active: bool,
     },
     /// Hide a workspace from the sidebar. Its record, chats, branch, and
-    /// worktree all stay; `restore` brings it back.
+    /// worktree all stay (the repository's `archive` script, if any, still
+    /// runs); `restore` brings it back.
     Archive {
         name: String,
         /// Retired: archive no longer touches the disk. Use `workspace delete`.
@@ -2895,11 +2897,16 @@ fn run_cli() -> Result<()> {
                             workspace.name,
                             workspace.path.display()
                         );
-                        if result.discarded_changes > 0 {
-                            println!(
-                                "Discarded {} uncommitted change(s); commits on {} are kept",
-                                result.discarded_changes, workspace.branch
-                            );
+                        match result.discarded_changes {
+                            Some(0) => {}
+                            Some(count) => println!(
+                                "Discarded {count} uncommitted change(s); commits on {} are kept",
+                                workspace.branch
+                            ),
+                            None => println!(
+                                "Could not count uncommitted changes before removing it; any there were discarded. Commits on {} are kept",
+                                workspace.branch
+                            ),
                         }
                     }
                     if delete_branch {

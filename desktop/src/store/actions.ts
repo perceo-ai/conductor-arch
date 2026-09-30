@@ -509,15 +509,18 @@ export const actions = {
         await send({
           type: "delete_workspace",
           workspace,
-          keep_worktree: false,
+          remove_worktree: true,
           delete_branch: deleteBranch,
         }),
       );
       if (nav.selectedWorkspace() === workspace) nav.goToPage("dashboard");
     } finally {
       // A failed branch step still deleted the workspace; a refused delete
-      // changed nothing. Either way the list should show what is true now.
-      await refreshInventory();
+      // changed nothing. Either way the list should show what is true now —
+      // but a failed refresh must not replace the delete's own outcome.
+      await refreshInventory().catch((err) => {
+        logAction("delete_workspace refresh failed", { workspace, error: String(err) });
+      });
     }
   },
 

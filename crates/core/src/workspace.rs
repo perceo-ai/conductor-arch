@@ -324,8 +324,9 @@ pub struct WorkspaceDeleteResult {
     pub workspace: Workspace,
     pub cleanup_error: Option<String>,
     /// Uncommitted changes (`git status --porcelain` entries) that were in the
-    /// worktree when delete force-removed it.
-    pub discarded_changes: usize,
+    /// worktree when delete force-removed it; `None` when they could not be
+    /// counted, which is not the same as none.
+    pub discarded_changes: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -347,6 +348,10 @@ pub struct WorkspaceLifecycleJob {
 struct WorkspaceCreateJobPayload {
     input: CreateWorkspace,
 }
+
+/// A workspace whose worktree is being (or has been) removed and whose record
+/// is about to be dropped. Seen only if dropping the record failed.
+const WORKSPACE_STATUS_DELETING: &str = "deleting";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct WorkspaceDeleteJobPayload {
@@ -1933,8 +1938,12 @@ impl WorkspaceStore {
         let current = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(current.repository_id)?;
         validate_workspace_artifact_cleanup_target(&repository, &current)?;
-        let workspace = self.archive(name)?;
-        remove_workspace_worktree(&repository.root_path, &workspace.path)?;
+        self.prepare_archive(&current, &repository)?;
+        // The row is marked archived only once the worktree is really gone, so
+        // a discard that fails leaves the workspace visible and unchanged.
+        remove_workspace_worktree(&repository.root_path, &current.path)
+            .with_context(|| format!("discard {name}"))?;
+        let workspace = self.mark_archived(name)?;
         // Delete the local branch (ignore errors if already gone or not fully merged)
         let _ = git_dynamic(
             &repository.root_path,
@@ -2034,13 +2043,22 @@ impl WorkspaceStore {
 
         self.stop_workspace_processes(&workspace)?;
 
-        // Disk first, record second. If the worktree cannot be removed the
-        // record stays, so the failure is visible and `delete` can be rerun;
-        // dropping the record first is what left worktrees behind silently.
+        // Disk first, record second, and the record never claims a worktree
+        // that is gone: it is marked `deleting` before the files go. If the
+        // files cannot be removed the mark is undone and nothing has changed;
+        // if the record cannot be dropped afterwards it still says `deleting`,
+        // and rerunning delete (or lifecycle recovery) finishes the job.
         let discarded_changes = if remove_worktree {
-            remove_workspace_worktree(&repository.root_path, &workspace.path)?
+            self.set_workspace_status(workspace.id, WORKSPACE_STATUS_DELETING)?;
+            match remove_workspace_worktree(&repository.root_path, &workspace.path) {
+                Ok(discarded) => discarded,
+                Err(err) => {
+                    self.set_workspace_status(workspace.id, &workspace.status)?;
+                    return Err(err);
+                }
+            }
         } else {
-            0
+            Some(0)
         };
 
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -2060,6 +2078,12 @@ impl WorkspaceStore {
             }
             Err(err) => {
                 let _ = self.conn.execute_batch("ROLLBACK");
+                if remove_worktree {
+                    return Err(err.context(format!(
+                        "removed {} but could not drop the workspace record (left as `deleting`); run delete again to finish",
+                        workspace.path.display()
+                    )));
+                }
                 return Err(err);
             }
         }
@@ -2077,6 +2101,15 @@ impl WorkspaceStore {
             cleanup_error,
             discarded_changes,
         })
+    }
+
+    fn set_workspace_status(&self, workspace_id: i64, status: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE workspaces SET status = ?1, updated_at = ?2 WHERE id = ?3",
+            params![status, timestamp(), workspace_id],
+        )?;
+        anyhow::ensure!(changed > 0, "workspace {workspace_id} not found");
+        Ok(())
     }
 
     pub fn cleanup_deleted_workspace_artifacts(
@@ -2382,10 +2415,21 @@ impl WorkspaceStore {
                 ) {
                     Ok(result) => result,
                     Err(err) => {
-                        // Nothing was deleted: the record is intact and the
-                        // caller sees the error. Retrying on the next daemon
-                        // start would delete behind the user's back.
-                        self.mark_workspace_lifecycle_job_failed(job_id, &format!("{err:#}"))?;
+                        let message = format!("{err:#}");
+                        let half_done = self
+                            .get_by_name(&payload.name)
+                            .is_ok_and(|workspace| workspace.status == WORKSPACE_STATUS_DELETING);
+                        if half_done {
+                            // The files are gone but the record is not:
+                            // finishing is safe and is what the user asked
+                            // for, so leave the job for recovery to retry.
+                            self.mark_workspace_lifecycle_job_queued_error(job_id, &message)?;
+                        } else {
+                            // Nothing was deleted: the record is intact and
+                            // the caller sees the error. Retrying on the next
+                            // daemon start would delete behind their back.
+                            self.mark_workspace_lifecycle_job_failed(job_id, &message)?;
+                        }
                         return Err(err);
                     }
                 }
@@ -2408,7 +2452,7 @@ impl WorkspaceStore {
                             updated_at: String::new(),
                         },
                         cleanup_error: None,
-                        discarded_changes: 0,
+                        discarded_changes: Some(0),
                     });
                 };
                 match self.cleanup_deleted_workspace_artifacts(
@@ -2419,12 +2463,12 @@ impl WorkspaceStore {
                     Ok(()) => WorkspaceDeleteResult {
                         workspace,
                         cleanup_error: None,
-                        discarded_changes: 0,
+                        discarded_changes: Some(0),
                     },
                     Err(err) => WorkspaceDeleteResult {
                         workspace,
                         cleanup_error: Some(format!("{err:#}")),
-                        discarded_changes: 0,
+                        discarded_changes: Some(0),
                     },
                 }
             }
@@ -2445,22 +2489,31 @@ impl WorkspaceStore {
     pub fn archive(&self, name: &str) -> Result<Workspace> {
         let workspace = self.get_by_name(name)?;
         let repository = self.load_repository_by_id(workspace.repository_id)?;
+        self.prepare_archive(&workspace, &repository)?;
+        self.mark_archived(name)
+    }
+
+    /// Stop the workspace's processes and run the repository's archive script.
+    fn prepare_archive(&self, workspace: &Workspace, repository: &RepositoryRecord) -> Result<()> {
         let settings = self.repository_settings(&repository.root_path)?;
 
-        self.stop_workspace_processes(&workspace)?;
+        self.stop_workspace_processes(workspace)?;
 
         if let Some(archive_script) = &settings.scripts.archive {
             if workspace.path.exists() {
                 run_shell_script(
                     archive_script,
                     &settings,
-                    &repository,
-                    &workspace,
-                    &self.linked_directory_env(&workspace)?,
+                    repository,
+                    workspace,
+                    &self.linked_directory_env(workspace)?,
                 )?;
             }
         }
+        Ok(())
+    }
 
+    fn mark_archived(&self, name: &str) -> Result<Workspace> {
         let now = timestamp();
         let changed = self.conn.execute(
             "UPDATE workspaces
@@ -10582,10 +10635,13 @@ fn read_codex_rollout_session_meta(path: &Path) -> Result<Option<CodexRolloutMet
 /// that process would recreate it on its next write, which is how a "removed"
 /// worktree used to reappear — and it names those processes so they can be
 /// stopped.
-fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> Result<usize> {
+fn remove_workspace_worktree(
+    repository_root: &Path,
+    workspace_path: &Path,
+) -> Result<Option<usize>> {
     if !workspace_path.exists() {
         let _ = git_dynamic(repository_root, &["worktree", "prune"]);
-        return Ok(0);
+        return Ok(Some(0));
     }
 
     let holders = crate::platform::processes_with_cwd_under(workspace_path);
@@ -10613,15 +10669,18 @@ fn remove_workspace_worktree(repository_root: &Path, workspace_path: &Path) -> R
             workspace_path,
             &["status", "--porcelain", "--", ".", ":(exclude).context"],
         )
+        .ok()
         .map(|status| {
             status
                 .lines()
                 .filter(|line| !line.trim().is_empty())
                 .count()
         })
-        .unwrap_or(0)
+    } else if fs::read_dir(workspace_path).is_ok_and(|mut entries| entries.next().is_none()) {
+        Some(0)
     } else {
-        0
+        // Not a git checkout any more: whatever is in there is uncounted.
+        None
     };
 
     let path_arg = workspace_path.to_string_lossy();
@@ -16784,7 +16843,8 @@ CUSTOM_VALUE = "from-settings"
 
         assert!(format!("{err:#}").contains("remove workspace directory"));
         assert!(workspace.path.exists());
-        assert!(store.get_by_name("berlin").is_ok());
+        // Nothing changed, so the row is not left saying `deleting`.
+        assert_eq!(store.get_by_name("berlin").unwrap().status, "active");
     }
 
     #[test]
@@ -17325,7 +17385,7 @@ CUSTOM_VALUE = "from-settings"
         let deleted = store.delete_fast("berlin", true, false).unwrap();
 
         assert!(!workspace.path.exists());
-        assert_eq!(deleted.discarded_changes, 2);
+        assert_eq!(deleted.discarded_changes, Some(2));
         assert!(deleted.cleanup_error.is_none());
         assert!(!git_output(&repo_path, ["worktree", "list"])
             .contains(workspace.path.to_string_lossy().as_ref()));
@@ -17412,6 +17472,124 @@ CUSTOM_VALUE = "from-settings"
         let _ = child.wait();
         store.delete("berlin", true, false).unwrap();
         assert!(!workspace.path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_discard_leaves_the_workspace_as_it_was() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, repo_path) = demo_store_with_workspace(temp.path());
+        let mut child = spawn_sleeper_in(&workspace.path);
+
+        let err = store.discard("berlin").unwrap_err();
+
+        assert!(format!("{err:#}").contains(&format!("pid {}", child.id())));
+        let current = store.get_by_name("berlin").unwrap();
+        assert_eq!(current.status, "active");
+        assert!(current.archived_at.is_none());
+        assert!(workspace.path.join(".git").exists());
+        assert!(branch_exists(&repo_path, "lc/berlin"));
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn delete_reports_an_unknown_discard_count_rather_than_zero() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, _repo_path) = demo_store_with_workspace(temp.path());
+        // No longer a git checkout, but files are still in it.
+        fs::remove_file(workspace.path.join(".git")).unwrap();
+
+        let deleted = store.delete_fast("berlin", true, false).unwrap();
+
+        assert!(!workspace.path.exists());
+        assert_eq!(deleted.discarded_changes, None);
+    }
+
+    #[test]
+    fn delete_counts_an_empty_leftover_directory_as_nothing_discarded() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, _repo_path) = demo_store_with_workspace(temp.path());
+        fs::remove_dir_all(&workspace.path).unwrap();
+        fs::create_dir(&workspace.path).unwrap();
+
+        let deleted = store.delete_fast("berlin", true, false).unwrap();
+
+        assert!(!workspace.path.exists());
+        assert_eq!(deleted.discarded_changes, Some(0));
+    }
+
+    #[test]
+    fn delete_finishes_when_the_worktree_is_already_gone() {
+        // The retry path after a record-drop failure: the files went first,
+        // so running delete again must prune and drop the record.
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, repo_path) = demo_store_with_workspace(temp.path());
+        fs::remove_dir_all(&workspace.path).unwrap();
+
+        store.delete("berlin", true, false).unwrap();
+
+        assert!(store.get_by_name("berlin").is_err());
+        assert!(!git_output(&repo_path, ["worktree", "list"])
+            .contains(workspace.path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn record_drop_failure_after_removal_leaves_an_honest_row_and_recovers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, repo_path) = demo_store_with_workspace(temp.path());
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER block_workspace_delete BEFORE DELETE ON workspaces
+                 BEGIN SELECT RAISE(ABORT, 'simulated database failure'); END;",
+            )
+            .unwrap();
+
+        let err = store
+            .delete_lifecycle_job("berlin", true, false)
+            .unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("simulated database failure"), "{message}");
+        assert!(message.contains("run delete again"), "{message}");
+        assert!(!workspace.path.exists());
+        // The record does not claim a worktree that is gone.
+        assert_eq!(store.get_by_name("berlin").unwrap().status, "deleting");
+        let job_status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM workspace_lifecycle_jobs WHERE kind = 'workspace.delete'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(job_status, "queued");
+
+        store
+            .conn
+            .execute_batch("DROP TRIGGER block_workspace_delete")
+            .unwrap();
+        assert_eq!(store.recover_workspace_lifecycle_jobs().unwrap(), 1);
+        assert!(store.get_by_name("berlin").is_err());
+        assert!(!git_output(&repo_path, ["worktree", "list"])
+            .contains(workspace.path.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn discard_that_cannot_remove_the_worktree_changes_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, repo_path) = demo_store_with_workspace(temp.path());
+        // A file where the worktree directory should be: removal fails.
+        fs::remove_dir_all(&workspace.path).unwrap();
+        fs::write(&workspace.path, "not a directory\n").unwrap();
+
+        assert!(store.discard("berlin").is_err());
+
+        let current = store.get_by_name("berlin").unwrap();
+        assert_eq!(current.status, "active");
+        assert!(current.archived_at.is_none());
+        assert!(branch_exists(&repo_path, "lc/berlin"));
     }
 
     #[test]
