@@ -13534,14 +13534,7 @@ fn process_group_matches_pid(pid: u32) -> bool {
 fn stop_process(pid: u32) -> Result<()> {
     // Try SIGTERM to the process group only when the child owns a distinct group.
     let group_ok = if process_group_matches_pid(pid) {
-        Command::new("kill")
-            .arg("-TERM")
-            .arg(format!("-{pid}"))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("run kill")?
-            .success()
+        crate::platform::signal_process_group(pid, "-TERM").context("run kill")?
     } else {
         false
     };
@@ -13566,12 +13559,7 @@ fn stop_process(pid: u32) -> Result<()> {
     // Still alive — send SIGKILL to process group, then process.
     if process_alive(pid) {
         if process_group_matches_pid(pid) {
-            let _ = Command::new("kill")
-                .arg("-KILL")
-                .arg(format!("-{pid}"))
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = crate::platform::signal_process_group(pid, "-KILL");
         }
         std::thread::sleep(Duration::from_millis(200));
         let _ = Command::new("kill")
@@ -17831,6 +17819,51 @@ CUSTOM_VALUE = "from-settings"
         assert!(wait_for_exit(&mut child), "session process kept running");
         assert!(!workspace.path.exists());
         assert!(store.get_by_name("berlin").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_escalates_to_sigkill_for_a_session_that_ignores_sigterm_within_a_bound() {
+        use std::os::unix::process::CommandExt;
+        let temp = tempfile::tempdir().unwrap();
+        let (store, workspace, _repo_path) = demo_store_with_workspace(temp.path());
+        // An agent that ignores SIGTERM, with a child in its group (the
+        // ignore is inherited), still sitting in the worktree.
+        let mut child = Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 300 & wait"])
+            .current_dir(&workspace.path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        store
+            .record_process(RecordProcessInput {
+                kind: ProcessKind::Session,
+                workspace: &workspace,
+                chat_thread_id: None,
+                command: "stubborn agent",
+                pid: child.id(),
+                file_prefix: "session",
+                session: ProcessSessionMetadata {
+                    harness_metadata: None,
+                    resume_id: None,
+                },
+            })
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        store.delete("berlin", true, false).unwrap();
+        let took = started.elapsed();
+
+        // Bounded: the 3s grace period plus the SIGKILL step, never a hang.
+        assert!(took < Duration::from_secs(10), "delete took {took:?}");
+        assert!(wait_for_exit(&mut child), "session survived delete");
+        // The group member went with it; nothing is left to recreate the tree.
+        assert!(crate::platform::processes_with_cwd_under(temp.path()).is_empty());
+        assert!(!workspace.path.exists());
     }
 
     #[cfg(target_os = "linux")]

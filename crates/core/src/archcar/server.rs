@@ -11173,6 +11173,7 @@ default = true
     fn terminate_test_child(child: &mut std::process::Child) {
         let _ = Command::new("kill")
             .arg("-KILL")
+            .arg("--")
             .arg(format!("-{}", child.id()))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
