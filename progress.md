@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-08-24.
+Current as of 2026-09-30.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -26,6 +26,23 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
+
+## Reading the board from the CLI (2026-09-30)
+
+`archductor chat <ws>` prints a chat as turns (requests, prose, one line per
+tool call with a clipped result, errors and prompts called out) from the same
+projection the desktop timeline uses, with `--json` JSON Lines. `archductor
+status [ws] --json` reports each agent's liveness (asked of the daemon, PID as a
+fallback), last activity, idle time, current tool, state (`working`,
+`awaiting_input`, `finished`, `failed`, `stopped`), and any PR it opened. Plain
+`status` no longer shows the run script's "stopped" where the agent's state
+belongs. `session send` to a busy agent queues the message for the next turn
+boundary instead of timing out.
+
+Root cause of the wrong liveness: a Claude transport restart (permission-mode
+or model change) spawned a new process but left the old PID on the session row,
+so PID checks read live agents as dead, and stop/archive killed nothing while
+the real child kept running. The restart now records the new PID.
 
 ## Branch prefixes and Full Disk Access (2026-09-30)
 

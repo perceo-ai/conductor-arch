@@ -2924,6 +2924,28 @@ impl WorkspaceStore {
         Ok(process)
     }
 
+    /// Point a still-running session at the process that now serves it.
+    ///
+    /// A provider transport restart (a Claude permission-mode or model change)
+    /// replaces the child process under the same session. Every liveness check,
+    /// stop, and archive goes through this row's PID, so leaving the old one
+    /// here makes a live agent read as dead and lets a stop kill nothing while
+    /// the real child keeps running.
+    pub fn update_session_process_pid(&self, process_id: i64, pid: u32) -> Result<()> {
+        anyhow::ensure!(pid > 0, "session process id is required");
+        let changed = self.conn.execute(
+            "UPDATE processes SET pid = ?1 WHERE id = ?2 AND kind = ?3 AND status = ?4",
+            params![
+                pid,
+                process_id,
+                ProcessKind::Session.as_str(),
+                ProcessStatus::Running.as_str()
+            ],
+        )?;
+        anyhow::ensure!(changed > 0, "no running session process #{process_id}");
+        Ok(())
+    }
+
     pub fn mark_session_process_exited(
         &self,
         process_id: i64,
@@ -21392,6 +21414,56 @@ working_directory = "apps/worker"
         assert_eq!(reconciled.id, process.id);
         assert_eq!(reconciled.status, ProcessStatus::Exited);
         assert!(reconciled.ended_at.is_some());
+    }
+
+    #[test]
+    fn a_restarted_session_transport_records_its_new_pid() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
+        let process = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+        let mut replacement = Command::new("sleep").arg("30").spawn().unwrap();
+
+        store
+            .update_session_process_pid(process.id, replacement.id())
+            .unwrap();
+
+        // The reconcile that used to see the dead original now sees the live
+        // replacement and leaves the session running.
+        assert!(store.reconcile_session_processes().unwrap().is_empty());
+        let updated = store.get_process(process.id).unwrap();
+        assert_eq!(updated.pid, replacement.id());
+        assert_eq!(updated.status, ProcessStatus::Running);
+
+        // An exited session keeps the PID it ended with.
+        store
+            .mark_session_process_exited(process.id, Some(0))
+            .unwrap();
+        assert!(store.update_session_process_pid(process.id, 1).is_err());
+        let _ = replacement.kill();
+        let _ = replacement.wait();
     }
 
     #[test]

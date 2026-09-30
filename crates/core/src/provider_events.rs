@@ -494,6 +494,17 @@ impl ProviderEventStore {
         Ok(rows)
     }
 
+    /// When the chat thread last streamed anything, in Unix milliseconds.
+    pub fn last_occurred_at_ms_for_chat_thread(&self, chat_thread_id: i64) -> Result<Option<u64>> {
+        let conn = self.open()?;
+        let last: Option<i64> = conn.query_row(
+            "SELECT MAX(occurred_at_ms) FROM provider_events WHERE chat_thread_id = ?1",
+            [chat_thread_id],
+            |row| row.get(0),
+        )?;
+        Ok(last.and_then(|ms| u64::try_from(ms).ok()))
+    }
+
     pub fn list_for_process(&self, process_id: i64) -> Result<Vec<ProviderEventRecord>> {
         let conn = self.open()?;
         let mut stmt = conn.prepare(

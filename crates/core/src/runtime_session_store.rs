@@ -213,6 +213,10 @@ impl RuntimeSessionStore {
         Ok(())
     }
 
+    pub fn update_session_process_pid(&self, process_id: i64, pid: u32) -> Result<()> {
+        self.open()?.update_session_process_pid(process_id, pid)
+    }
+
     pub fn mark_session_process_exited(
         &self,
         process_id: i64,

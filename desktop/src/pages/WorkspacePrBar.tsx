@@ -76,7 +76,17 @@ export default function WorkspacePrBar(props: { workspace: string }) {
       prSyncInFlight = false;
     }
   }
-  createEffect(on(() => props.workspace, () => void syncPrChecks()));
+  // Also the moment there is something new to learn: the PR itself appears (a
+  // row with no PR number when the bar mounted gets one once the PR is
+  // created), or a clean workspace gains changes and becomes worth asking
+  // GitHub about, since a PR may have been opened outside the app. Keyed on
+  // eligibility, not the diff counts, so ordinary edits do not re-fire it.
+  // A memoized string, because `on` alone re-runs on every row update even
+  // when the values it returns are unchanged.
+  const prSyncKey = createMemo(
+    () => `${props.workspace}|${row()?.prNumber ?? ""}|${shouldSyncPullRequest(row())}`,
+  );
+  createEffect(on(prSyncKey, () => void syncPrChecks()));
   onMount(() => {
     const timer = window.setInterval(() => void syncPrChecks(), 60_000);
     onCleanup(() => window.clearInterval(timer));

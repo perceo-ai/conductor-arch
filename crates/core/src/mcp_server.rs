@@ -408,6 +408,7 @@ pub fn tools() -> Vec<ToolSpec> {
                         Some("shell") => crate::workspace::SessionKind::SHELL,
                         _ => crate::workspace::SessionKind::CODEX,
                     },
+                    verbatim: false,
                 })
             },
         },

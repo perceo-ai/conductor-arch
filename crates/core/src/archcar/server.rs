@@ -1045,7 +1045,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             visible_input,
             kind,
             session_kind,
-        } => queue_chat_input(state, thread_id, input, visible_input, kind, session_kind),
+            verbatim,
+        } => queue_chat_input(
+            state,
+            thread_id,
+            input,
+            visible_input,
+            kind,
+            session_kind,
+            verbatim,
+        ),
         ArchcarRequest::ListQueuedChatInputs { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path)
@@ -3474,6 +3483,7 @@ fn start_background_task(
                 visible_input: Some(prompt.clone()),
                 kind: crate::archcar::protocol::ArchcarInputKind::User,
                 session_kind: kind,
+                verbatim: false,
             },
             state,
         );
@@ -3959,6 +3969,7 @@ fn queue_chat_input(
     visible_input: Option<String>,
     kind: crate::archcar::protocol::ArchcarInputKind,
     session_kind: SessionKind,
+    verbatim: bool,
 ) -> ArchcarResponse {
     let db_path = state.lock().unwrap().db_path.clone();
     let is_user_input = kind == crate::archcar::protocol::ArchcarInputKind::User;
@@ -3984,8 +3995,9 @@ fn queue_chat_input(
         // A human message can carry a hidden request for real workspace/branch/chat
         // names and a refreshed workspace summary. It rides the provider-bound text
         // only; the transcript keeps the visible text, so the user never sees it.
+        // `verbatim` input (the CLI) skips it, as a direct `SendInput` does.
         let (input, visible_input) = match kind {
-            crate::archcar::protocol::ArchcarInputKind::User => {
+            crate::archcar::protocol::ArchcarInputKind::User if !verbatim => {
                 match store.decorate_chat_input(thread_id, &input)? {
                     Some(decorated) => (
                         decorated,
@@ -7319,6 +7331,7 @@ mod tests {
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 session_kind: SessionKind::CODEX,
+                verbatim: false,
             },
             &state,
         );
@@ -7356,6 +7369,7 @@ mod tests {
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 session_kind: SessionKind::CODEX,
+                verbatim: false,
             },
             &state,
         );
@@ -7364,6 +7378,85 @@ mod tests {
         };
         assert_eq!(second.input, "and lint");
         assert!(!second.input.contains("<archductor_hidden_instruction>"));
+    }
+
+    #[test]
+    fn verbatim_queued_input_reaches_the_agent_exactly_as_sent() {
+        // `archductor session send` queues behind a busy turn with `verbatim`.
+        // The agent must get the operator's words alone, just as it would had
+        // the session been idle and the input gone straight in via SendInput.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let (subscriber_tx, _subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+            remote_listen: None,
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "run tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::CODEX,
+                verbatim: true,
+            },
+            &state,
+        );
+        let ArchcarResponse::QueuedChatInput { input } = response else {
+            panic!("expected queued chat input response");
+        };
+        assert_eq!(input.input, "run tests");
+        assert_eq!(input.visible_input, None);
+
+        // The desktop's (non-verbatim) queue still asks for the metadata.
+        let desktop = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "and lint".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::CODEX,
+                verbatim: false,
+            },
+            &state,
+        );
+        let ArchcarResponse::QueuedChatInput { input: desktop } = desktop else {
+            panic!("expected queued chat input response");
+        };
+        assert!(desktop.input.contains("<archductor_hidden_instruction>"));
     }
 
     #[test]
@@ -8506,6 +8599,7 @@ exit 1
                     visible_input: None,
                     kind: ArchcarInputKind::User,
                     session_kind: SessionKind::CLAUDE,
+                    verbatim: false,
                 },
                 &state,
             );
@@ -10161,6 +10255,7 @@ default = true
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 session_kind: SessionKind::CODEX,
+                verbatim: false,
             },
             &state,
         );
