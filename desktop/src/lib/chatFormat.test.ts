@@ -35,3 +35,12 @@ describe("inlineEventVerbChip", () => {
     ).toBe("Summarizing live DB lock and timeout findings\n\nInvestigating queue logs");
   });
 });
+
+describe("background task cards", () => {
+  it("label the task by what it is doing", () => {
+    expect(inlineEventVerbChip("background_card", "Run the test suite")).toEqual({
+      verb: "Background",
+      chip: "Run the test suite",
+    });
+  });
+});

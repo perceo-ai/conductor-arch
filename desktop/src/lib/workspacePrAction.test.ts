@@ -67,7 +67,7 @@ describe("deriveWorkspacePrAction", () => {
         checkExitCode: 0,
       }),
     ).toMatchObject({
-      title: "Checks unknown",
+      title: "No checks reported",
       actionLabel: "Review",
       action: "view",
     });
@@ -81,7 +81,7 @@ describe("deriveWorkspacePrAction", () => {
         checkStatus: "success",
       }),
     ).toMatchObject({
-      title: "Ready to merge",
+      title: "Checks passed",
       actionLabel: "Merge",
       action: "merge",
     });
@@ -96,7 +96,7 @@ describe("deriveWorkspacePrAction", () => {
           checkStatus,
         }),
       ).toMatchObject({
-        title: "Checks unknown",
+        title: "No checks reported",
         actionLabel: "Review",
         action: "view",
       });
@@ -109,13 +109,26 @@ describe("deriveWorkspacePrAction", () => {
     // script) used to sit on "Checks unknown" forever.
     expect(
       deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "passing" }),
-    ).toMatchObject({ title: "Ready to merge", action: "merge", state: "ready" });
+    ).toMatchObject({ title: "Checks passed", action: "merge", state: "ready" });
     expect(
       deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "failing" }),
     ).toMatchObject({ title: "Checks failing", action: "view", state: "checks-failed" });
     expect(
       deriveWorkspacePrAction({ prNumber: 42, prState: "open", prChecks: "pending" }),
     ).toMatchObject({ title: "Checks running", action: "view", state: "checks-running" });
+    // A finished local run is not a verdict and must not hide GitHub's: this
+    // is what kept any workspace that had run its check script on "unknown".
+    for (const checkStatus of ["exited", "stopped"]) {
+      expect(
+        deriveWorkspacePrAction({
+          prNumber: 42,
+          prState: "open",
+          checkStatus,
+          checkExitCode: 0,
+          prChecks: "failing",
+        }),
+      ).toMatchObject({ title: "Checks failing", state: "checks-failed" });
+    }
     // A live local check status still wins over the stored rollup.
     expect(
       deriveWorkspacePrAction({
@@ -125,6 +138,55 @@ describe("deriveWorkspacePrAction", () => {
         prChecks: "passing",
       }),
     ).toMatchObject({ state: "checks-running" });
+  });
+
+  it("reads the check tally from the summary, falling back to the row", () => {
+    const counts = { total: 21, passed: 11, failed: 1, pending: 8, skipped: 1 };
+    expect(
+      deriveWorkspacePrAction(
+        workspacePrActionInput(
+          { prNumber: 42, prState: "open", prChecks: "failing", prCheckCounts: counts },
+          undefined,
+        ),
+      ),
+    ).toMatchObject({
+      title: "Checks failing",
+      detail: "11/20 passed, 1 failed, 8 running, 1 skipped",
+    });
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prChecks: "pending",
+        prCheckCounts: { total: 20, passed: 12, failed: 0, pending: 8, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Checks running", detail: "12/20 passed, 8 running" });
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prChecks: "passing",
+        prCheckCounts: { total: 21, passed: 21, failed: 0, pending: 0, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Checks passed", detail: "21/21 passed", state: "ready" });
+    // The tally stays off states that are about something else.
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        conflicts: 1,
+        prChecks: "passing",
+        prCheckCounts: { total: 3, passed: 3, failed: 0, pending: 0, skipped: 0 },
+      }).detail,
+    ).toBeUndefined();
+  });
+
+  it("does not render an open PR without checks as a question mark", () => {
+    expect(WORKSPACE_PR_STATE_ICON["checks-unknown"]).not.toBe("circle-help");
+    expect(deriveWorkspacePrAction({ prNumber: 42, prState: "open" })).toMatchObject({
+      cssClass: "ws-pr-status-muted",
+      state: "checks-unknown",
+    });
   });
 
   it("routes explicit failed checks to review instead of merge", () => {
@@ -152,7 +214,7 @@ describe("deriveWorkspacePrAction", () => {
         checkExitCode: 7,
       }),
     ).toMatchObject({
-      title: "Checks unknown",
+      title: "No checks reported",
       actionLabel: "Review",
       action: "view",
     });

@@ -98,6 +98,7 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     const session = slice().session;
     return session == null || session.ready === true;
   };
+  const sessionAlive = () => slice().session != null;
 
   function updateFollowBottom() {
     const el = scrollRef;
@@ -139,6 +140,7 @@ export function Timeline(props: { threadId: number; workspace: string }) {
               <TimelineItem
                 item={item}
                 agentIdle={agentIdle()}
+                sessionAlive={sessionAlive()}
                 threadId={props.threadId}
                 workspace={props.workspace}
                 files={workspaceFiles() ?? []}

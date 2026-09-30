@@ -121,3 +121,19 @@ export function timelineWindow<T>(items: T[], visibleCount: number): TimelineWin
   if (items.length <= count) return { visible: items, hidden: 0 };
   return { visible: items.slice(items.length - count), hidden: items.length - count };
 }
+
+/**
+ * Whether a card should read as still running.
+ *
+ * An interrupted turn leaves its tool cards marked running, so once the agent
+ * is idle they stop spinning. A background task is the exception: it outlives
+ * the turn that started it, and keeps running for as long as the session does.
+ */
+export function showsRunning(
+  item: ArchcarProjectionItem,
+  agent: { idle: boolean; sessionAlive: boolean },
+): boolean {
+  if (item.status !== "running") return false;
+  if (item.render_class === "background_card") return agent.sessionAlive;
+  return !agent.idle;
+}

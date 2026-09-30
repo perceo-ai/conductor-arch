@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   isDisplayableTimelineItem,
   showsNewChatIntro,
+  showsRunning,
   timelineWindow,
   withoutPlanSource,
 } from "./timeline";
@@ -188,5 +189,25 @@ describe("timelineWindow", () => {
 
   it("treats a negative window as empty rather than slicing from the front", () => {
     expect(timelineWindow(rows, -10)).toEqual({ visible: [], hidden: 500 });
+  });
+});
+
+describe("showsRunning", () => {
+  const command = item({ render_class: "command_card", status: "running" });
+  const background = item({ render_class: "background_card", status: "running" });
+
+  it("stops a tool card spinning once the agent is idle", () => {
+    expect(showsRunning(command, { idle: false, sessionAlive: true })).toBe(true);
+    expect(showsRunning(command, { idle: true, sessionAlive: true })).toBe(false);
+  });
+
+  it("keeps a background task running after the turn ends, while the session lives", () => {
+    expect(showsRunning(background, { idle: true, sessionAlive: true })).toBe(true);
+    expect(showsRunning(background, { idle: true, sessionAlive: false })).toBe(false);
+  });
+
+  it("never spins a finished card", () => {
+    const done = item({ render_class: "background_card", status: "failed" });
+    expect(showsRunning(done, { idle: false, sessionAlive: true })).toBe(false);
   });
 });

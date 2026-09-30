@@ -14,7 +14,8 @@ export const TEXT_CLASSES = new Set(["user_chat", "assistant_chat", "reasoning_c
 const DEFAULT_VERB: Record<string, string> = {
   command_card: "Ran",
   process_card: "Ran",
-  background_card: "Ran",
+  // A task the agent moved to the background: its title is what it is doing.
+  background_card: "Background",
   error_card: "Error",
   file_card: "Read",
   diff_card: "Edited",

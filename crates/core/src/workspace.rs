@@ -5354,6 +5354,7 @@ mutation($threadId: ID!) {{
 
     pub fn refresh_pull_request_state(&self, name: &str) -> Result<Option<PullRequest>> {
         let workspace = self.get_by_name(name)?;
+        let mut discovered = None;
         if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
             // No PR on record does not mean no PR: one created outside
             // Archductor (gh CLI, the GitHub web UI, an agent shell) has no
@@ -5370,14 +5371,20 @@ mutation($threadId: ID!) {{
             let Some((url, state)) = found else {
                 return Ok(None);
             };
-            self.record_pull_request_with_state(workspace.id, &url, &state)?;
+            discovered = Some(self.record_pull_request_with_state(workspace.id, &url, &state)?);
         }
         let args = self.gh_pr_args_for_workspace(
             &workspace,
             "view",
             &["--json", "state,statusCheckRollup"],
         )?;
-        let output = command_output_owned(&workspace.path, "gh", &args)?;
+        let output = match command_output_owned(&workspace.path, "gh", &args) {
+            Ok(output) => output,
+            // The discovery itself is the news; a failed checks read must
+            // not throw it away.
+            Err(_) if discovered.is_some() => return Ok(discovered),
+            Err(err) => return Err(err),
+        };
         let (state, checks_state, checks_counts) = parse_pull_request_state_and_checks(&output);
         let state = state.unwrap_or_else(|| "open".to_owned());
         let checks_counts_json = checks_counts
@@ -22800,13 +22807,22 @@ exit 1
             })
             .unwrap();
 
-        // First refresh: nothing recorded, so it discovers and records #131.
+        // First refresh: nothing recorded, so it discovers and records #131,
+        // and reads its checks in the same pass — a discovered PR must not
+        // sit on "checks unknown" until some later sync.
         let discovered = store
             .refresh_pull_request_state("berlin")
             .unwrap()
             .expect("refresh should discover the externally created PR");
         assert_eq!(discovered.number, 131);
         assert_eq!(discovered.state, "open");
+        assert_eq!(discovered.checks_state.as_deref(), Some("pending"));
+        assert_eq!(
+            discovered
+                .checks_counts
+                .map(|counts| (counts.total, counts.pending)),
+            Some((1, 1))
+        );
         assert!(store
             .pull_request_by_workspace_id(workspace.id)
             .unwrap()

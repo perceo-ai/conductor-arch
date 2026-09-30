@@ -957,6 +957,9 @@ pub enum ClaudeProviderEventKind {
     /// The dimensions note claude appends after an image tool result.
     ImageCompanionNote,
     Subagent,
+    /// A `system/task_*` record about work claude moved to the background: a
+    /// backgrounded command or a background agent.
+    BackgroundTask,
     Usage,
     ApiRetry,
     RateLimit,
@@ -1167,6 +1170,9 @@ impl ClaudeProviderEventDraft {
             | ClaudeProviderEventKind::ContentBlockDelta
             | ClaudeProviderEventKind::ContentBlockStop
             | ClaudeProviderEventKind::UserMessage => self.provider_message_id.clone(),
+            ClaudeProviderEventKind::BackgroundTask => {
+                string_at(&self.raw_json, &["task_id"]).map(|task_id| format!("task:{task_id}"))
+            }
             _ => None,
         };
         let body = if self.kind == ClaudeProviderEventKind::ImageCompanionNote {
@@ -1241,6 +1247,19 @@ pub struct ClaudeStreamParser {
     /// card reads "Read cli.py" rather than just "Read".
     tool_targets_by_use_id: HashMap<String, String>,
     reasoning_blocks: HashSet<u64>,
+    /// task_id → what claude said the task is, and whether it runs in the
+    /// background. Only the start record carries the description, and a
+    /// foreground task's records restate the tool card it belongs to.
+    tasks: HashMap<String, ClaudeTaskState>,
+    /// tool_use_id → the checklist a TodoWrite call set, shown in place of the
+    /// tool's "Todos have been modified" reply.
+    todo_lists_by_use_id: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ClaudeTaskState {
+    description: Option<String>,
+    backgrounded: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1263,6 +1282,7 @@ impl ClaudeStreamParser {
 
     fn map_value(&mut self, raw_json: Value) -> ClaudeProviderEventDraft {
         let top_type = string_at(&raw_json, &["type"]);
+        self.observe_tasks(&raw_json);
         let kind = self.kind_for(&raw_json);
         let mut draft = ClaudeProviderEventDraft {
             provider: CLAUDE_PROVIDER_NAME.to_owned(),
@@ -1300,9 +1320,74 @@ impl ClaudeStreamParser {
         draft
     }
 
+    fn observe_tasks(&mut self, value: &Value) {
+        if string_at(value, &["type"]).as_deref() != Some("system") {
+            return;
+        }
+        match string_at(value, &["subtype"]).as_deref() {
+            Some("task_started") => {
+                let Some(task_id) = string_at(value, &["task_id"]) else {
+                    return;
+                };
+                let task = self.tasks.entry(task_id).or_default();
+                task.description = string_at(value, &["description"]).or(task.description.take());
+                task.backgrounded |= value
+                    .get("is_backgrounded")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            }
+            Some("task_updated") => {
+                if value
+                    .pointer("/patch/is_backgrounded")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    if let Some(task_id) = string_at(value, &["task_id"]) {
+                        self.tasks.entry(task_id).or_default().backgrounded = true;
+                    }
+                }
+            }
+            Some("background_tasks_changed") => {
+                for task in value
+                    .get("tasks")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let Some(task_id) = string_at(task, &["task_id"]) else {
+                        continue;
+                    };
+                    let state = self.tasks.entry(task_id).or_default();
+                    state.backgrounded = true;
+                    if state.description.is_none() {
+                        state.description = string_at(task, &["description"]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True for a task record claude has put in the background. A foreground
+    /// task (a long Bash call, a subagent the turn is waiting on) already has
+    /// its tool card; a second card for it would say the same thing twice.
+    fn is_background_task_record(&self, value: &Value) -> bool {
+        string_at(value, &["type"]).as_deref() == Some("system")
+            && matches!(
+                string_at(value, &["subtype"]).as_deref(),
+                Some("task_started" | "task_progress" | "task_notification" | "task_updated")
+            )
+            && string_at(value, &["task_id"])
+                .and_then(|task_id| self.tasks.get(&task_id))
+                .is_some_and(|task| task.backgrounded)
+    }
+
     fn kind_for(&self, value: &Value) -> ClaudeProviderEventKind {
         if claude_system_hook_event(value) {
             return ClaudeProviderEventKind::Hook;
+        }
+        if self.is_background_task_record(value) {
+            return ClaudeProviderEventKind::BackgroundTask;
         }
         let top_type = string_at(value, &["type"]);
         let subtype = string_at(value, &["subtype"]);
@@ -1487,6 +1572,9 @@ impl ClaudeStreamParser {
         // Non-streaming assistant messages carry their tool calls inline; learn
         // the names there too, or a session without partial messages never sees
         // a name at all.
+        for (id, todos) in assistant_todo_lists(&draft.raw_json) {
+            self.todo_lists_by_use_id.insert(id, todos);
+        }
         for (id, name, target) in assistant_tool_calls(&draft.raw_json) {
             self.tool_names_by_use_id.insert(id.clone(), name);
             if let Some(target) = target {
@@ -1518,12 +1606,22 @@ impl ClaudeStreamParser {
             ClaudeProviderEventKind::UserMessage => {
                 message_content_text(&draft.raw_json, "text", "text")
             }
-            ClaudeProviderEventKind::ToolResult | ClaudeProviderEventKind::DeferredResult => {
-                tool_result_text(&draft.raw_json)
-            }
+            ClaudeProviderEventKind::ToolResult | ClaudeProviderEventKind::DeferredResult => draft
+                .provider_tool_use_id
+                .as_ref()
+                .filter(|_| string_at(&draft.raw_json, &["type"]).as_deref() == Some("user"))
+                .and_then(|id| self.todo_lists_by_use_id.get(id).cloned())
+                .or_else(|| tool_result_text(&draft.raw_json)),
+            ClaudeProviderEventKind::BackgroundTask => claude_task_body(&draft.raw_json),
             ClaudeProviderEventKind::Result => string_at(&draft.raw_json, &["result"]),
             _ => None,
         };
+
+        if draft.kind == ClaudeProviderEventKind::BackgroundTask {
+            draft.tool_target = string_at(&draft.raw_json, &["task_id"])
+                .and_then(|task_id| self.tasks.get(&task_id))
+                .and_then(|task| task.description.clone());
+        }
 
         if string_at(&draft.raw_json, &["event", "type"]).as_deref() == Some("content_block_stop") {
             if let Some(index) = draft.content_block_index {
@@ -1663,6 +1761,90 @@ fn tool_result_content_text(content: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// What a background task record says: live progress while it runs, the
+/// summary and where its output went once it ends.
+fn claude_task_body(value: &Value) -> Option<String> {
+    let mut lines = Vec::new();
+    match string_at(value, &["subtype"]).as_deref() {
+        Some("task_progress") => {
+            let mut line = string_at(value, &["description"]).unwrap_or_default();
+            if let Some(uses) = number_at(value, &["usage", "tool_uses"]) {
+                let plural = if uses == 1 { "" } else { "s" };
+                line = if line.is_empty() {
+                    format!("{uses} tool use{plural}")
+                } else {
+                    format!("{line} ({uses} tool use{plural})")
+                };
+            }
+            lines.push(line);
+        }
+        Some("task_notification") => {
+            lines.push(string_at(value, &["summary"]).unwrap_or_default());
+            if let Some(output) = string_at(value, &["output_file"]) {
+                if !output.trim().is_empty() {
+                    lines.push(format!("Output: {output}"));
+                }
+            }
+        }
+        _ => {}
+    }
+    let body = lines
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!body.is_empty()).then_some(body)
+}
+
+fn claude_task_phase(value: &Value) -> ProviderEventPhase {
+    let status = match string_at(value, &["subtype"]).as_deref() {
+        Some("task_started") => return ProviderEventPhase::Started,
+        Some("task_progress") => return ProviderEventPhase::Progress,
+        Some("task_notification") => string_at(value, &["status"]),
+        Some("task_updated") => string_at(value, &["patch", "status"]),
+        _ => None,
+    };
+    match status.as_deref() {
+        Some("completed") => ProviderEventPhase::Completed,
+        Some("failed") => ProviderEventPhase::Failed,
+        Some("stopped" | "killed") => ProviderEventPhase::Interrupted,
+        _ => ProviderEventPhase::Progress,
+    }
+}
+
+/// `(tool_use_id, checklist)` for every TodoWrite call in an assistant
+/// message. The list is the point of the call; the tool's reply only says it
+/// was saved.
+fn assistant_todo_lists(raw_json: &Value) -> Vec<(String, String)> {
+    raw_json
+        .pointer("/message/content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| {
+            block.get("type").and_then(Value::as_str) == Some("tool_use")
+                && block.get("name").and_then(Value::as_str) == Some("TodoWrite")
+        })
+        .filter_map(|block| {
+            let todos = block.pointer("/input/todos")?.as_array()?;
+            let list = todos
+                .iter()
+                .filter_map(|todo| {
+                    let content = string_at(todo, &["content"])?;
+                    let mark = match string_at(todo, &["status"]).as_deref() {
+                        Some("completed") => "[x]",
+                        Some("in_progress") => "[~]",
+                        _ => "[ ]",
+                    };
+                    Some(format!("{mark} {content}"))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some((block.get("id")?.as_str()?.to_owned(), list))
+        })
+        .collect()
 }
 
 fn tool_result_is_error(value: &Value) -> bool {
@@ -1890,6 +2072,12 @@ fn claude_canonical_kind_and_subtype(
             Some("image_note".to_owned()),
         );
     }
+    if kind == ClaudeProviderEventKind::BackgroundTask {
+        return (
+            ProviderEventKind::GoalTask,
+            Some("background_task".to_owned()),
+        );
+    }
     if matches!(
         kind,
         ClaudeProviderEventKind::ToolUse
@@ -1949,6 +2137,7 @@ fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventK
         }
         ClaudeProviderEventKind::ImageCompanionNote => ProviderEventKind::WebBrowserMedia,
         ClaudeProviderEventKind::Subagent => ProviderEventKind::SubagentCollaboration,
+        ClaudeProviderEventKind::BackgroundTask => ProviderEventKind::GoalTask,
         ClaudeProviderEventKind::Usage
         | ClaudeProviderEventKind::ApiRetry
         | ClaudeProviderEventKind::RateLimit
@@ -2033,6 +2222,7 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
                 ProviderEventPhase::Declined
             }
         },
+        ClaudeProviderEventKind::BackgroundTask => claude_task_phase(raw_json),
         ClaudeProviderEventKind::Error => ProviderEventPhase::Failed,
         ClaudeProviderEventKind::Unknown => ProviderEventPhase::Unknown,
     }
@@ -2067,6 +2257,10 @@ fn claude_title_for(
         ClaudeProviderEventKind::SkillInjection => "Skill".to_owned(),
         ClaudeProviderEventKind::ImageCompanionNote => "Image".to_owned(),
         ClaudeProviderEventKind::Subagent => "Subagent".to_owned(),
+        ClaudeProviderEventKind::BackgroundTask => tool_target
+            .filter(|target| !target.trim().is_empty())
+            .map(first_line)
+            .unwrap_or_else(|| "Background task".to_owned()),
         ClaudeProviderEventKind::Usage => "Usage".to_owned(),
         ClaudeProviderEventKind::ApiRetry => "API retry".to_owned(),
         ClaudeProviderEventKind::RateLimit => "Rate limit".to_owned(),
@@ -2104,6 +2298,7 @@ fn claude_tool_target(input: &Value) -> Option<String> {
         "url",
         "notebook_path",
         "skill",
+        "subject",
         "description",
     ] {
         if let Some(value) = input.get(key).and_then(Value::as_str) {

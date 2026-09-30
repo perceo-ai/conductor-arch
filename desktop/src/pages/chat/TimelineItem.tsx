@@ -17,6 +17,7 @@ import {
   isTerminalCard,
   stripArchductorMetadata,
 } from "@/lib/chatFormat";
+import { showsRunning } from "@/lib/timeline";
 
 // One row of the chat timeline. The projection built in core decides which
 // shape a row takes; this module owns how each shape renders.
@@ -61,7 +62,7 @@ export function eventIcon(renderClass: string): IconName {
 // verb (action label) + a small monospace content chip (the command/filename),
 // with the body revealed only on expand. No category badge; the row carries no
 // card chrome of its own. Bodies stay collapsed until the user asks for them.
-function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean }) {
+function InlineCard(props: { item: ArchcarProjectionItem; running: boolean }) {
   const [open, setOpen] = createSignal(false);
   const parsed = () => inlineEventVerbChip(props.item.render_class, props.item.title);
   const verb = () => parsed().verb;
@@ -72,7 +73,7 @@ function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean })
       class="chat-inline-event"
       classList={{
         "chat-inline-event-failed": props.item.status === "failed",
-        "chat-inline-event-running": props.item.status === "running" && !props.agentIdle
+        "chat-inline-event-running": props.running
       }}
     >
       <div class="chat-inline-event-header">
@@ -124,6 +125,7 @@ function ReasoningBlock(props: { item: ArchcarProjectionItem }) {
 export function TimelineItem(props: {
   item: ArchcarProjectionItem;
   agentIdle: boolean;
+  sessionAlive: boolean;
   threadId: number;
   workspace: string;
   files: readonly string[];
@@ -131,7 +133,14 @@ export function TimelineItem(props: {
 }) {
   const cls = () => props.item.render_class;
   return (
-    <Switch fallback={<InlineCard item={props.item} agentIdle={props.agentIdle} />}>
+    <Switch
+      fallback={
+        <InlineCard
+          item={props.item}
+          running={showsRunning(props.item, { idle: props.agentIdle, sessionAlive: props.sessionAlive })}
+        />
+      }
+    >
       <Match when={cls() === "user_chat"}>
         <UserBubble
           body={props.item.body}
