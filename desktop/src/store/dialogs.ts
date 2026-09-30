@@ -22,7 +22,9 @@ export type DialogSpec =
       confirmLabel: string;
       destructive?: boolean;
       input?: { label: string; initialValue?: string };
-      onConfirm: (value?: string) => void;
+      /** An opt-in extra, e.g. "also delete the branch". Unchecked by default. */
+      checkbox?: { label: string; initialValue?: boolean };
+      onConfirm: (value?: string, checked?: boolean) => void;
     };
 
 export type ConfirmSpec = Extract<DialogSpec, { kind: "confirm" }>;

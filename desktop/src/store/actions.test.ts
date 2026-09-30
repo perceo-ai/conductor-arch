@@ -104,20 +104,61 @@ describe("actions.createWorkspace", () => {
 });
 
 describe("actions.deleteWorkspace", () => {
-  it("sends delete_workspace with cleanup flags", async () => {
+  it("removes the worktree and deletes the branch only when asked", async () => {
     routeByType({ delete_workspace: { type: "workspace_removed", name: "berlin" } });
     const { actions } = await import("./actions");
-    await actions.deleteWorkspace("berlin", true, true);
+    await actions.deleteWorkspace("berlin");
+    await actions.deleteWorkspace("berlin", true);
+
+    const calls = api.request.mock.calls
+      .map((c) => c[0] as Record<string, unknown>)
+      .filter((p) => p.type === "delete_workspace");
+    expect(calls[0]).toMatchObject({
+      workspace: "berlin",
+      remove_worktree: true,
+      delete_branch: false,
+    });
+    expect(calls[1]).toMatchObject({ remove_worktree: true, delete_branch: true });
+  });
+});
+
+describe("actions.deleteWorkspace when the inventory refresh fails", () => {
+  function routeWithFailingRefresh(deleteResponse: unknown) {
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "delete_workspace") return response(deleteResponse);
+      if (req.type === "list_workspaces" || req.type === "list_repositories") {
+        throw new Error("daemon went away");
+      }
+      return response({ type: "ack" });
+    });
+  }
+
+  it("still reports a successful delete as a success", async () => {
+    routeWithFailingRefresh({ type: "workspace_removed", name: "berlin" });
+    const { actions } = await import("./actions");
+    await expect(actions.deleteWorkspace("berlin")).resolves.toBeUndefined();
+  });
+
+  it("surfaces the delete's own error, not the refresh's", async () => {
+    routeWithFailingRefresh({
+      type: "error",
+      message: "refusing to remove /w/berlin: 1 process(es) still running inside it",
+    });
+    const { actions } = await import("./actions");
+    await expect(actions.deleteWorkspace("berlin")).rejects.toThrow(/refusing to remove/);
+  });
+});
+
+describe("actions.archiveWorkspace", () => {
+  it("only hides the workspace; it never asks to remove the worktree", async () => {
+    routeByType({ archive_workspace: { type: "workspace_updated", name: "berlin" } });
+    const { actions } = await import("./actions");
+    await actions.archiveWorkspace("berlin");
 
     const call = api.request.mock.calls
       .map((c) => c[0] as Record<string, unknown>)
-      .find((p) => p.type === "delete_workspace");
-    expect(call).toMatchObject({
-      type: "delete_workspace",
-      workspace: "berlin",
-      remove_worktree: true,
-      delete_branch: true,
-    });
+      .find((p) => p.type === "archive_workspace");
+    expect(call).toEqual({ type: "archive_workspace", workspace: "berlin" });
   });
 });
 

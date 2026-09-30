@@ -142,7 +142,7 @@ export function WorkspaceActionsForm(props: { workspace: string; onDone: () => v
           <span class="dialog-section-copy">Remove this workspace row and its worktree from disk.</span>
         </div>
         <div class="dialog-actions dialog-actions-wrap">
-        <button class="ui-button-destructive" disabled={busy()} onClick={() => submit(() => actions.deleteWorkspace(props.workspace, true, false).then(props.onDone))}>
+        <button class="ui-button-destructive" disabled={busy()} onClick={() => submit(() => actions.deleteWorkspace(props.workspace).then(props.onDone))}>
           Delete (remove worktree)
         </button>
         </div>

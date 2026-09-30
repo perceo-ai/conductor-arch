@@ -648,9 +648,14 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base_ref: Option<String>,
     },
+    /// Hide a workspace from the active list. Archductor keeps the worktree and branch;
+    /// only the repository's `archive` script, if configured, runs in it.
     ArchiveWorkspace {
         workspace: String,
-        #[serde(default)]
+        /// Retired: archive no longer removes the worktree. Still parsed so an
+        /// older client that sends `false` keeps working; `true` is refused
+        /// with a pointer to `delete_workspace`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         remove_worktree: bool,
     },
     RestoreWorkspace {
@@ -686,6 +691,11 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<String>,
     },
+    /// Drop a workspace's record and, when `remove_worktree` is set, remove
+    /// its worktree from disk first. Removing files is opt-in on the wire: a
+    /// request that does not say `remove_worktree: true` — including every
+    /// older client that meant "forget the record" — never touches the disk.
+    /// The CLI and desktop Delete always send it.
     DeleteWorkspace {
         workspace: String,
         #[serde(default)]
@@ -3273,6 +3283,28 @@ mod tests {
     use crate::provider_interactions::ProviderInteractionStatus;
 
     #[test]
+    fn delete_request_only_touches_disk_when_it_says_so() {
+        let removes = |json: &str| match serde_json::from_str::<ArchcarRequest>(json).unwrap() {
+            ArchcarRequest::DeleteWorkspace {
+                remove_worktree, ..
+            } => remove_worktree,
+            other => panic!("parsed {other:?}"),
+        };
+        // Older clients' "forget the record": field absent, or false.
+        assert!(!removes(r#"{"type":"delete_workspace","workspace":"ws"}"#));
+        assert!(!removes(
+            r#"{"type":"delete_workspace","workspace":"ws","remove_worktree":false}"#
+        ));
+        // A field this change briefly used must not be read as consent either.
+        assert!(!removes(
+            r#"{"type":"delete_workspace","workspace":"ws","keep_worktree":false}"#
+        ));
+        assert!(removes(
+            r#"{"type":"delete_workspace","workspace":"ws","remove_worktree":true}"#
+        ));
+    }
+
+    #[test]
     fn chat_snapshot_round_trips_an_absent_approval_mode() {
         let json = serde_json::json!({
             "thread_id": 1,
@@ -3710,10 +3742,10 @@ mod tests {
             (
                 ArchcarRequest::ArchiveWorkspace {
                     workspace: "ws".to_owned(),
-                    remove_worktree: true,
+                    remove_worktree: false,
                 },
                 "\"type\":\"archive_workspace\"",
-                "archive_workspace workspace=ws remove_worktree=true",
+                "archive_workspace workspace=ws remove_worktree=false",
             ),
             (
                 ArchcarRequest::RestoreWorkspace {

@@ -10,10 +10,14 @@ import {
 // Generic confirm dialog, optionally with a single text input.
 export function ConfirmForm(props: { spec: ConfirmSpec; onDone: () => void }) {
   const [value, setValue] = createSignal(props.spec.input?.initialValue ?? "");
+  const [checked, setChecked] = createSignal(props.spec.checkbox?.initialValue ?? false);
   const ok = () => !props.spec.input || value().trim().length > 0;
   const run = () => {
     if (!ok()) return;
-    props.spec.onConfirm(props.spec.input ? value().trim() : undefined);
+    props.spec.onConfirm(
+      props.spec.input ? value().trim() : undefined,
+      props.spec.checkbox ? checked() : undefined,
+    );
     props.onDone();
   };
   return (
@@ -29,6 +33,18 @@ export function ConfirmForm(props: { spec: ConfirmSpec; onDone: () => void }) {
               onInput={(e) => setValue(e.currentTarget.value)}
               onKeyDown={(e) => e.key === "Enter" && run()}
             />
+          </label>
+        )}
+      </Show>
+      <Show when={props.spec.checkbox}>
+        {(box) => (
+          <label class="dialog-check">
+            <input
+              type="checkbox"
+              checked={checked()}
+              onChange={(e) => setChecked(e.currentTarget.checked)}
+            />
+            <span>{box().label}</span>
           </label>
         )}
       </Show>

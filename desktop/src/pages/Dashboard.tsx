@@ -5,6 +5,8 @@ import { send } from "@/bridge/client";
 import type { BackgroundTask } from "@/bridge/protocol";
 import { titleCaseWorkspace } from "@/lib/text";
 import { dashboardTriageBadges, workspaceStatusKind, STATUS_COLOR } from "@/lib/workspaceStatus";
+import { openContextMenu } from "@/components/ContextMenu";
+import { workspaceMenuItems } from "@/components/Sidebar";
 import {
   backgroundTaskIsActive,
   backgroundTaskSummary,
@@ -140,6 +142,7 @@ function DashboardCard(props: { row: WorkspaceRow }) {
       class="flat workspace-card-action"
       title={`Open workspace ${props.row.name}`}
       onClick={() => nav.selectWorkspace(props.row.name)}
+      onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.row.name))}
     >
       <div
         class="workspace-card shell-card"

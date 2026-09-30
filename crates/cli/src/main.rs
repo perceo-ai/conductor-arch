@@ -172,9 +172,12 @@ enum Command {
         #[command(subcommand)]
         command: ReviewCommand,
     },
+    /// Hide a workspace from the sidebar. The worktree, branch, and chats stay;
+    /// the repository's `archive` script, if any, still runs.
     Archive {
         name: String,
-        #[arg(long)]
+        /// Retired: archive no longer touches the disk. Use `workspace delete`.
+        #[arg(long, hide = true)]
         remove_worktree: bool,
     },
     /// Every workspace with its branch, PR, run script, and what each agent is
@@ -1268,21 +1271,35 @@ enum WorkspaceCommand {
         #[arg(long)]
         active: bool,
     },
+    /// Hide a workspace from the sidebar. Its record, chats, branch, and
+    /// worktree all stay (the repository's `archive` script, if any, still
+    /// runs); `restore` brings it back.
     Archive {
         name: String,
-        #[arg(long)]
+        /// Retired: archive no longer touches the disk. Use `workspace delete`.
+        #[arg(long, hide = true)]
         remove_worktree: bool,
     },
+    /// Bring an archived workspace back into the sidebar.
     Restore {
         name: String,
     },
+    /// Archive, remove the worktree, and delete the local branch, keeping the
+    /// archived record in history.
     Discard {
         name: String,
     },
+    /// Remove the worktree from disk (uncommitted changes included) and drop
+    /// the workspace record. Works on archived workspaces too.
     Delete {
         name: String,
-        #[arg(long)]
+        /// Accepted for older scripts; removing the worktree is now the default.
+        #[arg(long, hide = true, conflicts_with = "keep_worktree")]
         remove_worktree: bool,
+        /// Drop the record only and leave the worktree on disk.
+        #[arg(long)]
+        keep_worktree: bool,
+        /// Also delete the local branch.
         #[arg(long)]
         delete_branch: bool,
     },
@@ -2898,14 +2915,7 @@ fn run_cli() -> Result<()> {
                 WorkspaceCommand::Archive {
                     name,
                     remove_worktree,
-                } => {
-                    let workspace = store.archive(&name, remove_worktree)?;
-                    println!(
-                        "Archived {} at {}",
-                        workspace.name,
-                        workspace.path.display()
-                    );
-                }
+                } => archive_workspace_command(&store, &name, remove_worktree)?,
                 WorkspaceCommand::Restore { name } => {
                     let workspace = store.restore(&name)?;
                     println!(
@@ -2924,23 +2934,46 @@ fn run_cli() -> Result<()> {
                 }
                 WorkspaceCommand::Delete {
                     name,
-                    remove_worktree,
+                    remove_worktree: _,
+                    keep_worktree,
                     delete_branch,
                 } => {
                     let result =
-                        store.delete_lifecycle_job(&name, remove_worktree, delete_branch)?;
-                    println!("Deleted workspace {}", result.workspace.name);
-                    if remove_worktree || delete_branch {
+                        store.delete_lifecycle_job(&name, !keep_worktree, delete_branch)?;
+                    let workspace = &result.workspace;
+                    if keep_worktree {
+                        println!(
+                            "Deleted workspace {} (worktree left at {})",
+                            workspace.name,
+                            workspace.path.display()
+                        );
+                    } else {
+                        println!(
+                            "Deleted workspace {} and removed {}",
+                            workspace.name,
+                            workspace.path.display()
+                        );
+                        match result.discarded_changes {
+                            Some(0) => {}
+                            Some(count) => println!(
+                                "Discarded {count} uncommitted change(s); commits on {} are kept",
+                                workspace.branch
+                            ),
+                            None => println!(
+                                "Could not count uncommitted changes before removing it; any there were discarded. Commits on {} are kept",
+                                workspace.branch
+                            ),
+                        }
+                    }
+                    if delete_branch {
                         if let Some(err) = result.cleanup_error {
-                            eprintln!(
-                                "Artifact cleanup failed after metadata delete for {}: {err}",
-                                result.workspace.name
-                            );
                             anyhow::bail!(
-                                "workspace metadata deleted but artifact cleanup failed: {err}"
+                                "deleted workspace {} but could not delete branch {}: {err}",
+                                workspace.name,
+                                workspace.branch
                             );
                         }
-                        println!("Cleaned workspace artifacts for {}", result.workspace.name);
+                        println!("Deleted branch {}", workspace.branch);
                     }
                 }
                 WorkspaceCommand::Rename { name, new_name } => {
@@ -3724,12 +3757,7 @@ fn run_cli() -> Result<()> {
             remove_worktree,
         } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
-            let workspace = store.archive(&name, remove_worktree)?;
-            println!(
-                "Archived {} at {}",
-                workspace.name,
-                workspace.path.display()
-            );
+            archive_workspace_command(&store, &name, remove_worktree)?;
         }
         Command::Status { workspace, json } => {
             let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
@@ -3836,6 +3864,27 @@ fn run_cli() -> Result<()> {
         Command::Gui => launch_desktop_gui()?,
     }
 
+    Ok(())
+}
+
+fn archive_workspace_command(
+    store: &WorkspaceStore,
+    name: &str,
+    remove_worktree: bool,
+) -> anyhow::Result<()> {
+    if remove_worktree {
+        eprintln!(
+            "warning: --remove-worktree is ignored; archive only hides a workspace now. \
+             To remove it from disk, run `archductor workspace delete {name}`."
+        );
+    }
+    let workspace = store.archive(name)?;
+    println!(
+        "Archived {} (hidden; worktree kept at {}). Restore with `archductor workspace restore {}`.",
+        workspace.name,
+        workspace.path.display(),
+        workspace.name
+    );
     Ok(())
 }
 
@@ -8230,16 +8279,38 @@ mod tests {
                 command:
                     WorkspaceCommand::Delete {
                         name,
-                        remove_worktree,
+                        keep_worktree,
                         delete_branch,
+                        ..
                     },
             } => {
                 assert_eq!(name, "berlin");
-                assert!(remove_worktree);
+                assert!(!keep_worktree);
                 assert!(delete_branch);
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn cli_workspace_delete_keep_worktree_conflicts_with_remove_worktree() {
+        assert!(try_parse([
+            "archductor",
+            "workspace",
+            "delete",
+            "berlin",
+            "--keep-worktree",
+        ])
+        .is_ok());
+        assert!(try_parse([
+            "archductor",
+            "workspace",
+            "delete",
+            "berlin",
+            "--keep-worktree",
+            "--remove-worktree",
+        ])
+        .is_err());
     }
 
     #[test]

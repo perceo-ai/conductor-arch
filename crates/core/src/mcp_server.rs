@@ -213,12 +213,12 @@ pub fn tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "archive_workspace",
-            description: "Archive a workspace, optionally removing its worktree.",
+            description: "Archive a workspace: hide it from the active list. Its worktree, \
+                          branch, and chats stay on disk; restore brings it back.",
             schema: || {
                 object(
                     json!({
                         "workspace": {"type": "string"},
-                        "remove_worktree": {"type": "boolean"},
                     }),
                     &["workspace"],
                 )
@@ -227,7 +227,7 @@ pub fn tools() -> Vec<ToolSpec> {
             build: |args| {
                 Ok(ArchcarRequest::ArchiveWorkspace {
                     workspace: string_arg(args, "workspace")?,
-                    remove_worktree: bool_arg(args, "remove_worktree", false),
+                    remove_worktree: false,
                 })
             },
         },

@@ -296,7 +296,7 @@ Merge only in a disposable repository:
 
 ```bash
 archductor pr merge berlin --method squash
-archductor workspace archive berlin --remove-worktree
+archductor workspace delete berlin --delete-branch
 ```
 
 For a non-disposable repository, close the PR manually and discard the

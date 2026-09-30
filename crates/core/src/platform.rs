@@ -40,6 +40,81 @@ pub fn shell_command(script: &str) -> Command {
     command
 }
 
+/// A process whose working directory sits inside some directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessInDirectory {
+    pub pid: u32,
+    pub command: String,
+}
+
+/// Every process whose current working directory is `dir` or below it, except
+/// this process and its ancestors (a shell that ran us from inside `dir` is not
+/// something we should refuse on). Deleting a directory out from under a live
+/// process is how a worktree "comes back": the process keeps running there and
+/// recreates it on its next write.
+///
+/// Linux reads `/proc`; other platforms have no cheap equivalent and return an
+/// empty list, so this check is best-effort outside Linux.
+pub fn processes_with_cwd_under(dir: &std::path::Path) -> Vec<ProcessInDirectory> {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(dir) = dir.canonicalize() else {
+            return Vec::new();
+        };
+        let excluded = own_process_lineage();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        let mut found = entries
+            .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|pid| !excluded.contains(pid))
+            .filter_map(|pid| {
+                let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
+                if !cwd.starts_with(&dir) {
+                    return None;
+                }
+                let raw = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                let command = String::from_utf8_lossy(&raw)
+                    .split('\0')
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let command: String = command.chars().take(120).collect();
+                Some(ProcessInDirectory { pid, command })
+            })
+            .collect::<Vec<_>>();
+        found.sort_by_key(|process| process.pid);
+        found
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dir;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn own_process_lineage() -> std::collections::HashSet<u32> {
+    let mut lineage = std::collections::HashSet::new();
+    let mut pid = std::process::id();
+    while pid > 1 && lineage.insert(pid) {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            break;
+        };
+        // `pid (comm) state ppid …`; comm may contain spaces or parens, so
+        // parse from the last ')'.
+        let Some(ppid) = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|ppid| ppid.parse::<u32>().ok())
+        else {
+            break;
+        };
+        pid = ppid;
+    }
+    lineage
+}
+
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
@@ -98,14 +173,32 @@ pub fn configure_new_process_group(command: &mut Command) {
 #[cfg(not(unix))]
 pub fn configure_new_process_group(_command: &mut Command) {}
 
+/// Send `signal` (e.g. `"-TERM"`) to the process group led by `pid`.
+///
+/// The `--` matters: procps-ng 4.0.4 (Ubuntu 24.04) reads `kill -TERM -1234`
+/// as options, exits 0, and signals nothing, so every group stop silently
+/// fell through to killing the leader alone and left the rest of its group —
+/// an agent's tool shells — running. pid 0 and 1 are refused outright:
+/// `kill -- -0` is our own group and `-1` is every process we may signal.
+#[cfg(unix)]
+pub fn signal_process_group(pid: u32, signal: &str) -> std::io::Result<bool> {
+    if pid <= 1 {
+        return Ok(false);
+    }
+    Command::new("kill")
+        .arg(signal)
+        .arg("--")
+        .arg(format!("-{pid}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+}
+
 #[cfg(unix)]
 /// Sends SIGINT to the process group rooted at `pid`.
 pub fn interrupt_process_group(pid: u32) -> std::io::Result<bool> {
-    Command::new("kill")
-        .arg("-INT")
-        .arg(format!("-{pid}"))
-        .status()
-        .map(|status| status.success())
+    signal_process_group(pid, "-INT")
 }
 
 #[cfg(windows)]
@@ -126,14 +219,7 @@ pub fn interrupt_process_group(_pid: u32) -> std::io::Result<bool> {
 
 #[cfg(unix)]
 pub fn terminate_process_group(pid: u32, force: bool) -> std::io::Result<bool> {
-    let signal = if force { "-KILL" } else { "-TERM" };
-    Command::new("kill")
-        .arg(signal)
-        .arg(format!("-{pid}"))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
+    signal_process_group(pid, if force { "-KILL" } else { "-TERM" })
 }
 
 #[cfg(windows)]
@@ -175,5 +261,62 @@ mod tests {
             command.get_args().collect::<Vec<_>>(),
             ["/D", "/S", "/C", "echo archductor"]
         );
+    }
+
+    #[cfg(unix)]
+    fn gone_within(pid: u32, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if !process_alive(pid) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        !process_alive(pid)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminating_a_group_stops_every_member_not_just_the_leader() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+
+        // A leader with a backgrounded member, like an agent and its tool shell.
+        let mut leader = Command::new("sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+
+        assert!(terminate_process_group(leader.id(), false).unwrap());
+
+        let timeout = std::time::Duration::from_secs(2);
+        let leader_gone = gone_within(leader.id(), timeout);
+        let member_gone = gone_within(member, timeout);
+        for pid in [leader.id(), member] {
+            let _ = Command::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
+        }
+        let _ = leader.wait();
+        assert!(leader_gone, "group leader survived SIGTERM to its group");
+        assert!(
+            member_gone,
+            "group member {member} survived SIGTERM to its group"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn our_own_and_every_group_are_never_signalled() {
+        // Would be `kill -- -0` (this test's own group) and `kill -- -1`.
+        assert!(!signal_process_group(0, "-TERM").unwrap());
+        assert!(!signal_process_group(1, "-TERM").unwrap());
     }
 }

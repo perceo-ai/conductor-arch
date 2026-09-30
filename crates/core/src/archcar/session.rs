@@ -1308,6 +1308,13 @@ fn claude_stream_connection_effort(connection: &ProviderProcessConnection) -> Op
     })
 }
 
+/// A restart asked for by a control change runs once the turn is idle — never
+/// after a kill, which would put a replacement agent back in a workspace that
+/// archive or delete is tearing down.
+fn claude_restart_allowed(pending_restart: bool, kill_requested: bool, idle: bool) -> bool {
+    pending_restart && !kill_requested && idle
+}
+
 fn restart_claude_stream_connection(
     connection: &mut ProviderProcessConnection,
     thread_id: i64,
@@ -2795,6 +2802,10 @@ fn run_claude_stream_session_loop(
         HarnessEffect::Ready,
     );
     let mut pending_restart = false;
+    // Once killed, never restart: archive/delete stop a session and then
+    // remove its worktree, and a replacement spawned after the kill would run
+    // on unseen and recreate it.
+    let mut kill_requested = false;
 
     loop {
         drain_claude_stdout(
@@ -2914,6 +2925,8 @@ fn run_claude_stream_session_loop(
                     }
                 }
                 SessionCommand::Kill => {
+                    kill_requested = true;
+                    pending_restart = false;
                     let _ = connection.child.kill();
                 }
                 SessionCommand::InterruptTurn => {
@@ -2948,7 +2961,7 @@ fn run_claude_stream_session_loop(
             }
         }
 
-        if pending_restart && adapter.tracker.ready() {
+        if claude_restart_allowed(pending_restart, kill_requested, adapter.tracker.ready()) {
             match restart_claude_stream_connection(
                 &mut connection,
                 started.thread_id,
@@ -2991,6 +3004,10 @@ fn run_claude_stream_session_loop(
                         "claude-stream-json",
                         "transport restarted: claude -p stream-json",
                     );
+                    // The row's pid is what archive/delete signal when they stop
+                    // the workspace. Leaving the pre-restart pid there made them
+                    // kill a dead process and report success while this agent
+                    // kept running — and recreated the worktree they removed.
                     if let Err(err) =
                         runtime_store.update_session_process_pid(started.session_id, pid)
                     {
@@ -4797,6 +4814,14 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             .all(|event| !matches!(event, ArchcarEvent::SessionError { .. })));
 
         let _ = connection.child.kill();
+    }
+
+    #[test]
+    fn claude_restart_never_follows_a_kill() {
+        assert!(claude_restart_allowed(true, false, true));
+        assert!(!claude_restart_allowed(true, false, false));
+        assert!(!claude_restart_allowed(false, false, true));
+        assert!(!claude_restart_allowed(true, true, true));
     }
 
     #[test]

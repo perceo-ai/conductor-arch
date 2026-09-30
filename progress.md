@@ -27,6 +27,24 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Archive hides, delete removes (2026-09-30)
+
+**Archive** now only hides a workspace from the sidebar: record, chats, branch,
+and worktree stay (only the repository's `archive` script runs), and it lives
+in History and the dashboard's Archived column until restored.
+`--remove-worktree` is retired (ignored with a warning; the wire flag is
+refused). **Delete** removes the worktree from disk — dirty or locked trees are
+force-removed and the discarded-change count is printed — then drops the record,
+and errors if the directory survives. The row reads `deleting` while files go,
+so a failed record drop never leaves it claiming a worktree that is gone. It
+stops the workspace's sessions first (a killed Claude session never restarts)
+and refuses, naming pids, while any other process works inside the tree.
+`--delete-branch` stays opt-in. On the wire, `delete_workspace` removes files
+only with `remove_worktree: true`; older clients' record-only deletes stay safe.
+
+The "removed" worktrees that came back were recreated by agents archive never
+stopped — the stale-PID bug fixed in the section below.
+
 ## Reading the board from the CLI (2026-09-30)
 
 `archductor chat <ws>` prints a chat as turns (requests, prose, one line per

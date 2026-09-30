@@ -3,6 +3,8 @@ import { nav, workspacesStore } from "@/store";
 import type { WorkspaceRow } from "@/store";
 import { titleCaseWorkspace } from "@/lib/text";
 import { workspaceStatusKind, STATUS_COLOR, STATUS_LABEL } from "@/lib/workspaceStatus";
+import { openContextMenu } from "@/components/ContextMenu";
+import { workspaceMenuItems } from "@/components/Sidebar";
 
 // History page — port of history.rs workspace list. All workspaces sorted by
 // lifecycle state then recency, filterable All/Active/Archived. Reuses the
@@ -72,7 +74,11 @@ export function HistoryPage() {
         >
           <For each={rows()}>
             {(r) => (
-              <button class="history-row" onClick={() => nav.selectWorkspace(r.name)}>
+              <button
+                class="history-row"
+                onClick={() => nav.selectWorkspace(r.name)}
+                onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(r.name))}
+              >
                 <span class="history-row-head">
                   <Show
                     when={nav.selectedWorkspace() !== r.name}
