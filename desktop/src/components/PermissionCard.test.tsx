@@ -59,6 +59,21 @@ describe("PermissionCard", () => {
     expect(openSettings).toHaveBeenCalled();
   });
 
+  it("retries the restart on the next return when one fails", async () => {
+    restartDaemon.mockResolvedValueOnce({ ok: false, error: "no" } as never);
+    const host = mount(null);
+
+    button(host, "Allow access")!.click();
+    await vi.waitFor(() => expect(openSettings).toHaveBeenCalled());
+    await Promise.resolve();
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(restartDaemon).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(host.textContent).toContain("no"));
+
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(restartDaemon).toHaveBeenCalledTimes(2));
+  });
+
   it("restarts the daemon when the user comes back from settings", async () => {
     const host = mount(null);
     window.dispatchEvent(new Event("focus"));

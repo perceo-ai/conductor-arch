@@ -343,6 +343,9 @@ pub struct WorkspaceLifecycleJob {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct WorkspaceCreateJobPayload {
     input: CreateWorkspace,
+    /// The request named no branch, so the resolved one is the codename.
+    #[serde(default)]
+    branch_generated: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1543,8 +1546,12 @@ impl WorkspaceStore {
         input: CreateWorkspace,
         after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
+        let branch_generated = input.branch.trim().is_empty();
         let input = self.resolve_lifecycle_create_input(input)?;
-        let payload = WorkspaceCreateJobPayload { input };
+        let payload = WorkspaceCreateJobPayload {
+            input,
+            branch_generated,
+        };
         let job_id = self.insert_workspace_lifecycle_job(
             "workspace.create",
             None,
@@ -1584,6 +1591,16 @@ impl WorkspaceStore {
     pub fn create_with_progress(
         &self,
         input: CreateWorkspace,
+        after_insert: impl FnOnce(&Workspace),
+    ) -> Result<Workspace> {
+        let branch_generated = input.branch.trim().is_empty();
+        self.create_with_branch_origin(input, branch_generated, after_insert)
+    }
+
+    fn create_with_branch_origin(
+        &self,
+        input: CreateWorkspace,
+        branch_generated: bool,
         after_insert: impl FnOnce(&Workspace),
     ) -> Result<Workspace> {
         let repository = self.load_repository(&input.repository_name)?;
@@ -1639,8 +1656,9 @@ impl WorkspaceStore {
         let now = timestamp();
         self.conn.execute(
             "INSERT INTO workspaces (
-                repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'creating', NULL, ?7, ?8)",
+                repository_id, name, path, branch, base_ref, port_base, status, archived_at, created_at, updated_at,
+                branch_generated
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'creating', NULL, ?7, ?8, ?9)",
             params![
                 repository.id,
                 name,
@@ -1650,6 +1668,7 @@ impl WorkspaceStore {
                 i64::from(port_base),
                 now,
                 now,
+                branch_generated,
             ],
         )?;
         let workspace = self.get_by_path(&path)?;
@@ -2264,7 +2283,7 @@ impl WorkspaceStore {
             self.update_workspace_lifecycle_job_workspace_id(job_id, workspace_id)?;
             self.resume_workspace_creation_by_id(workspace_id)
         } else {
-            self.create_with_progress(payload.input, |workspace| {
+            self.create_with_branch_origin(payload.input, payload.branch_generated, |workspace| {
                 let _ = self.update_workspace_lifecycle_job_workspace_id(job_id, workspace.id);
                 if let Some(callback) = after_insert.take() {
                     callback(workspace);
@@ -8277,7 +8296,13 @@ mutation($threadId: ID!) {{
             directive.branch_name.is_some() || directive.workspace_name.is_some();
         if has_workspace_metadata && !self.workspace_agent_metadata_applied(workspace.id)? {
             let mut workspace = workspace;
-            if let Some(branch_name) = directive.branch_name.as_deref() {
+            // Only a placeholder branch is the agent's to name; one the user
+            // chose, or one carrying an issue or PR, stays as it is.
+            let branch_name = match directive.branch_name.as_deref() {
+                Some(name) if self.workspace_branch_is_codename_derived(&workspace)? => Some(name),
+                _ => None,
+            };
+            if let Some(branch_name) = branch_name {
                 let branch_name = self.metadata_branch_name(&workspace, branch_name)?;
                 if branch_name != workspace.branch {
                     match self.rename_branch(&workspace.name, &branch_name) {
@@ -8723,15 +8748,24 @@ mutation($threadId: ID!) {{
         Ok(())
     }
 
-    /// True when the branch is just the workspace codename: bare, as new
-    /// workspaces are created, or behind the configured prefix, as older ones
-    /// were. A branch like `lc/gh-issue-42` carries an identity we must keep.
+    /// True when the branch is a placeholder Archductor chose: the bare codename
+    /// it created the workspace on, or, for workspaces from before that was
+    /// recorded, the codename behind the prefix. A branch the user typed, or
+    /// one like `lc/gh-issue-42`, carries an identity we must keep.
     fn workspace_branch_is_codename_derived(&self, workspace: &Workspace) -> Result<bool> {
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
         let prefix = configured_branch_prefix(&settings);
-        Ok(workspace.branch == workspace.name
-            || workspace.branch == format!("{prefix}/{}", workspace.name))
+        let branch_generated: bool = self.conn.query_row(
+            "SELECT branch_generated FROM workspaces WHERE id = ?1",
+            [workspace.id],
+            |row| row.get(0),
+        )?;
+        // Older workspaces carry the codename behind the prefix of the day,
+        // which is the `lc` default if the setting changed since.
+        Ok((branch_generated && workspace.branch == workspace.name)
+            || workspace.branch == format!("{prefix}/{}", workspace.name)
+            || workspace.branch == format!("lc/{}", workspace.name))
     }
 
     fn workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<bool> {
@@ -12063,7 +12097,7 @@ fn validate_branch_name(branch: &str) -> Result<()> {
     );
     anyhow::ensure!(
         !branch.ends_with('.')
-            && !branch.ends_with(".lock")
+            && !branch.split('/').any(|part| part.ends_with(".lock"))
             && !branch.contains("@{")
             && branch != "@"
             && !branch.split('/').any(|part| part.starts_with('.'))
@@ -14773,6 +14807,36 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_the_user_chose_is_not_renamed_even_when_it_matches_the_name() {
+        let (_temp, store) = test_workspace_store();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "helix".to_owned(),
+                branch: "helix".to_owned(),
+                base_ref: None,
+            })
+            .unwrap();
+        assert_eq!(workspace.branch, "helix");
+
+        let thread = store
+            .create_chat_thread("helix", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
+            .unwrap();
+        store
+            .append_agent_chat_message_with_metadata(
+                thread.id,
+                "<archductor_metadata>{\"workspace_name\":\"billing fix\",\"branch_name\":\"lc/billing-fix\"}</archductor_metadata>\nOn it.",
+                "agent_screen_parse",
+            )
+            .unwrap();
+
+        assert_eq!(store.get_by_name("billing-fix").unwrap().branch, "helix");
+    }
+
+    #[test]
     fn invalid_branch_is_refused_before_the_workspace_exists() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -14804,7 +14868,17 @@ mod tests {
 
     #[test]
     fn branch_validation_matches_git_ref_rules() {
-        for bad in ["a//b", "/a", "a/", "a.lock", "a.", "a@{b", "@", "a/.b"] {
+        for bad in [
+            "a//b",
+            "/a",
+            "a/",
+            "a.lock",
+            "team.lock/x",
+            "a.",
+            "a@{b",
+            "@",
+            "a/.b",
+        ] {
             assert!(
                 validate_branch_name(bad).is_err(),
                 "{bad} should be refused"

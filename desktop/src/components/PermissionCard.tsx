@@ -63,11 +63,14 @@ export function PermissionCard(props: {
 
   onMount(() => {
     const onFocus = () => {
-      if (!awaitingGrant()) return;
-      setAwaitingGrant(false);
+      if (!awaitingGrant() || busy()) return;
       void run(async () => {
         const res = await fileAccess.restartDaemon();
-        if (res.ok) await props.onPoll?.().catch(() => undefined);
+        // Keep waiting on failure, so the next return to this window retries.
+        if (res.ok) {
+          setAwaitingGrant(false);
+          await props.onPoll?.().catch(() => undefined);
+        }
         return res;
       });
     };

@@ -676,6 +676,15 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "summary_turns_since_write",
         "ALTER TABLE workspaces ADD COLUMN summary_turns_since_write INTEGER NOT NULL DEFAULT 3",
     )?;
+    // Whether Archductor chose the branch (the bare codename) rather than the
+    // user. Only a chosen-for-you branch is renamed when the agent names the
+    // workspace; a branch the user typed is theirs to keep.
+    ensure_column(
+        conn,
+        "workspaces",
+        "branch_generated",
+        "ALTER TABLE workspaces ADD COLUMN branch_generated INTEGER NOT NULL DEFAULT 0",
+    )?;
     Ok(())
 }
 
