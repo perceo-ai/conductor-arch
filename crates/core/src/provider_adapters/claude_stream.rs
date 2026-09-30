@@ -2342,7 +2342,7 @@ fn claude_tool_target(input: &Value) -> Option<String> {
 /// message. The streamed `content_block_start` carries an empty input — the
 /// arguments arrive as later deltas — so the assembled message is where a
 /// call's target can actually be read.
-fn assistant_tool_calls(raw_json: &Value) -> Vec<(String, String, Option<String>)> {
+pub fn assistant_tool_calls(raw_json: &Value) -> Vec<(String, String, Option<String>)> {
     raw_json
         .pointer("/message/content")
         .and_then(Value::as_array)

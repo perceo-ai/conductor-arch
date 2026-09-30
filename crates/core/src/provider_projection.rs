@@ -399,7 +399,7 @@ fn provider_projection_event_from_record(
     }
 }
 
-fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
+pub fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
     let thread_id = record
         .provider_thread_id
         .as_deref()

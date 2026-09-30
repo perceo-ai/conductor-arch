@@ -1,9 +1,11 @@
 pub mod agent_naming;
+pub mod agent_status;
 pub mod agent_tools;
 pub mod archcar;
 pub mod background_tasks;
 pub mod chat_attachments;
 pub mod chat_store;
+pub mod chat_transcript;
 pub mod codex_tui;
 pub mod doctor;
 pub mod env_flags;

@@ -26,7 +26,7 @@ use archductor_core::settings::{
 use archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
     ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
-    WorkspaceStatusLine, WorkspaceStore, WorkspaceTimelineEvent,
+    WorkspaceStore, WorkspaceTimelineEvent,
 };
 use archductor_core::workspace_intel::TaskUpdate;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -38,6 +38,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod observe;
 
 #[derive(Debug, Parser)]
 #[command(name = "archductor")]
@@ -86,12 +88,44 @@ enum Command {
     Stop {
         workspace: String,
     },
+    /// Raw log of the latest run script or agent session. An agent session's
+    /// log is the provider's own stream; `archductor chat` is the readable form.
     Logs {
         workspace: String,
         #[arg(long)]
         run: bool,
         #[arg(long)]
         session: bool,
+    },
+    /// A chat as readable turns: user requests, agent prose, one line per tool
+    /// call with its result clipped, errors and prompts called out. Newest last.
+    Chat {
+        workspace: String,
+        /// Read the chat this session belongs to (the id `status` lists).
+        #[arg(long, conflicts_with = "thread")]
+        session: Option<i64>,
+        /// Read this chat thread. Default: the chat that streamed most recently.
+        #[arg(long)]
+        thread: Option<i64>,
+        /// Show the last K turns.
+        #[arg(long, default_value_t = 2, value_name = "K")]
+        tail: usize,
+        /// Show at most N steps per turn (the request is always kept; the
+        /// earliest steps are elided).
+        #[arg(long, default_value_t = archductor_core::chat_transcript::DEFAULT_MAX_TURN_ENTRIES, value_name = "N")]
+        steps: usize,
+        /// Only steps at or after this time (RFC 3339, e.g. 2026-09-30T08:00:00Z).
+        #[arg(long, value_name = "RFC3339")]
+        since: Option<String>,
+        /// JSON Lines: a `chat` header record, then one `turn` record per turn.
+        #[arg(long)]
+        json: bool,
+        /// Leave out the one-line thinking markers.
+        #[arg(long)]
+        no_thinking: bool,
+        /// Do not clip text or elide steps.
+        #[arg(long)]
+        full: bool,
     },
     Runs {
         workspace: String,
@@ -143,7 +177,16 @@ enum Command {
         #[arg(long)]
         remove_worktree: bool,
     },
-    Status,
+    /// Every workspace with its branch, PR, run script, and what each agent is
+    /// doing, read from the daemon and the agent's stream rather than the
+    /// session table.
+    Status {
+        /// Only this workspace.
+        workspace: Option<String>,
+        /// One JSON document (schema_version 1) for programmatic use.
+        #[arg(long)]
+        json: bool,
+    },
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
@@ -319,9 +362,9 @@ enum HistoryCommand {
         #[arg(long)]
         workspace: Option<String>,
     },
-    Show {
-        process_id: i64,
-    },
+    /// The messages saved for a session. For the whole conversation (agent
+    /// replies, tool calls, results) run `archductor chat <workspace> --session <id>`.
+    Show { process_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1347,10 +1390,15 @@ enum SessionCommand {
         #[arg(long)]
         print_pty_path: bool,
     },
+    /// Send a message to an agent. A session busy mid-turn gets the message
+    /// queued and delivered at its next turn boundary; `--immediate` steers the
+    /// running turn instead.
     Send {
         workspace: String,
-        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
-        kind: SessionKind,
+        /// Agent to message. Default: the provider of `--thread-id`, else of the
+        /// workspace's most recent chat, else codex.
+        #[arg(long, value_parser = session_kind_parser())]
+        kind: Option<SessionKind>,
         #[arg(long)]
         thread_id: Option<i64>,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
@@ -3253,26 +3301,80 @@ fn run_cli() -> Result<()> {
                     immediate,
                     message,
                 } => {
-                    let kind: SessionKind = kind;
+                    let kind = resolve_send_kind(&store, &workspace, kind, thread_id)?;
                     anyhow::ensure!(
                         matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE),
                         "session send supports codex and claude"
                     );
                     let input = message_text_or_stdin(message)?;
                     let client = ArchcarClient::from_paths(&paths);
+                    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
                     let (session_id, resolved_thread_id) = ensure_session_send_target(
-                        &client,
-                        &store,
-                        &workspace,
-                        kind,
-                        thread_id,
-                        Duration::from_millis(timeout_ms),
+                        &client, &store, &workspace, kind, thread_id, deadline,
                     )?;
+                    let readiness = archcar_session_readiness(&client, session_id, deadline)?;
+                    let thread_has_visible_history =
+                        !store.list_chat_messages(resolved_thread_id)?.is_empty();
+                    let input_kind: ArchcarInputKind = input_kind.into();
+                    match session_send_route(
+                        &readiness,
+                        immediate,
+                        &input_kind,
+                        session_send_waits_for_ready(kind, thread_has_visible_history),
+                    ) {
+                        SessionSendRoute::Now => {}
+                        SessionSendRoute::WaitForReady => {
+                            wait_for_archcar_session_ready(&client, session_id, deadline)?
+                        }
+                        SessionSendRoute::Queue => {
+                            let queued = match client.send(ArchcarRequest::QueueChatInput {
+                                thread_id: resolved_thread_id,
+                                input,
+                                visible_input,
+                                kind: input_kind,
+                                session_kind: kind,
+                            })? {
+                                ArchcarResponse::QueuedChatInput { input } => input,
+                                ArchcarResponse::Error { message } => anyhow::bail!(message),
+                                other => anyhow::bail!("unexpected archcar response: {other:?}"),
+                            };
+                            // The daemon delivers straight away if the turn
+                            // ended in the meantime; say which happened.
+                            let waiting =
+                                match client.send(ArchcarRequest::ListQueuedChatInputs {
+                                    thread_id: resolved_thread_id,
+                                })? {
+                                    ArchcarResponse::QueuedChatInputs { inputs, .. } => inputs
+                                        .iter()
+                                        .position(|input| input.id == queued.id)
+                                        .map(|index| (index + 1, inputs.len())),
+                                    _ => None,
+                                };
+                            match waiting {
+                                Some((position, total)) => println!(
+                                    "queued {} message #{} for session {} thread {}: session is busy ({}); \
+                                     delivers at the next turn boundary (position {position} of {total})",
+                                    session_kind_label(kind),
+                                    queued.id,
+                                    session_id,
+                                    resolved_thread_id,
+                                    readiness.state.as_str(),
+                                ),
+                                None => println!(
+                                    "sent {} message to session {} thread {} (queued, delivered as the turn ended)",
+                                    session_kind_label(kind),
+                                    session_id,
+                                    resolved_thread_id
+                                ),
+                            }
+                            return Ok(());
+                        }
+                    }
                     match client.send(ArchcarRequest::SendInput {
                         session_id,
                         input,
                         visible_input,
-                        kind: input_kind.into(),
+                        kind: input_kind,
                         delivery: cli_input_delivery(immediate),
                     })? {
                         ArchcarResponse::Ack => {
@@ -3627,9 +3729,45 @@ fn run_cli() -> Result<()> {
                 workspace.path.display()
             );
         }
-        Command::Status => {
-            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
-            print_status(store.list_status()?);
+        Command::Status { workspace, json } => {
+            let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
+            let report = observe::status_report(&paths, &store, workspace.as_deref())?;
+            if json {
+                print!("{}", observe::render_status_json(&report)?);
+            } else {
+                print!("{}", observe::render_status_text(&report));
+            }
+        }
+        Command::Chat {
+            workspace,
+            session,
+            thread,
+            tail,
+            steps,
+            since,
+            json,
+            no_thinking,
+            full,
+        } => {
+            let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
+            print!(
+                "{}",
+                observe::run_chat(
+                    &paths,
+                    &store,
+                    observe::ChatArgs {
+                        workspace,
+                        session,
+                        thread,
+                        tail,
+                        steps,
+                        since,
+                        json,
+                        no_thinking,
+                        full,
+                    },
+                )?
+            );
         }
         Command::Checkpoint { command } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
@@ -3837,7 +3975,8 @@ fn local_store_command_name(command: &Command) -> Option<&'static str> {
         Command::Open { .. } => Some("open"),
         Command::Review { .. } => Some("review"),
         Command::Archive { .. } => Some("archive"),
-        Command::Status => Some("status"),
+        Command::Status { .. } => Some("status"),
+        Command::Chat { .. } => Some("chat"),
         Command::Checkpoint { .. } => Some("checkpoint"),
         Command::Conflicts { .. } => Some("conflicts"),
         Command::Discard { .. } => Some("discard"),
@@ -6123,39 +6262,6 @@ fn print_mcp_status(status: archductor_core::mcp::McpStatus) {
     }
 }
 
-fn print_status(lines: Vec<WorkspaceStatusLine>) {
-    if lines.is_empty() {
-        println!("No workspaces found. Run: archductor workspace create <repo> --name <name> --branch <branch>");
-        return;
-    }
-    for line in lines {
-        let ws = &line.workspace;
-        let pr = line
-            .pull_request
-            .as_ref()
-            .map(|pr| format!("PR #{} ({})", pr.number, pr.state))
-            .unwrap_or_else(|| "no PR".to_owned());
-        let push = match &line.branch_push_state {
-            Some(state) if !state.has_upstream => "no upstream".to_owned(),
-            Some(state) => format!("↑{} ↓{}", state.ahead, state.behind),
-            None => String::new(),
-        };
-        let run = if line.run_running {
-            "running"
-        } else {
-            "stopped"
-        };
-        let sessions = match line.active_sessions {
-            0 => "no session".to_owned(),
-            n => format!("{n} session(s)"),
-        };
-        println!(
-            "{:<16} {:<10} {:<28} {:<14} {:<10} {:<12} {} todo(s)  {}",
-            ws.name, ws.status, ws.branch, push, run, sessions, line.open_todos, pr,
-        );
-    }
-}
-
 impl From<CliArchcarInputKind> for ArchcarInputKind {
     fn from(value: CliArchcarInputKind) -> Self {
         match value {
@@ -6515,9 +6621,8 @@ fn ensure_session_send_target(
     workspace: &str,
     kind: SessionKind,
     thread_id: Option<i64>,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(i64, i64)> {
-    let deadline = Instant::now() + timeout;
     let response = if let Some(thread_id) = thread_id {
         client.send(ArchcarRequest::EnsureChatThreadSession {
             workspace: workspace.to_owned(),
@@ -6554,15 +6659,104 @@ fn ensure_session_send_target(
         ArchcarResponse::Error { message } => anyhow::bail!(message),
         other => anyhow::bail!("unexpected archcar response: {:?}", other),
     };
-    let thread_has_visible_history = !store.list_chat_messages(target.1)?.is_empty();
-    if session_send_waits_for_ready(kind, thread_has_visible_history) {
-        wait_for_archcar_session_ready(client, target.0, deadline)?;
-    }
     Ok(target)
 }
 
+/// A first Claude message on a fresh chat is accepted before the session
+/// reports ready; everything else needs a session between turns.
 fn session_send_waits_for_ready(kind: SessionKind, thread_has_visible_history: bool) -> bool {
     !matches!(kind, SessionKind::CLAUDE) || thread_has_visible_history
+}
+
+/// The session's state at the moment of sending.
+struct SessionReadiness {
+    ready: bool,
+    state: archductor_core::session_state::AgentSessionState,
+}
+
+/// The session's state now. A session spawned a moment ago may not be
+/// registered with the daemon yet, so "unknown" is retried until `deadline`.
+fn archcar_session_readiness(
+    client: &ArchcarClient,
+    session_id: i64,
+    deadline: Instant,
+) -> Result<SessionReadiness> {
+    loop {
+        match client.send(ArchcarRequest::GetSessionStatus { session_id })? {
+            ArchcarResponse::SessionStatus {
+                status,
+                runtime_state,
+                ready,
+                ..
+            } => {
+                anyhow::ensure!(
+                    !archcar_status_is_terminal(&status, runtime_state),
+                    "session {session_id} is not running (status={status} state={}); \
+                     send again without --thread-id to start a new one",
+                    runtime_state.as_str()
+                );
+                return Ok(SessionReadiness {
+                    ready,
+                    state: runtime_state,
+                });
+            }
+            ArchcarResponse::Error { message }
+                if message.contains("unknown session") && Instant::now() < deadline => {}
+            ArchcarResponse::Error { message } => {
+                anyhow::bail!("session {session_id} does not exist: {message}")
+            }
+            other => anyhow::bail!("unexpected archcar response: {other:?}"),
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SessionSendRoute {
+    /// Write the input to the session now.
+    Now,
+    /// Raw terminal bytes cannot be queued: wait for the turn to end.
+    WaitForReady,
+    /// Persist it in the chat's queue; the daemon delivers it at the next turn
+    /// boundary, so steering a busy agent never times out.
+    Queue,
+}
+
+fn session_send_route(
+    readiness: &SessionReadiness,
+    immediate: bool,
+    input_kind: &ArchcarInputKind,
+    waits_for_ready: bool,
+) -> SessionSendRoute {
+    if readiness.ready || immediate || !waits_for_ready {
+        SessionSendRoute::Now
+    } else if *input_kind == ArchcarInputKind::RawTerminal {
+        SessionSendRoute::WaitForReady
+    } else {
+        SessionSendRoute::Queue
+    }
+}
+
+/// `--kind` when given; otherwise the provider of the chat being messaged, so
+/// `archductor session send <ws> "..."` reaches the agent already working there.
+fn resolve_send_kind(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: Option<SessionKind>,
+    thread_id: Option<i64>,
+) -> Result<SessionKind> {
+    if let Some(kind) = kind {
+        return Ok(kind);
+    }
+    let provider = match thread_id {
+        Some(thread_id) => Some(store.get_chat_thread_record(thread_id)?.provider),
+        None => store
+            .list_chat_threads(workspace)?
+            .into_iter()
+            .map(|thread| thread.provider)
+            .find(|provider| provider == "claude" || provider == "codex"),
+    };
+    Ok(provider.map_or(SessionKind::CODEX, |provider| SessionKind::new(&provider)))
 }
 
 fn wait_for_archcar_session_ready(
@@ -7752,7 +7946,7 @@ mod tests {
         };
 
         assert_eq!(workspace, "berlin");
-        assert_eq!(kind, SessionKind::CLAUDE);
+        assert_eq!(kind, Some(SessionKind::CLAUDE));
         assert_eq!(thread_id, Some(42));
         assert_eq!(input_kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
@@ -7802,6 +7996,43 @@ mod tests {
     }
 
     #[test]
+    fn session_send_queues_for_a_busy_session_instead_of_waiting() {
+        use archductor_core::session_state::AgentSessionState;
+        let busy = SessionReadiness {
+            ready: false,
+            state: AgentSessionState::ToolRunning,
+        };
+        let idle = SessionReadiness {
+            ready: true,
+            state: AgentSessionState::WaitingForInput,
+        };
+        let user = ArchcarInputKind::User;
+
+        assert_eq!(
+            session_send_route(&busy, false, &user, true),
+            SessionSendRoute::Queue
+        );
+        assert_eq!(
+            session_send_route(&idle, false, &user, true),
+            SessionSendRoute::Now
+        );
+        // Steering writes into the running turn.
+        assert_eq!(
+            session_send_route(&busy, true, &user, true),
+            SessionSendRoute::Now
+        );
+        // A fresh Claude chat takes its first message before it reports ready.
+        assert_eq!(
+            session_send_route(&busy, false, &user, false),
+            SessionSendRoute::Now
+        );
+        assert_eq!(
+            session_send_route(&busy, false, &ArchcarInputKind::RawTerminal, true),
+            SessionSendRoute::WaitForReady
+        );
+    }
+
+    #[test]
     fn cli_claude_session_send_does_not_wait_for_ready_before_first_input() {
         assert!(!session_send_waits_for_ready(SessionKind::CLAUDE, false));
         assert!(session_send_waits_for_ready(SessionKind::CLAUDE, true));
@@ -7821,7 +8052,7 @@ mod tests {
         else {
             return None;
         };
-        if kind == SessionKind::CLAUDE {
+        if kind == Some(SessionKind::CLAUDE) {
             thread_id.map(|thread_id| (thread_id, message.join(" ")))
         } else {
             None

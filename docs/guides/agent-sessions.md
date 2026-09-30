@@ -21,7 +21,7 @@ for a second workspace when what you want is a second chat.
 
 | Provider | Managed session | Notes |
 | --- | --- | --- |
-| Codex | Yes | Default for `session send` |
+| Codex | Yes | Default for `session send` when the workspace has no chat yet |
 | Claude Code | Yes | |
 | Gemini CLI | Yes | Driven over the Agent Client Protocol |
 | Shell | Yes | No agent, just a PTY in the workspace |
@@ -68,6 +68,12 @@ archductor session send fix-auth --kind codex "Also add a regression test"
 archductor archcar queue list <thread-id>
 archductor archcar queue remove <queue-id>
 ```
+
+`session send` to an agent that is mid-turn does not wait for it: the message
+goes into that queue and the command says so (`queued claude message #7 ...
+delivers at the next turn boundary`). It fails only when the session is gone.
+Without `--kind`, it messages the provider of `--thread-id`, or of the
+workspace's most recent chat.
 
 **Steering** is the opposite: deliver now, into the turn in flight.
 

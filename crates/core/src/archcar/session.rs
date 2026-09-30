@@ -2991,6 +2991,16 @@ fn run_claude_stream_session_loop(
                         "claude-stream-json",
                         "transport restarted: claude -p stream-json",
                     );
+                    if let Err(err) =
+                        runtime_store.update_session_process_pid(started.session_id, pid)
+                    {
+                        warn!(
+                            session_id = started.session_id,
+                            pid,
+                            error = %format!("{err:#}"),
+                            "could not record the restarted Claude transport's pid"
+                        );
+                    }
                     if let Ok(mut state) = snapshot.lock() {
                         state.pid = pid;
                         state.ready = true;
