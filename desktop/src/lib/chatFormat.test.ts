@@ -44,3 +44,12 @@ describe("background task cards", () => {
     });
   });
 });
+
+describe("subagent cards", () => {
+  it("read as the agent asking its subagent", () => {
+    expect(inlineEventVerbChip("subagent_card", "Asked subagent")).toEqual({
+      verb: "Asked",
+      chip: "subagent",
+    });
+  });
+});

@@ -137,3 +137,33 @@ export function showsRunning(
   if (item.render_class === "background_card") return agent.sessionAlive;
   return !agent.idle;
 }
+
+/** The timeline split into top-level rows and the rows nested under each. */
+export interface NestedTimeline {
+  top: ArchcarProjectionItem[];
+  childrenOf: Map<string, ArchcarProjectionItem[]>;
+}
+
+/**
+ * Put each item under the card that spawned it. A subagent's conversation
+ * streams inline with the main one; flat, its tool calls interleave with the
+ * parent's and its report reads like the main agent talking. An item whose
+ * parent is not in the list (filtered out, or not arrived yet) stays top-level
+ * rather than disappearing.
+ */
+export function nestTimelineItems(items: ArchcarProjectionItem[]): NestedTimeline {
+  const ids = new Set(items.map((item) => item.id));
+  const top: ArchcarProjectionItem[] = [];
+  const childrenOf = new Map<string, ArchcarProjectionItem[]>();
+  for (const item of items) {
+    const parent = item.parent_id;
+    if (parent && parent !== item.id && ids.has(parent)) {
+      const siblings = childrenOf.get(parent);
+      if (siblings) siblings.push(item);
+      else childrenOf.set(parent, [item]);
+    } else {
+      top.push(item);
+    }
+  }
+  return { top, childrenOf };
+}

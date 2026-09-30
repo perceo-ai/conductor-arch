@@ -6,8 +6,8 @@ use archductor_core::archcar::harness_contract::{
     InteractionAnswer, ProviderInteractionResolution,
 };
 use archductor_core::archcar::protocol::{
-    ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
-    QueuedArchcarInput, WorkspaceChangeScope, WorkspaceGitAction,
+    ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarProjectionItem, ArchcarRequest,
+    ArchcarResponse, QueuedArchcarInput, WorkspaceChangeScope, WorkspaceGitAction,
 };
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -508,6 +508,10 @@ enum ArchcarCommand {
     /// Print the projected chat timeline for a thread.
     ChatProjection {
         thread_id: i64,
+        /// Print every body in full (command output, subagent reports)
+        /// instead of a one-line preview.
+        #[arg(long)]
+        full: bool,
     },
     /// List recent non-empty chats offered as attachable transcripts.
     ChatTranscripts {
@@ -1984,10 +1988,13 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::ListChatThreads { workspace })?,
                     );
                 }
-                ArchcarCommand::ChatProjection { thread_id } => {
-                    print_archcar_response(
-                        client.send(ArchcarRequest::GetChatProjection { thread_id })?,
-                    );
+                ArchcarCommand::ChatProjection { thread_id, full } => {
+                    match client.send(ArchcarRequest::GetChatProjection { thread_id })? {
+                        ArchcarResponse::ChatProjection { thread_id, items } => {
+                            print!("{}", format_chat_projection(thread_id, &items, full));
+                        }
+                        other => print_archcar_response(other),
+                    }
                 }
                 ArchcarCommand::ChatTranscripts { workspace, limit } => {
                     print_archcar_response(
@@ -3919,6 +3926,56 @@ fn render_layout_preset_list(
         .collect()
 }
 
+/// The chat timeline as text. A card leads with its title (the command, the
+/// file, the task), and a subagent's items sit indented under the Agent card
+/// that spawned them, the way the desktop app nests them.
+fn format_chat_projection(thread_id: i64, items: &[ArchcarProjectionItem], full: bool) -> String {
+    use std::fmt::Write as _;
+    let ids = items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let mut out = format!(
+        "chat_projection thread {} items {}\n",
+        thread_id,
+        items.len()
+    );
+    for item in items {
+        let nested = item
+            .parent_id
+            .as_deref()
+            .is_some_and(|parent| ids.contains(parent));
+        let indent = if nested { "  " } else { "" };
+        let is_text = matches!(
+            item.render_class.as_str(),
+            "user_chat" | "assistant_chat" | "reasoning_card"
+        );
+        let title = if is_text { "" } else { item.title.trim() };
+        let mut line = format!("{indent}[{}] {}", item.render_class, item.status);
+        if !title.is_empty() {
+            let _ = write!(line, " {}", title.lines().next().unwrap_or_default());
+        }
+        let body = item.body.trim_end();
+        if full {
+            let _ = writeln!(out, "{line}");
+            for body_line in body.lines() {
+                let _ = writeln!(out, "{indent}    {body_line}");
+            }
+        } else {
+            let preview = body.replace('\n', " ");
+            let preview: String = preview.chars().take(80).collect();
+            if preview.trim().is_empty() {
+                let _ = writeln!(out, "{line}");
+            } else if title.is_empty() {
+                let _ = writeln!(out, "{line} {preview}");
+            } else {
+                let _ = writeln!(out, "{line}: {preview}");
+            }
+        }
+    }
+    out
+}
+
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
@@ -4108,12 +4165,7 @@ fn print_archcar_response(response: ArchcarResponse) {
             }
         }
         ArchcarResponse::ChatProjection { thread_id, items } => {
-            println!("chat_projection thread {} items {}", thread_id, items.len());
-            for item in items {
-                let preview = item.body.replace('\n', " ");
-                let preview: String = preview.chars().take(80).collect();
-                println!("[{}] {} {}", item.render_class, item.status, preview);
-            }
+            print!("{}", format_chat_projection(thread_id, &items, false));
         }
         ArchcarResponse::ChatTranscripts {
             workspace,
@@ -6732,6 +6784,61 @@ fn print_setup(report: doctor::SetupReport) {
 
 #[cfg(test)]
 mod tests {
+    use super::{format_chat_projection, ArchcarProjectionItem};
+
+    fn projection_item(
+        id: &str,
+        render_class: &str,
+        title: &str,
+        body: &str,
+        parent_id: Option<&str>,
+    ) -> ArchcarProjectionItem {
+        ArchcarProjectionItem {
+            id: id.to_owned(),
+            sequence: 0,
+            render_class: render_class.to_owned(),
+            role_label: String::new(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            status: "complete".to_owned(),
+            stream_state: "complete".to_owned(),
+            timeline_seq: None,
+            parent_id: parent_id.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn chat_projection_names_each_card_and_nests_subagent_items() {
+        let items = vec![
+            projection_item(
+                "agent",
+                "tool_card",
+                "Agent Audit",
+                "Report line 1\nline 2",
+                None,
+            ),
+            projection_item("child", "command_card", "Bash rg x", "hit", Some("agent")),
+            projection_item("orphan", "command_card", "Bash ls", "", Some("missing")),
+        ];
+
+        assert_eq!(
+            format_chat_projection(7, &items, false),
+            "chat_projection thread 7 items 3\n\
+             [tool_card] complete Agent Audit: Report line 1 line 2\n\
+             \x20 [command_card] complete Bash rg x: hit\n\
+             [command_card] complete Bash ls\n"
+        );
+        assert_eq!(
+            format_chat_projection(7, &items[..2], true),
+            "chat_projection thread 7 items 2\n\
+             [tool_card] complete Agent Audit\n\
+             \x20   Report line 1\n\
+             \x20   line 2\n\
+             \x20 [command_card] complete Bash rg x\n\
+             \x20     hit\n"
+        );
+    }
+
     /// `service doctor` exists to expose a daemon whose file access differs from
     /// the calling shell's. Spawning a daemon to answer the question defeats it:
     /// the child inherits the shell's grants and reports "ok" for the very

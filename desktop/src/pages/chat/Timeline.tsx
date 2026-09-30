@@ -12,6 +12,7 @@ import {
   TIMELINE_WINDOW_STEP,
   forkableTurnEndIds,
   isDisplayableTimelineItem,
+  nestTimelineItems,
   showsNewChatIntro,
   timelineWindow,
   withoutPlanSource,
@@ -43,13 +44,16 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     const pending = interactionsStore.pending(props.threadId);
     return pending?.kind === "plan_approval" ? pending : null;
   };
+  // Subagent rows live inside the Agent card that spawned them, so everything
+  // below — turn boundaries, windowing, the new-chat intro — counts top-level
+  // rows only.
+  const nested = createMemo(() =>
+    nestTimelineItems(timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem)),
+  );
   const items = createMemo<ArchcarProjectionItem[]>(() =>
     // The plan card renders the plan, so the assistant message it was lifted
     // from must not render it a second time.
-    withoutPlanSource(
-      timelineItemsForSlice(slice()).filter(isDisplayableTimelineItem),
-      pendingPlan()?.detail,
-    ),
+    withoutPlanSource(nested().top, pendingPlan()?.detail),
   );
   // The loader sits inside the scrolled content, so its appearance and
   // disappearance change the content height — it belongs in the scroll signal
@@ -88,7 +92,11 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     () =>
       `${generation()}|${pendingPlan()?.id ?? ""}|` +
       windowed()
-        .visible.map((item) => `${item.id}:${item.status}:${item.stream_state}:${item.body.length}`)
+        .visible.map(
+          (item) =>
+            `${item.id}:${item.status}:${item.stream_state}:${item.body.length}:` +
+            `${nested().childrenOf.get(item.id)?.length ?? 0}`,
+        )
         .join("|"),
   );
   // An interrupted (or crashed) turn leaves its command/tool cards marked
@@ -141,6 +149,7 @@ export function Timeline(props: { threadId: number; workspace: string }) {
                 item={item}
                 agentIdle={agentIdle()}
                 sessionAlive={sessionAlive()}
+                childrenOf={nested().childrenOf}
                 threadId={props.threadId}
                 workspace={props.workspace}
                 files={workspaceFiles() ?? []}

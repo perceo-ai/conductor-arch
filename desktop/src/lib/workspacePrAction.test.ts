@@ -169,7 +169,17 @@ describe("deriveWorkspacePrAction", () => {
         prCheckCounts: { total: 21, passed: 21, failed: 0, pending: 0, skipped: 0 },
       }),
     ).toMatchObject({ title: "Checks passed", detail: "21/21 passed", state: "ready" });
-    // The tally stays off states that are about something else.
+    // Behind base is still waiting on GitHub, so the tally still helps.
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        branchBehind: 1,
+        prChecks: "passing",
+        prCheckCounts: { total: 21, passed: 21, failed: 0, pending: 0, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Behind base", detail: "21/21 passed" });
+    // The tally stays off states that are about local work.
     expect(
       deriveWorkspacePrAction({
         prNumber: 42,

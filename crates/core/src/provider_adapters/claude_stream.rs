@@ -1145,8 +1145,21 @@ impl ClaudeProviderEventDraft {
     }
 
     pub fn into_provider_event_draft(self, context: ProviderEventContext) -> ProviderEventDraft {
-        let (kind, provider_subtype) =
-            claude_canonical_kind_and_subtype(self.kind, self.tool_name.as_deref(), self.subtype);
+        let subagent_message = self
+            .parent_tool_use_id
+            .as_ref()
+            .and_then(|_| claude_subagent_message(self.kind));
+        let (kind, provider_subtype) = match subagent_message {
+            Some((subtype, _)) => (
+                ProviderEventKind::SubagentCollaboration,
+                Some(subtype.to_owned()),
+            ),
+            None => claude_canonical_kind_and_subtype(
+                self.kind,
+                self.tool_name.as_deref(),
+                self.subtype,
+            ),
+        };
         let phase = claude_phase_for(self.kind, &self.raw_json);
         let provider_event_id = self.provider_event_id.clone();
         let provider_item_id = match self.kind {
@@ -1214,12 +1227,14 @@ impl ClaudeProviderEventDraft {
                 .and_then(|value| i64::try_from(value).ok()),
             occurred_at_ms: context.occurred_at_ms,
             normalized_payload: json!({
-                "title": claude_event_title(
-                    self.kind,
-                    self.tool_name.as_deref(),
-                    self.tool_target.as_deref(),
-                    &self.raw_json,
-                ),
+                "title": subagent_message.map(|(_, title)| title.to_owned()).unwrap_or_else(|| {
+                    claude_event_title(
+                        self.kind,
+                        self.tool_name.as_deref(),
+                        self.tool_target.as_deref(),
+                        &self.raw_json,
+                    )
+                }),
                 "body": body,
                 "stream_delta": stream_delta,
                 "tool_name": self.tool_name,
@@ -2056,6 +2071,18 @@ fn claude_message_plain_text(value: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .or_else(|| message_content_text(value, "text", "text"))
+}
+
+/// `(subtype, title)` for a message a subagent sent or received. Claude streams
+/// a subagent's conversation inline, tagged with the Agent call that spawned
+/// it; read as ordinary messages, its prompt became a user bubble and its
+/// report an answer from the main agent.
+fn claude_subagent_message(kind: ClaudeProviderEventKind) -> Option<(&'static str, &'static str)> {
+    match kind {
+        ClaudeProviderEventKind::UserMessage => Some(("subagent_prompt", "Asked subagent")),
+        ClaudeProviderEventKind::AssistantMessage => Some(("nested_transcript", "Subagent")),
+        _ => None,
+    }
 }
 
 fn claude_canonical_kind_and_subtype(

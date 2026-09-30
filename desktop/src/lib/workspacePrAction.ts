@@ -107,12 +107,13 @@ export function checkCountsLabel(counts: PullRequestCheckCounts): string {
 
 export function deriveWorkspacePrAction(input: WorkspacePrActionInput): WorkspacePrActionState {
   const state = deriveWorkspacePrActionState(input);
-  // Only tally where the state is about checks; "Merge conflicts · 3/3
-  // passed" would bury the thing that needs doing.
+  // Only tally once the PR is waiting on GitHub rather than on local work;
+  // "Merge conflicts · 3/3 passed" would bury the thing that needs doing.
   const aboutChecks =
     state.state === "checks-failed" ||
     state.state === "checks-running" ||
     state.state === "checks-unknown" ||
+    state.state === "behind-base" ||
     state.state === "ready";
   return aboutChecks && input.prCheckCounts && input.prCheckCounts.total > 0
     ? { ...state, detail: checkCountsLabel(input.prCheckCounts) }

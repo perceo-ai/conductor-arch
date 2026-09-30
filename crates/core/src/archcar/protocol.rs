@@ -1623,6 +1623,10 @@ pub struct ArchcarProjectionItem {
     /// projected from provider events, so it never sees a `chat_messages.id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline_seq: Option<i64>,
+    /// Id of the item this one belongs under: a subagent's messages and tool
+    /// calls name the Agent card that spawned them. Absent for top-level rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,

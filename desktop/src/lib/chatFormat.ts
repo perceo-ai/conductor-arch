@@ -30,6 +30,7 @@ const DEFAULT_VERB: Record<string, string> = {
 // of these verbs, we keep it as the action and use the rest as the chip so we
 // don't double up (e.g. "Ran ls" → verb "Ran", chip "ls").
 const ACTION_PREFIXES = new Set([
+  "Asked",
   "Ran",
   "Read",
   "Used",

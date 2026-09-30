@@ -326,9 +326,9 @@ pub fn provider_projection_item_is_relevant_chat_event(item: &ProviderProjection
         // An assistant message whose content was only tool calls, or a thinking
         // block the provider withheld, projects to a bubble with nothing in it.
         // Empty prose is never worth a row.
-        ProjectionRenderClass::AssistantChat | ProjectionRenderClass::ReasoningCard => {
-            !item.body.trim().is_empty()
-        }
+        ProjectionRenderClass::AssistantChat
+        | ProjectionRenderClass::ReasoningCard
+        | ProjectionRenderClass::NestedTranscriptCard => !item.body.trim().is_empty(),
         _ => true,
     }
 }
@@ -574,6 +574,9 @@ fn provider_projection_category(
         }
         ProviderEventKind::SkillPluginHook => ProviderProjectionCategory::Skill,
         ProviderEventKind::ApprovalPermission => ProviderProjectionCategory::Approval,
+        ProviderEventKind::SubagentCollaboration if subtype.contains("nested_transcript") => {
+            ProviderProjectionCategory::NestedTranscript
+        }
         ProviderEventKind::SubagentCollaboration => ProviderProjectionCategory::Subagent,
         ProviderEventKind::WebBrowserMedia
             if subtype_contains_any(&subtype, &["tool_search", "search_output"]) =>
@@ -1786,5 +1789,54 @@ mod tests {
         assert!(agent
             .body
             .starts_with("The allowlist lives in chatFormat.ts."));
+    }
+
+    #[test]
+    fn a_subagents_conversation_nests_under_its_agent_card() {
+        let chat = chat_items_for_claude_fixture(SUBAGENTS_AND_BACKGROUND_TASKS);
+        let agent = chat
+            .iter()
+            .find(|item| item.title == "Agent Audit the renderer")
+            .expect("an Agent card");
+
+        // The subagent's prompt is not something the human typed, and its
+        // report is not the main agent's answer.
+        let users = chat
+            .iter()
+            .filter(|item| item.render_class == ProjectionRenderClass::UserChat)
+            .count();
+        assert_eq!(users, 0);
+        let answers = chat
+            .iter()
+            .filter(|item| item.render_class == ProjectionRenderClass::AssistantChat)
+            .map(|item| item.body.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(answers, vec!["Tests are running in the background."]);
+
+        let children = chat
+            .iter()
+            .filter(|item| item.parent_id.as_deref() == Some(agent.id.as_str()))
+            .map(|item| (item.render_class, item.title.as_str(), item.body.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            children,
+            vec![
+                (
+                    ProjectionRenderClass::SubagentCard,
+                    "Asked subagent",
+                    "Find where the timeline drops items."
+                ),
+                (
+                    ProjectionRenderClass::CommandCard,
+                    "Bash rg render_class desktop/src",
+                    "desktop/src/lib/chatFormat.ts:9"
+                ),
+                (
+                    ProjectionRenderClass::NestedTranscriptCard,
+                    "Subagent",
+                    "The allowlist lives in chatFormat.ts."
+                ),
+            ]
+        );
     }
 }

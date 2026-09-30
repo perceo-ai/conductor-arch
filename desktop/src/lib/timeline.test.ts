@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isDisplayableTimelineItem,
+  nestTimelineItems,
   showsNewChatIntro,
   showsRunning,
   timelineWindow,
@@ -209,5 +210,35 @@ describe("showsRunning", () => {
   it("never spins a finished card", () => {
     const done = item({ render_class: "background_card", status: "failed" });
     expect(showsRunning(done, { idle: false, sessionAlive: true })).toBe(false);
+  });
+});
+
+describe("nestTimelineItems", () => {
+  it("puts a subagent's rows under the Agent card and keeps the rest in order", () => {
+    const agent = item({ id: "agent", render_class: "tool_card" });
+    const prompt = item({ id: "prompt", render_class: "subagent_card", parent_id: "agent" });
+    const call = item({ id: "call", render_class: "command_card", parent_id: "agent" });
+    const answer = item({ id: "answer", render_class: "assistant_chat" });
+
+    const nested = nestTimelineItems([agent, prompt, call, answer]);
+
+    expect(nested.top.map((row) => row.id)).toEqual(["agent", "answer"]);
+    expect(nested.childrenOf.get("agent")?.map((row) => row.id)).toEqual(["prompt", "call"]);
+  });
+
+  it("keeps a row whose parent is not in the list rather than losing it", () => {
+    const orphan = item({ id: "orphan", render_class: "command_card", parent_id: "gone" });
+    expect(nestTimelineItems([orphan]).top).toEqual([orphan]);
+  });
+
+  it("nests a subagent's own subagent under its card", () => {
+    const outer = item({ id: "outer", render_class: "tool_card" });
+    const inner = item({ id: "inner", render_class: "tool_card", parent_id: "outer" });
+    const leaf = item({ id: "leaf", render_class: "command_card", parent_id: "inner" });
+
+    const nested = nestTimelineItems([outer, inner, leaf]);
+
+    expect(nested.top.map((row) => row.id)).toEqual(["outer"]);
+    expect(nested.childrenOf.get("inner")?.map((row) => row.id)).toEqual(["leaf"]);
   });
 });
