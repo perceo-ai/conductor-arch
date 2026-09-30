@@ -27,6 +27,31 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Agent activity in the chat (2026-09-30)
+
+Claude's stream-json carries more than the chat showed. Now surfaced, in core,
+the desktop, and `archcar chat-projection`:
+
+- **Tool output**: array-shaped results (Agent reports, MCP tools) fill their
+  card instead of leaving the call's input; `is_error` fails the card; a tool
+  card reads running until its result arrives.
+- **Background tasks**: `system/task_*` records for backgrounded commands and
+  agents project to a background card with progress, summary, output file, and
+  final status. It keeps running in the desktop after the turn ends while the
+  session lives. Foreground tasks stay folded into their tool card.
+- **Subagents**: records tagged `parent_tool_use_id` become subagent rows (no
+  more subagent prompts as user bubbles or reports as main answers). The daemon
+  sends `parent_id`; the desktop nests them in the Agent card and the CLI
+  indents them. `chat-projection --full` prints bodies untruncated.
+- **TodoWrite** cards show the checklist (fixture-tested only; Claude 2.1.283
+  `-p` does not offer TodoWrite).
+
+Stored events keep the classification they were parsed with, so chats from
+before this change still show old background records as hidden status rows.
+Not done: Codex plan updates / collab agents, ACP plans, the iOS client
+(decodes but ignores `parent_id`), and synthetic user records such as Stop-hook
+feedback still rendering as user bubbles.
+
 ## Remote takeover and daemon updates (2026-09-29)
 
 **Taking over a workspace from another machine** (`remote import`, the app's

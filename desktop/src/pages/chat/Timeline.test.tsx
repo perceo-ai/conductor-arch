@@ -196,6 +196,69 @@ describe("Timeline", () => {
     expect(el.querySelector(".chat-timeline-reveal-older")).toBeNull();
   });
 
+  it("nests a subagent's rows inside its Agent card until the card is opened", () => {
+    session = { runtime_state: "running", ready: false };
+    items = [
+      projectionItem({
+        id: "agent",
+        render_class: "tool_card",
+        title: "Agent Audit the renderer",
+        body: "",
+        status: "running",
+        stream_state: "streaming",
+      }),
+      projectionItem({
+        id: "child-call",
+        render_class: "command_card",
+        title: "Bash rg render_class",
+        body: "chatFormat.ts:9",
+        parent_id: "agent",
+      }),
+      projectionItem({
+        id: "child-text",
+        render_class: "nested_transcript_card",
+        title: "Subagent",
+        body: "The allowlist lives in chatFormat.ts.",
+        parent_id: "agent",
+      }),
+      projectionItem({ id: "answer", body: "Main agent answer" }),
+    ];
+
+    const el = mount();
+    const scroll = el.querySelector(".chat-messages")!;
+    // One card and one answer at the top level; the subagent's report is not
+    // the main agent talking.
+    expect(scroll.querySelectorAll(":scope > .chat-inline-event")).toHaveLength(1);
+    expect(el.querySelectorAll(".chat-agent-text")).toHaveLength(1);
+    expect(el.textContent).not.toContain("The allowlist lives");
+    // While it runs, the header says what the subagent is doing.
+    expect(el.querySelector(".chat-inline-event-latest")?.textContent).toContain("rg render_class");
+
+    el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
+
+    const nested = el.querySelector(".chat-inline-event-nested")!;
+    expect(nested.textContent).toContain("rg render_class");
+    expect(nested.querySelector(".chat-nested-text")?.textContent).toContain(
+      "The allowlist lives in chatFormat.ts.",
+    );
+  });
+
+  it("keeps a background task running after the turn goes idle", () => {
+    items = [
+      projectionItem({
+        id: "bg",
+        render_class: "background_card",
+        title: "Run the test suite",
+        body: "",
+        status: "running",
+        stream_state: "streaming",
+      }),
+    ];
+    const card = mount().querySelector(".chat-inline-event")!;
+    expect(card.classList.contains("chat-inline-event-running")).toBe(true);
+    expect(card.textContent).toContain("Background");
+  });
+
   it("marks a running command without attaching the looping loader", () => {
     session = { runtime_state: "running", ready: false };
     items = [

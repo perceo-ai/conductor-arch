@@ -14,6 +14,7 @@ import { TurnForkAction } from "./MessageActions";
 import {
   formatReasoningText,
   inlineEventVerbChip,
+  isInlineEventClass,
   isDiffCard,
   isTerminalCard,
   stripArchductorMetadata,
@@ -81,8 +82,12 @@ function InlineCard(props: {
   const hasBody = () => props.item.body.trim().length > 0 || hasNested();
   const latest = () => {
     if (!props.running || open()) return null;
-    const last = props.nested[props.nested.length - 1];
-    if (!last || last.render_class === "nested_transcript_card") return null;
+    // The newest action, not the newest prose: "Ran rg …" says what the
+    // subagent is doing, a sentence of its narration does not fit a header.
+    const last = props.nested.findLast(
+      (child) => isInlineEventClass(child.render_class) && child.render_class !== "nested_transcript_card",
+    );
+    if (!last) return null;
     const step = inlineEventVerbChip(last.render_class, last.title);
     return `${step.verb} ${step.chip}`.trim();
   };

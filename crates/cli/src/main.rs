@@ -30,7 +30,7 @@ use archductor_core::workspace::{
 };
 use archductor_core::workspace_intel::TaskUpdate;
 use clap::{Parser, Subcommand, ValueEnum};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -3930,50 +3930,68 @@ fn render_layout_preset_list(
 /// file, the task), and a subagent's items sit indented under the Agent card
 /// that spawned them, the way the desktop app nests them.
 fn format_chat_projection(thread_id: i64, items: &[ArchcarProjectionItem], full: bool) -> String {
-    use std::fmt::Write as _;
     let ids = items
         .iter()
         .map(|item| item.id.as_str())
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<HashSet<_>>();
+    let mut children = HashMap::<&str, Vec<&ArchcarProjectionItem>>::new();
+    let mut top = Vec::new();
+    for item in items {
+        match item.parent_id.as_deref() {
+            Some(parent) if parent != item.id && ids.contains(parent) => {
+                children.entry(parent).or_default().push(item);
+            }
+            _ => top.push(item),
+        }
+    }
     let mut out = format!(
         "chat_projection thread {} items {}\n",
         thread_id,
         items.len()
     );
-    for item in items {
-        let nested = item
-            .parent_id
-            .as_deref()
-            .is_some_and(|parent| ids.contains(parent));
-        let indent = if nested { "  " } else { "" };
-        let is_text = matches!(
-            item.render_class.as_str(),
-            "user_chat" | "assistant_chat" | "reasoning_card"
-        );
-        let title = if is_text { "" } else { item.title.trim() };
-        let mut line = format!("{indent}[{}] {}", item.render_class, item.status);
-        if !title.is_empty() {
-            let _ = write!(line, " {}", title.lines().next().unwrap_or_default());
-        }
-        let body = item.body.trim_end();
-        if full {
-            let _ = writeln!(out, "{line}");
-            for body_line in body.lines() {
-                let _ = writeln!(out, "{indent}    {body_line}");
-            }
-        } else {
-            let preview = body.replace('\n', " ");
-            let preview: String = preview.chars().take(80).collect();
-            if preview.trim().is_empty() {
-                let _ = writeln!(out, "{line}");
-            } else if title.is_empty() {
-                let _ = writeln!(out, "{line} {preview}");
-            } else {
-                let _ = writeln!(out, "{line}: {preview}");
-            }
+    let mut stack = top
+        .into_iter()
+        .rev()
+        .map(|item| (item, 0))
+        .collect::<Vec<_>>();
+    while let Some((item, depth)) = stack.pop() {
+        out.push_str(&format_chat_projection_item(item, depth, full));
+        if let Some(nested) = children.get(item.id.as_str()) {
+            stack.extend(nested.iter().rev().map(|child| (*child, depth + 1)));
         }
     }
     out
+}
+
+fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full: bool) -> String {
+    let indent = "  ".repeat(depth);
+    let is_text = matches!(
+        item.render_class.as_str(),
+        "user_chat" | "assistant_chat" | "reasoning_card"
+    );
+    let title = if is_text { "" } else { item.title.trim() };
+    let mut line = format!("{indent}[{}] {}", item.render_class, item.status);
+    if !title.is_empty() {
+        line.push(' ');
+        line.push_str(title.lines().next().unwrap_or_default());
+    }
+    let body = item.body.trim_end();
+    if full {
+        let mut out = format!("{line}\n");
+        for body_line in body.lines() {
+            out.push_str(&format!("{indent}    {body_line}\n"));
+        }
+        return out;
+    }
+    let preview = body.replace('\n', " ");
+    let preview: String = preview.chars().take(80).collect();
+    if preview.trim().is_empty() {
+        format!("{line}\n")
+    } else if title.is_empty() {
+        format!("{line} {preview}\n")
+    } else {
+        format!("{line}: {preview}\n")
+    }
 }
 
 fn print_archcar_response(response: ArchcarResponse) {
@@ -6817,8 +6835,8 @@ mod tests {
                 "Report line 1\nline 2",
                 None,
             ),
-            projection_item("child", "command_card", "Bash rg x", "hit", Some("agent")),
             projection_item("orphan", "command_card", "Bash ls", "", Some("missing")),
+            projection_item("child", "command_card", "Bash rg x", "hit", Some("agent")),
         ];
 
         assert_eq!(
@@ -6829,7 +6847,7 @@ mod tests {
              [command_card] complete Bash ls\n"
         );
         assert_eq!(
-            format_chat_projection(7, &items[..2], true),
+            format_chat_projection(7, &[items[0].clone(), items[2].clone()], true),
             "chat_projection thread 7 items 2\n\
              [tool_card] complete Agent Audit\n\
              \x20   Report line 1\n\
