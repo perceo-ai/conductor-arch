@@ -10,7 +10,7 @@ use crate::github_pr::{
     parse_github_deployment_entries, parse_github_deployment_latest_status,
     parse_pull_request_check_runs, parse_pull_request_number, parse_pull_request_readiness,
     parse_pull_request_review_thread_mutation, parse_pull_request_review_threads,
-    parse_pull_request_state_and_checks,
+    parse_pull_request_state_and_checks, PullRequestCheckCounts,
 };
 use crate::harness;
 use crate::linear::fetch_linear_issue;
@@ -1299,6 +1299,8 @@ pub struct PullRequest {
     /// GitHub CI rollup at the last PR sync: "passing" | "failing" | "pending".
     /// `None` when the PR has no checks or the sync predates this column.
     pub checks_state: Option<String>,
+    /// Per-outcome split of the same rollup, for "X/Y passed, Z running".
+    pub checks_counts: Option<PullRequestCheckCounts>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -5373,6 +5375,7 @@ mutation($threadId: ID!) {{
 
     pub fn refresh_pull_request_state(&self, name: &str) -> Result<Option<PullRequest>> {
         let workspace = self.get_by_name(name)?;
+        let mut discovered = None;
         if self.pull_request_by_workspace_id(workspace.id)?.is_none() {
             // No PR on record does not mean no PR: one created outside
             // Archductor (gh CLI, the GitHub web UI, an agent shell) has no
@@ -5380,27 +5383,40 @@ mutation($threadId: ID!) {{
             // opened and merged entirely outside Archductor is still the
             // workspace's PR — and record what was found, so a refresh finds
             // reality instead of reporting the stale "no PR yet".
+            // Then fall through and read its checks too: returning here left
+            // a discovered PR on "checks unknown" until some later sync.
             let found = match self.pull_request_in_any_state_for_workspace(&workspace) {
                 Ok(found) => found,
                 Err(_) => return Ok(None),
             };
-            return found
-                .map(|(url, state)| self.record_pull_request_with_state(workspace.id, &url, &state))
-                .transpose();
+            let Some((url, state)) = found else {
+                return Ok(None);
+            };
+            discovered = Some(self.record_pull_request_with_state(workspace.id, &url, &state)?);
         }
         let args = self.gh_pr_args_for_workspace(
             &workspace,
             "view",
             &["--json", "state,statusCheckRollup"],
         )?;
-        let output = command_output_owned(&workspace.path, "gh", &args)?;
-        let (state, checks_state) = parse_pull_request_state_and_checks(&output);
+        let output = match command_output_owned(&workspace.path, "gh", &args) {
+            Ok(output) => output,
+            // The discovery itself is the news; a failed checks read must
+            // not throw it away.
+            Err(_) if discovered.is_some() => return Ok(discovered),
+            Err(err) => return Err(err),
+        };
+        let (state, checks_state, checks_counts) = parse_pull_request_state_and_checks(&output);
         let state = state.unwrap_or_else(|| "open".to_owned());
+        let checks_counts_json = checks_counts
+            .map(|counts| serde_json::to_string(&counts))
+            .transpose()?;
         let now = timestamp();
         self.conn.execute(
-            "UPDATE pull_requests SET state = ?1, checks_state = ?2, updated_at = ?3
-             WHERE workspace_id = ?4",
-            params![state, checks_state, now, workspace.id],
+            "UPDATE pull_requests
+             SET state = ?1, checks_state = ?2, checks_counts_json = ?3, updated_at = ?4
+             WHERE workspace_id = ?5",
+            params![state, checks_state, checks_counts_json, now, workspace.id],
         )?;
         self.pull_request_by_workspace_id(workspace.id)
     }
@@ -5561,7 +5577,8 @@ mutation($threadId: ID!) {{
 
     fn pull_request_by_workspace_id(&self, workspace_id: i64) -> Result<Option<PullRequest>> {
         let result = self.conn.query_row(
-            "SELECT id, workspace_id, provider, number, url, state, checks_state, created_at, updated_at
+            "SELECT id, workspace_id, provider, number, url, state, checks_state, created_at,
+                    updated_at, checks_counts_json
              FROM pull_requests WHERE workspace_id = ?1",
             [workspace_id],
             row_to_pull_request,
@@ -10916,6 +10933,20 @@ fn row_to_spotlight_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Spotlig
     })
 }
 
+impl PullRequest {
+    /// "failing (11/20 passed, 1 failed, 8 running)", or `None` before any
+    /// sync has seen a check. One wording for every CLI line that shows it.
+    pub fn checks_label(&self) -> Option<String> {
+        let state = self.checks_state.as_deref();
+        match (state, self.checks_counts) {
+            (Some(state), Some(counts)) => Some(format!("{state} ({})", counts.label())),
+            (None, Some(counts)) => Some(counts.label()),
+            (Some(state), None) => Some(state.to_owned()),
+            (None, None) => None,
+        }
+    }
+}
+
 fn row_to_pull_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequest> {
     Ok(PullRequest {
         id: row.get(0)?,
@@ -10925,6 +10956,10 @@ fn row_to_pull_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<PullRequest>
         url: row.get(4)?,
         state: row.get(5)?,
         checks_state: row.get(6)?,
+        // Unreadable counts degrade to "no counts", never to a failed load.
+        checks_counts: row
+            .get::<_, Option<String>>(9)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
@@ -13659,7 +13694,7 @@ fn validate_relative_workspace_path(path: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::repository::{AddRepository, RepositoryStore};
     use std::fs;
@@ -13667,7 +13702,10 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
+    /// Serialises tests that swap process-wide env (PATH for a fake `gh`).
+    /// Crate-visible so tests in other modules that shell out to `gh` take the
+    /// same lock instead of picking up another test's fake.
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -15605,7 +15643,7 @@ exit 1
         assert!(brief.contains("https://github.com/example/demo/pull/42"));
     }
 
-    fn install_fake_gh(temp: &Path, script: &str) -> Option<std::ffi::OsString> {
+    pub(crate) fn install_fake_gh(temp: &Path, script: &str) -> Option<std::ffi::OsString> {
         let bin_dir = temp.join("bin");
         fs::create_dir(&bin_dir).unwrap();
         let gh_path = bin_dir.join("gh");
@@ -15646,7 +15684,7 @@ fi\n\
         old_path
     }
 
-    fn restore_path(old_path: Option<std::ffi::OsString>) {
+    pub(crate) fn restore_path(old_path: Option<std::ffi::OsString>) {
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
@@ -21843,7 +21881,7 @@ general = "Keep changes focused."
     #[test]
     fn diff_stats_against_base_reuses_resolved_merge_base() {
         let source = include_str!("workspace.rs")
-            .split("\n#[cfg(test)]\nmod tests")
+            .split("\n#[cfg(test)]\npub(crate) mod tests")
             .next()
             .unwrap();
         let start = source
@@ -23088,13 +23126,22 @@ exit 1
             })
             .unwrap();
 
-        // First refresh: nothing recorded, so it discovers and records #131.
+        // First refresh: nothing recorded, so it discovers and records #131,
+        // and reads its checks in the same pass — a discovered PR must not
+        // sit on "checks unknown" until some later sync.
         let discovered = store
             .refresh_pull_request_state("berlin")
             .unwrap()
             .expect("refresh should discover the externally created PR");
         assert_eq!(discovered.number, 131);
         assert_eq!(discovered.state, "open");
+        assert_eq!(discovered.checks_state.as_deref(), Some("pending"));
+        assert_eq!(
+            discovered
+                .checks_counts
+                .map(|counts| (counts.total, counts.pending)),
+            Some((1, 1))
+        );
         assert!(store
             .pull_request_by_workspace_id(workspace.id)
             .unwrap()

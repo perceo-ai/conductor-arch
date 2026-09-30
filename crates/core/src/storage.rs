@@ -569,6 +569,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "checks_state",
         "ALTER TABLE pull_requests ADD COLUMN checks_state TEXT",
     )?;
+    ensure_column(
+        conn,
+        "pull_requests",
+        "checks_counts_json",
+        "ALTER TABLE pull_requests ADD COLUMN checks_counts_json TEXT",
+    )?;
     // Providers ask in batches of questions with labelled options; the original
     // flat `choices_json` cannot hold that shape.
     ensure_column(

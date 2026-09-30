@@ -3,7 +3,7 @@ import { createStore, reconcile } from "solid-js/store";
 import { recordUpdate } from "./metrics";
 import { send } from "@/bridge/client";
 import { logState } from "@/lib/log";
-import type { ArchcarWorkspaceSummary } from "@/bridge/protocol";
+import type { ArchcarWorkspaceSummary, PullRequestCheckCounts } from "@/bridge/protocol";
 
 // Keyed workspace store. Row components read `workspaces.byName[name].status` so a
 // status change reconciles exactly one row (equivalent to
@@ -33,6 +33,7 @@ export interface WorkspaceRow {
   prState?: string;
   /** GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending"). */
   prChecks?: string;
+  prCheckCounts?: PullRequestCheckCounts;
   prUrl?: string;
   updatedAt: string;
 }
@@ -71,6 +72,7 @@ function rowFromSummary(s: ArchcarWorkspaceSummary): WorkspaceRow {
     prNumber: s.pull_request_number,
     prState: s.pull_request_state,
     prChecks: s.pull_request_checks,
+    prCheckCounts: s.pull_request_check_counts,
     prUrl: s.pull_request_url,
     updatedAt: s.updated_at,
   };

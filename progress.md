@@ -45,6 +45,41 @@ button that opens the pane and restarts the daemon when the window regains
 focus. The CLI still prints the grant instructions; it gains the pane listing
 through the same probe. Not yet smoke-tested on a Mac.
 
+## Agent activity in the chat (2026-09-30)
+
+Claude's stream-json carries more than the chat showed. Now surfaced, in core,
+the desktop, and `archcar chat-projection`:
+
+- **Tool output**: array-shaped results (Agent reports, MCP tools) fill their
+  card instead of leaving the call's input; `is_error` fails the card; a tool
+  card reads running until its result arrives.
+- **Background tasks**: `system/task_*` records for backgrounded commands and
+  agents project to a background card with progress, summary, output file, and
+  final status. It keeps running in the desktop after the turn ends while the
+  session lives. Foreground tasks stay folded into their tool card.
+- **Subagents**: records tagged `parent_tool_use_id` become subagent rows (no
+  more subagent prompts as user bubbles or reports as main answers). The daemon
+  sends `parent_id`; the desktop nests them in the Agent card and the CLI
+  indents them. `chat-projection --full` prints bodies untruncated.
+- **TodoWrite** cards show the checklist (fixture-tested only; Claude 2.1.283
+  `-p` does not offer TodoWrite).
+
+Stored events keep the classification they were parsed with, so chats from
+before this change still show old background records as hidden status rows.
+Not done: Codex plan updates / collab agents, ACP plans, the iOS client
+(decodes but ignores `parent_id`), and synthetic user records such as Stop-hook
+feedback still rendering as user bubbles.
+
+## PR checks status (2026-09-30)
+
+The PR bar and sidebar said "Checks unknown" (with a question-mark glyph) for
+PRs GitHub had checks for. The desktop preferred the local check script's
+process state (`exited`) over the GitHub rollup, a PR discovered by branch was
+recorded without its checks, and checks only synced at turn ends. Each PR now
+stores per-outcome counts; desktop and CLI show "Checks failing · 19/20 passed,
+1 failed"; the PR bar re-reads GitHub every minute while the PR is open; skipped
+jobs no longer turn a green rollup unknown; no-checks PRs get a muted PR glyph.
+
 ## Remote takeover and daemon updates (2026-09-29)
 
 **Taking over a workspace from another machine** (`remote import`, the app's

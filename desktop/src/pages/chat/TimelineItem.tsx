@@ -1,4 +1,5 @@
-import { Match, Show, Switch, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createSignal } from "solid-js";
+import type { JSX } from "solid-js";
 import type {
   ArchcarProjectionItem,
 } from "@/bridge/protocol";
@@ -13,10 +14,12 @@ import { TurnForkAction } from "./MessageActions";
 import {
   formatReasoningText,
   inlineEventVerbChip,
+  isInlineEventClass,
   isDiffCard,
   isTerminalCard,
   stripArchductorMetadata,
 } from "@/lib/chatFormat";
+import { showsRunning } from "@/lib/timeline";
 
 // One row of the chat timeline. The projection built in core decides which
 // shape a row takes; this module owns how each shape renders.
@@ -61,18 +64,39 @@ export function eventIcon(renderClass: string): IconName {
 // verb (action label) + a small monospace content chip (the command/filename),
 // with the body revealed only on expand. No category badge; the row carries no
 // card chrome of its own. Bodies stay collapsed until the user asks for them.
-function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean }) {
+//
+// A card that spawned a subagent carries the subagent's own rows. They expand
+// with the card, above its report; while it runs, the header shows the latest
+// thing the subagent did so the work is visible without opening it.
+function InlineCard(props: {
+  item: ArchcarProjectionItem;
+  running: boolean;
+  nested: ArchcarProjectionItem[];
+  renderNested: (item: ArchcarProjectionItem) => JSX.Element;
+}) {
   const [open, setOpen] = createSignal(false);
   const parsed = () => inlineEventVerbChip(props.item.render_class, props.item.title);
   const verb = () => parsed().verb;
   const chip = () => parsed().chip;
-  const hasBody = () => props.item.body.trim().length > 0;
+  const hasNested = () => props.nested.length > 0;
+  const hasBody = () => props.item.body.trim().length > 0 || hasNested();
+  const latest = () => {
+    if (!props.running || open()) return null;
+    // The newest action, not the newest prose: "Ran rg …" says what the
+    // subagent is doing, a sentence of its narration does not fit a header.
+    const last = props.nested.findLast(
+      (child) => isInlineEventClass(child.render_class) && child.render_class !== "nested_transcript_card",
+    );
+    if (!last) return null;
+    const step = inlineEventVerbChip(last.render_class, last.title);
+    return `${step.verb} ${step.chip}`.trim();
+  };
   return (
     <div
       class="chat-inline-event"
       classList={{
         "chat-inline-event-failed": props.item.status === "failed",
-        "chat-inline-event-running": props.item.status === "running" && !props.agentIdle
+        "chat-inline-event-running": props.running
       }}
     >
       <div class="chat-inline-event-header">
@@ -93,9 +117,24 @@ function InlineCard(props: { item: ArchcarProjectionItem; agentIdle?: boolean })
             <span class="chat-inline-event-chip-label">{chip()}</span>
           </span>
         </Show>
+        <Show when={latest()}>
+          {(step) => <span class="chat-inline-event-latest">{step()}</span>}
+        </Show>
       </div>
-      <Show when={open() && hasBody()}>
+      <Show when={open() && hasNested()}>
+        <div class="chat-inline-event-nested">
+          <For each={props.nested}>{(child) => props.renderNested(child)}</For>
+        </div>
+      </Show>
+      <Show when={open() && props.item.body.trim().length > 0}>
         <Switch fallback={<div class="chat-inline-event-body">{props.item.body}</div>}>
+          <Match when={hasNested()}>
+            {/* A subagent's report is prose, written for the parent agent. */}
+            <div
+              class="chat-nested-text markdown-body"
+              innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
+            />
+          </Match>
           <Match when={isDiffCard(props.item)}>
             <Diff text={props.item.body} />
           </Match>
@@ -124,14 +163,30 @@ function ReasoningBlock(props: { item: ArchcarProjectionItem }) {
 export function TimelineItem(props: {
   item: ArchcarProjectionItem;
   agentIdle: boolean;
+  sessionAlive: boolean;
   threadId: number;
   workspace: string;
   files: readonly string[];
   forkable: boolean;
+  /** Rows nested under each card, keyed by the card's id. */
+  childrenOf?: ReadonlyMap<string, ArchcarProjectionItem[]>;
 }) {
   const cls = () => props.item.render_class;
+  const nested = () => props.childrenOf?.get(props.item.id) ?? [];
+  const renderNested = (child: ArchcarProjectionItem) => (
+    <TimelineItem {...props} item={child} forkable={false} />
+  );
   return (
-    <Switch fallback={<InlineCard item={props.item} agentIdle={props.agentIdle} />}>
+    <Switch
+      fallback={
+        <InlineCard
+          item={props.item}
+          running={showsRunning(props.item, { idle: props.agentIdle, sessionAlive: props.sessionAlive })}
+          nested={nested()}
+          renderNested={renderNested}
+        />
+      }
+    >
       <Match when={cls() === "user_chat"}>
         <UserBubble
           body={props.item.body}
@@ -159,6 +214,13 @@ export function TimelineItem(props: {
       </Match>
       <Match when={cls() === "reasoning_card"}>
         <ReasoningBlock item={props.item} />
+      </Match>
+      <Match when={cls() === "nested_transcript_card"}>
+        {/* What a subagent said, inside its Agent card. */}
+        <div
+          class="chat-nested-text markdown-body"
+          innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
+        />
       </Match>
     </Switch>
   );
