@@ -545,6 +545,219 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
     wait_for_session_exit(temp.path(), second_session);
 }
 
+/// Failure this guards: `session send` to an agent mid-turn used to wait for the
+/// session to become ready and fail with "timed out waiting for session", so an
+/// operator could not steer exactly when it mattered. Now the message is queued
+/// and lands at the next turn boundary, and `status`/`chat` report the busy
+/// agent as working.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_codex = temp.path().join("fake-busy-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-first-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_busy_codex(&fake_codex).unwrap();
+    let app = || {
+        let mut command = app_with_home(temp.path(), &fake_home);
+        command
+            .env("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs)
+            .env("ARCHDUCTOR_RELEASE_PATH", &release);
+        command
+    };
+
+    app()
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app()
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "codex_executable_path = {:?}\n",
+            fake_codex.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines(&provider_inputs, 1);
+
+    // Busy: the first turn is still open. Status says so.
+    let status = app()
+        .args(["status", "berlin", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&status).unwrap();
+    let session = &status["workspaces"][0]["sessions"][0];
+    assert_eq!(session["alive"], true, "{status}");
+    assert_eq!(session["state"], "working", "{status}");
+    assert_eq!(session["liveness_source"], "daemon", "{status}");
+
+    // No --kind: the workspace's chat is a codex chat. A short timeout proves
+    // nothing waits on the busy session.
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Also run clippy",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("queued codex message"))
+        .stdout(contains("delivers at the next turn boundary"));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "the queued message must wait for the turn to end"
+    );
+
+    fs::write(&release, "").unwrap();
+    wait_for_file_lines(&provider_inputs, 2);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<String>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(captured.len(), 2);
+    // The queued message reaches the agent exactly as sent: no metadata
+    // request appended, the same as a message that went straight in.
+    assert!(captured[0].ends_with("Start the long task"), "{captured:?}");
+    assert_eq!(captured[1], "Also run clippy", "{captured:?}");
+
+    // The daemon records the delivered message just after the provider gets
+    // it, so give the transcript a moment to catch up.
+    let mut chat = String::new();
+    for _ in 0..50 {
+        let output = app()
+            .args(["chat", "berlin", "--tail", "5"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        chat = String::from_utf8(output).unwrap();
+        if chat.contains("user: Also run clippy") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(chat.starts_with("chat berlin thread "), "{chat}");
+    assert!(chat.contains("user: Start the long task"), "{chat}");
+    assert!(chat.contains("user: Also run clippy"), "{chat}");
+
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let session_id = store.list_sessions("berlin").unwrap()[0].id;
+    app()
+        .args(["archcar", "kill", &session_id.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), session_id);
+}
+
+/// A codex app-server stand-in whose first turn stays open until
+/// `$ARCHDUCTOR_RELEASE_PATH` exists; later turns complete at once.
+#[cfg(unix)]
+fn write_fake_busy_codex(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import threading
+import time
+
+capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
+release = os.environ["ARCHDUCTOR_RELEASE_PATH"]
+lock = threading.Lock()
+
+def emit(message):
+    with lock:
+        print(json.dumps(message), flush=True)
+
+def complete(turn_id):
+    emit({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}})
+
+def complete_when_released(turn_id):
+    while not os.path.exists(release):
+        time.sleep(0.05)
+    complete(turn_id)
+
+turns = 0
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        emit({"id": message["id"], "result": {}})
+    elif method in ("thread/start", "thread/resume"):
+        emit({"id": message["id"], "result": {"thread": {"id": "thread-busy"}}})
+    elif method == "turn/start":
+        turns += 1
+        with open(capture, "a", encoding="utf-8") as output:
+            output.write(json.dumps(message["params"]["input"][0]["text"]) + "\n")
+        turn_id = "turn-%d" % turns
+        emit({"id": message["id"], "result": {"turn": {"id": turn_id}}})
+        emit({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
+        if turns == 1:
+            threading.Thread(target=complete_when_released, args=(turn_id,), daemon=True).start()
+        else:
+            complete(turn_id)
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
 #[cfg(unix)]
 fn fake_codex_path(root: &Path) -> PathBuf {
     root.join("fake-codex")

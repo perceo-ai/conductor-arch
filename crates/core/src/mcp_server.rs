@@ -67,8 +67,9 @@ impl McpProfile {
 /// Public because the built-in prompts in [`crate::settings`] name these tools
 /// directly, and a test there asserts every tool a prompt cites is one an
 /// in-workspace agent can actually see.
-pub const SESSION_PROFILE_TOOLS: [&str; 6] = [
+pub const SESSION_PROFILE_TOOLS: [&str; 7] = [
     "set_workspace_context",
+    "set_chat_context",
     "get_context_briefing",
     "get_summary",
     "list_tasks",
@@ -407,6 +408,7 @@ pub fn tools() -> Vec<ToolSpec> {
                         Some("shell") => crate::workspace::SessionKind::SHELL,
                         _ => crate::workspace::SessionKind::CODEX,
                     },
+                    verbatim: false,
                 })
             },
         },
@@ -473,8 +475,10 @@ pub fn tools() -> Vec<ToolSpec> {
             description:
                 "Set this workspace's durable context: a short summary for whoever works here next, \
                  and real names for the workspace, branch, and chat while they are still \
-                 placeholders. Call it when you learn what the task actually is, and again when \
-                 the state of the work changes. The summary replaces the stored one, so write it \
+                 placeholders. The summary covers the whole workspace — every change on the \
+                 branch, whichever chat made it; use `set_chat_context` for what one chat is \
+                 doing. Call it when you learn what the task actually is, and again when the \
+                 state of the work changes. The summary replaces the stored one, so write it \
                  whole: goal, where the work stands, decisions made, what is next, open questions. \
                  Leave out file lists, session lists, and check status — Archductor shows those in \
                  its own tabs. Workspace and branch names are accepted once per workspace.",
@@ -500,6 +504,7 @@ pub fn tools() -> Vec<ToolSpec> {
                     branch_name: optional_string(args, "branch_name"),
                     chat_title: optional_string(args, "chat_title"),
                     summary: optional_string(args, "summary"),
+                    chat_summary: None,
                 };
                 if let ArchcarRequest::ApplyAgentContext {
                     workspace_name: None,
@@ -515,6 +520,49 @@ pub fn tools() -> Vec<ToolSpec> {
                     );
                 }
                 Ok(request)
+            },
+        },
+        ToolSpec {
+            name: "set_chat_context",
+            description:
+                "Set this chat's durable context: a short summary of what was asked in this chat, \
+                 the tasks it owns, and where each one stands, plus a real chat title while it is \
+                 still a placeholder. The workspace summary (`set_workspace_context`) covers the \
+                 whole branch; this one covers only the current chat. Call it when a task in this \
+                 chat starts, finishes, or changes direction. The summary replaces the stored one, \
+                 so write it whole. Leave out file lists and check status.",
+            schema: || {
+                object(
+                    json!({
+                        "workspace": {"type": "string"},
+                        "thread_id": {"type": "integer"},
+                        "summary": {"type": "string", "description": "At most 150 words of prose about this chat's tasks."},
+                        "chat_title": {"type": "string", "description": "At most 48 characters, title case."},
+                    }),
+                    &[],
+                )
+            },
+            mutating: true,
+            build: |args| {
+                let thread_id = args.get("thread_id").and_then(Value::as_i64).context(
+                    "set_chat_context needs `thread_id`; it is filled in automatically inside \
+                     an Archductor session",
+                )?;
+                let chat_summary = optional_string(args, "summary");
+                let chat_title = optional_string(args, "chat_title");
+                anyhow::ensure!(
+                    chat_summary.is_some() || chat_title.is_some(),
+                    "set_chat_context needs at least one of `summary` or `chat_title`"
+                );
+                Ok(ArchcarRequest::ApplyAgentContext {
+                    workspace: string_arg(args, "workspace")?,
+                    thread_id: Some(thread_id),
+                    workspace_name: None,
+                    branch_name: None,
+                    chat_title,
+                    summary: None,
+                    chat_summary,
+                })
             },
         },
         ToolSpec {
@@ -1317,6 +1365,7 @@ mod tests {
             "{names:?}"
         );
         assert!(names.contains(&"update_task".to_owned()), "{names:?}");
+        assert!(names.contains(&"set_chat_context".to_owned()), "{names:?}");
         // A session does not need to create or archive workspaces to keep its
         // own context current, and every extra tool is paid for on every turn.
         assert!(!names.contains(&"create_workspace".to_owned()), "{names:?}");
@@ -1516,6 +1565,41 @@ mod tests {
             } if chat_title.as_deref() == Some("Billing Webhook Retries")
                 && summary.as_deref() == Some("Retry backoff fixed; tests still to write.")
         ));
+    }
+
+    #[test]
+    fn set_chat_context_writes_the_chat_summary_not_the_workspace_one() {
+        let tools = tools();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "set_chat_context")
+            .expect("set_chat_context tool");
+
+        let err = (tool.build)(&json!({"workspace": "berlin", "summary": "hi"})).unwrap_err();
+        assert!(err.to_string().contains("thread_id"), "{err}");
+        let err = (tool.build)(&json!({"workspace": "berlin", "thread_id": 4})).unwrap_err();
+        assert!(err.to_string().contains("at least one"), "{err}");
+
+        let request = (tool.build)(&json!({
+            "workspace": "berlin",
+            "thread_id": 4,
+            "summary": "Asked to fix webhook retries; backoff done, tests next.",
+        }))
+        .unwrap();
+        assert!(matches!(
+            request,
+            ArchcarRequest::ApplyAgentContext {
+                thread_id: Some(4),
+                summary: None,
+                workspace_name: None,
+                branch_name: None,
+                ref chat_summary,
+                ..
+            } if chat_summary.as_deref()
+                == Some("Asked to fix webhook retries; backoff done, tests next.")
+        ));
+        // A session sees it, and binds it to its own chat like the workspace tool.
+        assert!(McpProfile::Session.includes(tool));
     }
 
     #[test]

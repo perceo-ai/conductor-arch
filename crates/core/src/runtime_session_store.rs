@@ -126,11 +126,6 @@ impl RuntimeSessionStore {
         self.open()?.chat_thread_plan_mode(thread_id)
     }
 
-    /// Point a session row at the process that replaced it after a restart.
-    pub fn update_session_process_pid(&self, process_id: i64, pid: u32) -> Result<()> {
-        self.open()?.update_session_process_pid(process_id, pid)
-    }
-
     /// The permission mode a Claude session for this thread should run in.
     /// Thin pass-through to the single source of truth so callers that only
     /// hold a `RuntimeSessionStore` don't open a `WorkspaceStore` inline.
@@ -216,6 +211,10 @@ impl RuntimeSessionStore {
         self.open()?
             .update_chat_thread_native_id(thread_id, native_thread_id)?;
         Ok(())
+    }
+
+    pub fn update_session_process_pid(&self, process_id: i64, pid: u32) -> Result<()> {
+        self.open()?.update_session_process_pid(process_id, pid)
     }
 
     pub fn mark_session_process_exited(

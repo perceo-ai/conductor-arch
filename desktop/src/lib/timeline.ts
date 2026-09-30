@@ -121,3 +121,68 @@ export function timelineWindow<T>(items: T[], visibleCount: number): TimelineWin
   if (items.length <= count) return { visible: items, hidden: 0 };
   return { visible: items.slice(items.length - count), hidden: items.length - count };
 }
+
+/**
+ * Whether a card should read as still running.
+ *
+ * An interrupted turn leaves its tool cards marked running, so once the agent
+ * is idle they stop spinning. A background task is the exception: it outlives
+ * the turn that started it, and keeps running for as long as the session does.
+ */
+export function showsRunning(
+  item: ArchcarProjectionItem,
+  agent: { idle: boolean; sessionAlive: boolean },
+): boolean {
+  if (item.status !== "running") return false;
+  if (item.render_class === "background_card") return agent.sessionAlive;
+  return !agent.idle;
+}
+
+/** The timeline split into top-level rows and the rows nested under each. */
+export interface NestedTimeline {
+  top: ArchcarProjectionItem[];
+  childrenOf: Map<string, ArchcarProjectionItem[]>;
+}
+
+/**
+ * Put each item under the card that spawned it. A subagent's conversation
+ * streams inline with the main one; flat, its tool calls interleave with the
+ * parent's and its report reads like the main agent talking. An item whose
+ * parent is not in the list (filtered out, or not arrived yet) stays top-level
+ * rather than disappearing.
+ */
+export function nestTimelineItems(items: ArchcarProjectionItem[]): NestedTimeline {
+  const ids = new Set(items.map((item) => item.id));
+  const top: ArchcarProjectionItem[] = [];
+  const childrenOf = new Map<string, ArchcarProjectionItem[]>();
+  for (const item of items) {
+    const parent = item.parent_id;
+    if (parent && parent !== item.id && ids.has(parent)) {
+      const siblings = childrenOf.get(parent);
+      if (siblings) siblings.push(item);
+      else childrenOf.set(parent, [item]);
+    } else {
+      top.push(item);
+    }
+  }
+  return { top, childrenOf };
+}
+
+/**
+ * What the chat's follow-bottom watches: every visible row and, recursively,
+ * the rows nested under it. Counting children alone missed a nested row that
+ * grew in place (a subagent's command streaming output inside an open Agent
+ * card), so the reader stopped being kept at the latest output.
+ */
+export function timelineScrollSignature(
+  visible: ArchcarProjectionItem[],
+  childrenOf: Map<string, ArchcarProjectionItem[]>,
+): string {
+  const parts: string[] = [];
+  const visit = (item: ArchcarProjectionItem) => {
+    parts.push(`${item.id}:${item.status}:${item.stream_state}:${item.body.length}`);
+    for (const child of childrenOf.get(item.id) ?? []) visit(child);
+  };
+  for (const item of visible) visit(item);
+  return parts.join("|");
+}

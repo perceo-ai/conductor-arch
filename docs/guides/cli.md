@@ -24,7 +24,7 @@ server-hosted daemon unchanged.
 ```bash
 archductor doctor                    # environment check
 archductor setup                     # provider readiness; --recheck to re-read the environment
-archductor status                    # workspaces at a glance (reads the database directly)
+archductor status                    # workspaces at a glance: run script, agents, PR
 archductor remote status             # which daemon this machine talks to
 archductor service status            # is the background service installed and running
 archductor archcar providers         # every agent this build knows, and how far it drives each
@@ -47,6 +47,83 @@ subcommand therefore doubles as a liveness check — `archductor archcar
 inventory-snapshot` is a cheap one. `archductor archcar status` and
 `archductor archcar ensure` are **session** commands, not daemon ones; they take
 a session id and a workspace respectively.
+
+## Watching the board from a script
+
+Two commands answer "what is every agent doing" without reading a log. Both
+are small by default, ASCII only, and have a versioned `--json` form, so a
+caller on a slow link (an agent polling through `ssh` or a VM guest agent) can
+use one short call per question.
+
+```bash
+archductor status                          # one line per workspace
+archductor status fix-auth --json          # one JSON document; omit the name for every workspace
+archductor chat fix-auth                   # the last 2 turns of the most recent chat
+archductor chat fix-auth --tail 5 --no-thinking
+archductor chat fix-auth --session 9 --since 2026-09-30T08:00:00Z --json
+```
+
+`status` separates the workspace **run script** (`run:stopped`) from the
+**agents** (`agent working`, `agents 1 working, 2 finished`). Liveness comes from
+the daemon, which holds each agent process; if the daemon cannot be reached the
+recorded PID is checked instead and `liveness_source` says `pid`.
+
+An agent's `state` is one of:
+
+| state | meaning |
+| --- | --- |
+| `working` | alive and mid-turn: thinking, streaming, or running a tool |
+| `awaiting_input` | alive and blocked on a person: a permission prompt, a question, a plan to approve, or a fresh chat with no task yet |
+| `finished` | the last turn completed successfully (idle, or exited) |
+| `failed` | the last turn ended in an error |
+| `stopped` | not running, and the last turn did not finish |
+
+`status --json` (`schema_version` 1):
+
+```json
+{"schema_version":1,"generated_at":"2026-09-30T09:09:58Z","workspaces":[
+  {"workspace":"fix-auth","repository":"my-app","status":"active","branch":"fix/auth",
+   "has_upstream":true,"ahead":2,"behind":0,"additions":140,"deletions":8,"open_todos":0,
+   "run_script":"stopped","state":"working",
+   "pr":{"number":150,"state":"open","url":"https://github.com/o/r/pull/150","checks":"passing"},
+   "pr_url":"https://github.com/o/r/pull/150",
+   "sessions":[{"session_id":9,"thread_id":12,"kind":"claude","title":"Fix token expiry",
+     "alive":true,"liveness_source":"daemon","state":"working",
+     "last_activity":"2026-09-30T09:09:59Z","idle_seconds":0,
+     "current_tool":"Bash: cargo test --all","turn_outcome":"running","turns":4,
+     "pending_interactions":0,"queued_inputs":0,
+     "pr_url":"https://github.com/o/r/pull/150"}]}]}
+```
+
+Fields that do not apply are left out rather than `null`. `sessions` lists every
+live agent plus the three most recent stopped ones (live ones only, for an
+archived workspace). `pr_url` is the workspace PR, else the newest PR an agent
+opened in its chat (`gh pr create` output), so "is it done, and where is the PR"
+needs no log search. `turn_outcome` is `running`, `success`, `failed`,
+`interrupted`, or `unknown` (an older turn with no recorded end).
+
+`chat` prints one line per step: `user:` requests, `assistant:` prose, a tool
+call as `Bash: cargo test --all` with its result clipped on the next line
+(`-> ...`), `ERROR` for failed calls, `PROMPT` for a waiting permission prompt,
+and thinking as a one-line marker. Clipped text ends in `...[+N chars]`; a busy
+turn shows its request and last `--steps` (10) steps. `--full` turns clipping
+off.
+
+`chat --json` is JSON Lines: a `chat` record, then one `turn` record per turn.
+
+```json
+{"type":"chat","schema_version":1,"workspace":"fix-auth","thread_id":12,"title":"Fix token expiry","provider":"claude","session":{...same as a status session...},"turns_total":4,"turns_shown":2,"other_threads":[11,10]}
+{"type":"turn","turn":4,"started_at":"2026-09-30T09:07:24Z","outcome":"running","elided":3,"entries":[
+  {"kind":"user","at":"2026-09-30T09:07:24Z","text":"run the tests","status":"running"},
+  {"kind":"tool","tool":"Bash","text":"cargo test --all","status":"complete","result":"test result: ok. 3 passed"},
+  {"kind":"error","tool":"Edit","text":"src/auth.rs","status":"failed","result":"File has not been read yet."}],
+ "pr_urls":["https://github.com/o/r/pull/150"]}
+```
+
+Entry `kind` is `user`, `assistant`, `thinking`, `tool`, `prompt`, `error`, or
+`event` (plans, background tasks, notifications). `truncated: true` marks a
+clipped entry and `nested: true` a subagent's step. `archductor logs <ws>
+--session` remains the raw provider stream.
 
 ## Repositories
 
@@ -128,6 +205,8 @@ archductor session stop fix-auth
 
 archductor archcar chat-threads fix-auth
 archductor archcar chat-transcript <thread-id>
+archductor archcar chat-projection <thread-id>          # the timeline the desktop draws, one line per card
+archductor archcar chat-projection <thread-id> --full   # every body in full: command output, subagent reports
 archductor archcar create-chat fix-auth
 archductor archcar close-chat <thread-id>
 archductor archcar fork-chat <thread-id> --through-message-id <id>
@@ -138,6 +217,11 @@ archductor archcar interactions list --all
 archductor archcar interactions allow <id> --always
 archductor archcar plan-mode <thread-id> --on
 ```
+
+`chat-projection` prints each card's title with a one-line preview. Rows a
+subagent produced are indented under the Agent card that spawned it, and
+backgrounded commands and agents appear as their own cards. Pass `--full` to
+print bodies untruncated, for example to read a command's whole output.
 
 ## Running and checking
 
@@ -191,7 +275,7 @@ archductor checkpoint restore fix-auth <id>
 archductor archcar push-branch fix-auth              # --force after a rebase (push with lease)
 archductor pr create fix-auth --title "Fix auth" --draft
 archductor pr create fix-auth --from-context         # title and body from the generated draft
-archductor pr view fix-auth
+archductor pr view fix-auth                          # re-reads GitHub: "checks: failing (19/20 passed, 1 failed)"
 archductor pr checks fix-auth
 archductor pr summary fix-auth --agent-prompt
 archductor pr resolve-thread fix-auth <thread-id>
@@ -280,7 +364,7 @@ archductor archcar sync
 
 ```bash
 archductor history list --workspace fix-auth
-archductor history show <process-id>
+archductor history show <process-id>          # saved messages; `chat --session <id>` for the whole conversation
 archductor import conductor --source <path>   # migrate from a Conductor setup
 archductor open fix-auth --editor cursor      # open in an editor
 ```

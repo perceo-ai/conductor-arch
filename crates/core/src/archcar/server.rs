@@ -1045,7 +1045,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             visible_input,
             kind,
             session_kind,
-        } => queue_chat_input(state, thread_id, input, visible_input, kind, session_kind),
+            verbatim,
+        } => queue_chat_input(
+            state,
+            thread_id,
+            input,
+            visible_input,
+            kind,
+            session_kind,
+            verbatim,
+        ),
         ArchcarRequest::ListQueuedChatInputs { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path)
@@ -1277,6 +1286,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             status: item.status.as_str().to_owned(),
                             stream_state: item.stream_state.as_str().to_owned(),
                             timeline_seq: item.timeline_seq,
+                            parent_id: item.parent_id,
                         })
                         .collect(),
                     }
@@ -1997,6 +2007,10 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             .pull_request
                             .as_ref()
                             .and_then(|pr| pr.checks_state.clone()),
+                        pull_request_check_counts: summary
+                            .pull_request
+                            .as_ref()
+                            .and_then(|pr| pr.checks_counts),
                         conflicting_workspaces: summary.conflicting_workspaces.len(),
                     },
                 },
@@ -2547,14 +2561,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             branch_name,
             chat_title,
             summary,
+            chat_summary,
         } => apply_agent_context(
             state,
             &workspace,
             thread_id,
-            workspace_name,
-            branch_name,
-            chat_title,
-            summary,
+            crate::workspace::ArchductorMetadataDirective {
+                workspace_name,
+                branch_name,
+                chat_title,
+                summary,
+                chat_summary,
+            },
         ),
         ArchcarRequest::DuplicateWorkspace {
             workspace,
@@ -2637,10 +2655,24 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::RefreshPullRequest { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match WorkspaceStore::open_app(&db_path)
-                .and_then(|s| s.refresh_pull_request_state(&workspace))
-            {
-                Ok(_) => ArchcarResponse::WorkspaceUpdated { name: workspace },
+            // Tell every client only when the refresh found news, as the
+            // post-turn sync does. The desktop polls this every minute while a
+            // PR is open, so it answers `Ack`: `WorkspaceUpdated` would make
+            // every client re-pull the inventory on every poll, and twice
+            // whenever something did change.
+            match WorkspaceStore::open_app(&db_path).and_then(|s| {
+                let before = s.pull_request(&workspace)?;
+                let after = s.refresh_pull_request_state(&workspace)?;
+                Ok((before, after))
+            }) {
+                Ok((before, after)) => {
+                    if let Some(event) =
+                        pull_request_changed_event(&workspace, before.as_ref(), after.as_ref())
+                    {
+                        broadcast(&mut state.lock().unwrap(), event);
+                    }
+                    ArchcarResponse::Ack
+                }
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -3446,6 +3478,7 @@ fn start_background_task(
                 visible_input: Some(prompt.clone()),
                 kind: crate::archcar::protocol::ArchcarInputKind::User,
                 session_kind: kind,
+                verbatim: false,
             },
             state,
         );
@@ -3763,26 +3796,17 @@ fn apply_agent_context(
     state: &Arc<Mutex<ServerState>>,
     workspace: &str,
     thread_id: Option<i64>,
-    workspace_name: Option<String>,
-    branch_name: Option<String>,
-    chat_title: Option<String>,
-    summary: Option<String>,
+    directive: crate::workspace::ArchductorMetadataDirective,
 ) -> ArchcarResponse {
     let db_path = state.lock().unwrap().db_path.clone();
     let before = thread_id.and_then(|thread_id| thread_naming_snapshot(&db_path, thread_id));
-    let wrote_summary = summary.is_some();
+    let wrote_summary = directive.summary.is_some();
+    let wrote_chat_summary = directive.chat_summary.is_some();
     let applied = WorkspaceStore::open_app(&db_path).and_then(|store| {
         // Resolve the id first: applying the metadata can rename the workspace
         // out from under the name the caller used.
         let workspace_id = store.get_by_name(workspace)?.id;
-        store.apply_agent_context_metadata(
-            workspace,
-            thread_id,
-            workspace_name,
-            branch_name,
-            chat_title,
-            summary,
-        )?;
+        store.apply_agent_context_metadata(workspace, thread_id, directive)?;
         store.workspace_name_by_id(workspace_id)
     });
     let name = match applied {
@@ -3799,6 +3823,13 @@ fn apply_agent_context(
     if wrote_summary {
         if let Ok(Some(stored)) = WorkspaceStore::open_app(&db_path)
             .and_then(|store| store.get_summary(&name, "workspace", None))
+        {
+            broadcast_summary_updated(state, &name, &stored);
+        }
+    }
+    if let (true, Some(thread_id)) = (wrote_chat_summary, thread_id) {
+        if let Ok(Some(stored)) = WorkspaceStore::open_app(&db_path)
+            .and_then(|store| store.get_summary(&name, "session", Some(thread_id)))
         {
             broadcast_summary_updated(state, &name, &stored);
         }
@@ -3933,6 +3964,7 @@ fn queue_chat_input(
     visible_input: Option<String>,
     kind: crate::archcar::protocol::ArchcarInputKind,
     session_kind: SessionKind,
+    verbatim: bool,
 ) -> ArchcarResponse {
     let db_path = state.lock().unwrap().db_path.clone();
     let is_user_input = kind == crate::archcar::protocol::ArchcarInputKind::User;
@@ -3958,8 +3990,9 @@ fn queue_chat_input(
         // A human message can carry a hidden request for real workspace/branch/chat
         // names and a refreshed workspace summary. It rides the provider-bound text
         // only; the transcript keeps the visible text, so the user never sees it.
+        // `verbatim` input (the CLI) skips it, as a direct `SendInput` does.
         let (input, visible_input) = match kind {
-            crate::archcar::protocol::ArchcarInputKind::User => {
+            crate::archcar::protocol::ArchcarInputKind::User if !verbatim => {
                 match store.decorate_chat_input(thread_id, &input)? {
                     Some(decorated) => (
                         decorated,
@@ -4796,6 +4829,7 @@ fn pull_request_changed_event(
                 || before.state != after.state
                 || before.url != after.url
                 || before.checks_state != after.checks_state
+                || before.checks_counts != after.checks_counts
         }
         _ => true,
     };
@@ -5550,6 +5584,7 @@ fn workspace_summary_from_status_line(
         pull_request_number: pull_request.as_ref().map(|pr| pr.number),
         pull_request_state: pull_request.as_ref().map(|pr| pr.state.clone()),
         pull_request_checks: pull_request.as_ref().and_then(|pr| pr.checks_state.clone()),
+        pull_request_check_counts: pull_request.as_ref().and_then(|pr| pr.checks_counts),
         pull_request_url: pull_request.map(|pr| pr.url),
         branch_ahead: branch_push_state.as_ref().map(|s| s.ahead),
         branch_behind: branch_push_state.map(|s| s.behind),
@@ -6948,6 +6983,7 @@ mod tests {
             url: format!("https://github.com/example/demo/pull/{number}"),
             state: state.to_owned(),
             checks_state: None,
+            checks_counts: None,
             created_at: "0".to_owned(),
             updated_at: "0".to_owned(),
         }
@@ -6983,6 +7019,27 @@ mod tests {
         passing.checks_state = Some("passing".to_owned());
         assert!(
             pull_request_changed_event("berlin", Some(&pr_row(77, "open")), Some(&passing))
+                .is_some()
+        );
+        // Same rollup word, more checks finished (3/8 -> 5/8 passed): news —
+        // the chip renders the tally, not just the word.
+        let mut pending_early = pr_row(77, "open");
+        pending_early.checks_state = Some("pending".to_owned());
+        pending_early.checks_counts = Some(crate::github_pr::PullRequestCheckCounts {
+            total: 8,
+            passed: 3,
+            pending: 5,
+            ..Default::default()
+        });
+        let mut pending_later = pending_early.clone();
+        pending_later.checks_counts = Some(crate::github_pr::PullRequestCheckCounts {
+            total: 8,
+            passed: 5,
+            pending: 3,
+            ..Default::default()
+        });
+        assert!(
+            pull_request_changed_event("berlin", Some(&pending_early), Some(&pending_later))
                 .is_some()
         );
         // Still no PR anywhere: silence.
@@ -7339,6 +7396,7 @@ mod tests {
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 session_kind: SessionKind::CODEX,
+                verbatim: false,
             },
             &state,
         );
@@ -7376,6 +7434,7 @@ mod tests {
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 session_kind: SessionKind::CODEX,
+                verbatim: false,
             },
             &state,
         );
@@ -7384,6 +7443,85 @@ mod tests {
         };
         assert_eq!(second.input, "and lint");
         assert!(!second.input.contains("<archductor_hidden_instruction>"));
+    }
+
+    #[test]
+    fn verbatim_queued_input_reaches_the_agent_exactly_as_sent() {
+        // `archductor session send` queues behind a busy turn with `verbatim`.
+        // The agent must get the operator's words alone, just as it would had
+        // the session been idle and the input gone straight in via SendInput.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let (subscriber_tx, _subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+            remote_listen: None,
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "run tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::CODEX,
+                verbatim: true,
+            },
+            &state,
+        );
+        let ArchcarResponse::QueuedChatInput { input } = response else {
+            panic!("expected queued chat input response");
+        };
+        assert_eq!(input.input, "run tests");
+        assert_eq!(input.visible_input, None);
+
+        // The desktop's (non-verbatim) queue still asks for the metadata.
+        let desktop = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "and lint".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::CODEX,
+                verbatim: false,
+            },
+            &state,
+        );
+        let ArchcarResponse::QueuedChatInput { input: desktop } = desktop else {
+            panic!("expected queued chat input response");
+        };
+        assert!(desktop.input.contains("<archductor_hidden_instruction>"));
     }
 
     #[test]
@@ -7557,6 +7695,135 @@ mod tests {
     }
 
     #[test]
+    fn refresh_pull_request_without_news_leaves_clients_alone() {
+        // No PR recorded and GitHub has none for the branch. The desktop
+        // polls this every minute, so an unchanged answer must not make every
+        // client re-pull the inventory.
+        use crate::workspace::tests::{env_lock, install_fake_gh, restore_path};
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+            remote_listen: None,
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::RefreshPullRequest {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+
+        restore_path(old_path);
+        assert!(matches!(response, ArchcarResponse::Ack), "{response:?}");
+        assert!(subscriber_rx.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn set_workspace_context_cannot_rename_a_branch_the_creator_chose() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        // The branch equals the workspace name, as a codename would, but it
+        // was asked for.
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "helix".to_owned(),
+                branch: "helix".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let (subscriber_tx, _subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+            remote_listen: None,
+        }));
+
+        // What the `set_workspace_context` MCP tool sends.
+        let response = dispatch_request(
+            ArchcarRequest::ApplyAgentContext {
+                workspace: "helix".to_owned(),
+                thread_id: None,
+                workspace_name: Some("billing webhook fix".to_owned()),
+                branch_name: Some("billing-webhook-fix".to_owned()),
+                chat_title: None,
+                summary: None,
+                chat_summary: None,
+            },
+            &state,
+        );
+
+        assert!(
+            matches!(&response, ArchcarResponse::WorkspaceUpdated { name } if name == "billing-webhook-fix"),
+            "{response:?}"
+        );
+        let updated = store.get_by_name("billing-webhook-fix").unwrap();
+        assert_eq!(updated.id, workspace.id);
+        assert_eq!(updated.branch, "helix");
+    }
+
+    #[test]
     fn apply_agent_context_renames_retitles_and_stores_the_summary() {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("state.db");
@@ -7605,6 +7872,7 @@ mod tests {
                 branch_name: None,
                 chat_title: Some("Billing Webhook Fix".to_owned()),
                 summary: Some("Retry backoff is the culprit; fix drafted.".to_owned()),
+                chat_summary: Some("Asked to fix the webhook retries; tests next.".to_owned()),
             },
             &state,
         );
@@ -7618,6 +7886,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stored.body_markdown.contains("Retry backoff"), "{stored:?}");
+        let chat = store
+            .agent_chat_summary("billing-webhook-fix", thread.id)
+            .unwrap()
+            .unwrap();
+        assert!(chat.body_markdown.contains("tests next"), "{chat:?}");
 
         // Clients address workspaces by name, so a tool-driven rename has to
         // reach them the same way a prose-driven one does.
@@ -7631,9 +7904,18 @@ mod tests {
             "{events:?}"
         );
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, ArchcarEvent::SummaryUpdated { .. })),
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::SummaryUpdated { scope_type, .. } if scope_type == "workspace"
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::SummaryUpdated { scope_type, scope_id, .. }
+                    if scope_type == "session" && *scope_id == thread.id
+            )),
             "{events:?}"
         );
     }
@@ -8382,6 +8664,7 @@ mod tests {
                     visible_input: None,
                     kind: ArchcarInputKind::User,
                     session_kind: SessionKind::CLAUDE,
+                    verbatim: false,
                 },
                 &state,
             );
@@ -10037,6 +10320,7 @@ default = true
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 session_kind: SessionKind::CODEX,
+                verbatim: false,
             },
             &state,
         );

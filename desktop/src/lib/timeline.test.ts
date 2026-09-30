@@ -2,7 +2,10 @@
 import { describe, expect, it } from "vitest";
 import {
   isDisplayableTimelineItem,
+  nestTimelineItems,
   showsNewChatIntro,
+  showsRunning,
+  timelineScrollSignature,
   timelineWindow,
   withoutPlanSource,
 } from "./timeline";
@@ -188,5 +191,72 @@ describe("timelineWindow", () => {
 
   it("treats a negative window as empty rather than slicing from the front", () => {
     expect(timelineWindow(rows, -10)).toEqual({ visible: [], hidden: 500 });
+  });
+});
+
+describe("showsRunning", () => {
+  const command = item({ render_class: "command_card", status: "running" });
+  const background = item({ render_class: "background_card", status: "running" });
+
+  it("stops a tool card spinning once the agent is idle", () => {
+    expect(showsRunning(command, { idle: false, sessionAlive: true })).toBe(true);
+    expect(showsRunning(command, { idle: true, sessionAlive: true })).toBe(false);
+  });
+
+  it("keeps a background task running after the turn ends, while the session lives", () => {
+    expect(showsRunning(background, { idle: true, sessionAlive: true })).toBe(true);
+    expect(showsRunning(background, { idle: true, sessionAlive: false })).toBe(false);
+  });
+
+  it("never spins a finished card", () => {
+    const done = item({ render_class: "background_card", status: "failed" });
+    expect(showsRunning(done, { idle: false, sessionAlive: true })).toBe(false);
+  });
+});
+
+describe("timelineScrollSignature", () => {
+  it("moves when a nested row grows in place, at any depth", () => {
+    const outer = item({ id: "outer", render_class: "tool_card" });
+    const inner = item({ id: "inner", render_class: "tool_card", parent_id: "outer" });
+    const leaf = item({ id: "leaf", render_class: "command_card", parent_id: "inner", body: "a" });
+    const before = nestTimelineItems([outer, inner, leaf]);
+    const grown = nestTimelineItems([outer, inner, { ...leaf, body: "a\nb" }]);
+    const finished = nestTimelineItems([outer, inner, { ...leaf, status: "completed" }]);
+
+    const signature = (n: typeof before) => timelineScrollSignature(n.top, n.childrenOf);
+    expect(signature(grown)).not.toBe(signature(before));
+    expect(signature(finished)).not.toBe(signature(before));
+    // Same content, same signature: follow-bottom does not fire for nothing.
+    expect(signature(nestTimelineItems([outer, inner, leaf]))).toBe(signature(before));
+  });
+});
+
+describe("nestTimelineItems", () => {
+  it("puts a subagent's rows under the Agent card and keeps the rest in order", () => {
+    const agent = item({ id: "agent", render_class: "tool_card" });
+    const prompt = item({ id: "prompt", render_class: "subagent_card", parent_id: "agent" });
+    const call = item({ id: "call", render_class: "command_card", parent_id: "agent" });
+    const answer = item({ id: "answer", render_class: "assistant_chat" });
+
+    const nested = nestTimelineItems([agent, prompt, call, answer]);
+
+    expect(nested.top.map((row) => row.id)).toEqual(["agent", "answer"]);
+    expect(nested.childrenOf.get("agent")?.map((row) => row.id)).toEqual(["prompt", "call"]);
+  });
+
+  it("keeps a row whose parent is not in the list rather than losing it", () => {
+    const orphan = item({ id: "orphan", render_class: "command_card", parent_id: "gone" });
+    expect(nestTimelineItems([orphan]).top).toEqual([orphan]);
+  });
+
+  it("nests a subagent's own subagent under its card", () => {
+    const outer = item({ id: "outer", render_class: "tool_card" });
+    const inner = item({ id: "inner", render_class: "tool_card", parent_id: "outer" });
+    const leaf = item({ id: "leaf", render_class: "command_card", parent_id: "inner" });
+
+    const nested = nestTimelineItems([outer, inner, leaf]);
+
+    expect(nested.top.map((row) => row.id)).toEqual(["outer"]);
+    expect(nested.childrenOf.get("inner")?.map((row) => row.id)).toEqual(["leaf"]);
   });
 });

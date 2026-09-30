@@ -193,6 +193,12 @@ pub enum ArchcarRequest {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
         session_kind: SessionKind,
+        /// Deliver the text as written, the way `SendInput` does: no in-band
+        /// Archductor metadata request appended. The CLI sets it so an
+        /// operator's message reaches the agent the same whether it went
+        /// straight in or waited behind a busy turn. Absent means `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        verbatim: bool,
     },
     ListQueuedChatInputs {
         thread_id: i64,
@@ -660,9 +666,9 @@ pub enum ArchcarRequest {
         new_name: String,
     },
     /// Agent-supplied context metadata: the names a workspace/branch/chat should
-    /// carry and the workspace summary the next agent will read. This is the same
-    /// path the hidden `<archductor_metadata>` block takes, exposed so an agent
-    /// can drive it with a tool call instead of prose.
+    /// carry, the workspace summary the next agent will read, and the summary of
+    /// one chat. This is the same path the hidden `<archductor_metadata>` block
+    /// takes, exposed so an agent can drive it with a tool call instead of prose.
     ApplyAgentContext {
         workspace: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -675,6 +681,9 @@ pub enum ArchcarRequest {
         chat_title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+        /// Needs `thread_id`: the chat whose summary this is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_summary: Option<String>,
     },
     DuplicateWorkspace {
         workspace: String,
@@ -1601,6 +1610,9 @@ pub struct ArchcarWorkspaceSummary {
     /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_checks: Option<String>,
+    /// Per-outcome split of that rollup, for "X/Y passed, Z running".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_check_counts: Option<crate::github_pr::PullRequestCheckCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1630,6 +1642,10 @@ pub struct ArchcarProjectionItem {
     /// projected from provider events, so it never sees a `chat_messages.id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeline_seq: Option<i64>,
+    /// Id of the item this one belongs under: a subagent's messages and tool
+    /// calls name the Agent card that spawned them. Absent for top-level rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,
@@ -1717,6 +1733,9 @@ pub struct ArchcarChecksSummary {
     /// GitHub CI rollup at the last PR sync ("passing" | "failing" | "pending").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pull_request_checks: Option<String>,
+    /// Per-outcome split of that rollup, for "X/Y passed, Z running".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_check_counts: Option<crate::github_pr::PullRequestCheckCounts>,
     pub conflicting_workspaces: usize,
 }
 
@@ -2223,13 +2242,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             branch_name,
             chat_title,
             summary,
+            chat_summary,
         } => format!(
-            "apply_agent_context workspace={workspace} thread_id={} name={} branch={} title={} summary_chars={}",
+            "apply_agent_context workspace={workspace} thread_id={} name={} branch={} title={} summary_chars={} chat_summary_chars={}",
             thread_id.map(|id| id.to_string()).unwrap_or_else(|| "-".to_owned()),
             workspace_name.as_deref().unwrap_or("-"),
             branch_name.as_deref().unwrap_or("-"),
             chat_title.as_deref().unwrap_or("-"),
             summary.as_deref().map(str::len).unwrap_or_default(),
+            chat_summary.as_deref().map(str::len).unwrap_or_default(),
         ),
         ArchcarRequest::DuplicateWorkspace {
             workspace,
@@ -3364,6 +3385,7 @@ mod tests {
             visible_input: Some("visible run tests".to_owned()),
             kind: ArchcarInputKind::User,
             session_kind: SessionKind::CODEX,
+            verbatim: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"queue_chat_input\""));

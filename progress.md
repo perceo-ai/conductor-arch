@@ -30,17 +30,90 @@ paths and known rough edges.
 ## Archive hides, delete removes (2026-09-30)
 
 **Archive** now only hides a workspace from the sidebar: record, chats, branch,
-and worktree stay, and it lives in History (and the dashboard's Archived
-column) until restored. `--remove-worktree` is retired (ignored with a warning;
-the wire flag is refused). **Delete** removes the worktree from disk — dirty or
-locked trees are force-removed and the discarded-change count is printed — then
-drops the record, and errors if the directory survives. It stops the
-workspace's sessions first and refuses, naming pids, while any other process
-works inside the tree. `--delete-branch` stays opt-in.
+and worktree stay (only the repository's `archive` script runs), and it lives
+in History and the dashboard's Archived column until restored.
+`--remove-worktree` is retired (ignored with a warning; the wire flag is
+refused). **Delete** removes the worktree from disk — dirty or locked trees are
+force-removed and the discarded-change count is printed — then drops the record,
+and errors if the directory survives. The row reads `deleting` while files go,
+so a failed record drop never leaves it claiming a worktree that is gone. It
+stops the workspace's sessions first (a killed Claude session never restarts)
+and refuses, naming pids, while any other process works inside the tree.
+`--delete-branch` stays opt-in. On the wire, `delete_workspace` removes files
+only with `remove_worktree: true`; older clients' record-only deletes stay safe.
 
 The "removed" worktrees that came back were recreated by agents archive never
-stopped: a restarted Claude stream session kept its old pid in the database, so
-the stop signalled a dead process. The restart now writes the new pid back.
+stopped — the stale-PID bug fixed in the section below.
+
+## Reading the board from the CLI (2026-09-30)
+
+`archductor chat <ws>` prints a chat as turns (requests, prose, one line per
+tool call with a clipped result, errors and prompts called out) from the same
+projection the desktop timeline uses, with `--json` JSON Lines. `archductor
+status [ws] --json` reports each agent's liveness (asked of the daemon, PID as a
+fallback), last activity, idle time, current tool, state (`working`,
+`awaiting_input`, `finished`, `failed`, `stopped`), and any PR it opened. Plain
+`status` no longer shows the run script's "stopped" where the agent's state
+belongs. `session send` to a busy agent queues the message for the next turn
+boundary instead of timing out.
+
+Root cause of the wrong liveness: a Claude transport restart (permission-mode
+or model change) spawned a new process but left the old PID on the session row,
+so PID checks read live agents as dead, and stop/archive killed nothing while
+the real child kept running. The restart now records the new PID.
+
+## Branch prefixes and Full Disk Access (2026-09-30)
+
+A workspace created without a branch now gets the bare codename (`helix`) as
+its branch; the configured prefix is applied only when the agent renames it on
+the first message (`team/billing-fix`). The rename still recognises older
+`prefix/codename` branches. Previously the codename branch carried the prefix,
+and a prefix typed as `name/` built `name//helix`, which git refused at
+`worktree add` after the workspace row was already inserted. Prefixes are now
+trimmed of slashes, and branch validation follows git's ref rules, so a bad name
+fails before anything is created.
+
+macOS has no API that prompts for Full Disk Access. The daemon's probe now
+attempts a read of the TCC database when a folder is denied, which lists
+`archcar` in the pane (toggle off). The desktop card is one "Allow access"
+button that opens the pane and restarts the daemon when the window regains
+focus. The CLI still prints the grant instructions; it gains the pane listing
+through the same probe. Not yet smoke-tested on a Mac.
+
+## Agent activity in the chat (2026-09-30)
+
+Claude's stream-json carries more than the chat showed. Now surfaced, in core,
+the desktop, and `archcar chat-projection`:
+
+- **Tool output**: array-shaped results (Agent reports, MCP tools) fill their
+  card instead of leaving the call's input; `is_error` fails the card; a tool
+  card reads running until its result arrives.
+- **Background tasks**: `system/task_*` records for backgrounded commands and
+  agents project to a background card with progress, summary, output file, and
+  final status. It keeps running in the desktop after the turn ends while the
+  session lives. Foreground tasks stay folded into their tool card.
+- **Subagents**: records tagged `parent_tool_use_id` become subagent rows (no
+  more subagent prompts as user bubbles or reports as main answers). The daemon
+  sends `parent_id`; the desktop nests them in the Agent card and the CLI
+  indents them. `chat-projection --full` prints bodies untruncated.
+- **TodoWrite** cards show the checklist (fixture-tested only; Claude 2.1.283
+  `-p` does not offer TodoWrite).
+
+Stored events keep the classification they were parsed with, so chats from
+before this change still show old background records as hidden status rows.
+Not done: Codex plan updates / collab agents, ACP plans, the iOS client
+(decodes but ignores `parent_id`), and synthetic user records such as Stop-hook
+feedback still rendering as user bubbles.
+
+## PR checks status (2026-09-30)
+
+The PR bar and sidebar said "Checks unknown" (with a question-mark glyph) for
+PRs GitHub had checks for. The desktop preferred the local check script's
+process state (`exited`) over the GitHub rollup, a PR discovered by branch was
+recorded without its checks, and checks only synced at turn ends. Each PR now
+stores per-outcome counts; desktop and CLI show "Checks failing · 19/20 passed,
+1 failed"; the PR bar re-reads GitHub every minute while the PR is open; skipped
+jobs no longer turn a green rollup unknown; no-checks PRs get a muted PR glyph.
 
 ## Remote takeover and daemon updates (2026-09-29)
 
@@ -413,7 +486,14 @@ the naming pipeline no longer depends on the agent answering a one-shot ask.
   `ApplyAgentContext`) sets the summary and the names as a tool call, with the
   workspace resolved from `ARCHDUCTOR_WORKSPACE` or the session's cwd and the
   thread from `ARCHDUCTOR_THREAD_ID`. `archductor mcp serve --profile session`
-  exposes six tools; `--profile full` is the external surface.
+  exposes seven tools; `--profile full` is the external surface.
+- **Chat summaries (2026-09-30).** `set_chat_context` is the per-chat
+  counterpart: `ApplyAgentContext.chat_summary` stores an agent-authored
+  `session`-scope summary for the calling thread, which the briefing's Current
+  chat section (and so the desktop Summary tab) already reads. The workspace
+  summary is now framed as whole-branch, and the session prompt and SessionStart
+  hook list the branch's changed files (capped at 40) and replay both notes. One
+  pacing counter covers both; a write to either resets it.
   `archductor mcp register` adds Archductor through each client's own
   `claude mcp add` / `codex mcp add`, so it appears like any other MCP server,
   with a Settings card (Clients -> Host Access) over the same archcar RPCs.

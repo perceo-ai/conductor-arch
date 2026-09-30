@@ -569,6 +569,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "checks_state",
         "ALTER TABLE pull_requests ADD COLUMN checks_state TEXT",
     )?;
+    ensure_column(
+        conn,
+        "pull_requests",
+        "checks_counts_json",
+        "ALTER TABLE pull_requests ADD COLUMN checks_counts_json TEXT",
+    )?;
     // Providers ask in batches of questions with labelled options; the original
     // flat `choices_json` cannot hold that shape.
     ensure_column(
@@ -675,6 +681,25 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "workspaces",
         "summary_turns_since_write",
         "ALTER TABLE workspaces ADD COLUMN summary_turns_since_write INTEGER NOT NULL DEFAULT 3",
+    )?;
+    // The same pacing for each chat's own note. Chats keep their own counter
+    // because their notes are written independently: one chat revising its note
+    // must not hold back the reminder for the workspace or for another chat.
+    ensure_column(
+        conn,
+        "chat_threads",
+        "summary_turns_since_write",
+        "ALTER TABLE chat_threads ADD COLUMN summary_turns_since_write INTEGER NOT NULL DEFAULT 3",
+    )?;
+    // Whether the branch was generated from the workspace name rather than
+    // chosen by whoever created the workspace. Only a generated branch may be
+    // renamed by the naming path. NULL on rows created before this was
+    // recorded; those fall back to comparing the branch with the name.
+    ensure_column(
+        conn,
+        "workspaces",
+        "branch_generated",
+        "ALTER TABLE workspaces ADD COLUMN branch_generated INTEGER",
     )?;
     Ok(())
 }

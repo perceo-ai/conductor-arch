@@ -6,8 +6,8 @@ use archductor_core::archcar::harness_contract::{
     InteractionAnswer, ProviderInteractionResolution,
 };
 use archductor_core::archcar::protocol::{
-    ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarRequest, ArchcarResponse,
-    QueuedArchcarInput, WorkspaceChangeScope, WorkspaceGitAction,
+    ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarProjectionItem, ArchcarRequest,
+    ArchcarResponse, QueuedArchcarInput, WorkspaceChangeScope, WorkspaceGitAction,
 };
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
@@ -26,11 +26,11 @@ use archductor_core::settings::{
 use archductor_core::workspace::{
     CreateWorkspace, LinkedDirectory, LocalChatHistoryMessage, LocalChatHistorySummary,
     ProcessRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
-    WorkspaceStatusLine, WorkspaceStore, WorkspaceTimelineEvent,
+    WorkspaceStore, WorkspaceTimelineEvent,
 };
 use archductor_core::workspace_intel::TaskUpdate;
 use clap::{Parser, Subcommand, ValueEnum};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -38,6 +38,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod observe;
 
 #[derive(Debug, Parser)]
 #[command(name = "archductor")]
@@ -86,12 +88,44 @@ enum Command {
     Stop {
         workspace: String,
     },
+    /// Raw log of the latest run script or agent session. An agent session's
+    /// log is the provider's own stream; `archductor chat` is the readable form.
     Logs {
         workspace: String,
         #[arg(long)]
         run: bool,
         #[arg(long)]
         session: bool,
+    },
+    /// A chat as readable turns: user requests, agent prose, one line per tool
+    /// call with its result clipped, errors and prompts called out. Newest last.
+    Chat {
+        workspace: String,
+        /// Read the chat this session belongs to (the id `status` lists).
+        #[arg(long, conflicts_with = "thread")]
+        session: Option<i64>,
+        /// Read this chat thread. Default: the chat that streamed most recently.
+        #[arg(long)]
+        thread: Option<i64>,
+        /// Show the last K turns.
+        #[arg(long, default_value_t = 2, value_name = "K")]
+        tail: usize,
+        /// Show at most N steps per turn (the request is always kept; the
+        /// earliest steps are elided).
+        #[arg(long, default_value_t = archductor_core::chat_transcript::DEFAULT_MAX_TURN_ENTRIES, value_name = "N")]
+        steps: usize,
+        /// Only steps at or after this time (RFC 3339, e.g. 2026-09-30T08:00:00Z).
+        #[arg(long, value_name = "RFC3339")]
+        since: Option<String>,
+        /// JSON Lines: a `chat` header record, then one `turn` record per turn.
+        #[arg(long)]
+        json: bool,
+        /// Leave out the one-line thinking markers.
+        #[arg(long)]
+        no_thinking: bool,
+        /// Do not clip text or elide steps.
+        #[arg(long)]
+        full: bool,
     },
     Runs {
         workspace: String,
@@ -146,7 +180,16 @@ enum Command {
         #[arg(long, hide = true)]
         remove_worktree: bool,
     },
-    Status,
+    /// Every workspace with its branch, PR, run script, and what each agent is
+    /// doing, read from the daemon and the agent's stream rather than the
+    /// session table.
+    Status {
+        /// Only this workspace.
+        workspace: Option<String>,
+        /// One JSON document (schema_version 1) for programmatic use.
+        #[arg(long)]
+        json: bool,
+    },
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
@@ -322,9 +365,9 @@ enum HistoryCommand {
         #[arg(long)]
         workspace: Option<String>,
     },
-    Show {
-        process_id: i64,
-    },
+    /// The messages saved for a session. For the whole conversation (agent
+    /// replies, tool calls, results) run `archductor chat <workspace> --session <id>`.
+    Show { process_id: i64 },
 }
 
 #[derive(Debug, Subcommand)]
@@ -511,6 +554,10 @@ enum ArchcarCommand {
     /// Print the projected chat timeline for a thread.
     ChatProjection {
         thread_id: i64,
+        /// Print every body in full (command output, subagent reports)
+        /// instead of a one-line preview.
+        #[arg(long)]
+        full: bool,
     },
     /// List recent non-empty chats offered as attachable transcripts.
     ChatTranscripts {
@@ -1360,10 +1407,15 @@ enum SessionCommand {
         #[arg(long)]
         print_pty_path: bool,
     },
+    /// Send a message to an agent. A session busy mid-turn gets the message
+    /// queued and delivered at its next turn boundary; `--immediate` steers the
+    /// running turn instead.
     Send {
         workspace: String,
-        #[arg(long, value_parser = session_kind_parser(), default_value = "codex")]
-        kind: SessionKind,
+        /// Agent to message. Default: the provider of `--thread-id`, else of the
+        /// workspace's most recent chat, else codex.
+        #[arg(long, value_parser = session_kind_parser())]
+        kind: Option<SessionKind>,
         #[arg(long)]
         thread_id: Option<i64>,
         #[arg(long, value_enum, default_value_t = CliArchcarInputKind::User)]
@@ -1752,6 +1804,7 @@ fn run_cli() -> Result<()> {
                         visible_input,
                         kind: kind.into(),
                         session_kind,
+                        verbatim: false,
                     })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
@@ -2001,10 +2054,13 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::ListChatThreads { workspace })?,
                     );
                 }
-                ArchcarCommand::ChatProjection { thread_id } => {
-                    print_archcar_response(
-                        client.send(ArchcarRequest::GetChatProjection { thread_id })?,
-                    );
+                ArchcarCommand::ChatProjection { thread_id, full } => {
+                    match client.send(ArchcarRequest::GetChatProjection { thread_id })? {
+                        ArchcarResponse::ChatProjection { thread_id, items } => {
+                            print!("{}", format_chat_projection(thread_id, &items, full));
+                        }
+                        other => print_archcar_response(other),
+                    }
                 }
                 ArchcarCommand::ChatTranscripts { workspace, limit } => {
                     print_archcar_response(
@@ -3134,7 +3190,7 @@ fn run_cli() -> Result<()> {
                             pr.number,
                             pr.url,
                             pr.state,
-                            pr.checks_state.as_deref().unwrap_or("unknown")
+                            pr.checks_label().as_deref().unwrap_or("none reported")
                         ),
                         None => println!("No pull request recorded for {workspace}"),
                     }
@@ -3279,26 +3335,81 @@ fn run_cli() -> Result<()> {
                     immediate,
                     message,
                 } => {
-                    let kind: SessionKind = kind;
+                    let kind = resolve_send_kind(&store, &workspace, kind, thread_id)?;
                     anyhow::ensure!(
                         matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE),
                         "session send supports codex and claude"
                     );
                     let input = message_text_or_stdin(message)?;
                     let client = ArchcarClient::from_paths(&paths);
+                    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
                     let (session_id, resolved_thread_id) = ensure_session_send_target(
-                        &client,
-                        &store,
-                        &workspace,
-                        kind,
-                        thread_id,
-                        Duration::from_millis(timeout_ms),
+                        &client, &store, &workspace, kind, thread_id, deadline,
                     )?;
+                    let readiness = archcar_session_readiness(&client, session_id, deadline)?;
+                    let thread_has_visible_history =
+                        !store.list_chat_messages(resolved_thread_id)?.is_empty();
+                    let input_kind: ArchcarInputKind = input_kind.into();
+                    match session_send_route(
+                        &readiness,
+                        immediate,
+                        &input_kind,
+                        session_send_waits_for_ready(kind, thread_has_visible_history),
+                    ) {
+                        SessionSendRoute::Now => {}
+                        SessionSendRoute::WaitForReady => {
+                            wait_for_archcar_session_ready(&client, session_id, deadline)?
+                        }
+                        SessionSendRoute::Queue => {
+                            let queued = match client.send(ArchcarRequest::QueueChatInput {
+                                thread_id: resolved_thread_id,
+                                input,
+                                visible_input,
+                                kind: input_kind,
+                                session_kind: kind,
+                                verbatim: true,
+                            })? {
+                                ArchcarResponse::QueuedChatInput { input } => input,
+                                ArchcarResponse::Error { message } => anyhow::bail!(message),
+                                other => anyhow::bail!("unexpected archcar response: {other:?}"),
+                            };
+                            // The daemon delivers straight away if the turn
+                            // ended in the meantime; say which happened.
+                            let waiting =
+                                match client.send(ArchcarRequest::ListQueuedChatInputs {
+                                    thread_id: resolved_thread_id,
+                                })? {
+                                    ArchcarResponse::QueuedChatInputs { inputs, .. } => inputs
+                                        .iter()
+                                        .position(|input| input.id == queued.id)
+                                        .map(|index| (index + 1, inputs.len())),
+                                    _ => None,
+                                };
+                            match waiting {
+                                Some((position, total)) => println!(
+                                    "queued {} message #{} for session {} thread {}: session is busy ({}); \
+                                     delivers at the next turn boundary (position {position} of {total})",
+                                    session_kind_label(kind),
+                                    queued.id,
+                                    session_id,
+                                    resolved_thread_id,
+                                    readiness.state.as_str(),
+                                ),
+                                None => println!(
+                                    "sent {} message to session {} thread {} (queued, delivered as the turn ended)",
+                                    session_kind_label(kind),
+                                    session_id,
+                                    resolved_thread_id
+                                ),
+                            }
+                            return Ok(());
+                        }
+                    }
                     match client.send(ArchcarRequest::SendInput {
                         session_id,
                         input,
                         visible_input,
-                        kind: input_kind.into(),
+                        kind: input_kind,
                         delivery: cli_input_delivery(immediate),
                     })? {
                         ArchcarResponse::Ack => {
@@ -3648,9 +3759,45 @@ fn run_cli() -> Result<()> {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
             archive_workspace_command(&store, &name, remove_worktree)?;
         }
-        Command::Status => {
-            let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
-            print_status(store.list_status()?);
+        Command::Status { workspace, json } => {
+            let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
+            let report = observe::status_report(&paths, &store, workspace.as_deref())?;
+            if json {
+                print!("{}", observe::render_status_json(&report)?);
+            } else {
+                print!("{}", observe::render_status_text(&report));
+            }
+        }
+        Command::Chat {
+            workspace,
+            session,
+            thread,
+            tail,
+            steps,
+            since,
+            json,
+            no_thinking,
+            full,
+        } => {
+            let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
+            print!(
+                "{}",
+                observe::run_chat(
+                    &paths,
+                    &store,
+                    observe::ChatArgs {
+                        workspace,
+                        session,
+                        thread,
+                        tail,
+                        steps,
+                        since,
+                        json,
+                        no_thinking,
+                        full,
+                    },
+                )?
+            );
         }
         Command::Checkpoint { command } => {
             let store = WorkspaceStore::open_app_with_logs(paths.database_path, paths.logs_dir)?;
@@ -3802,10 +3949,14 @@ fn claude_hook_context_reply(thread_id: i64, stdin: &str) -> Option<serde_json::
             &archductor_core::workspace::archductor_session_system_prompt(
                 &gaps.workspace,
                 gaps.summary.as_deref(),
+                gaps.chat_summary.as_deref(),
+                &store
+                    .branch_changed_files(&gaps.workspace)
+                    .unwrap_or_default(),
             ),
         )),
         ClaudeHookRequest::PostToolUse if !gaps.is_empty() => {
-            let _ = store.note_context_nudge(thread_id);
+            let _ = store.note_context_nudge(thread_id, &gaps);
             Some(encode_claude_hook_context(
                 "PostToolUse",
                 &archductor_core::workspace::archductor_context_nudge(&gaps),
@@ -3875,7 +4026,8 @@ fn local_store_command_name(command: &Command) -> Option<&'static str> {
         Command::Open { .. } => Some("open"),
         Command::Review { .. } => Some("review"),
         Command::Archive { .. } => Some("archive"),
-        Command::Status => Some("status"),
+        Command::Status { .. } => Some("status"),
+        Command::Chat { .. } => Some("chat"),
         Command::Checkpoint { .. } => Some("checkpoint"),
         Command::Conflicts { .. } => Some("conflicts"),
         Command::Discard { .. } => Some("discard"),
@@ -3966,6 +4118,74 @@ fn render_layout_preset_list(
             )
         })
         .collect()
+}
+
+/// The chat timeline as text. A card leads with its title (the command, the
+/// file, the task), and a subagent's items sit indented under the Agent card
+/// that spawned them, the way the desktop app nests them.
+fn format_chat_projection(thread_id: i64, items: &[ArchcarProjectionItem], full: bool) -> String {
+    let ids = items
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut children = HashMap::<&str, Vec<&ArchcarProjectionItem>>::new();
+    let mut top = Vec::new();
+    for item in items {
+        match item.parent_id.as_deref() {
+            Some(parent) if parent != item.id && ids.contains(parent) => {
+                children.entry(parent).or_default().push(item);
+            }
+            _ => top.push(item),
+        }
+    }
+    let mut out = format!(
+        "chat_projection thread {} items {}\n",
+        thread_id,
+        items.len()
+    );
+    let mut stack = top
+        .into_iter()
+        .rev()
+        .map(|item| (item, 0))
+        .collect::<Vec<_>>();
+    while let Some((item, depth)) = stack.pop() {
+        out.push_str(&format_chat_projection_item(item, depth, full));
+        if let Some(nested) = children.get(item.id.as_str()) {
+            stack.extend(nested.iter().rev().map(|child| (*child, depth + 1)));
+        }
+    }
+    out
+}
+
+fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full: bool) -> String {
+    let indent = "  ".repeat(depth);
+    let is_text = matches!(
+        item.render_class.as_str(),
+        "user_chat" | "assistant_chat" | "reasoning_card"
+    );
+    let title = if is_text { "" } else { item.title.trim() };
+    let mut line = format!("{indent}[{}] {}", item.render_class, item.status);
+    if !title.is_empty() {
+        line.push(' ');
+        line.push_str(title.lines().next().unwrap_or_default());
+    }
+    let body = item.body.trim_end();
+    if full {
+        let mut out = format!("{line}\n");
+        for body_line in body.lines() {
+            out.push_str(&format!("{indent}    {body_line}\n"));
+        }
+        return out;
+    }
+    let preview = body.replace('\n', " ");
+    let preview: String = preview.chars().take(80).collect();
+    if preview.trim().is_empty() {
+        format!("{line}\n")
+    } else if title.is_empty() {
+        format!("{line} {preview}\n")
+    } else {
+        format!("{line}: {preview}\n")
+    }
 }
 
 fn print_archcar_response(response: ArchcarResponse) {
@@ -4157,12 +4377,7 @@ fn print_archcar_response(response: ArchcarResponse) {
             }
         }
         ArchcarResponse::ChatProjection { thread_id, items } => {
-            println!("chat_projection thread {} items {}", thread_id, items.len());
-            for item in items {
-                let preview = item.body.replace('\n', " ");
-                let preview: String = preview.chars().take(80).collect();
-                println!("[{}] {} {}", item.render_class, item.status, preview);
-            }
+            print!("{}", format_chat_projection(thread_id, &items, false));
         }
         ArchcarResponse::ChatTranscripts {
             workspace,
@@ -5199,7 +5414,7 @@ fn print_checks_summary(summary: archductor_core::workspace::ChecksSummary) {
             println!("PR:        #{} {} ({})", pr.number, pr.url, pr.state);
             println!(
                 "PR checks: {}",
-                pr.checks_state
+                pr.checks_label()
                     .as_deref()
                     .unwrap_or("unknown (refresh with: archductor pr view)")
             );
@@ -6098,39 +6313,6 @@ fn print_mcp_status(status: archductor_core::mcp::McpStatus) {
     }
 }
 
-fn print_status(lines: Vec<WorkspaceStatusLine>) {
-    if lines.is_empty() {
-        println!("No workspaces found. Run: archductor workspace create <repo> --name <name> --branch <branch>");
-        return;
-    }
-    for line in lines {
-        let ws = &line.workspace;
-        let pr = line
-            .pull_request
-            .as_ref()
-            .map(|pr| format!("PR #{} ({})", pr.number, pr.state))
-            .unwrap_or_else(|| "no PR".to_owned());
-        let push = match &line.branch_push_state {
-            Some(state) if !state.has_upstream => "no upstream".to_owned(),
-            Some(state) => format!("↑{} ↓{}", state.ahead, state.behind),
-            None => String::new(),
-        };
-        let run = if line.run_running {
-            "running"
-        } else {
-            "stopped"
-        };
-        let sessions = match line.active_sessions {
-            0 => "no session".to_owned(),
-            n => format!("{n} session(s)"),
-        };
-        println!(
-            "{:<16} {:<10} {:<28} {:<14} {:<10} {:<12} {} todo(s)  {}",
-            ws.name, ws.status, ws.branch, push, run, sessions, line.open_todos, pr,
-        );
-    }
-}
-
 impl From<CliArchcarInputKind> for ArchcarInputKind {
     fn from(value: CliArchcarInputKind) -> Self {
         match value {
@@ -6490,9 +6672,8 @@ fn ensure_session_send_target(
     workspace: &str,
     kind: SessionKind,
     thread_id: Option<i64>,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(i64, i64)> {
-    let deadline = Instant::now() + timeout;
     let response = if let Some(thread_id) = thread_id {
         client.send(ArchcarRequest::EnsureChatThreadSession {
             workspace: workspace.to_owned(),
@@ -6529,15 +6710,111 @@ fn ensure_session_send_target(
         ArchcarResponse::Error { message } => anyhow::bail!(message),
         other => anyhow::bail!("unexpected archcar response: {:?}", other),
     };
-    let thread_has_visible_history = !store.list_chat_messages(target.1)?.is_empty();
-    if session_send_waits_for_ready(kind, thread_has_visible_history) {
-        wait_for_archcar_session_ready(client, target.0, deadline)?;
-    }
     Ok(target)
 }
 
+/// A first Claude message on a fresh chat is accepted before the session
+/// reports ready; everything else needs a session between turns.
 fn session_send_waits_for_ready(kind: SessionKind, thread_has_visible_history: bool) -> bool {
     !matches!(kind, SessionKind::CLAUDE) || thread_has_visible_history
+}
+
+/// The session's state at the moment of sending.
+struct SessionReadiness {
+    ready: bool,
+    state: archductor_core::session_state::AgentSessionState,
+}
+
+/// The session's state now. A session spawned a moment ago may not be
+/// registered with the daemon yet, so "unknown" is retried until `deadline`.
+fn archcar_session_readiness(
+    client: &ArchcarClient,
+    session_id: i64,
+    deadline: Instant,
+) -> Result<SessionReadiness> {
+    loop {
+        match client.send(ArchcarRequest::GetSessionStatus { session_id })? {
+            ArchcarResponse::SessionStatus {
+                status,
+                runtime_state,
+                ready,
+                ..
+            } => {
+                anyhow::ensure!(
+                    !archcar_status_is_terminal(&status, runtime_state),
+                    "session {session_id} is not running (status={status} state={}); \
+                     send again without --thread-id to start a new one",
+                    runtime_state.as_str()
+                );
+                return Ok(SessionReadiness {
+                    ready,
+                    state: runtime_state,
+                });
+            }
+            ArchcarResponse::Error { message }
+                if message.contains("unknown session") && Instant::now() < deadline => {}
+            ArchcarResponse::Error { message } => {
+                anyhow::bail!("session {session_id} does not exist: {message}")
+            }
+            other => anyhow::bail!("unexpected archcar response: {other:?}"),
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SessionSendRoute {
+    /// Write the input to the session now.
+    Now,
+    /// The session is still starting, or the input is raw terminal bytes
+    /// (which cannot be queued): wait for it to be ready, then write it.
+    WaitForReady,
+    /// The agent is mid-turn. Persist the message in the chat's queue; the
+    /// daemon delivers it at the next turn boundary, so steering a busy agent
+    /// never times out.
+    Queue,
+}
+
+fn session_send_route(
+    readiness: &SessionReadiness,
+    immediate: bool,
+    input_kind: &ArchcarInputKind,
+    waits_for_ready: bool,
+) -> SessionSendRoute {
+    use archductor_core::session_state::AgentSessionState;
+    if readiness.ready || immediate || !waits_for_ready {
+        SessionSendRoute::Now
+    } else if *input_kind == ArchcarInputKind::RawTerminal
+        // A booting session has no turn to wait behind. Its first message
+        // goes in directly once it is up, exactly as before queueing existed.
+        || readiness.state == AgentSessionState::Starting
+    {
+        SessionSendRoute::WaitForReady
+    } else {
+        SessionSendRoute::Queue
+    }
+}
+
+/// `--kind` when given; otherwise the provider of the chat being messaged, so
+/// `archductor session send <ws> "..."` reaches the agent already working there.
+fn resolve_send_kind(
+    store: &WorkspaceStore,
+    workspace: &str,
+    kind: Option<SessionKind>,
+    thread_id: Option<i64>,
+) -> Result<SessionKind> {
+    if let Some(kind) = kind {
+        return Ok(kind);
+    }
+    let provider = match thread_id {
+        Some(thread_id) => Some(store.get_chat_thread_record(thread_id)?.provider),
+        None => store
+            .list_chat_threads(workspace)?
+            .into_iter()
+            .map(|thread| thread.provider)
+            .find(|provider| provider == "claude" || provider == "codex"),
+    };
+    Ok(provider.map_or(SessionKind::CODEX, |provider| SessionKind::new(&provider)))
 }
 
 fn wait_for_archcar_session_ready(
@@ -6781,6 +7058,61 @@ fn print_setup(report: doctor::SetupReport) {
 
 #[cfg(test)]
 mod tests {
+    use super::{format_chat_projection, ArchcarProjectionItem};
+
+    fn projection_item(
+        id: &str,
+        render_class: &str,
+        title: &str,
+        body: &str,
+        parent_id: Option<&str>,
+    ) -> ArchcarProjectionItem {
+        ArchcarProjectionItem {
+            id: id.to_owned(),
+            sequence: 0,
+            render_class: render_class.to_owned(),
+            role_label: String::new(),
+            title: title.to_owned(),
+            body: body.to_owned(),
+            status: "complete".to_owned(),
+            stream_state: "complete".to_owned(),
+            timeline_seq: None,
+            parent_id: parent_id.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn chat_projection_names_each_card_and_nests_subagent_items() {
+        let items = vec![
+            projection_item(
+                "agent",
+                "tool_card",
+                "Agent Audit",
+                "Report line 1\nline 2",
+                None,
+            ),
+            projection_item("orphan", "command_card", "Bash ls", "", Some("missing")),
+            projection_item("child", "command_card", "Bash rg x", "hit", Some("agent")),
+        ];
+
+        assert_eq!(
+            format_chat_projection(7, &items, false),
+            "chat_projection thread 7 items 3\n\
+             [tool_card] complete Agent Audit: Report line 1 line 2\n\
+             \x20 [command_card] complete Bash rg x: hit\n\
+             [command_card] complete Bash ls\n"
+        );
+        assert_eq!(
+            format_chat_projection(7, &[items[0].clone(), items[2].clone()], true),
+            "chat_projection thread 7 items 2\n\
+             [tool_card] complete Agent Audit\n\
+             \x20   Report line 1\n\
+             \x20   line 2\n\
+             \x20 [command_card] complete Bash rg x\n\
+             \x20     hit\n"
+        );
+    }
+
     /// `service doctor` exists to expose a daemon whose file access differs from
     /// the calling shell's. Spawning a daemon to answer the question defeats it:
     /// the child inherits the shell's grants and reports "ok" for the very
@@ -7672,7 +8004,7 @@ mod tests {
         };
 
         assert_eq!(workspace, "berlin");
-        assert_eq!(kind, SessionKind::CLAUDE);
+        assert_eq!(kind, Some(SessionKind::CLAUDE));
         assert_eq!(thread_id, Some(42));
         assert_eq!(input_kind, CliArchcarInputKind::ReviewPrompt);
         assert_eq!(visible_input.as_deref(), Some("Review selected comments"));
@@ -7722,6 +8054,53 @@ mod tests {
     }
 
     #[test]
+    fn session_send_queues_for_a_busy_session_instead_of_waiting() {
+        use archductor_core::session_state::AgentSessionState;
+        let busy = SessionReadiness {
+            ready: false,
+            state: AgentSessionState::ToolRunning,
+        };
+        let idle = SessionReadiness {
+            ready: true,
+            state: AgentSessionState::WaitingForInput,
+        };
+        let user = ArchcarInputKind::User;
+
+        assert_eq!(
+            session_send_route(&busy, false, &user, true),
+            SessionSendRoute::Queue
+        );
+        assert_eq!(
+            session_send_route(&idle, false, &user, true),
+            SessionSendRoute::Now
+        );
+        // Steering writes into the running turn.
+        assert_eq!(
+            session_send_route(&busy, true, &user, true),
+            SessionSendRoute::Now
+        );
+        // A fresh Claude chat takes its first message before it reports ready.
+        assert_eq!(
+            session_send_route(&busy, false, &user, false),
+            SessionSendRoute::Now
+        );
+        assert_eq!(
+            session_send_route(&busy, false, &ArchcarInputKind::RawTerminal, true),
+            SessionSendRoute::WaitForReady
+        );
+        // A session still booting is not busy: its first message waits for it
+        // and goes in directly, keeping the first-turn prefix contract.
+        let starting = SessionReadiness {
+            ready: false,
+            state: AgentSessionState::Starting,
+        };
+        assert_eq!(
+            session_send_route(&starting, false, &user, true),
+            SessionSendRoute::WaitForReady
+        );
+    }
+
+    #[test]
     fn cli_claude_session_send_does_not_wait_for_ready_before_first_input() {
         assert!(!session_send_waits_for_ready(SessionKind::CLAUDE, false));
         assert!(session_send_waits_for_ready(SessionKind::CLAUDE, true));
@@ -7741,7 +8120,7 @@ mod tests {
         else {
             return None;
         };
-        if kind == SessionKind::CLAUDE {
+        if kind == Some(SessionKind::CLAUDE) {
             thread_id.map(|thread_id| (thread_id, message.join(" ")))
         } else {
             None

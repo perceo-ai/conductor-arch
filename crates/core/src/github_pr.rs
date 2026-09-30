@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,62 @@ impl PullRequestCheckRun {
             self.status.to_ascii_lowercase().as_str(),
             "pass" | "passed" | "success" | "successful" | "completed"
         )
+    }
+
+    /// Ran to a verdict that neither blocks nor counts as a pass — GitHub
+    /// greys these out and still lets the PR merge.
+    pub fn is_skipped(&self) -> bool {
+        matches!(
+            self.status.to_ascii_lowercase().as_str(),
+            "skipped" | "neutral"
+        )
+    }
+}
+
+/// How a PR's check runs split at the last sync. `total` includes runs in a
+/// vocabulary we do not recognise, so they still count against "X/Y passed".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequestCheckCounts {
+    pub total: i64,
+    pub passed: i64,
+    pub failed: i64,
+    pub pending: i64,
+    pub skipped: i64,
+}
+
+impl PullRequestCheckCounts {
+    pub fn from_runs(checks: &[PullRequestCheckRun]) -> Self {
+        let count = |pred: fn(&PullRequestCheckRun) -> bool| {
+            checks.iter().filter(|check| pred(check)).count() as i64
+        };
+        Self {
+            total: checks.len() as i64,
+            passed: count(PullRequestCheckRun::is_success),
+            failed: count(PullRequestCheckRun::is_failure),
+            pending: count(PullRequestCheckRun::is_pending),
+            skipped: count(PullRequestCheckRun::is_skipped),
+        }
+    }
+
+    /// "11/20 passed, 1 failed, 8 running" — skipped runs are left out of the
+    /// denominator the way GitHub leaves them out of its own tally.
+    pub fn label(&self) -> String {
+        let ran = self.total - self.skipped;
+        // "0/0 passed" says nothing; a skipped-only PR reads "2 skipped".
+        let mut parts = Vec::new();
+        if ran > 0 {
+            parts.push(format!("{}/{} passed", self.passed, ran));
+        }
+        if self.failed > 0 {
+            parts.push(format!("{} failed", self.failed));
+        }
+        if self.pending > 0 {
+            parts.push(format!("{} running", self.pending));
+        }
+        if self.skipped > 0 {
+            parts.push(format!("{} skipped", self.skipped));
+        }
+        parts.join(", ")
     }
 }
 
@@ -246,6 +303,8 @@ pub(crate) fn parse_pull_request_readiness(output: &str) -> Result<PullRequestRe
 /// Collapse a PR's check runs to one word: `failing` beats `pending` beats
 /// `passing`; no checks at all is `None` (unknown, not passing — a repo with
 /// no CI configured must not render as green).
+/// Skipped and neutral runs do not block (GitHub merges past them), but a PR
+/// whose every run was skipped has not passed anything either.
 pub(crate) fn summarize_check_runs(checks: &[PullRequestCheckRun]) -> Option<String> {
     if checks.is_empty() {
         return None;
@@ -256,20 +315,29 @@ pub(crate) fn summarize_check_runs(checks: &[PullRequestCheckRun]) -> Option<Str
     if checks.iter().any(PullRequestCheckRun::is_pending) {
         return Some("pending".to_owned());
     }
-    if checks.iter().all(PullRequestCheckRun::is_success) {
+    if checks.iter().any(PullRequestCheckRun::is_success)
+        && checks
+            .iter()
+            .all(|check| check.is_success() || check.is_skipped())
+    {
         return Some("passing".to_owned());
     }
     None
 }
 
-/// `gh pr view --json state,statusCheckRollup` → (state, rollup summary).
-/// The two are fetched in one call so the PR chip's state and its checks can
-/// never disagree about which snapshot they came from.
+/// `gh pr view --json state,statusCheckRollup` → (state, rollup summary,
+/// per-outcome counts). Fetched in one call so the PR chip's state and its
+/// checks can never disagree about which snapshot they came from. Counts are
+/// `None` when the PR reports no checks at all.
 pub(crate) fn parse_pull_request_state_and_checks(
     output: &str,
-) -> (Option<String>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<PullRequestCheckCounts>,
+) {
     let Ok(value) = serde_json::from_str::<Value>(output) else {
-        return (None, None);
+        return (None, None, None);
     };
     let state = json_string(&value, "state").map(|state| state.to_ascii_lowercase());
     let checks = json_array_or_nodes(value.get("statusCheckRollup"))
@@ -277,7 +345,8 @@ pub(crate) fn parse_pull_request_state_and_checks(
         .filter(|item| !is_deployment_rollup_item(item))
         .filter_map(parse_pull_request_rollup_check)
         .collect::<Vec<_>>();
-    (state, summarize_check_runs(&checks))
+    let counts = (!checks.is_empty()).then(|| PullRequestCheckCounts::from_runs(&checks));
+    (state, summarize_check_runs(&checks), counts)
 }
 
 pub(crate) fn parse_pull_request_review_threads(
@@ -962,32 +1031,76 @@ mod tests {
             summarize_check_runs(&[run("SUCCESS"), run("IN_PROGRESS"), run("FAILURE")]).as_deref(),
             Some("failing")
         );
-        // A status outside the known vocabulary must not read as green.
+        // Skipped and neutral jobs do not block a merge on GitHub, so they
+        // must not drag an otherwise green PR down to "unknown".
         assert_eq!(
-            summarize_check_runs(&[run("SUCCESS"), run("NEUTRAL")]),
-            None
+            summarize_check_runs(&[run("SUCCESS"), run("SKIPPED"), run("NEUTRAL")]).as_deref(),
+            Some("passing")
+        );
+        // ...but nothing ran at all is not a pass.
+        assert_eq!(summarize_check_runs(&[run("SKIPPED")]), None);
+        // A status outside the known vocabulary must not read as green.
+        assert_eq!(summarize_check_runs(&[run("SUCCESS"), run("STALE")]), None);
+    }
+
+    #[test]
+    fn check_counts_label_reads_like_the_github_tally() {
+        let counts = PullRequestCheckCounts::from_runs(&[
+            run("SUCCESS"),
+            run("SUCCESS"),
+            run("FAILURE"),
+            run("IN_PROGRESS"),
+            run("SKIPPED"),
+            run("STALE"),
+        ]);
+        assert_eq!(
+            counts,
+            PullRequestCheckCounts {
+                total: 6,
+                passed: 2,
+                failed: 1,
+                pending: 1,
+                skipped: 1,
+            }
+        );
+        assert_eq!(counts.label(), "2/5 passed, 1 failed, 1 running, 1 skipped");
+        assert_eq!(
+            PullRequestCheckCounts::from_runs(&[run("SUCCESS")]).label(),
+            "1/1 passed"
+        );
+        // Everything skipped: no zero-denominator "0/0 passed".
+        assert_eq!(
+            PullRequestCheckCounts::from_runs(&[run("SKIPPED"), run("NEUTRAL")]).label(),
+            "2 skipped"
         );
     }
 
     #[test]
     fn parse_pull_request_state_and_checks_reads_one_gh_snapshot() {
-        let (state, checks) = parse_pull_request_state_and_checks(
+        // Shape `gh` really emits: a running CheckRun carries an empty
+        // conclusion next to its IN_PROGRESS status.
+        let (state, checks, counts) = parse_pull_request_state_and_checks(
             r#"{"state":"OPEN","statusCheckRollup":[
-                {"name":"unit","conclusion":"SUCCESS"},
-                {"name":"desktop","status":"IN_PROGRESS"}
+                {"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS"},
+                {"__typename":"CheckRun","name":"desktop","status":"IN_PROGRESS","conclusion":""}
             ]}"#,
         );
         assert_eq!(state.as_deref(), Some("open"));
         assert_eq!(checks.as_deref(), Some("pending"));
+        assert_eq!(
+            counts.map(|c| (c.total, c.passed, c.pending)),
+            Some((2, 1, 1))
+        );
 
-        let (state, checks) =
+        let (state, checks, counts) =
             parse_pull_request_state_and_checks(r#"{"state":"MERGED","statusCheckRollup":[]}"#);
         assert_eq!(state.as_deref(), Some("merged"));
         assert_eq!(checks, None);
+        assert_eq!(counts, None);
 
         assert_eq!(
             parse_pull_request_state_and_checks("not json"),
-            (None, None)
+            (None, None, None)
         );
     }
 
