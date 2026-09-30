@@ -33,6 +33,7 @@ afterEach(() => {
   dispose = undefined;
   document.body.innerHTML = "";
   openSettings.mockClear();
+  restartDaemon.mockClear();
 });
 
 function button(host: HTMLElement, label: string): HTMLButtonElement | undefined {
@@ -53,15 +54,32 @@ describe("PermissionCard", () => {
   it("opens settings when asked", () => {
     const host = mount(null);
 
-    button(host, "Open Settings")!.click();
+    button(host, "Allow access")!.click();
 
     expect(openSettings).toHaveBeenCalled();
+  });
+
+  it("restarts the daemon when the user comes back from settings", async () => {
+    const host = mount(null);
+    window.dispatchEvent(new Event("focus"));
+    expect(restartDaemon).not.toHaveBeenCalled();
+
+    button(host, "Allow access")!.click();
+    await vi.waitFor(() => expect(openSettings).toHaveBeenCalled());
+    await Promise.resolve();
+    window.dispatchEvent(new Event("focus"));
+    await vi.waitFor(() => expect(restartDaemon).toHaveBeenCalledTimes(1));
+
+    // Only once per trip to the pane.
+    window.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+    expect(restartDaemon).toHaveBeenCalledTimes(1);
   });
 
   it("offers no local buttons for a remote daemon", () => {
     const host = mount("server:7420");
 
-    expect(button(host, "Open Settings")).toBeUndefined();
+    expect(button(host, "Allow access")).toBeUndefined();
     expect(host.textContent).toContain("server:7420");
   });
 
