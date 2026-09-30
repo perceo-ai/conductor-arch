@@ -35,6 +35,7 @@ const refreshes = () => send.mock.calls.filter(([request]) => request.type === "
 
 describe("WorkspacePrBar", () => {
   it("re-reads a PR from GitHub as soon as it appears, not on the next minute tick", async () => {
+    setRow({ additions: 0, deletions: 0 });
     const host = document.createElement("div");
     document.body.append(host);
     dispose = render(() => <WorkspacePrBar workspace="demo" />, host);
@@ -46,5 +47,30 @@ describe("WorkspacePrBar", () => {
     setRow({ prNumber: 152, prState: "open", additions: 3, deletions: 1 });
 
     await vi.waitFor(() => expect(refreshes()).toBe(1));
+
+    // The agent's next edits update the row; that is not a reason to ask
+    // GitHub again (the minute poll covers an open PR).
+    setRow({ prNumber: 152, prState: "open", additions: 8, deletions: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(refreshes()).toBe(1);
+  });
+
+  it("looks for a PR as soon as a clean workspace gains changes", async () => {
+    setRow({ additions: 0, deletions: 0 });
+    const host = document.createElement("div");
+    document.body.append(host);
+    dispose = render(() => <WorkspacePrBar workspace="demo" />, host);
+
+    await Promise.resolve();
+    expect(refreshes()).toBe(0);
+
+    // The branch now has work; a PR may have been opened outside the app.
+    setRow({ additions: 5, deletions: 2 });
+    await vi.waitFor(() => expect(refreshes()).toBe(1));
+
+    // More edits are not a new reason to ask.
+    setRow({ additions: 9, deletions: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(refreshes()).toBe(1);
   });
 });
