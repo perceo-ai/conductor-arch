@@ -72,6 +72,9 @@ archductor archcar queue remove <queue-id>
 `session send` to an agent that is mid-turn does not wait for it: the message
 goes into that queue and the command says so (`queued claude message #7 ...
 delivers at the next turn boundary`). It fails only when the session is gone.
+Either way the agent receives exactly the text you sent; a session that is
+still starting is waited for rather than queued, so its first message goes in
+the same way it always has.
 Without `--kind`, it messages the provider of `--thread-id`, or of the
 workspace's most recent chat.
 
