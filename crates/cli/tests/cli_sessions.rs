@@ -668,10 +668,10 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
         .map(|line| serde_json::from_str::<String>(line).unwrap())
         .collect::<Vec<_>>();
     assert_eq!(captured.len(), 2);
-    // Archductor may wrap a request with its general prompt or a metadata
-    // request; the order and the text are what this is about.
-    assert!(captured[0].contains("Start the long task"), "{captured:?}");
-    assert!(captured[1].starts_with("Also run clippy"), "{captured:?}");
+    // The queued message reaches the agent exactly as sent: no metadata
+    // request appended, the same as a message that went straight in.
+    assert!(captured[0].ends_with("Start the long task"), "{captured:?}");
+    assert_eq!(captured[1], "Also run clippy", "{captured:?}");
 
     // The daemon records the delivered message just after the provider gets
     // it, so give the transcript a moment to catch up.

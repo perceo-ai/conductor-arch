@@ -193,6 +193,12 @@ pub enum ArchcarRequest {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
         session_kind: SessionKind,
+        /// Deliver the text as written, the way `SendInput` does: no in-band
+        /// Archductor metadata request appended. The CLI sets it so an
+        /// operator's message reaches the agent the same whether it went
+        /// straight in or waited behind a busy turn. Absent means `false`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        verbatim: bool,
     },
     ListQueuedChatInputs {
         thread_id: i64,
@@ -3347,6 +3353,7 @@ mod tests {
             visible_input: Some("visible run tests".to_owned()),
             kind: ArchcarInputKind::User,
             session_kind: SessionKind::CODEX,
+            verbatim: false,
         };
         let json = serde_json::to_string(&request).unwrap();
         assert!(json.contains("\"type\":\"queue_chat_input\""));

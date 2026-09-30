@@ -199,17 +199,17 @@ pub fn build_chat_transcript(
             });
         }
         let turn = turns.last_mut().expect("a turn was just ensured");
-        if creates_pull_request(item) {
+        let target = tool_use_ids
+            .get(&item.id)
+            .and_then(|use_id| targets.get(use_id))
+            .map(String::as_str);
+        if creates_pull_request(item, target) {
             for url in find_pr_urls(&item.body) {
                 if !turn.pr_urls.contains(&url) {
                     turn.pr_urls.push(url);
                 }
             }
         }
-        let target = tool_use_ids
-            .get(&item.id)
-            .and_then(|use_id| targets.get(use_id))
-            .map(String::as_str);
         if let Some(mut entry) = transcript_entry(item, target, root.as_deref(), options) {
             entry.nested = nested;
             entry.at_ms = at_ms;
@@ -548,23 +548,24 @@ fn echoes_input(body: &str, arg: &str) -> bool {
     })
 }
 
-/// A call whose output is a PR it opened: `gh pr create` (which prints the new
-/// PR's URL as its last line — the title may only show a heredoc's first line),
-/// or a tool named for creating one. Links merely printed by other commands (a
-/// grep hit, a PR the agent was reading) are not something this chat produced.
-fn creates_pull_request(item: &ProviderProjectionItem) -> bool {
+/// A call that opened a PR: `gh pr create`, or a tool named for creating one.
+/// The evidence has to be in the call itself (its title, or its full input,
+/// since a title may show only a heredoc's first line). A PR link in the
+/// output alone proves nothing: `gh pr view` prints one, so does a grep hit.
+fn creates_pull_request(item: &ProviderProjectionItem, full_input: Option<&str>) -> bool {
     if item.render_class == ProjectionRenderClass::UserChat
         || item.render_class == ProjectionRenderClass::AssistantChat
     {
         return false;
     }
-    let title = item.title.to_ascii_lowercase();
-    let last_line = item.body.trim().lines().last().unwrap_or_default().trim();
-    title.contains("pr create")
-        || title.contains("create_pull_request")
-        || title.contains("pull_request_create")
-        || title.contains("createpullrequest")
-        || find_pr_urls(last_line).first().map(String::as_str) == Some(last_line)
+    let names_creation = |text: &str| {
+        let text = text.to_ascii_lowercase();
+        text.contains("gh pr create")
+            || text.contains("create_pull_request")
+            || text.contains("pull_request_create")
+            || text.contains("createpullrequest")
+    };
+    names_creation(&item.title) || full_input.is_some_and(names_creation)
 }
 
 fn join_title_body(title: &str, body: &str) -> String {
@@ -998,6 +999,26 @@ pub(crate) mod tests {
             "cargo test"
         ));
         assert!(!echoes_input(r#"{"ok": true}"#, "cargo test"));
+    }
+
+    #[test]
+    fn a_pr_url_printed_by_a_command_that_did_not_create_it_is_not_produced() {
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"is the PR up?"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","session_id":"s1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_v","name":"Bash","input":{"command":"gh pr view --json url -q .url"}}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_v","content":"https://github.com/perceo/archductor/pull/77\n"}]}}"#,
+            "\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"yes"}"#,
+            "\n",
+        );
+        let records = records_from_claude(native, 1_790_757_000_000);
+        let turns = build_chat_transcript(&records, &options(Path::new("/work/ws")));
+
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].pr_urls.is_empty(), "{turns:#?}");
+        assert_eq!(latest_pr_url(&turns), None);
     }
 
     #[test]

@@ -84,7 +84,34 @@ pub fn render_status_json(report: &StatusReport) -> Result<String> {
     Ok(format!("{}\n", serde_json::to_string(report)?))
 }
 
+/// Provider text (file contents, command output, chat titles) can carry
+/// terminal control sequences, and a crafted one would drive the operator's
+/// terminal: move the cursor, rewrite lines, set the clipboard (OSC 52). Our
+/// own formatting emits only newlines, so every other control character in
+/// the text output is shown escaped instead (`\x1b`, `\u{9b}`). The JSON
+/// forms are escaped by the serializer.
+pub fn terminal_safe(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\n' | '\t' => out.push(c),
+            c if (c as u32) < 0x80 && c.is_control() => {
+                let _ = write!(out, "\\x{:02x}", c as u32);
+            }
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{{{:x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn render_status_text(report: &StatusReport) -> String {
+    terminal_safe(&status_text(report))
+}
+
+fn status_text(report: &StatusReport) -> String {
     if report.workspaces.is_empty() {
         return "No workspaces found. Run: archductor workspace create <repo> --name <name> --branch <branch>\n"
             .to_owned();
@@ -306,6 +333,10 @@ pub fn render_chat_json(header: &ChatHeader<'_>, turns: &[TranscriptTurn]) -> Re
 }
 
 pub fn render_chat_text(header: &ChatHeader<'_>, turns: &[TranscriptTurn]) -> String {
+    terminal_safe(&chat_text(header, turns))
+}
+
+fn chat_text(header: &ChatHeader<'_>, turns: &[TranscriptTurn]) -> String {
     let mut out = format!(
         "chat {} thread {} {} \"{}\"",
         header.workspace, header.thread_id, header.provider, header.title
@@ -538,6 +569,46 @@ mod tests {
              \x20 of prose\n"
         );
         assert!(text.is_ascii());
+    }
+
+    #[test]
+    fn provider_text_cannot_drive_the_operators_terminal() {
+        // An OSC 52 clipboard write, a CSI cursor move, a carriage return that
+        // would overwrite the line, and an 8-bit CSI.
+        let mut read = entry(EntryKind::Tool, Some("Read"), "evil.txt", "complete");
+        read.result = Some("a\u{1b}]52;c;aGk=\u{7}b\u{1b}[2Jc\rd\u{9b}e".to_owned());
+        let turn = TranscriptTurn {
+            turn: 1,
+            started_at: None,
+            ended_at: None,
+            outcome: TurnOutcome::Success,
+            elided: 0,
+            entries: vec![entry(EntryKind::User, None, "look", "running"), read],
+            pr_urls: Vec::new(),
+            started_ms: None,
+            ended_ms: None,
+        };
+        let header = ChatHeader {
+            workspace: "berlin",
+            thread_id: 1,
+            title: "title\u{1b}[31m",
+            provider: "claude",
+            session: None,
+            turns_total: 1,
+            other_threads: &[],
+        };
+
+        let text = render_chat_text(&header, &[turn]);
+
+        assert!(
+            !text.chars().any(|c| c.is_control() && c != '\n'),
+            "{text:?}"
+        );
+        assert!(
+            text.contains("-> a\\x1b]52;c;aGk=\\x07b\\x1b[2Jc\\x0dd\\u{9b}e"),
+            "{text}"
+        );
+        assert!(text.contains("\"title\\x1b[31m\""), "{text}");
     }
 
     #[test]

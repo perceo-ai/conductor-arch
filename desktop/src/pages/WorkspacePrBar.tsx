@@ -76,7 +76,14 @@ export default function WorkspacePrBar(props: { workspace: string }) {
       prSyncInFlight = false;
     }
   }
-  createEffect(on(() => props.workspace, () => void syncPrChecks()));
+  // Also when the PR itself appears: a row that had no PR number when the bar
+  // mounted gets one once the PR is created, and should not wait a minute.
+  createEffect(
+    on(
+      () => [props.workspace, row()?.prNumber ?? null] as const,
+      () => void syncPrChecks(),
+    ),
+  );
   onMount(() => {
     const timer = window.setInterval(() => void syncPrChecks(), 60_000);
     onCleanup(() => window.clearInterval(timer));

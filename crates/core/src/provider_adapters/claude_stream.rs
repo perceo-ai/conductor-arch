@@ -495,7 +495,12 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
         let input = std::str::from_utf8(&record.payload).context("decode Claude stream-json")?;
         let mut effects = Vec::new();
 
-        for line in input.lines().filter(|line| !line.trim().is_empty()) {
+        let lines = input
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .flat_map(split_parallel_tool_results);
+        for line in lines {
+            let line = line.as_ref();
             // Control requests are the provider asking *us* something
             // (`can_use_tool`), not transcript content. They carry a
             // `request_id` that must be answered on stdin before the tool runs,
@@ -1650,12 +1655,56 @@ impl ClaudeStreamParser {
 pub fn parse_claude_stream_json_lines(input: &str) -> Result<Vec<ClaudeProviderEventDraft>> {
     let mut parser = ClaudeStreamParser::default();
     let mut events = Vec::new();
-    for line in input.lines() {
-        if let Some(event) = parser.parse_line(line)? {
+    for line in input.lines().flat_map(split_parallel_tool_results) {
+        if let Some(event) = parser.parse_line(&line)? {
             events.push(event);
         }
     }
     Ok(events)
+}
+
+/// One record per tool result.
+///
+/// The message format lets one user record answer several parallel tool calls
+/// at once. Everything downstream (the tool name, the target, the card a result
+/// lands on) keys a record by a single `tool_use_id`, so such a record would
+/// hang every result on the first call and show one tool's output under
+/// another. Split it into one record per result; each keeps the rest of the
+/// record, and its uuid gains the tool id so the copies stay distinct events.
+/// Claude Code emits a record per result today; this keeps that assumption
+/// from being load-bearing.
+fn split_parallel_tool_results(line: &str) -> Vec<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+    let single = || vec![Cow::Borrowed(line)];
+    if !line.contains("tool_result") {
+        return single();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+        return single();
+    };
+    let Some(blocks) = value.pointer("/message/content").and_then(Value::as_array) else {
+        return single();
+    };
+    let is_result =
+        |block: &Value| block.get("type").and_then(Value::as_str) == Some("tool_result");
+    if blocks.iter().filter(|block| is_result(block)).count() < 2 {
+        return single();
+    }
+    blocks
+        .iter()
+        .filter(|block| is_result(block))
+        .map(|block| {
+            let mut record = value.clone();
+            record["message"]["content"] = Value::Array(vec![block.clone()]);
+            if let (Some(uuid), Some(tool_use_id)) = (
+                value.get("uuid").and_then(Value::as_str),
+                block.get("tool_use_id").and_then(Value::as_str),
+            ) {
+                record["uuid"] = Value::String(format!("{uuid}:{tool_use_id}"));
+            }
+            Cow::Owned(record.to_string())
+        })
+        .collect()
 }
 
 fn usage_from(value: &Value) -> ClaudeUsageDraft {
@@ -2992,6 +3041,59 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--permission-mode", "plan"]));
+    }
+
+    #[test]
+    fn parallel_tool_results_in_one_record_each_land_on_their_own_call() {
+        let native = concat!(
+            r#"{"type":"assistant","session_id":"s1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"cargo test"}},{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"/repo/cli.py"}}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"3 tests passed"},{"type":"tool_result","tool_use_id":"toolu_b","content":"1\timport argparse"}]}}"#,
+            "\n",
+        );
+
+        let results = provider_events_for(native)
+            .into_iter()
+            .filter(|draft| {
+                draft.kind == ProviderEventKind::Tool
+                    || draft.kind == ProviderEventKind::CommandProcess
+                    || draft.kind == ProviderEventKind::FileSystem
+            })
+            .filter(|draft| {
+                draft
+                    .provider_item_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("toolu_"))
+            })
+            .map(|draft| {
+                (
+                    draft.provider_item_id.clone().unwrap(),
+                    draft.normalized_payload["title"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    draft.normalized_payload["body"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned(),
+                    draft.provider_event_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let a = results
+            .iter()
+            .find(|r| r.0 == "toolu_a")
+            .expect("bash result");
+        let b = results
+            .iter()
+            .find(|r| r.0 == "toolu_b")
+            .expect("read result");
+        assert_eq!(a.1, "Bash cargo test");
+        assert_eq!(a.2, "3 tests passed");
+        assert_eq!(b.1, "Read /repo/cli.py");
+        assert_eq!(b.2, "1\timport argparse");
+        assert_ne!(a.3, b.3, "each result is its own event");
     }
 
     #[test]

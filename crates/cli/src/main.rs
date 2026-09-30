@@ -1787,6 +1787,7 @@ fn run_cli() -> Result<()> {
                         visible_input,
                         kind: kind.into(),
                         session_kind,
+                        verbatim: false,
                     })? {
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
@@ -3333,6 +3334,7 @@ fn run_cli() -> Result<()> {
                                 visible_input,
                                 kind: input_kind,
                                 session_kind: kind,
+                                verbatim: true,
                             })? {
                                 ArchcarResponse::QueuedChatInput { input } => input,
                                 ArchcarResponse::Error { message } => anyhow::bail!(message),
@@ -6715,10 +6717,12 @@ fn archcar_session_readiness(
 enum SessionSendRoute {
     /// Write the input to the session now.
     Now,
-    /// Raw terminal bytes cannot be queued: wait for the turn to end.
+    /// The session is still starting, or the input is raw terminal bytes
+    /// (which cannot be queued): wait for it to be ready, then write it.
     WaitForReady,
-    /// Persist it in the chat's queue; the daemon delivers it at the next turn
-    /// boundary, so steering a busy agent never times out.
+    /// The agent is mid-turn. Persist the message in the chat's queue; the
+    /// daemon delivers it at the next turn boundary, so steering a busy agent
+    /// never times out.
     Queue,
 }
 
@@ -6728,9 +6732,14 @@ fn session_send_route(
     input_kind: &ArchcarInputKind,
     waits_for_ready: bool,
 ) -> SessionSendRoute {
+    use archductor_core::session_state::AgentSessionState;
     if readiness.ready || immediate || !waits_for_ready {
         SessionSendRoute::Now
-    } else if *input_kind == ArchcarInputKind::RawTerminal {
+    } else if *input_kind == ArchcarInputKind::RawTerminal
+        // A booting session has no turn to wait behind. Its first message
+        // goes in directly once it is up, exactly as before queueing existed.
+        || readiness.state == AgentSessionState::Starting
+    {
         SessionSendRoute::WaitForReady
     } else {
         SessionSendRoute::Queue
@@ -8028,6 +8037,16 @@ mod tests {
         );
         assert_eq!(
             session_send_route(&busy, false, &ArchcarInputKind::RawTerminal, true),
+            SessionSendRoute::WaitForReady
+        );
+        // A session still booting is not busy: its first message waits for it
+        // and goes in directly, keeping the first-turn prefix contract.
+        let starting = SessionReadiness {
+            ready: false,
+            state: AgentSessionState::Starting,
+        };
+        assert_eq!(
+            session_send_route(&starting, false, &user, true),
             SessionSendRoute::WaitForReady
         );
     }
