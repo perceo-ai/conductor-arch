@@ -64,10 +64,16 @@ export function PermissionCard(props: {
   onMount(() => {
     const onFocus = () => {
       if (!awaitingGrant()) return;
+      // Disarmed while the restart runs, so another focus does not start a
+      // second one; re-armed if it fails, so coming back again retries it.
       setAwaitingGrant(false);
       void run(async () => {
         const res = await fileAccess.restartDaemon();
-        if (res.ok) await props.onPoll?.().catch(() => undefined);
+        if (!res.ok) {
+          setAwaitingGrant(true);
+          return res;
+        }
+        await props.onPoll?.().catch(() => undefined);
         return res;
       });
     };
