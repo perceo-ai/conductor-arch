@@ -8826,12 +8826,8 @@ mutation($threadId: ID!) {{
         let repository = self.load_repository_by_id(workspace.repository_id)?;
         let settings = self.repository_settings(&repository.root_path)?;
         let prefix = configured_branch_prefix(&settings);
-        // Older codenames carried the prefix of their day, which is the default
-        // one for any repository that has since configured its own.
-        let default_prefix = normalize_branch_prefix(None);
         Ok(workspace.branch == workspace.name
-            || workspace.branch == format!("{prefix}/{}", workspace.name)
-            || workspace.branch == format!("{default_prefix}/{}", workspace.name))
+            || workspace.branch == format!("{prefix}/{}", workspace.name))
     }
 
     fn workspace_agent_metadata_applied(&self, workspace_id: i64) -> Result<bool> {
@@ -26526,10 +26522,9 @@ spotlight_testing = true
             "[customization.workspace_defaults]\nbranch_prefix = \"team\"\n",
         )
         .unwrap();
-        // An older workspace: prefixed codename branch, origin never recorded.
-        forget_branch_origin(&store, "berlin");
+        codename_workspace(&store, "helix");
         let thread = store
-            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .create_chat_thread("helix", "codex", "New Chat", None)
             .unwrap();
         store
             .append_chat_message(thread.id, "user", "Fix billing webhook", "user_send")
@@ -26543,7 +26538,7 @@ spotlight_testing = true
             )
             .unwrap();
 
-        let workspace = store.get_by_name("berlin").unwrap();
+        let workspace = store.get_by_name("helix").unwrap();
         assert_eq!(workspace.branch, "team/billing-webhook-fix");
     }
 
@@ -27280,6 +27275,47 @@ spotlight_testing = true
             .unwrap();
         assert_eq!(chosen.branch, "lc/tidy-the-metrics");
         assert!(!store.workspace_branch_is_codename_derived(&chosen).unwrap());
+    }
+
+    #[test]
+    fn a_legacy_branch_under_an_old_prefix_is_kept() {
+        let (temp, store) = test_workspace_store();
+        // Created before branch origin was recorded, on `lc/berlin`; the
+        // repository has since moved to its own prefix. Whether `lc/berlin` was
+        // a codename or a choice is unknowable, so it is kept.
+        forget_branch_origin(&store, "berlin");
+        let settings_dir = temp.path().join("demo/.archductor");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::write(
+            settings_dir.join("settings.toml"),
+            "[customization.workspace_defaults]\nbranch_prefix = \"team\"\n",
+        )
+        .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New chat", None)
+            .unwrap();
+        store
+            .append_chat_message(thread.id, "user", "Fix the billing webhook", "user_send")
+            .unwrap();
+
+        let context = store
+            .deterministic_naming_context(thread.id)
+            .unwrap()
+            .unwrap();
+        assert!(!context.wants_branch_name);
+        store
+            .apply_deterministic_names(
+                thread.id,
+                &context,
+                &crate::agent_naming::AgentNames {
+                    workspace_name: Some("stripe webhook retry".to_owned()),
+                    branch_name: Some("stripe-webhook-retry".to_owned()),
+                    chat_title: Some("Stripe Webhook Retry".to_owned()),
+                },
+            )
+            .unwrap();
+        let named = store.get_by_name("stripe-webhook-retry").unwrap();
+        assert_eq!(named.branch, "lc/berlin");
     }
 
     #[test]
