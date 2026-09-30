@@ -7603,6 +7603,69 @@ exit 1
     }
 
     #[test]
+    fn set_workspace_context_cannot_rename_a_branch_the_creator_chose() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        // The branch equals the workspace name, as a codename would, but it
+        // was asked for.
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "helix".to_owned(),
+                branch: "helix".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let (subscriber_tx, _subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+            remote_listen: None,
+        }));
+
+        // What the `set_workspace_context` MCP tool sends.
+        let response = dispatch_request(
+            ArchcarRequest::ApplyAgentContext {
+                workspace: "helix".to_owned(),
+                thread_id: None,
+                workspace_name: Some("billing webhook fix".to_owned()),
+                branch_name: Some("billing-webhook-fix".to_owned()),
+                chat_title: None,
+                summary: None,
+                chat_summary: None,
+            },
+            &state,
+        );
+
+        assert!(
+            matches!(&response, ArchcarResponse::WorkspaceUpdated { name } if name == "billing-webhook-fix"),
+            "{response:?}"
+        );
+        let updated = store.get_by_name("billing-webhook-fix").unwrap();
+        assert_eq!(updated.id, workspace.id);
+        assert_eq!(updated.branch, "helix");
+    }
+
+    #[test]
     fn apply_agent_context_renames_retitles_and_stores_the_summary() {
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("state.db");

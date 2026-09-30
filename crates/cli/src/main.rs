@@ -3767,7 +3767,7 @@ fn claude_hook_context_reply(thread_id: i64, stdin: &str) -> Option<serde_json::
             ),
         )),
         ClaudeHookRequest::PostToolUse if !gaps.is_empty() => {
-            let _ = store.note_context_nudge(thread_id);
+            let _ = store.note_context_nudge(thread_id, &gaps);
             Some(encode_claude_hook_context(
                 "PostToolUse",
                 &archductor_core::workspace::archductor_context_nudge(&gaps),
