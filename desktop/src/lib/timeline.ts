@@ -167,3 +167,22 @@ export function nestTimelineItems(items: ArchcarProjectionItem[]): NestedTimelin
   }
   return { top, childrenOf };
 }
+
+/**
+ * What the chat's follow-bottom watches: every visible row and, recursively,
+ * the rows nested under it. Counting children alone missed a nested row that
+ * grew in place (a subagent's command streaming output inside an open Agent
+ * card), so the reader stopped being kept at the latest output.
+ */
+export function timelineScrollSignature(
+  visible: ArchcarProjectionItem[],
+  childrenOf: Map<string, ArchcarProjectionItem[]>,
+): string {
+  const parts: string[] = [];
+  const visit = (item: ArchcarProjectionItem) => {
+    parts.push(`${item.id}:${item.status}:${item.stream_state}:${item.body.length}`);
+    for (const child of childrenOf.get(item.id) ?? []) visit(child);
+  };
+  for (const item of visible) visit(item);
+  return parts.join("|");
+}

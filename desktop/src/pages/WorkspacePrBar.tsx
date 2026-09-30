@@ -6,6 +6,7 @@ import {
   WORKSPACE_PR_STATE_ICON,
   WORKSPACE_PR_STATE_MOTION,
   deriveWorkspacePrAction,
+  shouldSyncPullRequest,
   workspacePrActionInput,
 } from "@/lib/workspacePrAction";
 import Icon from "@/components/Icon";
@@ -54,17 +55,17 @@ export default function WorkspacePrBar(props: { workspace: string }) {
   const row = () => workspacesStore.row(props.workspace);
   const st = createMemo(() => deriveWorkspacePrAction(workspacePrActionInput(row(), checksNow())));
 
-  // The stored rollup otherwise only moves at agent turn boundaries, and CI
-  // finishes (or is re-run) minutes after the turn that pushed. While this
-  // workspace's PR is open, re-read it from GitHub: once on arrival, then every
-  // minute. Keyed on the PR, not the displayed state — "Behind base" outranks
-  // the checks on screen but still needs them. The daemon broadcasts any
-  // change, which is what moves the sidebar row too.
+  // The stored PR otherwise only moves at agent turn boundaries, and CI
+  // finishes (or is re-run) minutes after the turn that pushed. Re-read it from
+  // GitHub once on arrival, then every minute, for as long as
+  // `shouldSyncPullRequest` says there is something to learn. Keyed on the PR,
+  // not the displayed state — "Behind base" outranks the checks on screen but
+  // still needs them. The daemon broadcasts any change, which is what moves
+  // the sidebar row too.
   let prSyncInFlight = false;
   async function syncPrChecks() {
     const ws = props.workspace;
-    const open = (row()?.prState ?? "open").toLowerCase() === "open";
-    if (prSyncInFlight || !row()?.prNumber || !open) return;
+    if (prSyncInFlight || !shouldSyncPullRequest(row())) return;
     prSyncInFlight = true;
     try {
       await send({ type: "refresh_pull_request", workspace: ws });

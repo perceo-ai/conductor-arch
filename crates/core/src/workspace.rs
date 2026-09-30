@@ -13620,7 +13620,7 @@ fn validate_relative_workspace_path(path: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::repository::{AddRepository, RepositoryStore};
     use std::fs;
@@ -13628,7 +13628,10 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::{Mutex, OnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
+    /// Serialises tests that swap process-wide env (PATH for a fake `gh`).
+    /// Crate-visible so tests in other modules that shell out to `gh` take the
+    /// same lock instead of picking up another test's fake.
+    pub(crate) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
     }
@@ -15530,7 +15533,7 @@ exit 1
         assert!(brief.contains("https://github.com/example/demo/pull/42"));
     }
 
-    fn install_fake_gh(temp: &Path, script: &str) -> Option<std::ffi::OsString> {
+    pub(crate) fn install_fake_gh(temp: &Path, script: &str) -> Option<std::ffi::OsString> {
         let bin_dir = temp.join("bin");
         fs::create_dir(&bin_dir).unwrap();
         let gh_path = bin_dir.join("gh");
@@ -15571,7 +15574,7 @@ fi\n\
         old_path
     }
 
-    fn restore_path(old_path: Option<std::ffi::OsString>) {
+    pub(crate) fn restore_path(old_path: Option<std::ffi::OsString>) {
         match old_path {
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
@@ -21818,7 +21821,7 @@ general = "Keep changes focused."
     #[test]
     fn diff_stats_against_base_reuses_resolved_merge_base() {
         let source = include_str!("workspace.rs")
-            .split("\n#[cfg(test)]\nmod tests")
+            .split("\n#[cfg(test)]\npub(crate) mod tests")
             .next()
             .unwrap();
         let start = source

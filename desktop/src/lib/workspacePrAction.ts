@@ -91,6 +91,29 @@ export function workspacePrActionInput(
   };
 }
 
+/**
+ * Whether the PR bar should re-read this workspace's PR from GitHub.
+ *
+ * An open PR: yes — CI finishes (or is re-run) long after the turn that
+ * pushed. No PR recorded yet: yes if the branch has work, because a PR opened
+ * outside Archductor (gh CLI, web UI) is only found by asking; the daemon
+ * discovers it by branch. Merged/closed, or nothing to open a PR for: no.
+ */
+export function shouldSyncPullRequest(
+  row:
+    | {
+        prNumber?: number | null;
+        prState?: string | null;
+        additions?: number | null;
+        deletions?: number | null;
+      }
+    | undefined,
+): boolean {
+  if (!row) return false;
+  if (!row.prNumber) return (row.additions ?? 0) > 0 || (row.deletions ?? 0) > 0;
+  return (row.prState ?? "open").toLowerCase() === "open";
+}
+
 /** Local check-script states that are process lifecycle, not a verdict. An
  *  exit — even exit 0 — says nothing about the PR's revision. */
 const LOCAL_NON_VERDICTS = new Set(["exited", "stopped"]);
@@ -98,7 +121,9 @@ const LOCAL_NON_VERDICTS = new Set(["exited", "stopped"]);
 /** "11/20 passed, 1 failed, 8 running" — skipped runs stay out of the
  *  denominator, as on GitHub. Mirrors `PullRequestCheckCounts::label` in core. */
 export function checkCountsLabel(counts: PullRequestCheckCounts): string {
-  const parts = [`${counts.passed}/${counts.total - counts.skipped} passed`];
+  const ran = counts.total - counts.skipped;
+  // "0/0 passed" says nothing; a skipped-only PR reads "2 skipped".
+  const parts = ran > 0 ? [`${counts.passed}/${ran} passed`] : [];
   if (counts.failed > 0) parts.push(`${counts.failed} failed`);
   if (counts.pending > 0) parts.push(`${counts.pending} running`);
   if (counts.skipped > 0) parts.push(`${counts.skipped} skipped`);
@@ -106,7 +131,7 @@ export function checkCountsLabel(counts: PullRequestCheckCounts): string {
 }
 
 export function deriveWorkspacePrAction(input: WorkspacePrActionInput): WorkspacePrActionState {
-  const state = deriveWorkspacePrActionState(input);
+  const state = withReportedChecksTitle(deriveWorkspacePrActionState(input), input.prCheckCounts);
   // Only tally once the PR is waiting on GitHub rather than on local work;
   // "Merge conflicts · 3/3 passed" would bury the thing that needs doing.
   const aboutChecks =
@@ -118,6 +143,20 @@ export function deriveWorkspacePrAction(input: WorkspacePrActionInput): Workspac
   return aboutChecks && input.prCheckCounts && input.prCheckCounts.total > 0
     ? { ...state, detail: checkCountsLabel(input.prCheckCounts) }
     : state;
+}
+
+/** "No checks reported" is only true when GitHub reported none. Checks that
+ *  ran without a verdict we recognise — all skipped, or a state outside the
+ *  known vocabulary — say so instead. */
+function withReportedChecksTitle(
+  state: WorkspacePrActionState,
+  counts: PullRequestCheckCounts | null | undefined,
+): WorkspacePrActionState {
+  if (state.state !== "checks-unknown" || !counts || counts.total === 0) return state;
+  return {
+    ...state,
+    title: counts.skipped === counts.total ? "Checks skipped" : "Checks inconclusive",
+  };
 }
 
 function deriveWorkspacePrActionState(input: WorkspacePrActionInput): WorkspacePrActionState {
