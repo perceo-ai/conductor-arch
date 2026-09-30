@@ -69,11 +69,12 @@ impl PullRequestCheckCounts {
     /// "11/20 passed, 1 failed, 8 running" — skipped runs are left out of the
     /// denominator the way GitHub leaves them out of its own tally.
     pub fn label(&self) -> String {
-        let mut parts = vec![format!(
-            "{}/{} passed",
-            self.passed,
-            self.total - self.skipped
-        )];
+        let ran = self.total - self.skipped;
+        // "0/0 passed" says nothing; a skipped-only PR reads "2 skipped".
+        let mut parts = Vec::new();
+        if ran > 0 {
+            parts.push(format!("{}/{} passed", self.passed, ran));
+        }
         if self.failed > 0 {
             parts.push(format!("{} failed", self.failed));
         }
@@ -1066,6 +1067,11 @@ mod tests {
         assert_eq!(
             PullRequestCheckCounts::from_runs(&[run("SUCCESS")]).label(),
             "1/1 passed"
+        );
+        // Everything skipped: no zero-denominator "0/0 passed".
+        assert_eq!(
+            PullRequestCheckCounts::from_runs(&[run("SKIPPED"), run("NEUTRAL")]).label(),
+            "2 skipped"
         );
     }
 

@@ -2651,9 +2651,11 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::RefreshPullRequest { workspace } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            // Tell every client when the refresh found news, as the post-turn
-            // sync does: the desktop polls this while CI runs, and the sidebar
-            // renders from the inventory, not from this response.
+            // Tell every client only when the refresh found news, as the
+            // post-turn sync does. The desktop polls this every minute while a
+            // PR is open, so it answers `Ack`: `WorkspaceUpdated` would make
+            // every client re-pull the inventory on every poll, and twice
+            // whenever something did change.
             match WorkspaceStore::open_app(&db_path).and_then(|s| {
                 let before = s.pull_request(&workspace)?;
                 let after = s.refresh_pull_request_state(&workspace)?;
@@ -2665,7 +2667,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                     {
                         broadcast(&mut state.lock().unwrap(), event);
                     }
-                    ArchcarResponse::WorkspaceUpdated { name: workspace }
+                    ArchcarResponse::Ack
                 }
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -7531,6 +7533,72 @@ mod tests {
         // Nothing moved this time, so clients are left alone.
         let before = thread_naming_snapshot(&db_path, thread.id);
         broadcast_naming_changes(&state, &db_path, thread.id, before);
+        assert!(subscriber_rx.try_iter().next().is_none());
+    }
+
+    #[test]
+    fn refresh_pull_request_without_news_leaves_clients_alone() {
+        // No PR recorded and GitHub has none for the branch. The desktop
+        // polls this every minute, so an unchanged answer must not make every
+        // client re-pull the inventory.
+        use crate::workspace::tests::{env_lock, install_fake_gh, restore_path};
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let old_path = install_fake_gh(
+            temp.path(),
+            r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '[]\n'
+  exit 0
+fi
+echo "unexpected gh args: $*" >&2
+exit 1
+"#,
+        );
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let (subscriber_tx, subscriber_rx) = mpsc::channel();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: vec![subscriber_tx],
+            remote_listen: None,
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::RefreshPullRequest {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+
+        restore_path(old_path);
+        assert!(matches!(response, ArchcarResponse::Ack), "{response:?}");
         assert!(subscriber_rx.try_iter().next().is_none());
     }
 

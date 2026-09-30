@@ -3,6 +3,7 @@ import {
   WORKSPACE_PR_STATE_ICON,
   WORKSPACE_PR_STATE_MOTION,
   deriveWorkspacePrAction,
+  shouldSyncPullRequest,
   workspacePrActionInput,
   type WorkspacePrActionInput,
   type WorkspacePrStateKind,
@@ -191,6 +192,26 @@ describe("deriveWorkspacePrAction", () => {
     ).toBeUndefined();
   });
 
+  it("tells skipped or unrecognised checks apart from no checks at all", () => {
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prCheckCounts: { total: 1, passed: 0, failed: 0, pending: 0, skipped: 1 },
+      }),
+    ).toMatchObject({ title: "Checks skipped", detail: "1 skipped", state: "checks-unknown" });
+    expect(
+      deriveWorkspacePrAction({
+        prNumber: 42,
+        prState: "open",
+        prCheckCounts: { total: 2, passed: 1, failed: 0, pending: 0, skipped: 0 },
+      }),
+    ).toMatchObject({ title: "Checks inconclusive", detail: "1/2 passed" });
+    expect(deriveWorkspacePrAction({ prNumber: 42, prState: "open" })).toMatchObject({
+      title: "No checks reported",
+    });
+  });
+
   it("does not render an open PR without checks as a question mark", () => {
     expect(WORKSPACE_PR_STATE_ICON["checks-unknown"]).not.toBe("circle-help");
     expect(deriveWorkspacePrAction({ prNumber: 42, prState: "open" })).toMatchObject({
@@ -248,6 +269,27 @@ describe("deriveWorkspacePrAction", () => {
         action: "push",
       });
     }
+  });
+});
+
+describe("shouldSyncPullRequest", () => {
+  it("keeps polling an open PR whatever the bar is showing", () => {
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "open" })).toBe(true);
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "OPEN" })).toBe(true);
+  });
+
+  it("looks for a PR opened outside Archductor while the branch has work", () => {
+    // No PR row yet: only asking GitHub (by branch) finds one created with the
+    // gh CLI or the web UI while this workspace stays open.
+    expect(shouldSyncPullRequest({ additions: 3, deletions: 0 })).toBe(true);
+    expect(shouldSyncPullRequest({ additions: 0, deletions: 2 })).toBe(true);
+  });
+
+  it("stays quiet when there is nothing to learn", () => {
+    expect(shouldSyncPullRequest(undefined)).toBe(false);
+    expect(shouldSyncPullRequest({ additions: 0, deletions: 0 })).toBe(false);
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "merged", additions: 3 })).toBe(false);
+    expect(shouldSyncPullRequest({ prNumber: 42, prState: "closed" })).toBe(false);
   });
 });
 

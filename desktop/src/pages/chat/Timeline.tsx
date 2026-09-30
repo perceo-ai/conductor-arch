@@ -14,6 +14,7 @@ import {
   isDisplayableTimelineItem,
   nestTimelineItems,
   showsNewChatIntro,
+  timelineScrollSignature,
   timelineWindow,
   withoutPlanSource,
 } from "@/lib/timeline";
@@ -91,13 +92,7 @@ export function Timeline(props: { threadId: number; workspace: string }) {
   const scrollSignal = createMemo(
     () =>
       `${generation()}|${pendingPlan()?.id ?? ""}|` +
-      windowed()
-        .visible.map(
-          (item) =>
-            `${item.id}:${item.status}:${item.stream_state}:${item.body.length}:` +
-            `${nested().childrenOf.get(item.id)?.length ?? 0}`,
-        )
-        .join("|"),
+      timelineScrollSignature(windowed().visible, nested().childrenOf),
   );
   // An interrupted (or crashed) turn leaves its command/tool cards marked
   // "running". Once the agent is idle nothing is running, so those must stop

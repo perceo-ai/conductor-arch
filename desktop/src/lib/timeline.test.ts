@@ -5,6 +5,7 @@ import {
   nestTimelineItems,
   showsNewChatIntro,
   showsRunning,
+  timelineScrollSignature,
   timelineWindow,
   withoutPlanSource,
 } from "./timeline";
@@ -210,6 +211,23 @@ describe("showsRunning", () => {
   it("never spins a finished card", () => {
     const done = item({ render_class: "background_card", status: "failed" });
     expect(showsRunning(done, { idle: false, sessionAlive: true })).toBe(false);
+  });
+});
+
+describe("timelineScrollSignature", () => {
+  it("moves when a nested row grows in place, at any depth", () => {
+    const outer = item({ id: "outer", render_class: "tool_card" });
+    const inner = item({ id: "inner", render_class: "tool_card", parent_id: "outer" });
+    const leaf = item({ id: "leaf", render_class: "command_card", parent_id: "inner", body: "a" });
+    const before = nestTimelineItems([outer, inner, leaf]);
+    const grown = nestTimelineItems([outer, inner, { ...leaf, body: "a\nb" }]);
+    const finished = nestTimelineItems([outer, inner, { ...leaf, status: "completed" }]);
+
+    const signature = (n: typeof before) => timelineScrollSignature(n.top, n.childrenOf);
+    expect(signature(grown)).not.toBe(signature(before));
+    expect(signature(finished)).not.toBe(signature(before));
+    // Same content, same signature: follow-bottom does not fire for nothing.
+    expect(signature(nestTimelineItems([outer, inner, leaf]))).toBe(signature(before));
   });
 });
 
