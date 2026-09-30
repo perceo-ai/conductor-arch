@@ -655,9 +655,9 @@ pub enum ArchcarRequest {
         new_name: String,
     },
     /// Agent-supplied context metadata: the names a workspace/branch/chat should
-    /// carry and the workspace summary the next agent will read. This is the same
-    /// path the hidden `<archductor_metadata>` block takes, exposed so an agent
-    /// can drive it with a tool call instead of prose.
+    /// carry, the workspace summary the next agent will read, and the summary of
+    /// one chat. This is the same path the hidden `<archductor_metadata>` block
+    /// takes, exposed so an agent can drive it with a tool call instead of prose.
     ApplyAgentContext {
         workspace: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -670,6 +670,9 @@ pub enum ArchcarRequest {
         chat_title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<String>,
+        /// Needs `thread_id`: the chat whose summary this is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_summary: Option<String>,
     },
     DuplicateWorkspace {
         workspace: String,
@@ -2223,13 +2226,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             branch_name,
             chat_title,
             summary,
+            chat_summary,
         } => format!(
-            "apply_agent_context workspace={workspace} thread_id={} name={} branch={} title={} summary_chars={}",
+            "apply_agent_context workspace={workspace} thread_id={} name={} branch={} title={} summary_chars={} chat_summary_chars={}",
             thread_id.map(|id| id.to_string()).unwrap_or_else(|| "-".to_owned()),
             workspace_name.as_deref().unwrap_or("-"),
             branch_name.as_deref().unwrap_or("-"),
             chat_title.as_deref().unwrap_or("-"),
             summary.as_deref().map(str::len).unwrap_or_default(),
+            chat_summary.as_deref().map(str::len).unwrap_or_default(),
         ),
         ArchcarRequest::DuplicateWorkspace {
             workspace,

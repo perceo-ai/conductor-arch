@@ -27,6 +27,24 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Branch prefixes and Full Disk Access (2026-09-30)
+
+A workspace created without a branch now gets the bare codename (`helix`) as
+its branch; the configured prefix is applied only when the agent renames it on
+the first message (`team/billing-fix`). The rename still recognises older
+`prefix/codename` branches. Previously the codename branch carried the prefix,
+and a prefix typed as `name/` built `name//helix`, which git refused at
+`worktree add` after the workspace row was already inserted. Prefixes are now
+trimmed of slashes, and branch validation follows git's ref rules, so a bad name
+fails before anything is created.
+
+macOS has no API that prompts for Full Disk Access. The daemon's probe now
+attempts a read of the TCC database when a folder is denied, which lists
+`archcar` in the pane (toggle off). The desktop card is one "Allow access"
+button that opens the pane and restarts the daemon when the window regains
+focus. The CLI still prints the grant instructions; it gains the pane listing
+through the same probe. Not yet smoke-tested on a Mac.
+
 ## Agent activity in the chat (2026-09-30)
 
 Claude's stream-json carries more than the chat showed. Now surfaced, in core,
@@ -51,6 +69,16 @@ before this change still show old background records as hidden status rows.
 Not done: Codex plan updates / collab agents, ACP plans, the iOS client
 (decodes but ignores `parent_id`), and synthetic user records such as Stop-hook
 feedback still rendering as user bubbles.
+
+## PR checks status (2026-09-30)
+
+The PR bar and sidebar said "Checks unknown" (with a question-mark glyph) for
+PRs GitHub had checks for. The desktop preferred the local check script's
+process state (`exited`) over the GitHub rollup, a PR discovered by branch was
+recorded without its checks, and checks only synced at turn ends. Each PR now
+stores per-outcome counts; desktop and CLI show "Checks failing · 19/20 passed,
+1 failed"; the PR bar re-reads GitHub every minute while the PR is open; skipped
+jobs no longer turn a green rollup unknown; no-checks PRs get a muted PR glyph.
 
 ## Remote takeover and daemon updates (2026-09-29)
 
@@ -423,7 +451,14 @@ the naming pipeline no longer depends on the agent answering a one-shot ask.
   `ApplyAgentContext`) sets the summary and the names as a tool call, with the
   workspace resolved from `ARCHDUCTOR_WORKSPACE` or the session's cwd and the
   thread from `ARCHDUCTOR_THREAD_ID`. `archductor mcp serve --profile session`
-  exposes six tools; `--profile full` is the external surface.
+  exposes seven tools; `--profile full` is the external surface.
+- **Chat summaries (2026-09-30).** `set_chat_context` is the per-chat
+  counterpart: `ApplyAgentContext.chat_summary` stores an agent-authored
+  `session`-scope summary for the calling thread, which the briefing's Current
+  chat section (and so the desktop Summary tab) already reads. The workspace
+  summary is now framed as whole-branch, and the session prompt and SessionStart
+  hook list the branch's changed files (capped at 40) and replay both notes. One
+  pacing counter covers both; a write to either resets it.
   `archductor mcp register` adds Archductor through each client's own
   `claude mcp add` / `codex mcp add`, so it appears like any other MCP server,
   with a Settings card (Clients -> Host Access) over the same archcar RPCs.

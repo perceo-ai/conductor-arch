@@ -242,7 +242,7 @@ Archductor is an MCP server, so an agent can query and drive Archductor itself.
 ```bash
 archductor mcp serve                      # full surface, 31 tools
 archductor mcp serve --read-only          # mutating tools hidden
-archductor mcp serve --profile session    # the six context tools
+archductor mcp serve --profile session    # the seven context tools
 archductor mcp register                   # register with claude and codex on this machine
 archductor mcp unregister --client codex
 archductor mcp status <workspace>
@@ -254,10 +254,20 @@ Two profiles, for two different jobs:
   sessions, prompts, summaries, context, changes and diffs, checks, review
   status, PR draft and create, background tasks.
 - **`session`** — what an agent needs to keep *its own* workspace context
-  current, and nothing else: `set_workspace_context`, `get_context_briefing`,
-  `get_summary`, `list_tasks`, `create_task`, `update_task`. This is the right
-  default for `mcp register`, because an agent that can archive its own
-  workspace is a hazard, not a feature.
+  current, and nothing else: `set_workspace_context`, `set_chat_context`,
+  `get_context_briefing`, `get_summary`, `list_tasks`, `create_task`,
+  `update_task`. This is the right default for `mcp register`, because an agent
+  that can archive its own workspace is a hazard, not a feature.
+
+An agent keeps two handoff notes. The **workspace summary**
+(`set_workspace_context`) covers the whole workspace: every change on the
+branch, whichever chat made it. Each session is told which files the branch has
+changed so far so the note can account for all of them. The **chat summary**
+(`set_chat_context`) covers one chat: what was asked in it, its tasks, and where
+each stands. It shows as **Current chat** in the Summary tab and in
+`archductor archcar context-briefing <workspace> --thread-id <id>`. Both are
+agent-authored, so the automatic refresh never overwrites them, and a session
+can only write the summary of its own chat.
 
 Because the tools are archcar requests, an MCP client can drive a *remote*
 daemon by pointing it at one — see

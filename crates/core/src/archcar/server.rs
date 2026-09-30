@@ -2541,14 +2541,18 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             branch_name,
             chat_title,
             summary,
+            chat_summary,
         } => apply_agent_context(
             state,
             &workspace,
             thread_id,
-            workspace_name,
-            branch_name,
-            chat_title,
-            summary,
+            crate::workspace::ArchductorMetadataDirective {
+                workspace_name,
+                branch_name,
+                chat_title,
+                summary,
+                chat_summary,
+            },
         ),
         ArchcarRequest::DuplicateWorkspace {
             workspace,
@@ -3785,26 +3789,17 @@ fn apply_agent_context(
     state: &Arc<Mutex<ServerState>>,
     workspace: &str,
     thread_id: Option<i64>,
-    workspace_name: Option<String>,
-    branch_name: Option<String>,
-    chat_title: Option<String>,
-    summary: Option<String>,
+    directive: crate::workspace::ArchductorMetadataDirective,
 ) -> ArchcarResponse {
     let db_path = state.lock().unwrap().db_path.clone();
     let before = thread_id.and_then(|thread_id| thread_naming_snapshot(&db_path, thread_id));
-    let wrote_summary = summary.is_some();
+    let wrote_summary = directive.summary.is_some();
+    let wrote_chat_summary = directive.chat_summary.is_some();
     let applied = WorkspaceStore::open_app(&db_path).and_then(|store| {
         // Resolve the id first: applying the metadata can rename the workspace
         // out from under the name the caller used.
         let workspace_id = store.get_by_name(workspace)?.id;
-        store.apply_agent_context_metadata(
-            workspace,
-            thread_id,
-            workspace_name,
-            branch_name,
-            chat_title,
-            summary,
-        )?;
+        store.apply_agent_context_metadata(workspace, thread_id, directive)?;
         store.workspace_name_by_id(workspace_id)
     });
     let name = match applied {
@@ -3821,6 +3816,13 @@ fn apply_agent_context(
     if wrote_summary {
         if let Ok(Some(stored)) = WorkspaceStore::open_app(&db_path)
             .and_then(|store| store.get_summary(&name, "workspace", None))
+        {
+            broadcast_summary_updated(state, &name, &stored);
+        }
+    }
+    if let (true, Some(thread_id)) = (wrote_chat_summary, thread_id) {
+        if let Ok(Some(stored)) = WorkspaceStore::open_app(&db_path)
+            .and_then(|store| store.get_summary(&name, "session", Some(thread_id)))
         {
             broadcast_summary_updated(state, &name, &stored);
         }
@@ -7581,6 +7583,7 @@ mod tests {
                 branch_name: None,
                 chat_title: Some("Billing Webhook Fix".to_owned()),
                 summary: Some("Retry backoff is the culprit; fix drafted.".to_owned()),
+                chat_summary: Some("Asked to fix the webhook retries; tests next.".to_owned()),
             },
             &state,
         );
@@ -7594,6 +7597,11 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stored.body_markdown.contains("Retry backoff"), "{stored:?}");
+        let chat = store
+            .agent_chat_summary("billing-webhook-fix", thread.id)
+            .unwrap()
+            .unwrap();
+        assert!(chat.body_markdown.contains("tests next"), "{chat:?}");
 
         // Clients address workspaces by name, so a tool-driven rename has to
         // reach them the same way a prose-driven one does.
@@ -7607,9 +7615,18 @@ mod tests {
             "{events:?}"
         );
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, ArchcarEvent::SummaryUpdated { .. })),
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::SummaryUpdated { scope_type, .. } if scope_type == "workspace"
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                ArchcarEvent::SummaryUpdated { scope_type, scope_id, .. }
+                    if scope_type == "session" && *scope_id == thread.id
+            )),
             "{events:?}"
         );
     }

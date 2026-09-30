@@ -3760,6 +3760,10 @@ fn claude_hook_context_reply(thread_id: i64, stdin: &str) -> Option<serde_json::
             &archductor_core::workspace::archductor_session_system_prompt(
                 &gaps.workspace,
                 gaps.summary.as_deref(),
+                gaps.chat_summary.as_deref(),
+                &store
+                    .branch_changed_files(&gaps.workspace)
+                    .unwrap_or_default(),
             ),
         )),
         ClaudeHookRequest::PostToolUse if !gaps.is_empty() => {

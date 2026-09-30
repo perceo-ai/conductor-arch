@@ -209,8 +209,8 @@ applies, and leave every other key unset so it falls through.
 
 Prompts may name MCP tools, but agent sessions register the MCP server with the
 `session` profile, which exposes only `set_workspace_context`,
-`get_context_briefing`, `get_summary`, `list_tasks`, `create_task`, and
-`update_task`. Naming any other tool sends the agent looking for something that
+`set_chat_context`, `get_context_briefing`, `get_summary`, `list_tasks`,
+`create_task`, and `update_task`. Naming any other tool sends the agent looking for something that
 is not in its tool list.
 
 ```bash
