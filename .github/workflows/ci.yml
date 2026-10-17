@@ -888,6 +888,40 @@ jobs:
           pnpm test
           pnpm build
 
+  ios-tests:
+    name: "iOS: build ArchcarKit and run Swift tests"
+    needs: [preflight]
+    if: needs.preflight.outputs.run_rust == 'true'
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      # ArchcarKit's manifest is swift-tools-version 6.0, which needs Xcode 16,
+      # but the macos-14 image defaults to Xcode 15. Pick the newest installed
+      # Xcode 16 rather than pinning a minor version the image may drop.
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_16*.app' | sort -V | tail -n 1)"
+          if [ -z "$xcode" ]; then
+            echo "::error title=No Xcode 16 on runner::ArchcarKit needs Swift 6 tools" >&2
+            exit 1
+          fi
+          sudo xcode-select -s "$xcode"
+          xcode-select -p
+          swift --version
+
+      - name: Build ArchcarKit
+        run: cd ios/ArchcarKit && swift build
+
+      - name: Test ArchcarKit
+        run: cd ios/ArchcarKit && swift test
+
   ci-gate:
     name: archductor/ci-gate
     needs:
@@ -905,6 +939,7 @@ jobs:
       - linux-musl
       - linux-distros
       - desktop
+      - ios-tests
     # `always()` would also run this gate for a run that was cancelled by the
     # concurrency group, where every lane reports `cancelled` and the gate posts
     # a red required check for a run nobody is waiting on. `!cancelled()` still
@@ -931,6 +966,7 @@ jobs:
             linux-musl=${{ needs.linux-musl.result }}
             linux-distros=${{ needs.linux-distros.result }}
             desktop=${{ needs.desktop.result }}
+            ios-tests=${{ needs.ios-tests.result }}
         run: |
           set -euo pipefail
 
