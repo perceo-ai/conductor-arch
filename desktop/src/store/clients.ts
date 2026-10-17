@@ -36,6 +36,26 @@ const [state, setState] = createStore<ClientsState>({
   loaded: false,
 });
 
+const lastWorkspaceByClient = new Map<string, string>();
+
+function clientKey(id: string | null): string {
+  return id ?? "local";
+}
+
+function rememberCurrentWorkspace(id: string | null): void {
+  const selected = nav.selectedWorkspace();
+  if (selected) lastWorkspaceByClient.set(clientKey(id), selected);
+}
+
+function restoreWorkspaceForClient(id: string | null): void {
+  const remembered = lastWorkspaceByClient.get(clientKey(id));
+  if (remembered && workspacesStore.row(remembered)) {
+    nav.selectWorkspace(remembered);
+  } else {
+    nav.goToDashboard();
+  }
+}
+
 function applyResult(res: ClientsResult): boolean {
   if (!res.ok) {
     toastsStore.error(res.error);
@@ -61,6 +81,7 @@ async function resync(): Promise<void> {
   // The new daemon may know a different set of agents than the old one, so a
   // stale registry would offer providers this host cannot actually run.
   await providersStore.load().catch(() => undefined);
+  restoreWorkspaceForClient(state.activeId);
   const selected = nav.selectedWorkspace();
   const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
   await layoutPresetsStore.load(repository).catch(() => undefined);
@@ -115,12 +136,14 @@ export const clientsStore = {
   async activate(id: string | null): Promise<boolean> {
     if (id === state.activeId) return true;
     logAction("switch client", { id });
+    rememberCurrentWorkspace(state.activeId);
     return run("client switched", () => bridge.activate(id), resync);
   },
 
   /** Save a daemon and switch to it. Main verifies before committing. */
   async add(opts: { label?: string; address: string; token: string }): Promise<boolean> {
     logAction("add client", { address: opts.address });
+    rememberCurrentWorkspace(state.activeId);
     return run("client added", () => bridge.add(opts), resync);
   },
 

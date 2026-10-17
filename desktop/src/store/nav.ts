@@ -68,6 +68,14 @@ export const nav = {
     setActivePage(page);
   },
 
+  goToDashboard() {
+    if (activePage() === "dashboard" && selectedWorkspace() == null) return;
+    pushHistory();
+    if (selectedWorkspace() != null) setSelectedChatThread(null);
+    setSelectedWorkspaceRaw(null);
+    setActivePage("dashboard");
+  },
+
   selectChatThread(threadId: number | null) {
     setSelectedChatThread(threadId);
   },
