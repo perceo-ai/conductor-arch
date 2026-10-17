@@ -916,6 +916,16 @@ jobs:
           xcode-select -p
           swift --version
 
+      # LiveDaemonTests drive the real `archcar` daemon and fail with
+      # "archcar not built at .../target/debug/archcar" unless the daemon is
+      # built first. This mirrors the repo's `make ios-test` target:
+      # `cargo build -p archcar && cd ios/ArchcarKit && swift test`.
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - name: Build archcar daemon for live-daemon tests
+        run: cargo build -p archcar
+
       - name: Build ArchcarKit
         run: cd ios/ArchcarKit && swift build
 
