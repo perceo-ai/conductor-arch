@@ -6534,6 +6534,7 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
             workspace: snapshot.workspace,
             kind: snapshot.kind,
             pid: snapshot.pid,
+            replayed: true,
         });
         if snapshot.ready {
             let _ = subscriber.send(ArchcarEvent::SessionReady {
@@ -9324,6 +9325,7 @@ exit 1
             workspace: "berlin".to_owned(),
             kind: SessionKind::CODEX,
             pid: 12345,
+            replayed: true,
         }));
         assert!(events.contains(&ArchcarEvent::SessionReady {
             session_id: 9,
@@ -9335,6 +9337,7 @@ exit 1
             workspace: "paris".to_owned(),
             kind: SessionKind::CODEX,
             pid: 12346,
+            replayed: true,
         }));
         assert!(!events.contains(&ArchcarEvent::SessionReady {
             session_id: 10,

@@ -3064,6 +3064,7 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             workspace,
             kind,
             pid,
+            ..
         } => format!(
             "session_started workspace={workspace} kind={} session_id={session_id} thread_id={thread_id} pid={pid}",
             session_kind_label(*kind)
@@ -3188,6 +3189,12 @@ pub enum ArchcarEvent {
         workspace: String,
         kind: SessionKind,
         pid: u32,
+        /// True when this event is the daemon replaying already-live session
+        /// state to a newly connected or reconnected client, not a session that
+        /// just started. The desktop sound detector must not treat a replay as
+        /// new work. Omitted when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replayed: bool,
     },
     SessionReady {
         session_id: i64,
@@ -3335,11 +3342,30 @@ mod tests {
                 workspace: "berlin".to_owned(),
                 kind: SessionKind::CODEX,
                 pid: 123,
+                replayed: false,
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();
+        // A genuine start keeps the wire shape older clients know.
+        assert!(!json.contains("replayed"), "{json}");
         let decoded: RpcEnvelope<ArchcarEvent> = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, envelope);
+
+        let replay = RpcEnvelope {
+            id: "2".to_owned(),
+            payload: ArchcarEvent::SessionStarted {
+                session_id: 4,
+                thread_id: 6,
+                workspace: "berlin".to_owned(),
+                kind: SessionKind::CODEX,
+                pid: 123,
+                replayed: true,
+            },
+        };
+        let json = serde_json::to_string(&replay).unwrap();
+        assert!(json.contains("\"replayed\":true"), "{json}");
+        let decoded: RpcEnvelope<ArchcarEvent> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, replay);
     }
 
     #[test]

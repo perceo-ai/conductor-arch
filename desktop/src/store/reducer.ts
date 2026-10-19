@@ -175,6 +175,7 @@ export function applyEvent(event: ArchcarEvent) {
         session_id: number;
         workspace: string;
         kind: string;
+        replayed?: boolean;
       };
       // Shell sessions back the Terminal tab; correlate the async spawn to its
       // workspace and pull the first screen.
@@ -195,9 +196,10 @@ export function applyEvent(event: ArchcarEvent) {
         }
         // Record busy now rather than waiting for a pull: a short turn can
         // start and finish inside one refresh interval, and a detector that
-        // never saw it busy cannot hear it finish. Only a real start lands
-        // here, so an idle chat loading stays silent.
-        observeChatGeneration(e.thread_id);
+        // never saw it busy cannot hear it finish. A replay (the daemon
+        // re-announcing live sessions on connect) is not new work: recording
+        // it as busy would chime for every idle chat on each reconnect.
+        if (!e.replayed) observeChatGeneration(e.thread_id);
       }
       void refreshThreadWorkspace(e.thread_id);
       break;

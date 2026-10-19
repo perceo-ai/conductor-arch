@@ -1849,6 +1849,7 @@ fn run_session_loop(
         workspace: started.workspace.clone(),
         kind: started.kind,
         pid: started.pid,
+        replayed: false,
     });
     if started.ready {
         let _ = event_tx.send(ArchcarEvent::SessionReady {
@@ -2263,6 +2264,7 @@ fn run_codex_app_server_session_loop(
         workspace: started.workspace.clone(),
         kind: started.kind,
         pid: started.pid,
+        replayed: false,
     });
     append_runtime_provider_event(
         &runtime_store,
@@ -2761,6 +2763,7 @@ fn run_claude_stream_session_loop(
         workspace: started.workspace.clone(),
         kind: started.kind,
         pid: started.pid,
+        replayed: false,
     });
     let _ = runtime_store.append_provider_native_output(
         started.session_id,

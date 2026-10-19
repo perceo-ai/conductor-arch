@@ -192,6 +192,24 @@ describe("turn-finished sound", () => {
     expect(play).toHaveBeenCalledTimes(1);
   });
 
+  it("does not chime when the daemon replays an already-idle session on reconnect", async () => {
+    const { applyEvent, play, daemonSays } = await setup();
+    // Simulate the reconnect replay: SessionStarted(replayed) immediately followed by
+    // SessionReady, for a session that was already idle before this client connected.
+    applyEvent({
+      type: "session_started",
+      thread_id: 1,
+      session_id: 10,
+      workspace: "berlin",
+      kind: "claude",
+      replayed: true,
+    } as never);
+    applyEvent({ type: "session_ready", session_id: 10, thread_id: 1 } as never);
+    // The debounced pull that follows sees an idle session with no history of real work.
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).not.toHaveBeenCalled();
+  });
+
   it("fires even when a file or commit view is covering the selected chat", async () => {
     const { daemonSays, play, nav, prefsStore } = await setup();
     prefsStore.setTurnSoundSuppressWhenViewing(true);
