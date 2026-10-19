@@ -11,6 +11,9 @@ const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");
 const [selectedChatThread, setSelectedChatThread] = createSignal<number | null>(null);
 const [windowFocused, setWindowFocused] = createSignal(true);
+// False while the chat surface shows a file or commit over the selected chat:
+// the chat tab stays selected underneath, but it is not what is on screen.
+const [chatSurfaceShowsChat, setChatSurfaceShowsChat] = createSignal(true);
 
 interface NavEntry {
   selectedWorkspace: string | null;
@@ -47,10 +50,12 @@ export const nav = {
   activePage,
   selectedChatThread,
   windowFocused,
+  chatSurfaceShowsChat,
   canBack,
   canForward,
 
   setWindowFocused,
+  setChatSurfaceShowsChat,
   /** Select a workspace and switch to its page (clears per-workspace selections). */
   selectWorkspace(name: string | null) {
     if (selectedWorkspace() === name && activePage() === "workspace") return;

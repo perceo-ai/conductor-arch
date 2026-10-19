@@ -14,6 +14,7 @@ import {
   type SkillOption
 } from "@/lib/skillMention";
 import { send } from "@/bridge/client";
+import { observeChatGeneration } from "@/store/turnSound";
 import { titleCaseWorkspace } from "@/lib/text";
 import CompactSelect from "@/components/CompactSelect";
 import RichInput, { type RichInputApi } from "@/components/RichInput";
@@ -357,6 +358,9 @@ export function Composer(props: {
     // agent takes seconds, and silence there reads as a dropped message.
     if (sessionId() == null) {
       chatStore.setPhase(props.threadId, { kind: "starting", provider: sessionKind() });
+      // The turn-finished sound needs a busy baseline; a fast turn can be over
+      // before the first snapshot pull would have recorded one.
+      observeChatGeneration(props.threadId);
     }
     try {
       const res = await send({

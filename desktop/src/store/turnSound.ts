@@ -49,7 +49,8 @@ function currentGate(threadId: number): TurnSoundGate {
     viewing:
       nav.windowFocused() &&
       nav.activePage() === "workspace" &&
-      nav.selectedChatThread() === threadId,
+      nav.selectedChatThread() === threadId &&
+      nav.chatSurfaceShowsChat(),
   };
 }
 

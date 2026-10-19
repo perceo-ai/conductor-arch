@@ -193,6 +193,11 @@ export function applyEvent(event: ArchcarEvent) {
         if (chatStore.slice(e.thread_id).phase.kind === "failed") {
           chatStore.setPhase(e.thread_id, { kind: "ready" });
         }
+        // Record busy now rather than waiting for a pull: a short turn can
+        // start and finish inside one refresh interval, and a detector that
+        // never saw it busy cannot hear it finish. Only a real start lands
+        // here, so an idle chat loading stays silent.
+        observeChatGeneration(e.thread_id);
       }
       void refreshThreadWorkspace(e.thread_id);
       break;

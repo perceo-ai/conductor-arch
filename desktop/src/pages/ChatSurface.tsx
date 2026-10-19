@@ -61,6 +61,11 @@ export default function ChatSurface(props: { workspace: string }) {
     });
   }
 
+  // A file or commit open here hides the selected chat; the turn-finished
+  // sound's "quiet for the chat on screen" needs to know it is not on screen.
+  createEffect(() => nav.setChatSurfaceShowsChat(view().kind === "chat"));
+  onCleanup(() => nav.setChatSurfaceShowsChat(true));
+
   // Let the right-panel Browse/Changes open files into the center.
   onMount(() => registerOpenFile((ws, path, scope) => {
     if (ws !== props.workspace) return;

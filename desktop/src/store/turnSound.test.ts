@@ -175,6 +175,37 @@ describe("turn-finished sound", () => {
     expect(play).not.toHaveBeenCalled();
   });
 
+  it("fires for a short turn that starts and finishes before any snapshot pull sees it busy", async () => {
+    const { applyEvent, play, daemonSays } = await setup();
+    // No prior pull for this thread yet, so the module has no busy baseline.
+    // session_started must record one on its own, independent of the (still
+    // unfired) debounced snapshot pull.
+    applyEvent({
+      type: "session_started",
+      thread_id: 1,
+      session_id: 10,
+      workspace: "berlin",
+      kind: "claude",
+    } as never);
+    // By the time the pull resolves the turn has already finished.
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires even when a file or commit view is covering the selected chat", async () => {
+    const { daemonSays, play, nav, prefsStore } = await setup();
+    prefsStore.setTurnSoundSuppressWhenViewing(true);
+    nav.selectWorkspace("berlin");
+    nav.selectChatThread(1);
+    nav.setWindowFocused(true);
+    // A FileView/CommitView is open over the chat surface: the chat tab is
+    // still "selected" but is not actually what's on screen.
+    nav.setChatSurfaceShowsChat(false);
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
   it("optionally stays quiet for the chat on screen in a focused window", async () => {
     const { daemonSays, play, nav, prefsStore } = await setup();
     prefsStore.setTurnSoundSuppressWhenViewing(true);
