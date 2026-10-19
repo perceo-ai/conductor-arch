@@ -3200,6 +3200,12 @@ pub enum ArchcarEvent {
         /// starting is always not-ready. Omitted when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         ready: bool,
+        /// The replayed session's actual runtime state. `ready = false` alone
+        /// cannot tell an agent mid-turn from one parked on a question for
+        /// the user (`waiting_for_input`), and only the first is busy. Only
+        /// set on replay; omitted otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_state: Option<AgentSessionState>,
     },
     SessionReady {
         session_id: i64,
@@ -3349,6 +3355,7 @@ mod tests {
                 pid: 123,
                 replayed: false,
                 ready: false,
+                runtime_state: None,
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();
@@ -3367,6 +3374,7 @@ mod tests {
                 pid: 123,
                 replayed: true,
                 ready: false,
+                runtime_state: None,
             },
         };
         let json = serde_json::to_string(&replay).unwrap();

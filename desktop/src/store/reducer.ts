@@ -177,6 +177,7 @@ export function applyEvent(event: ArchcarEvent) {
         kind: string;
         replayed?: boolean;
         ready?: boolean;
+        runtime_state?: string;
       };
       // Shell sessions back the Terminal tab; correlate the async spawn to its
       // workspace and pull the first screen.
@@ -184,12 +185,14 @@ export function applyEvent(event: ArchcarEvent) {
         terminalStore.attachSession(e.workspace, e.session_id);
         void refreshTerminalScreen(e.session_id);
       } else {
-        // A replay on connect carries the session's real readiness; a genuine
-        // start is never ready yet.
+        // A replay on connect carries the session's real readiness and
+        // runtime state (an agent parked on a question is not ready but
+        // `waiting_for_input`, which is not work); a genuine start is never
+        // ready yet and carries neither.
         chatStore.setSession(e.thread_id, {
           session_id: e.session_id,
           status: e.ready ? "ready" : "starting",
-          runtime_state: e.ready ? "idle" : "starting",
+          runtime_state: e.runtime_state ?? (e.ready ? "idle" : "starting"),
           ready: e.ready ?? false,
         });
         // A fresh session starting clears any stale "failed" phase from a prior
@@ -197,13 +200,14 @@ export function applyEvent(event: ArchcarEvent) {
         if (chatStore.slice(e.thread_id).phase.kind === "failed") {
           chatStore.setPhase(e.thread_id, { kind: "ready" });
         }
-        // Record the chat's state now rather than waiting for a pull: a short
-        // turn can start and finish inside one refresh interval, and a
-        // detector that never saw it busy cannot hear it finish. The session
-        // above reflects its real readiness, so a replayed idle session only
-        // sets a silent idle baseline, and a replayed busy one seeds busy and
-        // chimes when it actually finishes.
-        observeChatGeneration(e.thread_id);
+        // Record busy now rather than waiting for a pull: a short turn can
+        // start and finish inside one refresh interval, and a detector that
+        // never saw it busy cannot hear it finish. This only ever records
+        // busy (canFinish: false). Deciding a chat finished needs a settled
+        // snapshot-and-projection pull: on a reconnect the stored subagent
+        // cards are stale, and a background agent launched while disconnected
+        // would otherwise be missed.
+        observeChatGeneration(e.thread_id, { canFinish: false });
       }
       void refreshThreadWorkspace(e.thread_id);
       break;

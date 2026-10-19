@@ -6536,6 +6536,7 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
             pid: snapshot.pid,
             replayed: true,
             ready: snapshot.ready,
+            runtime_state: Some(snapshot.runtime_state),
         });
         if snapshot.ready {
             let _ = subscriber.send(ArchcarEvent::SessionReady {
@@ -9328,6 +9329,7 @@ exit 1
             pid: 12345,
             replayed: true,
             ready: true,
+            runtime_state: Some(crate::session_state::AgentSessionState::WaitingForInput),
         }));
         assert!(events.contains(&ArchcarEvent::SessionReady {
             session_id: 9,
@@ -9341,6 +9343,7 @@ exit 1
             pid: 12346,
             replayed: true,
             ready: false,
+            runtime_state: Some(crate::session_state::AgentSessionState::Starting),
         }));
         assert!(!events.contains(&ArchcarEvent::SessionReady {
             session_id: 10,

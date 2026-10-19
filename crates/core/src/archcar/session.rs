@@ -1851,6 +1851,7 @@ fn run_session_loop(
         pid: started.pid,
         replayed: false,
         ready: false,
+        runtime_state: None,
     });
     if started.ready {
         let _ = event_tx.send(ArchcarEvent::SessionReady {
@@ -2267,6 +2268,7 @@ fn run_codex_app_server_session_loop(
         pid: started.pid,
         replayed: false,
         ready: false,
+        runtime_state: None,
     });
     append_runtime_provider_event(
         &runtime_store,
@@ -2767,6 +2769,7 @@ fn run_claude_stream_session_loop(
         pid: started.pid,
         replayed: false,
         ready: false,
+        runtime_state: None,
     });
     let _ = runtime_store.append_provider_native_output(
         started.session_id,

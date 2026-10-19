@@ -228,6 +228,60 @@ describe("turn-finished sound", () => {
     expect(play).toHaveBeenCalledTimes(1);
   });
 
+  it("does not chime when a replayed session was already waiting on a question", async () => {
+    const { applyEvent, play, daemonSays } = await setup();
+    // The daemon reports a Claude agent parked on a question as not ready but
+    // waiting_for_input (mark_snapshot_awaiting_input). That is not work.
+    const waiting = { session_id: 10, status: "running", runtime_state: "waiting_for_input", ready: false };
+    applyEvent({
+      type: "session_started",
+      thread_id: 1,
+      session_id: 10,
+      workspace: "berlin",
+      kind: "claude",
+      replayed: true,
+      ready: false,
+      runtime_state: "waiting_for_input",
+    } as never);
+    // Opening the chat (or any pull) loads the question; nothing finished.
+    await daemonSays(1, { live_session: waiting, items: [] });
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("does not ring on reconnect while a background agent launched during the disconnect still works", async () => {
+    const { applyEvent, play, daemonSays } = await setup();
+    const bgAgent = (status: string) => ({
+      id: "claude:s:task:agent",
+      render_class: "background_card",
+      status,
+      background_agent: true,
+    });
+    // Last pull before the connection dropped: main agent busy, no subagent.
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    // While disconnected the main turn ended and a background agent started.
+    // The event stream reconnects without a reload, so the stored cards are
+    // stale when the replay lands.
+    daemon[1] = { live_session: READY, items: [bgAgent("running")] };
+    applyEvent({
+      type: "session_started",
+      thread_id: 1,
+      session_id: 10,
+      workspace: "berlin",
+      kind: "claude",
+      replayed: true,
+      ready: true,
+      runtime_state: "waiting_for_input",
+    } as never);
+    applyEvent({ type: "session_ready", session_id: 10, thread_id: 1 } as never);
+    await settle();
+    expect(play).not.toHaveBeenCalled();
+    // A settled pull sees the agent still running; its completion is the chime.
+    await daemonSays(1, { live_session: READY, items: [bgAgent("running")] });
+    expect(play).not.toHaveBeenCalled();
+    await daemonSays(1, { live_session: READY, items: [bgAgent("complete")] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
   it("fires even when a file or commit view is covering the selected chat", async () => {
     const { daemonSays, play, nav, prefsStore } = await setup();
     prefsStore.setTurnSoundSuppressWhenViewing(true);
