@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import type { ArchcarProjectionItem, ProviderInteractionRecord } from "@/bridge/protocol";
 
@@ -19,6 +20,9 @@ const PLAN_BODY = "## Step one\n\nDo the thing.";
 let items: ArchcarProjectionItem[] = [];
 let pending: ProviderInteractionRecord | null = null;
 let session = { runtime_state: "ready", ready: true };
+// A reactive feed for tests that change the thread after it is mounted, the
+// way the store does while an agent streams. Null falls back to `items`.
+const [liveItems, setLiveItems] = createSignal<ArchcarProjectionItem[] | null>(null);
 
 function projectionItem(over: Partial<ArchcarProjectionItem>): ArchcarProjectionItem {
   return {
@@ -58,7 +62,7 @@ vi.mock("@/store", () => ({
 vi.mock("@/store/actions", () => ({
   actions: { resolveInteraction: vi.fn(() => Promise.resolve()), revealPanel: vi.fn() },
 }));
-vi.mock("@/store/chat", () => ({ timelineItemsForSlice: () => items }));
+vi.mock("@/store/chat", () => ({ timelineItemsForSlice: () => liveItems() ?? items }));
 vi.mock("./NewChatIntro", () => ({
   NewChatIntro: () => <div class="new-chat-intro">new chat</div>,
 }));
@@ -85,6 +89,7 @@ afterEach(() => {
   dispose = undefined;
   host = undefined;
   items = [];
+  setLiveItems(null);
   pending = null;
   session = { runtime_state: "ready", ready: true };
 });
@@ -313,18 +318,16 @@ describe("Timeline", () => {
     expect(nested.querySelector(".chat-inline-event-reveal-older")).toBeNull();
   });
 
-  it("keeps a new action visible in a capped card while the subagent runs", async () => {
+  it("follows a running subagent's new action into an open, capped card", () => {
     session = { runtime_state: "running", ready: false };
-    const calls = (n: number) =>
-      Array.from({ length: n }, (_, i) =>
-        projectionItem({
-          id: `call-${i}`,
-          render_class: "command_card",
-          title: `Bash rg step${i}`,
-          body: "",
-          parent_id: "agent",
-        }),
-      );
+    const call = (i: number) =>
+      projectionItem({
+        id: `call-${i}`,
+        render_class: "command_card",
+        title: `Bash rg step${i}`,
+        body: "",
+        parent_id: "agent",
+      });
     const agent = projectionItem({
       id: "agent",
       render_class: "tool_card",
@@ -333,11 +336,32 @@ describe("Timeline", () => {
       status: "running",
       stream_state: "streaming",
     });
-    items = [agent, ...calls(110)];
+    const before = [agent, ...Array.from({ length: 110 }, (_, i) => call(i))];
+    setLiveItems(before);
     const el = mount();
     const header = el.querySelector(".chat-inline-event-header")!;
     expect(header.querySelector(".chat-inline-event-latest")?.textContent).toContain("step109");
     expect(header.querySelector(".chat-inline-event-count")?.textContent).toBe("110 actions");
+
+    el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
+    const nested = el.querySelector(".chat-inline-event-nested")!;
+    const rows = () => [...nested.querySelectorAll(":scope > .chat-inline-event")].map((r) => r.textContent!);
+    const reveal = () => nested.querySelector(":scope > .chat-inline-event-reveal-older")?.textContent;
+    expect(rows()).toHaveLength(50);
+    expect(rows().at(-1)).toContain("step109");
+    expect(reveal()).toContain("60");
+
+    // The subagent takes another action while the card is open and capped.
+    setLiveItems([...before, call(110)]);
+
+    // Same card, still open: the window slides to the new action rather than
+    // growing past the cap or holding the old rows.
+    expect(el.querySelector(".chat-inline-event-nested")).toBe(nested);
+    expect(rows()).toHaveLength(50);
+    expect(rows().at(-1)).toContain("step110");
+    expect(rows()[0]).toContain("step61");
+    expect(reveal()).toContain("61");
+    expect(header.querySelector(".chat-inline-event-count")?.textContent).toBe("111 actions");
   });
 
   it("keeps a background task running after the turn goes idle", () => {
