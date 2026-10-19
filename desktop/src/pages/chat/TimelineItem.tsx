@@ -16,6 +16,7 @@ import {
   formatReasoningText,
   inlineEventVerbChip,
   isDiffCard,
+  isInlineEventClass,
   isSubagentAction,
   isTerminalCard,
   stripArchductorMetadata,
@@ -84,12 +85,14 @@ function InlineCard(props: {
   const chip = () => parsed().chip;
   const hasNested = () => props.nested.length > 0;
   const hasBody = () => props.item.body.trim().length > 0 || hasNested();
-  const actionCount = () => props.nested.filter((child) => isSubagentAction(child.render_class)).length;
+  const actionCount = () => props.nested.filter(isSubagentAction).length;
   const latest = () => {
     if (!props.running || open()) return null;
     // The newest action, not the newest prose: "Ran rg …" says what the
     // subagent is doing, a sentence of its narration does not fit a header.
-    const last = props.nested.findLast((child) => isSubagentAction(child.render_class));
+    const last = props.nested.findLast(
+      (child) => isInlineEventClass(child.render_class) && child.render_class !== "nested_transcript_card",
+    );
     if (!last) return null;
     const step = inlineEventVerbChip(last.render_class, last.title);
     return `${step.verb} ${step.chip}`.trim();

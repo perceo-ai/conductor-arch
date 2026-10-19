@@ -63,11 +63,14 @@ describe("formatActionCount", () => {
 });
 
 describe("isSubagentAction", () => {
-  it("counts what a subagent did, not what it said", () => {
-    expect(isSubagentAction("command_card")).toBe(true);
-    expect(isSubagentAction("tool_card")).toBe(true);
-    expect(isSubagentAction("subagent_card")).toBe(true);
-    expect(isSubagentAction("nested_transcript_card")).toBe(false);
-    expect(isSubagentAction("assistant_chat")).toBe(false);
+  it("counts what a subagent did, not what it said or was asked", () => {
+    const row = (render_class: string, title: string) => ({ render_class, title });
+    expect(isSubagentAction(row("command_card", "Bash ls"))).toBe(true);
+    expect(isSubagentAction(row("tool_card", "Agent Dig deeper"))).toBe(true);
+    // A Codex spawn/wait is a subagent card too, and is an action.
+    expect(isSubagentAction(row("subagent_card", "spawn_agent"))).toBe(true);
+    expect(isSubagentAction(row("subagent_card", "Asked subagent"))).toBe(false);
+    expect(isSubagentAction(row("nested_transcript_card", "Subagent"))).toBe(false);
+    expect(isSubagentAction(row("assistant_chat", ""))).toBe(false);
   });
 });

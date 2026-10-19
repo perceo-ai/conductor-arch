@@ -47,10 +47,13 @@ export function isInlineEventClass(renderClass: string): boolean {
 
 /**
  * True for a row that is something a subagent did (a command, a tool call, a
- * nested Agent) rather than something it said.
+ * nested Agent) rather than something it said, or the prompt it was handed —
+ * core titles that row "Asked subagent".
  */
-export function isSubagentAction(renderClass: string): boolean {
-  return isInlineEventClass(renderClass) && renderClass !== "nested_transcript_card";
+export function isSubagentAction(item: { render_class: string; title: string }): boolean {
+  if (!isInlineEventClass(item.render_class)) return false;
+  if (item.render_class === "nested_transcript_card") return false;
+  return !(item.render_class === "subagent_card" && item.title === "Asked subagent");
 }
 
 /** The action count an Agent card shows in its header: "1 action", "12 actions". */

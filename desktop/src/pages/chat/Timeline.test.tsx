@@ -246,6 +246,14 @@ describe("Timeline", () => {
   it("shows the subagent's action count in the collapsed Agent card header", () => {
     items = [
       projectionItem({ id: "agent", render_class: "tool_card", title: "Agent Audit the renderer", body: "" }),
+      // The prompt the subagent was handed is not one of its actions.
+      projectionItem({
+        id: "prompt",
+        render_class: "subagent_card",
+        title: "Asked subagent",
+        body: "Audit the renderer.",
+        parent_id: "agent",
+      }),
       ...Array.from({ length: 12 }, (_, i) =>
         projectionItem({
           id: `call-${i}`,
