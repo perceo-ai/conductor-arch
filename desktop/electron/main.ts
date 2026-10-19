@@ -23,6 +23,7 @@ import {
 import { resolveWindowIconPath } from "./icon.js";
 import { externalNavigationUrl, isAppShellNavigation, isExternalOpenTarget } from "./externalNavigation.js";
 import * as fileAccess from "./fileAccess.js";
+import { doNotDisturbActive } from "./doNotDisturb.js";
 // CommonJS package: the named export is not reachable through ESM interop.
 import electronUpdater from "electron-updater";
 import {
@@ -779,6 +780,8 @@ ipcMain.handle("app:notify", (_evt, opts: { title?: string; body?: string }) => 
     return { ok: false, error: String(err) };
   }
 });
+
+ipcMain.handle("app:do-not-disturb", () => doNotDisturbActive());
 
 // Open a URL in the default browser or a path in the OS default handler
 // (editor/file manager). Used by the PR status bar, the top-bar editor button,

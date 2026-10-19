@@ -75,6 +75,7 @@ interface ArchductorApi {
   fileAccessRestartDaemon(): Promise<{ ok: boolean; error?: string }>;
   openWorkspaceApp(opts: { rootPath: string; appId: WorkspaceOpenAppId }): Promise<{ ok: boolean; error?: string }>;
   notify(opts: { id: string; title: string; body: string }): Promise<{ ok: boolean; error?: string }>;
+  doNotDisturb?(): Promise<boolean>;
   checkForUpdates(): Promise<
     | { ok: true; currentVersion: string; latestVersion?: string; updateAvailable: boolean; releaseUrl?: string }
     | { ok: false; currentVersion: string; error: string }
@@ -194,6 +195,16 @@ export const openWorkspaceApp = (opts: { rootPath: string; appId: WorkspaceOpenA
 
 /** Show a native desktop notification from the Electron main process. */
 export const notify = (opts: { id: string; title: string; body: string }) => api().notify(opts);
+
+/** Whether the OS reports do-not-disturb. False where the platform does not
+ *  expose it, and on any failure: a missed silence beats a lost ding. */
+export const doNotDisturb = async (): Promise<boolean> => {
+  try {
+    return (await api().doNotDisturb?.()) === true;
+  } catch {
+    return false;
+  }
+};
 
 /** Check GitHub releases for a newer packaged Archductor build. */
 export const checkForUpdates = () => api().checkForUpdates();

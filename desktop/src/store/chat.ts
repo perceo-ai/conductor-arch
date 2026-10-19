@@ -187,15 +187,18 @@ export const chatStore = {
   },
 
   /** A session process exited — clear it from whichever thread owned it so the
-   *  running/busy indicators don't get stuck on. */
-  markSessionExited(sessionId: number) {
+   *  running/busy indicators don't get stuck on. Returns the threads touched. */
+  markSessionExited(sessionId: number): number[] {
+    const touched: number[] = [];
     for (const key of Object.keys(chat)) {
       const threadId = Number(key);
       if (chat[threadId]?.session?.session_id === sessionId) {
         setChat(threadId, "session", null);
         recordUpdate(`chat.sessionExited.${threadId}`);
+        touched.push(threadId);
       }
     }
+    return touched;
   },
 
   /** Local optimistic append (before the durable event arrives). */

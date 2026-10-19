@@ -13,6 +13,7 @@ import { nav } from "./nav";
 import { workspacesStore } from "./workspaces";
 import { threadsStore } from "./threads";
 import { intelStore } from "./intel";
+import { observeChatGeneration } from "./turnSound";
 
 async function refreshWorkspaceInventoryAndChats() {
   try {
@@ -110,6 +111,11 @@ async function refreshThreadSnapshot(threadId: number) {
     inflightSnapshot.delete(threadId);
     if (pendingSnapshot.delete(threadId)) {
       void refreshThreadSnapshot(threadId);
+    } else {
+      // Judged only on a settled pull: snapshot and projection together are
+      // the one place both the main agent's state and its subagents' are
+      // current, and a pull with a follow-up queued is already stale.
+      observeChatGeneration(threadId);
     }
   }
 }
@@ -186,22 +192,26 @@ export function applyEvent(event: ArchcarEvent) {
 
     case "session_exited": {
       // Clear the exited session so running/busy spinners don't stick on.
-      chatStore.markSessionExited((event as { session_id: number }).session_id);
+      for (const threadId of chatStore.markSessionExited((event as { session_id: number }).session_id)) {
+        observeChatGeneration(threadId);
+      }
       void refreshWorkspaceInventoryAndChats();
       break;
     }
 
     case "provider_interaction_requested": {
-      interactionsStore.request(
-        (event as { interaction: ProviderInteractionRecord }).interaction,
-      );
+      const interaction = (event as { interaction: ProviderInteractionRecord }).interaction;
+      interactionsStore.request(interaction);
+      // An agent parked on a question is waiting on the operator: that is the
+      // moment the sound exists for.
+      observeChatGeneration(interaction.thread_id);
       break;
     }
 
     case "provider_interaction_resolved": {
-      interactionsStore.resolve(
-        (event as { interaction: ProviderInteractionRecord }).interaction,
-      );
+      const interaction = (event as { interaction: ProviderInteractionRecord }).interaction;
+      interactionsStore.resolve(interaction);
+      observeChatGeneration(interaction.thread_id);
       break;
     }
 
@@ -219,6 +229,9 @@ export function applyEvent(event: ArchcarEvent) {
         runtime_state: "idle",
         ready: true,
       });
+      // Pull the projection too: whether a subagent outlives this turn is only
+      // known from it, and the sound waits on that answer.
+      chatRefresh.request(e.thread_id);
       void refreshThreadWorkspace(e.thread_id);
       break;
     }

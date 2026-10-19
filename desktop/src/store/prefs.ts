@@ -40,6 +40,10 @@ export interface Prefs {
    * two people pointed at the same daemon should be able to pin differently.
    */
   pinnedWorkspaces: string[];
+  /** Play a sound when a chat (main agent and every subagent) stops generating. */
+  turnSound: boolean;
+  /** …except for the chat on screen while the window is focused. */
+  turnSoundSuppressWhenViewing: boolean;
 }
 
 const DEFAULTS: Prefs = {
@@ -52,6 +56,8 @@ const DEFAULTS: Prefs = {
   activePresetId: "code",
   keybindings: "",
   pinnedWorkspaces: [],
+  turnSound: true,
+  turnSoundSuppressWhenViewing: false,
 };
 
 function persistedPrefs(prefs: Prefs) {
@@ -65,6 +71,8 @@ function persistedPrefs(prefs: Prefs) {
     activePresetId: prefs.activePresetId,
     keybindings: prefs.keybindings,
     pinnedWorkspaces: prefs.pinnedWorkspaces,
+    turnSound: prefs.turnSound,
+    turnSoundSuppressWhenViewing: prefs.turnSoundSuppressWhenViewing,
   };
 }
 
@@ -149,6 +157,16 @@ export const prefsStore = {
 
   setActivePresetId(activePresetId: string) {
     setState("activePresetId", activePresetId);
+    persist();
+  },
+
+  setTurnSound(turnSound: boolean) {
+    setState("turnSound", turnSound);
+    persist();
+  },
+
+  setTurnSoundSuppressWhenViewing(suppress: boolean) {
+    setState("turnSoundSuppressWhenViewing", suppress);
     persist();
   },
 

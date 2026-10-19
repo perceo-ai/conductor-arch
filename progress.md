@@ -27,6 +27,20 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Turn-finished sound (2026-10-19)
+
+The desktop app chimes when a chat stops generating, in any chat, viewed or
+not. "Stopped" means the main agent is idle and no subagent card in the
+projection is still running, so a background subagent holds the chime until it
+lands. One busy selector and a per-chat falling-edge detector fire once per
+busy -> idle transition. The reducer evaluates them only on settled
+snapshot+projection pulls, on session exit, and on interaction asks. Settings ->
+General -> Sounds has the on/off toggle (default on) and an opt-in "quiet for
+the chat on screen" toggle. Both persist in local prefs. Do-not-disturb is
+honoured on GNOME. macOS Focus and Windows Focus Assist expose no public API.
+The CLI has no equivalent yet: it has no long-lived command that watches turns
+finish.
+
 ## Archive hides, delete removes (2026-09-30)
 
 **Archive** now only hides a workspace from the sidebar: record, chats, branch,
