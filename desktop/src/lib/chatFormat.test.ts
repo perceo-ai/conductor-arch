@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatReasoningText, inlineEventVerbChip } from "./chatFormat";
+import { formatActionCount, formatReasoningText, inlineEventVerbChip, isSubagentAction } from "./chatFormat";
 
 describe("inlineEventVerbChip", () => {
   it("renders read-only shell wrappers as Read events", () => {
@@ -51,5 +51,23 @@ describe("subagent cards", () => {
       verb: "Asked",
       chip: "subagent",
     });
+  });
+});
+
+describe("formatActionCount", () => {
+  it("counts a subagent's actions for the collapsed card header", () => {
+    expect(formatActionCount(1)).toBe("1 action");
+    expect(formatActionCount(12)).toBe("12 actions");
+    expect(formatActionCount(0)).toBe("0 actions");
+  });
+});
+
+describe("isSubagentAction", () => {
+  it("counts what a subagent did, not what it said", () => {
+    expect(isSubagentAction("command_card")).toBe(true);
+    expect(isSubagentAction("tool_card")).toBe(true);
+    expect(isSubagentAction("subagent_card")).toBe(true);
+    expect(isSubagentAction("nested_transcript_card")).toBe(false);
+    expect(isSubagentAction("assistant_chat")).toBe(false);
   });
 });

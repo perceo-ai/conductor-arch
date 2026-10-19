@@ -45,6 +45,19 @@ export function isInlineEventClass(renderClass: string): boolean {
   return renderClass in DEFAULT_VERB;
 }
 
+/**
+ * True for a row that is something a subagent did (a command, a tool call, a
+ * nested Agent) rather than something it said.
+ */
+export function isSubagentAction(renderClass: string): boolean {
+  return isInlineEventClass(renderClass) && renderClass !== "nested_transcript_card";
+}
+
+/** The action count an Agent card shows in its header: "1 action", "12 actions". */
+export function formatActionCount(count: number): string {
+  return `${count} ${count === 1 ? "action" : "actions"}`;
+}
+
 /** True if we render this item at all — a strict allowlist (text or inline event). */
 export function isRenderableClass(renderClass: string): boolean {
   return TEXT_CLASSES.has(renderClass) || isInlineEventClass(renderClass);

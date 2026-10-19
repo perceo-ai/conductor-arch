@@ -243,6 +243,95 @@ describe("Timeline", () => {
     );
   });
 
+  it("shows the subagent's action count in the collapsed Agent card header", () => {
+    items = [
+      projectionItem({ id: "agent", render_class: "tool_card", title: "Agent Audit the renderer", body: "" }),
+      ...Array.from({ length: 12 }, (_, i) =>
+        projectionItem({
+          id: `call-${i}`,
+          render_class: "command_card",
+          title: `Bash rg pattern${i}`,
+          body: "",
+          parent_id: "agent",
+        }),
+      ),
+      // The subagent's narration is not an action.
+      projectionItem({
+        id: "report",
+        render_class: "nested_transcript_card",
+        title: "Subagent",
+        body: "Done.",
+        parent_id: "agent",
+      }),
+    ];
+    const el = mount();
+    const header = el.querySelector(".chat-inline-event-header")!;
+    expect(header.querySelector(".chat-inline-event-count")?.textContent).toBe("12 actions");
+    // Finished, so it neither spins nor shows a latest-action line.
+    expect(el.querySelector(".chat-inline-event-running")).toBeNull();
+    expect(header.querySelector(".chat-inline-event-latest")).toBeNull();
+  });
+
+  it("caps an open Agent card with 100+ actions and reveals older ones on demand", () => {
+    items = [
+      projectionItem({ id: "agent", render_class: "tool_card", title: "Agent Sweep the repo", body: "" }),
+      ...Array.from({ length: 120 }, (_, i) =>
+        projectionItem({
+          id: `call-${i}`,
+          render_class: "command_card",
+          title: `Bash rg step${i}`,
+          body: "",
+          parent_id: "agent",
+        }),
+      ),
+    ];
+    const el = mount();
+    expect(el.querySelector(".chat-inline-event-count")?.textContent).toBe("120 actions");
+    el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
+
+    const nested = el.querySelector(".chat-inline-event-nested")!;
+    const rows = () => [...nested.querySelectorAll(":scope > .chat-inline-event")].map((r) => r.textContent!);
+    expect(rows()).toHaveLength(50);
+    // The newest actions stay mounted: a running subagent's work arrives there.
+    expect(rows().at(-1)).toContain("step119");
+    expect(rows()[0]).toContain("step70");
+
+    const reveal = nested.querySelector<HTMLButtonElement>(":scope > .chat-inline-event-reveal-older");
+    expect(reveal?.textContent).toContain("70");
+    reveal!.click();
+    expect(rows()).toHaveLength(100);
+    nested.querySelector<HTMLButtonElement>(":scope > .chat-inline-event-reveal-older")!.click();
+    expect(rows()).toHaveLength(120);
+    expect(nested.querySelector(".chat-inline-event-reveal-older")).toBeNull();
+  });
+
+  it("keeps a new action visible in a capped card while the subagent runs", async () => {
+    session = { runtime_state: "running", ready: false };
+    const calls = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        projectionItem({
+          id: `call-${i}`,
+          render_class: "command_card",
+          title: `Bash rg step${i}`,
+          body: "",
+          parent_id: "agent",
+        }),
+      );
+    const agent = projectionItem({
+      id: "agent",
+      render_class: "tool_card",
+      title: "Agent Sweep the repo",
+      body: "",
+      status: "running",
+      stream_state: "streaming",
+    });
+    items = [agent, ...calls(110)];
+    const el = mount();
+    const header = el.querySelector(".chat-inline-event-header")!;
+    expect(header.querySelector(".chat-inline-event-latest")?.textContent).toContain("step109");
+    expect(header.querySelector(".chat-inline-event-count")?.textContent).toBe("110 actions");
+  });
+
   it("keeps a background task running after the turn goes idle", () => {
     items = [
       projectionItem({
