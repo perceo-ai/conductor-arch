@@ -1646,6 +1646,11 @@ pub struct ArchcarProjectionItem {
     /// calls name the Agent card that spawned them. Absent for top-level rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// A `background_card` for a subagent rather than a shell command. While
+    /// one runs, the chat is still working even though the main agent is
+    /// idle. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background_agent: bool,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,

@@ -13,6 +13,7 @@ import { nav } from "./nav";
 import { workspacesStore } from "./workspaces";
 import { threadsStore } from "./threads";
 import { intelStore } from "./intel";
+import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
 import { observeChatGeneration } from "./turnSound";
 
 async function refreshWorkspaceInventoryAndChats() {
@@ -78,6 +79,12 @@ async function refreshThreadSnapshot(threadId: number) {
     return;
   }
   inflightSnapshot.add(threadId);
+  // Whether this pull may decide the chat finished: both the snapshot (main
+  // agent) and the projection (subagents) must have come back, from the daemon
+  // still connected. A failed half leaves the other half stale, and a stale
+  // projection is exactly how a running subagent gets missed.
+  const epoch = daemonEpoch();
+  let fresh = false;
   try {
     // Interactions and plan state are pulled, not just listened for: an ask
     // raised before this window opened (or before this chat was selected) has
@@ -105,18 +112,19 @@ async function refreshThreadSnapshot(threadId: number) {
       chatStore.setPlanMode(threadId, plan.plan_mode);
       chatStore.setPlanPath(threadId, plan.plan_path ?? null);
     }
+    fresh = snap.type === "chat_snapshot" && proj.type === "chat_projection";
   } catch {
     // page owns its own error surface; ignore transient failures
   } finally {
     inflightSnapshot.delete(threadId);
-    if (pendingSnapshot.delete(threadId)) {
-      void refreshThreadSnapshot(threadId);
-    } else {
-      // Judged only on a settled pull: snapshot and projection together are
-      // the one place both the main agent's state and its subagents' are
-      // current, and a pull with a follow-up queued is already stale.
-      observeChatGeneration(threadId);
+    const followUp = pendingSnapshot.delete(threadId);
+    if (fresh && !daemonChangedSince(epoch)) {
+      // Busy is recorded from every pull, so a turn whose pulls always have a
+      // follow-up queued still has a busy baseline. Finished is only judged on
+      // a settled pull: one with a follow-up queued is already stale.
+      observeChatGeneration(threadId, { canFinish: !followUp });
     }
+    if (followUp) void refreshThreadSnapshot(threadId);
   }
 }
 

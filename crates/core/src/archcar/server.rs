@@ -1287,6 +1287,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             stream_state: item.stream_state.as_str().to_owned(),
                             timeline_seq: item.timeline_seq,
                             parent_id: item.parent_id,
+                            background_agent: item.background_agent,
                         })
                         .collect(),
                     }

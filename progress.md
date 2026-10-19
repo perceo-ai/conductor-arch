@@ -30,16 +30,21 @@ paths and known rough edges.
 ## Turn-finished sound (2026-10-19)
 
 The desktop app chimes when a chat stops generating, in any chat, viewed or
-not. "Stopped" means the main agent is idle and no subagent card in the
-projection is still running, so a background subagent holds the chime until it
-lands. One busy selector and a per-chat falling-edge detector fire once per
-busy -> idle transition. The reducer evaluates them only on settled
-snapshot+projection pulls, on session exit, and on interaction asks. Settings ->
-General -> Sounds has the on/off toggle (default on) and an opt-in "quiet for
-the chat on screen" toggle. Both persist in local prefs. Do-not-disturb is
-honoured on GNOME. macOS Focus and Windows Focus Assist expose no public API.
-The CLI has no equivalent yet: it has no long-lived command that watches turns
-finish.
+not. Stopped means the main agent is idle and no subagent is running: a running
+nested transcript, or a running background card the daemon marks
+`background_agent`. The Claude adapter now keeps `task_type` and stores agent
+tasks under the provider subtype `background_task:agent`, so a backgrounded
+agent holds the chime while a backgrounded shell command does not. Records
+stored before this change read as commands.
+
+One busy selector feeds a per-chat falling-edge detector. Busy is recorded from
+every successful pull, and finished is judged only on a settled pull where both
+the snapshot and the projection came back. The detector resets when the active
+daemon changes. Settings → General → Sounds holds the on/off toggle (default
+on) and an opt-in "quiet for the chat on screen" toggle. Both are checked again
+after the do-not-disturb lookup. Do-not-disturb is honoured on GNOME only;
+macOS Focus and Windows Focus Assist have no public API. The CLI has no
+equivalent: it has no long-lived command that watches turns finish.
 
 ## Archive hides, delete removes (2026-09-30)
 

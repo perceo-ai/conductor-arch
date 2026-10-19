@@ -45,6 +45,17 @@ describe("activeSubagentCount", () => {
     expect(activeSubagentCount(streaming)).toBe(1);
   });
 
+  it("counts a running background agent card, never a background command card", () => {
+    const card = (status: string, background_agent?: boolean) => ({
+      render_class: "background_card",
+      status,
+      background_agent,
+    });
+    expect(activeSubagentCount([card("running", true)])).toBe(1);
+    expect(activeSubagentCount([card("complete", true)])).toBe(0);
+    expect(activeSubagentCount([card("running", false), card("running")])).toBe(0);
+  });
+
   it("counts only running subagent and nested-transcript cards", () => {
     expect(
       activeSubagentCount([
@@ -99,6 +110,25 @@ describe("falling edge over main agent + subagents", () => {
         input({ session: READY, projection: [subagent("complete")] }),
       ]),
     ).toEqual([false, false, true]);
+  });
+
+  it("main done but background agent still running: does not fire until the agent completes", () => {
+    const bg = (status: string) => ({ render_class: "background_card", status, background_agent: true });
+    expect(
+      edgesFor([
+        input({ session: STREAMING }),
+        input({ session: READY, projection: [bg("running")] }),
+        input({ session: READY, projection: [bg("running")] }),
+        input({ session: READY, projection: [bg("complete")] }),
+      ]),
+    ).toEqual([false, false, false, true]);
+  });
+
+  it("reset forgets every chat, so the next observation is only a baseline", () => {
+    const d = createGenerationEdgeDetector();
+    d.observe(1, true);
+    d.reset();
+    expect(d.observe(1, false)).toBe(false);
   });
 
   it("last subagent finishes while main is still working: does not fire until main is done", () => {

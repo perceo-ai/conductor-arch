@@ -9,11 +9,23 @@ vi.mock("@/lib/turnSoundPlayer", () => ({ playTurnSound: vi.fn() }));
 
 interface FakeChat {
   live_session?: { session_id: number; status: string; runtime_state: string; ready: boolean };
-  items: { id: string; render_class: string; status: string; parent_id?: string | null }[];
+  items: {
+    id: string;
+    render_class: string;
+    status: string;
+    parent_id?: string | null;
+    background_agent?: boolean;
+  }[];
 }
 
 let daemon: Record<number, FakeChat>;
 let dnd: boolean;
+/** Answer delay for every request; the state is still read when it is sent. */
+let latencyMs: number;
+/** Fail the next N `get_chat_projection` requests. */
+let failProjections: number;
+/** When set, `doNotDisturb` waits for this before answering. */
+let dndGate: Promise<void> | null;
 
 const STREAMING = { session_id: 10, status: "running", runtime_state: "streaming", ready: false };
 const READY = { session_id: 10, status: "ready", runtime_state: "idle", ready: true };
@@ -23,9 +35,16 @@ beforeEach(() => {
   vi.resetModules();
   daemon = {};
   dnd = false;
+  latencyMs = 0;
+  failProjections = 0;
+  dndGate = null;
   const api = {
     request: vi.fn(async (req: { type: string; thread_id?: number }) => {
       const chat = daemon[req.thread_id ?? -1] ?? { items: [] };
+      const fail = req.type === "get_chat_projection" && failProjections > 0;
+      if (fail) failProjections -= 1;
+      if (latencyMs > 0) await new Promise((r) => setTimeout(r, latencyMs));
+      if (fail) throw new Error("daemon went away mid-pull");
       if (req.type === "get_chat_snapshot") {
         return {
           type: "chat_snapshot",
@@ -57,7 +76,10 @@ beforeEach(() => {
       return { type: "ack" };
     }),
     notify: vi.fn(async () => ({ ok: true })),
-    doNotDisturb: vi.fn(async () => dnd),
+    doNotDisturb: vi.fn(async () => {
+      if (dndGate) await dndGate;
+      return dnd;
+    }),
     log: vi.fn(),
   };
   (globalThis as unknown as { window: unknown }).window = { archductor: api };
@@ -168,5 +190,87 @@ describe("turn-finished sound", () => {
     await daemonSays(1, { live_session: STREAMING, items: [] });
     await daemonSays(1, { live_session: READY, items: [] });
     expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires when a background agent outlives the main turn, only once it finishes", async () => {
+    const { daemonSays, play } = await setup();
+    const bgAgent = (status: string) => ({
+      id: "claude:s:task:agent",
+      render_class: "background_card",
+      status,
+      background_agent: true,
+    });
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    // Main turn over, the backgrounded agent still working.
+    await daemonSays(1, { live_session: READY, items: [bgAgent("running")] });
+    expect(play).not.toHaveBeenCalled();
+    await daemonSays(1, { live_session: READY, items: [bgAgent("complete")] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not wait on a backgrounded shell command", async () => {
+    const { daemonSays, play } = await setup();
+    const server = { id: "claude:s:task:bash", render_class: "background_card", status: "running" };
+    await daemonSays(1, { live_session: STREAMING, items: [server] });
+    await daemonSays(1, { live_session: READY, items: [server] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fires when every busy pull had a follow-up queued behind it", async () => {
+    const { applyEvent, play } = await setup();
+    latencyMs = 20;
+    daemon[1] = { live_session: STREAMING, items: [] };
+    // Pull 1 goes out while the agent is streaming...
+    applyEvent({ type: "turn_completed", session_id: 10, thread_id: 1, status: "completed" });
+    // ...and the turn ends before it answers, so a follow-up is queued.
+    daemon[1] = { live_session: READY, items: [] };
+    applyEvent({ type: "turn_completed", session_id: 10, thread_id: 1, status: "completed" });
+    await new Promise((r) => setTimeout(r, 120));
+    await settle();
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not judge a chat finished from a pull whose projection failed", async () => {
+    const { daemonSays, play } = await setup();
+    const bgAgent = {
+      id: "claude:s:task:agent",
+      render_class: "background_card",
+      status: "running",
+      background_agent: true,
+    };
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    // The main agent goes idle with a background agent running, but the
+    // projection half of the pull fails: the store holds a ready session and
+    // the old, empty projection.
+    failProjections = 1;
+    await daemonSays(1, { live_session: READY, items: [bgAgent] });
+    expect(play).not.toHaveBeenCalled();
+    // The retry sees the agent, and its completion is the one chime.
+    await daemonSays(1, { live_session: READY, items: [bgAgent] });
+    expect(play).not.toHaveBeenCalled();
+    await daemonSays(1, { live_session: READY, items: [{ ...bgAgent, status: "complete" }] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ring when switching daemons lands on an idle chat with the same id", async () => {
+    const { daemonSays, play } = await setup();
+    const { bumpDaemonEpoch } = await import("./daemonEpoch");
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    bumpDaemonEpoch();
+    // Thread 1 on the new daemon is a different chat, and idle.
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("honours muting that happens while do-not-disturb is being checked", async () => {
+    const { daemonSays, play, prefsStore } = await setup();
+    let answer!: () => void;
+    dndGate = new Promise<void>((r) => (answer = r));
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    await daemonSays(1, { live_session: READY, items: [] });
+    prefsStore.setTurnSound(false);
+    answer();
+    await settle();
+    expect(play).not.toHaveBeenCalled();
   });
 });

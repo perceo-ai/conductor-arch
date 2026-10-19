@@ -7078,6 +7078,7 @@ mod tests {
             stream_state: "complete".to_owned(),
             timeline_seq: None,
             parent_id: parent_id.map(ToOwned::to_owned),
+            background_agent: false,
         }
     }
 
