@@ -26,6 +26,25 @@ function edgesFor(states: ChatBusyInput[], threadId = 1): boolean[] {
 }
 
 describe("activeSubagentCount", () => {
+  it("ignores a subagent's prompt row, which the daemon never closes", () => {
+    // The shape main's projection gives a finished Claude subagent
+    // (core fixture subagents_and_background_tasks.jsonl).
+    const agent = "claude:sess_tasks:toolu_agent";
+    const finished = [
+      { render_class: "subagent_card", status: "running", parent_id: agent },
+      { render_class: "command_card", status: "complete", parent_id: agent },
+      { render_class: "nested_transcript_card", status: "complete", parent_id: agent },
+      { render_class: "tool_card", status: "complete", parent_id: null },
+    ];
+    expect(activeSubagentCount(finished)).toBe(0);
+    expect(isChatGenerating(input({ session: READY, projection: finished }))).toBe(false);
+    // Its report still streaming is real subagent work.
+    const streaming = finished.map((item) =>
+      item.render_class === "nested_transcript_card" ? { ...item, status: "running" } : item,
+    );
+    expect(activeSubagentCount(streaming)).toBe(1);
+  });
+
   it("counts only running subagent and nested-transcript cards", () => {
     expect(
       activeSubagentCount([

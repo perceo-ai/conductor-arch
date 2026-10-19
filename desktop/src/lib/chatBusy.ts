@@ -14,19 +14,25 @@ import { chatGenerationState, type ChatGenerationInput } from "./chatGeneration"
 /** Timeline cards the daemon projects for subagent work (provider_projection.rs). */
 const SUBAGENT_RENDER_CLASSES = new Set(["subagent_card", "nested_transcript_card"]);
 
+type BusyItem = Pick<ArchcarProjectionItem, "render_class" | "status" | "parent_id">;
+
 /** Subagent cards the daemon still reports as running. */
-export function activeSubagentCount(
-  projection: readonly Pick<ArchcarProjectionItem, "render_class" | "status">[],
-): number {
+export function activeSubagentCount(projection: readonly BusyItem[]): number {
   let n = 0;
   for (const item of projection) {
-    if (SUBAGENT_RENDER_CLASSES.has(item.render_class) && item.status === "running") n += 1;
+    if (item.status !== "running" || !SUBAGENT_RENDER_CLASSES.has(item.render_class)) continue;
+    // A `subagent_card` nested under an Agent card is the prompt the subagent
+    // was given. The daemon projects it from a user record that has no
+    // completion, so it reads "running" for the life of the chat; counting it
+    // would mean a chat that ever used a subagent never finishes.
+    if (item.render_class === "subagent_card" && item.parent_id) continue;
+    n += 1;
   }
   return n;
 }
 
 export interface ChatBusyInput extends ChatGenerationInput {
-  projection: readonly Pick<ArchcarProjectionItem, "render_class" | "status">[];
+  projection: readonly BusyItem[];
 }
 
 /** The main agent is streaming, tool-calling or starting, or any subagent is active. */

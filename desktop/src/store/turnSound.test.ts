@@ -9,7 +9,7 @@ vi.mock("@/lib/turnSoundPlayer", () => ({ playTurnSound: vi.fn() }));
 
 interface FakeChat {
   live_session?: { session_id: number; status: string; runtime_state: string; ready: boolean };
-  items: { id: string; render_class: string; status: string }[];
+  items: { id: string; render_class: string; status: string; parent_id?: string | null }[];
 }
 
 let daemon: Record<number, FakeChat>;
@@ -105,6 +105,18 @@ describe("turn-finished sound", () => {
     await daemonSays(1, { live_session: READY, items: [subagent("running")] });
     expect(play).not.toHaveBeenCalled();
     await daemonSays(1, { live_session: READY, items: [subagent("complete")] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires after a Claude subagent finishes even though its prompt row stays running", async () => {
+    const { daemonSays, play } = await setup();
+    const agent = "claude:sess_tasks:toolu_agent";
+    const prompt = { id: "p", render_class: "subagent_card", status: "running", parent_id: agent };
+    await daemonSays(1, { live_session: STREAMING, items: [prompt] });
+    await daemonSays(1, {
+      live_session: READY,
+      items: [prompt, { id: "r", render_class: "nested_transcript_card", status: "complete", parent_id: agent }],
+    });
     expect(play).toHaveBeenCalledTimes(1);
   });
 
