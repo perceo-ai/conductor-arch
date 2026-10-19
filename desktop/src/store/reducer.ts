@@ -176,6 +176,7 @@ export function applyEvent(event: ArchcarEvent) {
         workspace: string;
         kind: string;
         replayed?: boolean;
+        ready?: boolean;
       };
       // Shell sessions back the Terminal tab; correlate the async spawn to its
       // workspace and pull the first screen.
@@ -183,23 +184,26 @@ export function applyEvent(event: ArchcarEvent) {
         terminalStore.attachSession(e.workspace, e.session_id);
         void refreshTerminalScreen(e.session_id);
       } else {
+        // A replay on connect carries the session's real readiness; a genuine
+        // start is never ready yet.
         chatStore.setSession(e.thread_id, {
           session_id: e.session_id,
-          status: "starting",
-          runtime_state: "starting",
-          ready: false,
+          status: e.ready ? "ready" : "starting",
+          runtime_state: e.ready ? "idle" : "starting",
+          ready: e.ready ?? false,
         });
         // A fresh session starting clears any stale "failed" phase from a prior
         // turn so the composer doesn't keep showing an error.
         if (chatStore.slice(e.thread_id).phase.kind === "failed") {
           chatStore.setPhase(e.thread_id, { kind: "ready" });
         }
-        // Record busy now rather than waiting for a pull: a short turn can
-        // start and finish inside one refresh interval, and a detector that
-        // never saw it busy cannot hear it finish. A replay (the daemon
-        // re-announcing live sessions on connect) is not new work: recording
-        // it as busy would chime for every idle chat on each reconnect.
-        if (!e.replayed) observeChatGeneration(e.thread_id);
+        // Record the chat's state now rather than waiting for a pull: a short
+        // turn can start and finish inside one refresh interval, and a
+        // detector that never saw it busy cannot hear it finish. The session
+        // above reflects its real readiness, so a replayed idle session only
+        // sets a silent idle baseline, and a replayed busy one seeds busy and
+        // chimes when it actually finishes.
+        observeChatGeneration(e.thread_id);
       }
       void refreshThreadWorkspace(e.thread_id);
       break;

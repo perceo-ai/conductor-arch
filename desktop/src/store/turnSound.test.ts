@@ -203,11 +203,29 @@ describe("turn-finished sound", () => {
       workspace: "berlin",
       kind: "claude",
       replayed: true,
+      ready: true,
     } as never);
     applyEvent({ type: "session_ready", session_id: 10, thread_id: 1 } as never);
     // The debounced pull that follows sees an idle session with no history of real work.
     await daemonSays(1, { live_session: READY, items: [] });
     expect(play).not.toHaveBeenCalled();
+  });
+
+  it("still chimes when a replayed session is genuinely active and finishes later", async () => {
+    const { applyEvent, play, daemonSays } = await setup();
+    // Reconnect lands while this chat's agent is still mid-turn (not ready yet).
+    applyEvent({
+      type: "session_started",
+      thread_id: 1,
+      session_id: 10,
+      workspace: "berlin",
+      kind: "claude",
+      replayed: true,
+      ready: false,
+    } as never);
+    // The turn finishes before any other pull ever observed it busy.
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).toHaveBeenCalledTimes(1);
   });
 
   it("fires even when a file or commit view is covering the selected chat", async () => {

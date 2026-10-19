@@ -3195,6 +3195,11 @@ pub enum ArchcarEvent {
         /// new work. Omitted when false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         replayed: bool,
+        /// True when this replayed session was already ready and idle; only
+        /// meaningful when `replayed` is true, a session that is genuinely just
+        /// starting is always not-ready. Omitted when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ready: bool,
     },
     SessionReady {
         session_id: i64,
@@ -3343,6 +3348,7 @@ mod tests {
                 kind: SessionKind::CODEX,
                 pid: 123,
                 replayed: false,
+                ready: false,
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();
@@ -3360,6 +3366,7 @@ mod tests {
                 kind: SessionKind::CODEX,
                 pid: 123,
                 replayed: true,
+                ready: false,
             },
         };
         let json = serde_json::to_string(&replay).unwrap();
