@@ -60,13 +60,18 @@ public final class ChatStore {
     // --- Loading -----------------------------------------------------------
 
     public func refreshThreads() async {
+        await clearStale(afterRefetchSucceeded: await fetchThreads())
+    }
+
+    private func fetchThreads() async -> Bool {
         guard case .chatThreads(_, let threads)? = await request(
-            ListChatThreadsRequest(workspace: workspace)) else { return }
+            ListChatThreadsRequest(workspace: workspace)) else { return false }
         // Open chats first, newest first: an archived chat is history, and on a
         // phone the list is short enough that burying it is the whole design.
         self.threads = threads
             .filter { !$0.isArchived }
             .sorted { $0.updatedAt > $1.updatedAt }
+        return true
     }
 
     public func select(threadID: Int64) async {
@@ -88,43 +93,71 @@ public final class ChatStore {
     }
 
     public func refreshTimeline() async {
-        guard let threadID = selectedThreadID else { return }
+        await clearStale(afterRefetchSucceeded: await fetchTimeline())
+    }
+
+    public func refreshQueue() async {
+        await clearStale(afterRefetchSucceeded: await fetchQueue())
+    }
+
+    public func refreshInteractions() async {
+        await clearStale(afterRefetchSucceeded: await fetchInteractions())
+    }
+
+    public func refreshPlan() async {
+        await clearStale(afterRefetchSucceeded: await fetchPlan())
+    }
+
+    public func refreshStatus() async {
+        await clearStale(afterRefetchSucceeded: await fetchStatus())
+    }
+
+    // Each fetch reports whether it brought its panel up to date. Nothing to
+    // fetch — no thread selected, no session yet — counts as up to date.
+
+    private func fetchTimeline() async -> Bool {
+        guard let threadID = selectedThreadID else { return true }
         guard case .chatProjection(_, let items)? = await request(
-            GetChatProjectionRequest(threadID: threadID)) else { return }
+            GetChatProjectionRequest(threadID: threadID)) else { return false }
         // The same allowlist the desktop applies: only known text and activity
         // classes render, and assistant prose only once it is finalized.
         self.items = items
             .filter(ChatFormat.isDisplayable)
             .sorted { $0.sequence < $1.sequence }
+        return true
     }
 
-    public func refreshQueue() async {
-        guard let threadID = selectedThreadID else { return }
+    private func fetchQueue() async -> Bool {
+        guard let threadID = selectedThreadID else { return true }
         guard case .queuedChatInputs(_, let inputs)? = await request(
-            ListQueuedChatInputsRequest(threadID: threadID)) else { return }
+            ListQueuedChatInputsRequest(threadID: threadID)) else { return false }
         queued = inputs
+        return true
     }
 
-    public func refreshInteractions() async {
-        guard let threadID = selectedThreadID else { return }
+    private func fetchInteractions() async -> Bool {
+        guard let threadID = selectedThreadID else { return true }
         guard case .providerInteractions(let interactions)? = await request(
-            ListProviderInteractionsRequest(threadID: threadID, pendingOnly: true)) else { return }
+            ListProviderInteractionsRequest(threadID: threadID, pendingOnly: true)) else { return false }
         pendingInteractions = interactions.filter(\.isPending)
+        return true
     }
 
-    public func refreshPlan() async {
-        guard let threadID = selectedThreadID else { return }
+    private func fetchPlan() async -> Bool {
+        guard let threadID = selectedThreadID else { return true }
         guard case .chatPlan(_, let planMode, _, let markdown)? = await request(
-            GetChatPlanRequest(threadID: threadID)) else { return }
+            GetChatPlanRequest(threadID: threadID)) else { return false }
         self.planMode = planMode
         planMarkdown = markdown
+        return true
     }
 
-    public func refreshStatus() async {
-        guard let sessionID else { return }
+    private func fetchStatus() async -> Bool {
+        guard let sessionID else { return true }
         guard case .sessionStatus(let status)? = await request(
-            GetSessionStatusRequest(sessionID: sessionID)) else { return }
+            GetSessionStatusRequest(sessionID: sessionID)) else { return false }
         sessionStatus = status
+        return true
     }
 
     // --- Acting ------------------------------------------------------------
@@ -342,10 +375,17 @@ public final class ChatStore {
         }
     }
 
-    /// Refetches everything on screen after a reconnect.
+    /// Refetches everything on screen after a reconnect, and clears the stale
+    /// mark only if every sub-fetch succeeded while the connection is still
+    /// up: a later one succeeding says nothing about an earlier one that
+    /// failed.
     private func resync() async {
-        await refreshThreads()
-        guard let threadID = selectedThreadID else { return }
+        // Each runs regardless of the others, so no `&&` short-circuit.
+        let gotThreads = await fetchThreads()
+        guard let threadID = selectedThreadID else {
+            await clearStale(afterRefetchSucceeded: gotThreads)
+            return
+        }
         // The reconnect's replay may have named a session this store has not
         // seen, for instance one started while the link was down.
         let known = await session.cachedSessionID(forThread: threadID)
@@ -359,11 +399,13 @@ public final class ChatStore {
             // and Effort pointed at a session that is gone.
             await reconcileSession(current)
         }
-        await refreshStatus()
-        await refreshPlan()
-        await refreshQueue()
-        await refreshInteractions()
-        await refreshTimeline()
+        let gotStatus = await fetchStatus()
+        let gotPlan = await fetchPlan()
+        let gotQueue = await fetchQueue()
+        let gotInteractions = await fetchInteractions()
+        let gotTimeline = await fetchTimeline()
+        await clearStale(
+            afterRefetchSucceeded: gotThreads && gotStatus && gotPlan && gotQueue && gotInteractions && gotTimeline)
     }
 
     /// Forgets `sessionID` if the daemon says it is no longer running.
@@ -391,16 +433,21 @@ public final class ChatStore {
         sessionStatus = nil
     }
 
+    /// Marks the chat stale when a request fails, but never clears the mark:
+    /// an action succeeding says nothing about whether what is on screen is
+    /// current. Only a refetch clears it, through `clearStale`.
     private func request<Body: ArchcarRequestBody>(_ body: Body) async -> ArchcarResponse? {
         do {
-            let response = try await session.request(body)
-            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
-            return response
+            return try await session.request(body)
         } catch {
             markStale()
             composerError = String(describing: error)
             return nil
         }
+    }
+
+    private func clearStale(afterRefetchSucceeded succeeded: Bool) async {
+        if await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self) { isStale = false }
     }
 
     private func markStale() {
