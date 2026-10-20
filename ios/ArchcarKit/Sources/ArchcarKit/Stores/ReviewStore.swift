@@ -27,6 +27,9 @@ public final class ReviewStore {
     /// out of date. Cleared only by a refetch of the panels that succeeded
     /// while the stream is connected; see `StaleClearing`.
     public private(set) var isStale = false
+    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// can tell a mark landed since; see `StaleClearing`.
+    @ObservationIgnored private(set) var staleRevision = 0
     /// Output from the last git/gh action, worth showing verbatim: when `gh`
     /// refuses, the reason is on the other machine and the text is all the
     /// phone has.
@@ -112,7 +115,7 @@ public final class ReviewStore {
     }
 
     private func clearStale(afterRefetchSucceeded succeeded: Bool) async {
-        if await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session) { isStale = false }
+        if await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self) { isStale = false }
     }
 
     public func addTodo(_ text: String) async {
@@ -184,7 +187,7 @@ public final class ReviewStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { isStale = true }
+            if await session.connectionState != .connected { markStale() }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await refreshAll() }
             for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
@@ -193,7 +196,7 @@ public final class ReviewStore {
                 await clearStale(afterRefetchSucceeded: gotChanges && gotChecks)
             }
             guard !Task.isCancelled else { return }
-            isStale = true
+            markStale()
             missedEvents = true
         }
     }
@@ -223,9 +226,16 @@ public final class ReviewStore {
             lastError = nil
             return response
         } catch {
-            isStale = true
+            markStale()
             lastError = String(describing: error)
             return nil
         }
     }
+
+    private func markStale() {
+        isStale = true
+        staleRevision += 1
+    }
 }
+
+extension ReviewStore: StaleRevisioned {}

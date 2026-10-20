@@ -29,6 +29,9 @@ public final class TerminalStore {
     /// Cleared by the next screen fetch that succeeds while the stream is
     /// connected; see `StaleClearing`.
     public private(set) var isStale = false
+    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// can tell a mark landed since; see `StaleClearing`.
+    @ObservationIgnored private(set) var staleRevision = 0
 
     private let session: DaemonSession
     public let workspace: String
@@ -170,10 +173,10 @@ public final class TerminalStore {
             self.screen = screen
             // Typing calls this too, on its own connection, so a fetch that
             // succeeds while the stream is down must leave the mark up.
-            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
             lastError = nil
         } catch {
-            isStale = true
+            markStale()
             lastError = String(describing: error)
         }
     }
@@ -209,7 +212,7 @@ public final class TerminalStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { isStale = true }
+            if await session.connectionState != .connected { markStale() }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await reattach() }
             for await event in subscription.events {
@@ -227,7 +230,7 @@ public final class TerminalStore {
                 }
             }
             guard !Task.isCancelled else { return }
-            isStale = true
+            markStale()
             missedEvents = true
         }
     }
@@ -247,7 +250,7 @@ public final class TerminalStore {
         // whether or not a shell survived it. `refreshScreen()` clears the
         // mark too, but only with a session to fetch; with none attached,
         // nothing else would lift it.
-        if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
+        if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
         guard let attached = sessionID else { return }
         let running = TerminalStore.runningShells(in: text)
         if let replacement = running.max(), !running.contains(attached) {
@@ -262,4 +265,11 @@ public final class TerminalStore {
         }
         await refreshScreen()
     }
+
+    private func markStale() {
+        isStale = true
+        staleRevision += 1
+    }
 }
+
+extension TerminalStore: StaleRevisioned {}

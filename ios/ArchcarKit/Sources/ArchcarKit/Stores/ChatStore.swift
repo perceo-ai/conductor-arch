@@ -28,6 +28,9 @@ public final class ChatStore {
     public private(set) var planMarkdown: String?
     public private(set) var sessionStatus: SessionStatus?
     public private(set) var isStale = false
+    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// can tell a mark landed since; see `StaleClearing`.
+    @ObservationIgnored private(set) var staleRevision = 0
     public private(set) var composerError: String?
     public private(set) var isSending = false
 
@@ -245,9 +248,9 @@ public final class ChatStore {
         do {
             _ = try await session.request(
                 ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
-            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
         } catch {
-            isStale = true
+            markStale()
             let message = Self.resolveFailureMessage(for: error)
             composerError = message
             return .failure(message)
@@ -307,7 +310,7 @@ public final class ChatStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { isStale = true }
+            if await session.connectionState != .connected { markStale() }
             // Subscribe before refetching, so an event that lands during the
             // refetch is not lost between the two.
             guard let subscription = await session.connectedEvents() else { return }
@@ -334,7 +337,7 @@ public final class ChatStore {
                 }
             }
             guard !Task.isCancelled else { return }
-            isStale = true
+            markStale()
             missedEvents = true
         }
     }
@@ -391,12 +394,19 @@ public final class ChatStore {
     private func request<Body: ArchcarRequestBody>(_ body: Body) async -> ArchcarResponse? {
         do {
             let response = try await session.request(body)
-            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
             return response
         } catch {
-            isStale = true
+            markStale()
             composerError = String(describing: error)
             return nil
         }
     }
+
+    private func markStale() {
+        isStale = true
+        staleRevision += 1
+    }
 }
+
+extension ChatStore: StaleRevisioned {}
