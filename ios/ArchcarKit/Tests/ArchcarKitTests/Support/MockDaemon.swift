@@ -23,6 +23,9 @@ actor MockDaemon {
     private var subscribers: [NWConnection] = []
     /// How many `subscribe` requests have arrived, across reconnects.
     private(set) var subscribeCount = 0
+    /// The self-id the default handshake reply carries. Nil (the default)
+    /// answers like an older daemon that predates `daemon_self_id`.
+    private var handshakeDaemonSelfID: String?
 
     init() async throws {
         let parameters = NWParameters.tcp
@@ -45,6 +48,8 @@ actor MockDaemon {
     }
 
     func requireToken(_ token: String) { expectedToken = token }
+
+    func stampHandshake(daemonSelfID: String?) { handshakeDaemonSelfID = daemonSelfID }
 
     func respond(to matcher: @escaping @Sendable (String) -> String?) {
         self.matcher = matcher
@@ -131,7 +136,7 @@ actor MockDaemon {
                 subscribeCount += 1
                 subscribers.append(connection)
             }
-            if let reply = matcher?(text) ?? Self.handshakeProbeReply(to: text) {
+            if let reply = matcher?(text) ?? handshakeProbeReply(to: text) {
                 connection.send(content: Data((reply + "\n").utf8), completion: .idempotent)
             }
         }
@@ -148,11 +153,14 @@ extension MockDaemon {
     /// `DaemonSession.connect` proves its token with a `list_repositories`
     /// round trip, so a mock that never answers one would hang every connect.
     /// The real daemon always answers it; this keeps the stand-in honest.
-    static func handshakeProbeReply(to line: String) -> String? {
+    func handshakeProbeReply(to line: String) -> String? {
         guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
               let id = object["id"] as? String,
               let payload = object["payload"] as? [String: Any],
               payload["type"] as? String == "list_repositories" else { return nil }
+        if let selfID = handshakeDaemonSelfID {
+            return #"{"id":"\#(id)","payload":{"type":"repositories","repositories":[],"daemon_self_id":"\#(selfID)"}}"#
+        }
         return #"{"id":"\#(id)","payload":{"type":"repositories","repositories":[]}}"#
     }
 }

@@ -3306,6 +3306,26 @@ mod tests {
     use crate::provider_interactions::ProviderInteractionStatus;
 
     #[test]
+    fn repositories_response_carries_daemon_self_id_additively() {
+        // An older daemon's handshake reply has no self-id: still decodes.
+        let older: ArchcarResponse =
+            serde_json::from_str(r#"{"type":"repositories","repositories":[]}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&older).unwrap(),
+            serde_json::json!({"type": "repositories", "repositories": []})
+        );
+
+        let newer: ArchcarResponse = serde_json::from_str(
+            r#"{"type":"repositories","repositories":[],"daemon_self_id":"abc-123"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&newer).unwrap()["daemon_self_id"],
+            serde_json::json!("abc-123")
+        );
+    }
+
+    #[test]
     fn delete_request_only_touches_disk_when_it_says_so() {
         let removes = |json: &str| match serde_json::from_str::<ArchcarRequest>(json).unwrap() {
             ArchcarRequest::DeleteWorkspace {

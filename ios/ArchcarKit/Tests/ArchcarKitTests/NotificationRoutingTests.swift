@@ -134,3 +134,65 @@ private struct Fixture {
         == NotificationTap(threadID: 42, daemonID: nil))
     #expect(ChatThreadLookup.tap(fromUserInfo: ["daemon_id": "daemon-a"]) == nil)
 }
+
+// Q2 case 1: an older daemon's push carries no self-id at all. Route
+// exactly as today, against the active daemon.
+@Test func unstampedPushRoutesToTheActiveDaemon() throws {
+    let fixture = try Fixture()
+    let tap = NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: nil)
+
+    #expect(ChatThreadLookup.resolve(
+        tap, activeDaemonID: nil, activeDaemonSelfID: "self-b",
+        workspaces: fixture.workspaces, chatThreads: fixture.chatThreads)
+        == .found(workspace: fixture.checkout, threadID: 42))
+}
+
+// Q2 case 2: the push IS stamped and it does not match the active
+// daemon's learned self-id. The active daemon happens to have its own
+// thread 42 (checkout) — this must never open it.
+@Test func stampedAndMismatchedPushIsNotFoundEvenWhenItsNumberMatches() throws {
+    let fixture = try Fixture()
+    let tap = NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: "self-a")
+
+    #expect(ChatThreadLookup.resolve(
+        tap, activeDaemonID: nil, activeDaemonSelfID: "self-b",
+        workspaces: fixture.workspaces, chatThreads: fixture.chatThreads)
+        == .notFound(threadID: 42))
+}
+
+// The positive case: the push is stamped and DOES match the active
+// daemon's learned self-id.
+@Test func stampedPushMatchingTheActiveDaemonOpensTheRightChat() throws {
+    let fixture = try Fixture()
+    let tap = NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: "self-b")
+
+    #expect(ChatThreadLookup.resolve(
+        tap, activeDaemonID: nil, activeDaemonSelfID: "self-b",
+        workspaces: fixture.workspaces, chatThreads: fixture.chatThreads)
+        == .found(workspace: fixture.checkout, threadID: 42))
+}
+
+// Q2 case 3: the push is stamped but this client has not learned the
+// active daemon's self-id yet (upgraded app, pairing not refreshed).
+// Route as case 1 rather than refusing every push until the next
+// reconnect — the accepted trade-off from the card.
+@Test func stampedPushWithNoLearnedSelfIDYetRoutesToTheActiveDaemon() throws {
+    let fixture = try Fixture()
+    let tap = NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: "self-a")
+
+    #expect(ChatThreadLookup.resolve(
+        tap, activeDaemonID: nil, activeDaemonSelfID: nil,
+        workspaces: fixture.workspaces, chatThreads: fixture.chatThreads)
+        == .found(workspace: fixture.checkout, threadID: 42))
+}
+
+// Proves the real wire parsing, not just the resolve logic: a tapped
+// APNs push's userInfo carries `daemon_self_id` at the top level
+// (exactly how APNs payload keys land in userInfo), separate from the
+// pre-existing local-notification `daemon_id` key.
+@Test func tapReadsTheStampedDaemonSelfIDFromUserInfo() {
+    #expect(ChatThreadLookup.tap(fromUserInfo: ["thread_id": Int64(42), "daemon_self_id": "self-a"])
+        == NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: "self-a"))
+    #expect(ChatThreadLookup.tap(fromUserInfo: ["thread_id": Int64(42), "daemon_self_id": ""])
+        == NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: nil))
+}

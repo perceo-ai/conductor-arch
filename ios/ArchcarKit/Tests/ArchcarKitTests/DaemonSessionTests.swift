@@ -62,6 +62,27 @@ private func requestType(_ line: String) -> String? {
     await daemon.stop()
 }
 
+/// The connect handshake is where the client learns the daemon's self-id —
+/// the one a fresh APNs push is stamped with. An older daemon's reply has
+/// none, and connecting still works.
+@Test func connectLearnsTheDaemonSelfIDFromTheHandshake() async throws {
+    let stamped = try await MockDaemon()
+    await stamped.stampHandshake(daemonSelfID: "self-a")
+    let session = DaemonSession(address: await stamped.address, token: "t")
+    try await session.connect()
+    #expect(await session.remoteDaemonSelfID == "self-a")
+    await session.disconnect()
+    await stamped.stop()
+
+    let older = try await MockDaemon()
+    let olderSession = DaemonSession(address: await older.address, token: "t")
+    try await olderSession.connect()
+    #expect(await olderSession.remoteDaemonSelfID == nil)
+    #expect(await olderSession.connectionState == .connected)
+    await olderSession.disconnect()
+    await older.stop()
+}
+
 @Test func daemonErrorSurfacesAsThrownError() async throws {
     let daemon = try await MockDaemon()
     // Only the real request errors; the handshake probe is answered normally,

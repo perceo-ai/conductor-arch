@@ -714,6 +714,43 @@ mod tests {
     }
 
     #[test]
+    fn daemon_self_id_is_stable_across_restarts() {
+        let (_temp, db_path) = migrated_db();
+        let first = daemon_self_id(&db_path).unwrap();
+        // Simulate a restart: nothing in-process is cached, re-derive from
+        // the same data directory (same db_path) and expect the same id.
+        let second = daemon_self_id(&db_path).unwrap();
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+
+        // A different data directory must NOT share the id.
+        let (_temp2, other_db_path) = migrated_db();
+        let other = daemon_self_id(&other_db_path).unwrap();
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn notification_payload_carries_the_daemon_self_id_when_present() {
+        let notification = EventNotification {
+            id: "turn-1-9-completed".to_owned(),
+            title: "Chat finished".to_owned(),
+            body: "done".to_owned(),
+            thread_id: Some(9),
+        };
+        let with_id = notification_payload(&notification, Some("abc-123"));
+        let parsed: serde_json::Value = serde_json::from_str(&with_id).unwrap();
+        assert_eq!(parsed["daemon_self_id"], serde_json::json!("abc-123"));
+        assert_eq!(parsed["thread_id"], serde_json::json!(9));
+
+        // Absent id (lookup failed, or an older code path): field must be
+        // omitted entirely, not null — an older client reading this JSON
+        // must see exactly what it saw before this change.
+        let without_id = notification_payload(&notification, None);
+        let parsed_without: serde_json::Value = serde_json::from_str(&without_id).unwrap();
+        assert!(parsed_without.get("daemon_self_id").is_none());
+    }
+
+    #[test]
     fn names_the_workspace_that_owns_the_thread() {
         let (_temp, db_path) = migrated_db();
         let conn = Connection::open(&db_path).unwrap();

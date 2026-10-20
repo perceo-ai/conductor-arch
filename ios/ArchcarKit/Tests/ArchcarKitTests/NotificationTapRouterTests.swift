@@ -133,6 +133,24 @@ private final class FakeInventory: ChatInventory {
     #expect(fake.refreshes == 1)
 }
 
+@MainActor
+@Test func stampedPushFromAnInactiveDaemonIsNotFoundWithoutOpeningTheSameNumberedChat() async throws {
+    let fake = FakeInventory()
+    // The active daemon has its own thread 42 — an unrelated chat.
+    fake.snapshot = ([try workspace(name: "billing")], ["billing": [try thread(id: 42)]])
+    await fake.refresh()
+    let router = NotificationTapRouter()
+    router.inventory = { fake }
+    router.activeDaemonSelfID = { "self-b" }
+
+    await router.tapped(NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: "self-a"))
+
+    #expect(router.request == .notFound(threadID: 42))
+    // No point refetching another daemon's list for a push that is
+    // already known to be from a different daemon.
+    #expect(fake.refreshes == 1)
+}
+
 /// The race behind the CI failure of the reconnect test's first version: the
 /// tap's own refetch is still in flight (sent while offline) when the
 /// reconnect's refetch succeeds. The retry that success triggers must not be
