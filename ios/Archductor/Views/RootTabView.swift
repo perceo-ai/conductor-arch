@@ -19,6 +19,7 @@ struct RootTabView: View {
                 .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
             DaemonsView()
                 .tabItem { Label("More", systemImage: "ellipsis.circle") }
+            Text(thisIdentifierDoesNotExistAnywhere)
         }
         .environment(\.palette, palette)
         .tint(palette.accent)
