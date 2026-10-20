@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatReasoningText, inlineEventVerbChip } from "./chatFormat";
+import { formatActionCount, formatReasoningText, inlineEventVerbChip, isSubagentAction } from "./chatFormat";
 
 describe("inlineEventVerbChip", () => {
   it("renders read-only shell wrappers as Read events", () => {
@@ -51,5 +51,26 @@ describe("subagent cards", () => {
       verb: "Asked",
       chip: "subagent",
     });
+  });
+});
+
+describe("formatActionCount", () => {
+  it("counts a subagent's actions for the collapsed card header", () => {
+    expect(formatActionCount(1)).toBe("1 action");
+    expect(formatActionCount(12)).toBe("12 actions");
+    expect(formatActionCount(0)).toBe("0 actions");
+  });
+});
+
+describe("isSubagentAction", () => {
+  it("counts what a subagent did, not what it said or was asked", () => {
+    const row = (render_class: string, title: string) => ({ render_class, title });
+    expect(isSubagentAction(row("command_card", "Bash ls"))).toBe(true);
+    expect(isSubagentAction(row("tool_card", "Agent Dig deeper"))).toBe(true);
+    // A Codex spawn/wait is a subagent card too, and is an action.
+    expect(isSubagentAction(row("subagent_card", "spawn_agent"))).toBe(true);
+    expect(isSubagentAction(row("subagent_card", "Asked subagent"))).toBe(false);
+    expect(isSubagentAction(row("nested_transcript_card", "Subagent"))).toBe(false);
+    expect(isSubagentAction(row("assistant_chat", ""))).toBe(false);
   });
 });

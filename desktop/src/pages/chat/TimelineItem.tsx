@@ -12,14 +12,16 @@ import { openableChipPath } from "@/lib/fileChip";
 import { openFileInCenter } from "@/pages/openFileBridge";
 import { TurnForkAction } from "./MessageActions";
 import {
+  formatActionCount,
   formatReasoningText,
   inlineEventVerbChip,
-  isInlineEventClass,
   isDiffCard,
+  isInlineEventClass,
+  isSubagentAction,
   isTerminalCard,
   stripArchductorMetadata,
 } from "@/lib/chatFormat";
-import { showsRunning } from "@/lib/timeline";
+import { NESTED_WINDOW_SIZE, NESTED_WINDOW_STEP, showsRunning, timelineWindow } from "@/lib/timeline";
 
 // One row of the chat timeline. The projection built in core decides which
 // shape a row takes; this module owns how each shape renders.
@@ -67,7 +69,8 @@ export function eventIcon(renderClass: string): IconName {
 //
 // A card that spawned a subagent carries the subagent's own rows. They expand
 // with the card, above its report; while it runs, the header shows the latest
-// thing the subagent did so the work is visible without opening it.
+// thing the subagent did so the work is visible without opening it, and how
+// many actions it has taken. An open card mounts only the newest rows.
 function InlineCard(props: {
   item: ArchcarProjectionItem;
   running: boolean;
@@ -75,11 +78,14 @@ function InlineCard(props: {
   renderNested: (item: ArchcarProjectionItem) => JSX.Element;
 }) {
   const [open, setOpen] = createSignal(false);
+  const [nestedCount, setNestedCount] = createSignal(NESTED_WINDOW_SIZE);
+  const nestedWindow = () => timelineWindow(props.nested, nestedCount());
   const parsed = () => inlineEventVerbChip(props.item.render_class, props.item.title);
   const verb = () => parsed().verb;
   const chip = () => parsed().chip;
   const hasNested = () => props.nested.length > 0;
   const hasBody = () => props.item.body.trim().length > 0 || hasNested();
+  const actionCount = () => props.nested.filter(isSubagentAction).length;
   const latest = () => {
     if (!props.running || open()) return null;
     // The newest action, not the newest prose: "Ran rg …" says what the
@@ -117,13 +123,24 @@ function InlineCard(props: {
             <span class="chat-inline-event-chip-label">{chip()}</span>
           </span>
         </Show>
+        <Show when={actionCount() > 0}>
+          <span class="chat-inline-event-count">{formatActionCount(actionCount())}</span>
+        </Show>
         <Show when={latest()}>
           {(step) => <span class="chat-inline-event-latest">{step()}</span>}
         </Show>
       </div>
       <Show when={open() && hasNested()}>
         <div class="chat-inline-event-nested">
-          <For each={props.nested}>{(child) => props.renderNested(child)}</For>
+          <Show when={nestedWindow().hidden > 0}>
+            <button
+              class="chat-inline-event-reveal-older"
+              onClick={() => setNestedCount((count) => count + NESTED_WINDOW_STEP)}
+            >
+              Show earlier actions ({nestedWindow().hidden})
+            </button>
+          </Show>
+          <For each={nestedWindow().visible}>{(child) => props.renderNested(child)}</For>
         </div>
       </Show>
       <Show when={open() && props.item.body.trim().length > 0}>
