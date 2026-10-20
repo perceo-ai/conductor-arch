@@ -142,3 +142,43 @@ private func summary(
     #expect(store.isStale)
     #expect(store.lastError != nil)
 }
+
+@MainActor
+@Test func aDroppedStreamMarksTheListStaleAndRefetchesOnReconnect() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { line in
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = object["id"] as? String,
+              let payload = object["payload"] as? [String: Any],
+              payload["type"] as? String == "get_inventory_snapshot" else { return nil }
+        return #"{"id":"\#(id)","payload":{"type":"inventory_snapshot","repositories":[],"workspaces":[],"chat_threads":{}}}"#
+    }
+    // Too slow to reconnect on its own within the test, so the stale state
+    // holds until `reconnectNow` ends it.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = WorkspacesStore(session: session)
+    await store.refresh()
+    #expect(store.isStale == false)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+    let refreshesBefore = store.refreshCount
+
+    await daemon.endEventConnection()
+
+    // Stale without any request having failed: none was even attempted.
+    #expect(await eventually { @MainActor in store.isStale })
+    #expect(store.refreshCount == refreshesBefore)
+
+    await session.reconnectNow()
+
+    // The reconnect refetches the list, which is what clears the mark.
+    #expect(await eventually { @MainActor in store.refreshCount > refreshesBefore && !store.isStale })
+    #expect(await daemon.subscribeCount == 2)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}

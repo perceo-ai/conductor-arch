@@ -65,7 +65,16 @@ public actor ArchcarConnection {
         return stream
     }
 
-    public func open() async throws {
+    /// Opens the connection and sends the token line.
+    ///
+    /// `keepalive` is for the long-lived event connection. Without it, a TCP
+    /// connection with nothing flowing in either direction cannot notice that
+    /// the path under it died — a NAT that dropped the mapping, a phone that
+    /// changed networks — because no FIN, reset, or read error ever arrives,
+    /// and the stream looks open forever. With it, unanswered probes fail the
+    /// connection and the pending receive ends the stream. One-shot request
+    /// connections close after a single line and gain nothing from it.
+    public func open(keepalive: Bool = false) async throws {
         guard connection == nil else { return }
         _ = lines
         // Bound locally so the state handler below can name the endpoint in its
@@ -74,7 +83,19 @@ public actor ArchcarConnection {
         let endpoint = NWEndpoint.hostPort(
             host: NWEndpoint.Host(address.host),
             port: NWEndpoint.Port(rawValue: address.port) ?? NWEndpoint.Port(rawValue: DaemonAddress.defaultPort)!)
-        let parameters = NWParameters.tcp
+        let parameters: NWParameters
+        if keepalive {
+            let tcp = NWProtocolTCP.Options()
+            tcp.enableKeepalive = true
+            // Idle 15s, then a probe every 5s; three unanswered probes fail the
+            // connection, so a dead path surfaces in about half a minute.
+            tcp.keepaliveIdle = 15
+            tcp.keepaliveInterval = 5
+            tcp.keepaliveCount = 3
+            parameters = NWParameters(tls: nil, tcp: tcp)
+        } else {
+            parameters = NWParameters.tcp
+        }
         let connection = NWConnection(to: endpoint, using: parameters)
         self.connection = connection
 

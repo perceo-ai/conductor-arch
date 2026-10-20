@@ -1,5 +1,6 @@
 import ArchcarKit
 import Foundation
+import Network
 
 /// Which daemon the app is talking to, and the stores hanging off it.
 ///
@@ -19,6 +20,11 @@ final class AppModel {
     private var observation: Task<Void, Never>?
     private var notificationObservation: Task<Void, Never>?
     private let localNotifications = LocalNotificationService()
+    /// Watches for the network path changing — Wi-Fi to cellular, a VPN coming
+    /// up — which is the moment a dropped session is most likely to come back.
+    @ObservationIgnored private let pathMonitor = NWPathMonitor()
+    @ObservationIgnored private var isMonitoringPath = false
+    @ObservationIgnored private var pathObservation: Task<Void, Never>?
 
     init(directory: DaemonDirectory = DaemonDirectory()) {
         self.directory = directory
@@ -32,8 +38,32 @@ final class AppModel {
             for daemon in await directory.all() { try? await directory.remove(id: daemon.id) }
         }
         saved = await directory.all()
+        startMonitoringPath()
         if let active = await directory.active() {
             await activate(active)
+        }
+    }
+
+    /// Asks the session to retry at once whenever the network path changes.
+    ///
+    /// The monitor also reports the current path as soon as it starts; that
+    /// is harmless, because `reconnectNow` does nothing while connected. An
+    /// unsatisfied path is skipped: an attempt with no route fails at once,
+    /// and would only reset the backoff the retry loop is running.
+    private func startMonitoringPath() {
+        guard !isMonitoringPath else { return }
+        isMonitoringPath = true
+        // The handler runs on the monitor's own queue, so it only forwards
+        // into a stream; the main actor reads it from there.
+        let (paths, continuation) = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        pathMonitor.pathUpdateHandler = { @Sendable path in
+            continuation.yield(path.status == .satisfied)
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "ai.perceo.archductor.path-monitor"))
+        pathObservation = Task { [weak self] in
+            for await satisfied in paths where satisfied {
+                await self?.session?.reconnectNow()
+            }
         }
     }
 
@@ -93,6 +123,11 @@ final class AppModel {
 
     /// The socket does not survive suspension, so coming back to the front
     /// reconnects and refetches rather than trying to replay what was missed.
+    ///
+    /// An existing session is reconnected in place, not replaced: every open
+    /// chat, review and terminal store holds this same `DaemonSession`, and
+    /// each resubscribes and refetches once it reconnects. Building a new one
+    /// would leave those screens bound to a session nobody reconnects.
     func handleForeground() async {
         guard let active = activeDaemon else { return }
         guard let session else {
@@ -102,14 +137,17 @@ final class AppModel {
         if await session.connectionState == .connected {
             await workspaces?.refresh()
         } else {
-            await activate(active)
+            await session.reconnectNow()
         }
     }
 
     private func observeNotifications(session: DaemonSession) async {
-        for await event in await session.events {
-            guard let descriptor = EventNotificationDescriptor.from(event) else { continue }
-            await localNotifications.deliver(descriptor)
+        while !Task.isCancelled {
+            guard let subscription = await session.connectedEvents() else { return }
+            for await event in subscription.events {
+                guard let descriptor = EventNotificationDescriptor.from(event) else { continue }
+                await localNotifications.deliver(descriptor)
+            }
         }
     }
 

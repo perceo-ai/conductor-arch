@@ -30,3 +30,26 @@ import Testing
     await session.disconnect()
     await daemon.stop()
 }
+
+@Test func droppedStreamFinishesEverySubscriber() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { _ in nil }
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+
+    // Chat, review, terminal: each one would otherwise sit in its loop over a
+    // stream that can never produce anything again.
+    var drains: [Task<Void, Never>] = []
+    for _ in 0..<3 {
+        let events = await session.events
+        drains.append(Task { for await _ in events {} })
+    }
+
+    await daemon.endEventConnection()
+
+    for drain in drains {
+        #expect(await finishes(drain))
+    }
+    await session.disconnect()
+    await daemon.stop()
+}

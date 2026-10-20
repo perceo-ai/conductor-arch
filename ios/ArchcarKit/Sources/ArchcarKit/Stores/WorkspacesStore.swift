@@ -13,8 +13,9 @@ public final class WorkspacesStore {
     /// Chats per workspace, straight off the inventory snapshot, so the Chats
     /// tab costs no extra round trips.
     public private(set) var chatThreads: [String: [ChatThread]] = [:]
-    /// True when the last refresh failed. The rows stay on screen — last-known
-    /// state beats a spinner — but the UI marks them and disables mutations.
+    /// True when the last refresh failed or the event stream dropped. The rows
+    /// stay on screen — last-known state beats a spinner — but the UI marks
+    /// them and disables mutations.
     public private(set) var isStale = false
     public private(set) var lastError: String?
     /// A create/archive/restore is in flight; the UI disables its controls so
@@ -227,11 +228,27 @@ public final class WorkspacesStore {
     /// of them invalidates the list; on a phone each refetch is a fresh TCP
     /// connection plus a whole inventory snapshot over a VPN, so answering each
     /// event separately turns a busy daemon into a permanent backlog.
+    ///
+    /// While the stream is down — dropped, or not up yet when this started —
+    /// the list is marked stale, because events that would change it cannot
+    /// arrive. Once the session has reconnected this resubscribes and
+    /// refetches, since whatever happened in between was missed.
     public func observe() async {
-        for await event in await session.events where Self.invalidates(event) {
-            refreshSoon()
+        var missedEvents = false
+        while !Task.isCancelled {
+            if await session.connectionState != .connected { isStale = true }
+            // Subscribe before refetching, so an event that lands during the
+            // refetch is not lost between the two.
+            guard let subscription = await session.connectedEvents() else { return }
+            if missedEvents || subscription.waited { await refresh() }
+            for await event in subscription.events where Self.invalidates(event) {
+                refreshSoon()
+            }
+            coalescedRefresh?.cancel()
+            guard !Task.isCancelled else { return }
+            isStale = true
+            missedEvents = true
         }
-        coalescedRefresh?.cancel()
     }
 
     /// Asks for a refresh without waiting for one. Bursts collapse into a

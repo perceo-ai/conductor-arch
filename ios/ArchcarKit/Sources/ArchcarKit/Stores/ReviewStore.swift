@@ -142,10 +142,20 @@ public final class ReviewStore {
         }
     }
 
+    /// Keeps the panels live. A dropped stream is waited out and, once the
+    /// session has reconnected, everything is refetched before listening
+    /// again, since whatever changed in between was missed.
     public func observe() async {
-        for await event in await session.events where Self.invalidates(event, workspace: workspace) {
-            await refreshChanges()
-            await refreshChecks()
+        var missedEvents = false
+        while !Task.isCancelled {
+            guard let subscription = await session.connectedEvents() else { return }
+            if missedEvents || subscription.waited { await refreshAll() }
+            for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
+                await refreshChanges()
+                await refreshChecks()
+            }
+            guard !Task.isCancelled else { return }
+            missedEvents = true
         }
     }
 

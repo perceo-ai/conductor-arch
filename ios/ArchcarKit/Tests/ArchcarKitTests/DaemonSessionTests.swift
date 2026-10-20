@@ -116,3 +116,115 @@ private func requestType(_ line: String) -> String? {
     await session.disconnect()
     await daemon.stop()
 }
+
+private let inventoryChanged =
+    #"{"id":"e1","payload":{"type":"inventory_changed","scope":"workspace","workspace":"w"}}"#
+
+/// A schedule short enough that a reconnect test does not sit out the
+/// production half-second.
+private let quickBackoff = Backoff(base: .milliseconds(20), cap: .milliseconds(200))
+
+@Test func droppedEventStreamFinishesTheSubscriber() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { _ in nil }
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let events = await session.events
+    let drained = Task { for await _ in events {} }
+
+    await daemon.endEventConnection()
+
+    // Before the fix this loop waited forever: the connection ended but
+    // nothing finished the subscriber's stream.
+    #expect(await finishes(drained))
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@Test func reconnectsOnItsOwnAfterTheEventStreamDrops() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { _ in nil }
+    let session = DaemonSession(address: await daemon.address, token: "t", backoff: quickBackoff)
+    try await session.connect()
+    let first = await session.events
+    let drained = Task { for await _ in first {} }
+
+    await daemon.endEventConnection()
+    #expect(await finishes(drained))
+
+    // Nobody calls `connect` again: the session's own retry loop does.
+    await daemon.waitForSubscribes(2)
+    #expect(await daemon.subscribeCount == 2)
+    #expect(await eventually { await session.connectionState == .connected })
+
+    await session.waitUntilConnected()
+    let second = await session.events
+    let received = Task { () -> Bool in
+        for await _ in second { return true }
+        return false
+    }
+    await daemon.push(inventoryChanged)
+    #expect(await finishes(received))
+    #expect(await received.value)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@Test func reconnectNowSkipsTheBackoffWait() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { _ in nil }
+    // A wait far longer than the test allows: only a forced attempt can
+    // reconnect in time.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let events = await session.events
+    let drained = Task { for await _ in events {} }
+    await daemon.endEventConnection()
+    #expect(await finishes(drained))
+    #expect(await session.connectionState == .disconnected)
+
+    await session.reconnectNow()
+
+    await daemon.waitForSubscribes(2)
+    #expect(await eventually { await session.connectionState == .connected })
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@Test func deliberateDisconnectDoesNotReconnect() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { _ in nil }
+    let session = DaemonSession(address: await daemon.address, token: "t", backoff: quickBackoff)
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+
+    await session.disconnect()
+    await session.reconnectNow()
+    try await Task.sleep(for: .milliseconds(300))
+
+    #expect(await daemon.subscribeCount == 1)
+    #expect(await session.connectionState == .disconnected)
+    await daemon.stop()
+}
+
+@Test func remembersTheSessionBehindEachThread() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { _ in nil }
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+
+    await daemon.push(
+        #"{"id":"e1","payload":{"type":"session_started","session_id":3,"thread_id":7,"workspace":"w","kind":"codex","pid":900}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == 3 })
+    #expect(await session.cachedSessionID(forThread: 8) == nil)
+
+    await daemon.push(#"{"id":"e2","payload":{"type":"session_exited","session_id":3,"exit_code":0}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == nil })
+
+    await session.disconnect()
+    await daemon.stop()
+}

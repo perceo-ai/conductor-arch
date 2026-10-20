@@ -115,13 +115,25 @@ public final class TerminalStore {
     private nonisolated static let shellCommands: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh"]
 
     /// Parses the `Sessions` block and returns the newest running shell.
+    public nonisolated static func newestRunningShell(in report: String) -> Int64? {
+        runningShells(in: report).max()
+    }
+
+    /// Whether the report has a line for `sessionID` at all, running or not.
+    nonisolated static func lists(_ sessionID: Int64, in report: String) -> Bool {
+        report.split(separator: "\n").contains { line in
+            line.trimmingCharacters(in: .whitespaces).hasPrefix("#\(sessionID) ")
+        }
+    }
+
+    /// Every running shell in the `Sessions` block.
     ///
     /// Lines look like `#2 /bin/zsh running pid=32518 exit=- started=…`. The
     /// daemon has no structured session listing, so the text is the interface;
     /// a line that does not parse is skipped rather than failing the lookup.
-    public nonisolated static func newestRunningShell(in report: String) -> Int64? {
+    public nonisolated static func runningShells(in report: String) -> [Int64] {
         var inSessions = false
-        var newest: Int64?
+        var shells: [Int64] = []
         for rawLine in report.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line == "Sessions" {
@@ -135,9 +147,9 @@ public final class TerminalStore {
             guard fields.count >= 2, let value = Int64(fields[0].dropFirst()) else { continue }
             let command = fields[1].split(separator: "/").last.map(String.init) ?? String(fields[1])
             guard shellCommands.contains(command) else { continue }
-            newest = max(newest ?? value, value)
+            shells.append(value)
         }
-        return newest
+        return shells
     }
 
 
@@ -184,21 +196,55 @@ public final class TerminalStore {
     }
 
     /// Follows the session's screen updates rather than polling on a timer: the
-    /// daemon already emits an event per change.
+    /// daemon already emits an event per change. A dropped stream is waited
+    /// out, and the screen refetched once the session has reconnected.
     public func observe() async {
-        for await event in await session.events {
-            switch event {
-            case .sessionStarted(let id, _, let eventWorkspace, let kind, _)
-                where eventWorkspace == workspace && kind == .shell && sessionID == nil:
-                sessionID = id
-                await refreshScreen()
-            case .sessionScreenUpdated(let id) where id == sessionID:
-                await refreshScreen()
-            case .sessionExited(let id, _) where id == sessionID:
-                sessionID = nil
-            default:
-                continue
+        var missedEvents = false
+        while !Task.isCancelled {
+            guard let subscription = await session.connectedEvents() else { return }
+            if missedEvents || subscription.waited { await reattach() }
+            for await event in subscription.events {
+                switch event {
+                case .sessionStarted(let id, _, let eventWorkspace, let kind, _)
+                    where eventWorkspace == workspace && kind == .shell && sessionID == nil:
+                    sessionID = id
+                    await refreshScreen()
+                case .sessionScreenUpdated(let id) where id == sessionID:
+                    await refreshScreen()
+                case .sessionExited(let id, _) where id == sessionID:
+                    sessionID = nil
+                default:
+                    continue
+                }
             }
+            guard !Task.isCancelled else { return }
+            missedEvents = true
         }
+    }
+
+    /// After missed events, checks the attached shell is still the one
+    /// running. It may have exited, or been replaced, while the link was down;
+    /// either way its `session_started`/`session_exited` never arrived here.
+    /// Left alone, keystrokes would go to a shell that is gone.
+    private func reattach() async {
+        guard let attached = sessionID else { return }
+        guard case .workspaceProcesses(_, let text)? = try? await session.request(
+            GetWorkspaceProcessesRequest(workspace: workspace)) else {
+            // No report, so no evidence the shell is gone: keep it.
+            await refreshScreen()
+            return
+        }
+        let running = TerminalStore.runningShells(in: text)
+        if let replacement = running.max(), !running.contains(attached) {
+            sessionID = replacement
+            screen = ""
+        } else if running.isEmpty, TerminalStore.lists(attached, in: text) {
+            // Listed, and not running: it exited. An empty list alone is not
+            // enough — the daemon reports `Could not read: …` when its own
+            // query fails, and that must not detach a live shell.
+            sessionID = nil
+            screen = ""
+        }
+        await refreshScreen()
     }
 }
