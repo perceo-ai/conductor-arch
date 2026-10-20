@@ -91,6 +91,10 @@ private func chatResponder(
             return #"{"id":"\#(id)","payload":{"type":"chat_plan","thread_id":7,"plan_mode":false}}"#
         case "interrupt_turn", "set_chat_plan_mode":
             return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
+        case "set_session_model", "set_session_effort":
+            return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
+        case "remove_queued_chat_input", "move_queued_chat_input":
+            return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
         default:
             return nil
         }
@@ -672,6 +676,134 @@ private func connectedStore(
     #expect(store.isStale)
 
     observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+/// A chat with a live session whose timeline refetch has failed while the
+/// stream is up, so it is correctly stale. The returned daemon still answers
+/// everything but the timeline.
+@MainActor
+private func chatWithAStaleTimeline(
+    pendingInteraction: Bool = false
+) async throws -> (MockDaemon, DaemonSession, ChatStore) {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder(pendingInteraction: pendingInteraction))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+    await daemon.push(
+        #"{"id":"e1","payload":{"type":"session_started","session_id":3,"thread_id":7,"workspace":"w","kind":"codex","pid":900}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == 3 })
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession)
+    #expect(store.isStale == false)
+
+    await daemon.respond(to: chatResponder(pendingInteraction: pendingInteraction, timelineFail: true))
+    await store.refreshTimeline()
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+    return (daemon, session, store)
+}
+
+@MainActor
+@Test func aSucceedingModelSwitchDoesNotClearAStaleTimeline() async throws {
+    let (daemon, session, store) = try await chatWithAStaleTimeline()
+
+    // The switch refetches the thread list, which says nothing about the
+    // timeline that failed.
+    let before = await daemon.receivedLines.count
+    await store.setModel("gpt-5")
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("set_session_model"))
+    #expect(sent.contains("list_chat_threads"))
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aSucceedingEffortSwitchDoesNotClearAStaleTimeline() async throws {
+    let (daemon, session, store) = try await chatWithAStaleTimeline()
+
+    let before = await daemon.receivedLines.count
+    await store.setEffort("high")
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("set_session_effort"))
+    #expect(sent.contains("list_chat_threads"))
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aSucceedingSendDoesNotClearAStaleTimeline() async throws {
+    let (daemon, session, store) = try await chatWithAStaleTimeline()
+
+    // The send refetches the queue, which says nothing about the timeline.
+    let before = await daemon.receivedLines.count
+    await store.send("ship it")
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("queue_chat_input"))
+    #expect(sent.contains("list_queued_chat_inputs"))
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aSucceedingResolveDoesNotClearAStaleTimeline() async throws {
+    let (daemon, session, store) = try await chatWithAStaleTimeline(pendingInteraction: true)
+    let interaction = try #require(store.pendingInteractions.first)
+
+    // Answering the agent is an action, and the interactions refetch after it
+    // says nothing about the timeline.
+    let before = await daemon.receivedLines.count
+    let outcome = await store.resolve(interaction, with: .approve)
+    #expect(outcome == .success)
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("resolve_provider_interaction"))
+    #expect(sent.contains("list_provider_interactions"))
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aQueueRefreshWithNoThreadSelectedDoesNotClearStale() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(daemon, responder: chatResponder(threadsFail: true))
+    await store.refreshThreads()
+    #expect(store.selectedThreadID == nil)
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    // With no thread there is no queue to fetch, so nothing was brought up
+    // to date and nothing may clear the mark.
+    let input = try JSONDecoder().decode(
+        QueuedChatInput.self,
+        from: Data("""
+        {"id":1,"thread_id":7,"input":"ship it","kind":"user","session_kind":"codex",\
+        "created_at":"1","updated_at":"1"}
+        """.utf8))
+    let before = await daemon.receivedLines.count
+    await store.refreshQueue()
+    #expect(store.isStale)
+    await store.removeQueued(input)
+    #expect(store.isStale)
+    await store.moveQueued(input, up: true)
+    #expect(store.isStale)
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("remove_queued_chat_input"))
+    #expect(sent.contains("move_queued_chat_input"))
+    #expect(!sent.contains("list_queued_chat_inputs"))
+
     await session.disconnect()
     await daemon.stop()
 }
