@@ -7,9 +7,16 @@ import SwiftUI
 /// glance from launch, not a walk through workspaces.
 struct ChatsTabView: View {
     @Environment(AppModel.self) private var model
+    @State private var path = NavigationPath()
+
+    /// A chat opened by a tapped notification rather than a row.
+    struct NotificationRoute: Hashable {
+        let workspace: WorkspaceSummary
+        let threadID: Int64
+    }
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if let store = model.workspaces {
                     list(store)
@@ -22,6 +29,18 @@ struct ChatsTabView: View {
             .archductorScreen()
             .navigationTitle("Chats")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: NotificationRoute.self) { route in
+                WorkspaceChatEntry(workspace: route.workspace, threadID: route.threadID)
+            }
+        }
+        // `initial` covers a request published before this tab was first
+        // built, which is the cold-launch-from-a-tap case.
+        .onChange(of: model.chatOpenRequest, initial: true) { _, request in
+            guard case .found(let workspace, let threadID) = request else { return }
+            // Replace whatever was open, so the tapped chat is one Back away
+            // from the list rather than stacked on an unrelated chat.
+            path = NavigationPath([NotificationRoute(workspace: workspace, threadID: threadID)])
+            model.clearChatOpenRequest()
         }
     }
 
