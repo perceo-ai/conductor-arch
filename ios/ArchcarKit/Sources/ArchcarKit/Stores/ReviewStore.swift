@@ -59,11 +59,14 @@ public final class ReviewStore {
     /// came back: a later fetch succeeding says nothing about an earlier one
     /// that failed and left its panel showing old data.
     public func refreshAll() async {
+        // A mark landing while any fetch below is in flight must win.
+        let revision = staleRevision
         // Each runs regardless of the others, so no `&&` short-circuit.
         let gotChanges = await fetchChanges()
         let gotChecks = await fetchChecks()
         let gotTodos = await fetchTodos()
-        await clearStale(afterRefetchSucceeded: gotChanges && gotChecks && gotTodos, clearing: .all)
+        await clearStale(
+            afterRefetchSucceeded: gotChanges && gotChecks && gotTodos, clearing: .all, unchangedSince: revision)
     }
 
     public func refreshChanges() async {
@@ -128,8 +131,12 @@ public final class ReviewStore {
         static let all: StalePanels = [.changes, .checks, .todos]
     }
 
-    private func clearStale(afterRefetchSucceeded succeeded: Bool, clearing panels: StalePanels) async {
-        guard await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self)
+    /// A batch passes the revision it read before its first fetch.
+    private func clearStale(
+        afterRefetchSucceeded succeeded: Bool, clearing panels: StalePanels, unchangedSince: Int? = nil
+    ) async {
+        guard await StaleClearing.mayClear(
+            afterRefetchSucceeded: succeeded, on: session, store: self, unchangedSince: unchangedSince)
         else { return }
         if panels.contains(.changes) { changesStale = false }
         if panels.contains(.checks) { checksStale = false }
@@ -209,10 +216,13 @@ public final class ReviewStore {
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await refreshAll() }
             for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
+                let revision = staleRevision
                 let gotChanges = await fetchChanges()
                 let gotChecks = await fetchChecks()
                 // Todos are not refetched here, so their mark stays.
-                await clearStale(afterRefetchSucceeded: gotChanges && gotChecks, clearing: [.changes, .checks])
+                await clearStale(
+                    afterRefetchSucceeded: gotChanges && gotChecks, clearing: [.changes, .checks],
+                    unchangedSince: revision)
             }
             guard !Task.isCancelled else { return }
             markStale()

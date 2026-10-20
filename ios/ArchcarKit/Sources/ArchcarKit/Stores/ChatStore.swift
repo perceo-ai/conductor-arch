@@ -89,6 +89,8 @@ public final class ChatStore {
     /// of them came back: what a pull-to-refresh asks for, any time, rather
     /// than only after a reconnect as `resync()` does.
     public func refreshAll() async {
+        // A mark landing while any fetch below is in flight must win.
+        let revision = staleRevision
         // Each runs regardless of the others, so no `&&` short-circuit.
         let gotThreads = await fetchThreads()
         let gotStatus = await fetchStatus()
@@ -98,7 +100,7 @@ public final class ChatStore {
         let gotTimeline = await fetchTimeline()
         await clearStale(
             afterRefetchSucceeded: gotThreads && gotStatus && gotPlan && gotQueue && gotInteractions && gotTimeline,
-            clearing: .all)
+            clearing: .all, unchangedSince: revision)
     }
 
     public func select(threadID: Int64) async {
@@ -113,12 +115,13 @@ public final class ChatStore {
         let known = await session.cachedSessionID(forThread: threadID)
         guard selectedThreadID == threadID else { return }
         sessionID = known
+        // The transcript first, so a slow plan or status cannot hold it back.
+        await refreshTimeline()
         // Plan and status too, even with no session or plan traffic: a failed
         // request marks every panel, and these need a way back besides a
         // reconnect.
         await refreshStatus()
         await refreshPlan()
-        await refreshTimeline()
         await refreshQueue()
         await refreshInteractions()
     }
@@ -421,10 +424,12 @@ public final class ChatStore {
     /// up: a later one succeeding says nothing about an earlier one that
     /// failed.
     private func resync() async {
+        // A mark landing while any fetch below is in flight must win.
+        let revision = staleRevision
         // Each runs regardless of the others, so no `&&` short-circuit.
         let gotThreads = await fetchThreads()
         guard let threadID = selectedThreadID else {
-            await clearStale(afterRefetchSucceeded: gotThreads, clearing: .threads)
+            await clearStale(afterRefetchSucceeded: gotThreads, clearing: .threads, unchangedSince: revision)
             return
         }
         // The reconnect's replay may have named a session this store has not
@@ -447,7 +452,7 @@ public final class ChatStore {
         let gotTimeline = await fetchTimeline()
         await clearStale(
             afterRefetchSucceeded: gotThreads && gotStatus && gotPlan && gotQueue && gotInteractions && gotTimeline,
-            clearing: .all)
+            clearing: .all, unchangedSince: revision)
     }
 
     /// Forgets `sessionID` if the daemon says it is no longer running.
@@ -499,9 +504,13 @@ public final class ChatStore {
         static let all: StalePanels = [.threads, .timeline, .queue, .plan, .interactions, .status]
     }
 
-    /// Lifts the marks on `panels` only, the ones the refetch covered.
-    private func clearStale(afterRefetchSucceeded succeeded: Bool, clearing panels: StalePanels) async {
-        guard await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self)
+    /// Lifts the marks on `panels` only, the ones the refetch covered. A
+    /// batch passes the revision it read before its first fetch.
+    private func clearStale(
+        afterRefetchSucceeded succeeded: Bool, clearing panels: StalePanels, unchangedSince: Int? = nil
+    ) async {
+        guard await StaleClearing.mayClear(
+            afterRefetchSucceeded: succeeded, on: session, store: self, unchangedSince: unchangedSince)
         else { return }
         if panels.contains(.threads) { threadsStale = false }
         if panels.contains(.timeline) { timelineStale = false }
