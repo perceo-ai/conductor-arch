@@ -227,9 +227,12 @@ export function applyEvent(event: ArchcarEvent) {
       interactionsStore.request(interaction);
       // An agent parked on a question is waiting on the operator: that is the
       // moment the sound exists for, unless a subagent is still working. The
-      // stored projection may predate a subagent launched just before the
-      // ask, so let a settled pull decide, as session_ready does.
-      chatRefresh.request(interaction.thread_id);
+      // stored projection, or a pull already in flight, may predate a subagent
+      // launched just before the ask. Flush rather than request: a request
+      // inside the interval only sets a timer, so an in-flight pull would not
+      // know it is stale and would judge the chat finished. Flushing marks it
+      // for a follow-up, and the settled follow-up decides.
+      chatRefresh.flush(interaction.thread_id);
       break;
     }
 

@@ -367,6 +367,48 @@ describe("turn-finished sound", () => {
     expect(play).toHaveBeenCalledTimes(1);
   });
 
+  it("does not ring when a question lands while an older pull that predates the subagent is in flight", async () => {
+    const { applyEvent, daemonSays, play } = await setup();
+    const bgAgent = {
+      id: "claude:s:task:agent",
+      render_class: "background_card",
+      status: "running",
+      background_agent: true,
+    };
+    // Busy baseline: main agent streaming, no subagent.
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    // Step outside the refresh interval so the next streamed update pulls at once.
+    await new Promise((r) => setTimeout(r, 120));
+    latencyMs = 30;
+    // A streamed update starts a pull that reads the daemon before the subagent exists.
+    applyEvent({ type: "session_messages_updated", session_id: 10, thread_id: 1 } as never);
+    // While it is in flight, inside the refresh interval, the main agent
+    // launches a background agent and asks a question.
+    daemon[1] = { live_session: STREAMING, items: [bgAgent] };
+    applyEvent({
+      type: "provider_interaction_requested",
+      interaction: {
+        id: "q-1",
+        provider_key: "claude",
+        workspace: "berlin",
+        thread_id: 1,
+        session_id: 10,
+        kind: "user_question",
+        title: "Which branch?",
+        detail: "",
+        questions: [],
+        status: "pending",
+      },
+    });
+    // The older pull resolves with the stale projection; a follow-up must judge instead.
+    await new Promise((r) => setTimeout(r, 200));
+    await settle();
+    expect(play).not.toHaveBeenCalled();
+    latencyMs = 0;
+    await daemonSays(1, { live_session: READY, items: [{ ...bgAgent, status: "complete" }] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
   it("does not wait on a backgrounded shell command", async () => {
     const { daemonSays, play } = await setup();
     const server = { id: "claude:s:task:bash", render_class: "background_card", status: "running" };
