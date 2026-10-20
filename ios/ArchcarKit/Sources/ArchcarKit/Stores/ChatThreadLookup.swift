@@ -1,5 +1,22 @@
 import Foundation
 
+/// What a tapped notification points at.
+///
+/// `daemonID` is the paired daemon that delivered it. Thread ids are per-daemon
+/// SQLite rowids, so thread 42 on one daemon is an unrelated chat on another;
+/// a tap is only resolved against the daemon it came from. Local notifications
+/// carry it. APNs pushes do not (their payload has only `thread_id`), so for
+/// those it is nil and the active daemon is assumed.
+public struct NotificationTap: Sendable, Equatable {
+    public let threadID: Int64
+    public let daemonID: String?
+
+    public init(threadID: Int64, daemonID: String?) {
+        self.threadID = threadID
+        self.daemonID = daemonID
+    }
+}
+
 /// Finds the workspace a chat thread belongs to, from the inventory snapshot
 /// the workspace list already holds.
 ///
@@ -28,6 +45,21 @@ public enum ChatThreadLookup {
         }
     }
 
+    /// Resolves a tap against the active daemon's snapshot. A tap stamped with
+    /// a different daemon is `.notFound` without looking: matching its thread
+    /// number here would open an unrelated chat, which is worse than none.
+    public static func resolve(
+        _ tap: NotificationTap,
+        activeDaemonID: String?,
+        workspaces: [WorkspaceSummary],
+        chatThreads: [String: [ChatThread]]
+    ) -> Resolution {
+        if let daemonID = tap.daemonID, daemonID != activeDaemonID {
+            return .notFound(threadID: tap.threadID)
+        }
+        return resolve(threadID: tap.threadID, workspaces: workspaces, chatThreads: chatThreads)
+    }
+
     public static func resolve(
         threadID: Int64,
         workspaces: [WorkspaceSummary],
@@ -40,6 +72,13 @@ public enum ChatThreadLookup {
             return .notFound(threadID: threadID)
         }
         return .found(workspace: workspace, threadID: threadID)
+    }
+
+    /// The chat, and the daemon if stamped, a tapped notification points at.
+    public static func tap(fromUserInfo userInfo: [AnyHashable: Any]) -> NotificationTap? {
+        guard let threadID = threadID(fromUserInfo: userInfo) else { return nil }
+        let daemonID = (userInfo["daemon_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return NotificationTap(threadID: threadID, daemonID: daemonID)
     }
 
     /// The `thread_id` a tapped notification carries.
@@ -70,10 +109,5 @@ extension WorkspacesStore {
     /// See ``ChatThreadLookup/workspaceName(forThread:in:)``.
     public func workspaceName(forThread threadID: Int64) -> String? {
         ChatThreadLookup.workspaceName(forThread: threadID, in: chatThreads)
-    }
-
-    /// See ``ChatThreadLookup/resolve(threadID:workspaces:chatThreads:)``.
-    public func resolveThread(_ threadID: Int64) -> ChatThreadLookup.Resolution {
-        ChatThreadLookup.resolve(threadID: threadID, workspaces: workspaces, chatThreads: chatThreads)
     }
 }

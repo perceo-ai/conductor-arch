@@ -25,6 +25,10 @@ public final class WorkspacesStore {
     /// number is the whole point of the coalescing below, so it is observable
     /// rather than inferred from a log.
     public private(set) var refreshCount = 0
+    /// Called after every refresh that succeeded — the first load, a
+    /// foreground refetch, the refetch after a reconnect, a coalesced one —
+    /// so work waiting on a loaded list (a tapped notification) can retry.
+    @ObservationIgnored public var onRefreshed: (@MainActor () -> Void)?
 
     /// How long the store waits for the event stream to go quiet before
     /// refetching. Long enough to swallow one turn's worth of events, short
@@ -212,6 +216,7 @@ public final class WorkspacesStore {
             self.chatThreads = chatThreads
             isStale = false
             lastError = nil
+            onRefreshed?()
         } catch {
             lastError = String(describing: error)
             isStale = true

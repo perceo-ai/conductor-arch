@@ -98,3 +98,39 @@ private struct Fixture {
     #expect(ChatThreadLookup.threadID(fromUserInfo: ["thread_id": NSNumber(value: 1.5)]) == nil)
     #expect(ChatThreadLookup.threadID(fromUserInfo: ["other": 42]) == nil)
 }
+
+@Test func threadFromAnotherDaemonIsNotFoundEvenWhenItsNumberMatches() throws {
+    let fixture = try Fixture()
+    // Thread 42 exists on the active daemon, but this tap came from another
+    // one: ids are per-daemon rowids, so it is a different chat.
+    let tap = NotificationTap(threadID: 42, daemonID: "daemon-a")
+
+    #expect(ChatThreadLookup.resolve(
+        tap, activeDaemonID: "daemon-b",
+        workspaces: fixture.workspaces, chatThreads: fixture.chatThreads)
+        == .notFound(threadID: 42))
+}
+
+@Test func tapFromTheActiveDaemonResolves() throws {
+    let fixture = try Fixture()
+
+    #expect(ChatThreadLookup.resolve(
+        NotificationTap(threadID: 42, daemonID: "daemon-b"), activeDaemonID: "daemon-b",
+        workspaces: fixture.workspaces, chatThreads: fixture.chatThreads)
+        == .found(workspace: fixture.checkout, threadID: 42))
+    // An APNs push carries no daemon id; it resolves against the active one.
+    #expect(ChatThreadLookup.resolve(
+        NotificationTap(threadID: 42, daemonID: nil), activeDaemonID: "daemon-b",
+        workspaces: fixture.workspaces, chatThreads: fixture.chatThreads)
+        == .found(workspace: fixture.checkout, threadID: 42))
+}
+
+@Test func tapReadsTheStampedDaemonFromUserInfo() {
+    #expect(ChatThreadLookup.tap(fromUserInfo: ["thread_id": Int64(42), "daemon_id": "daemon-a"])
+        == NotificationTap(threadID: 42, daemonID: "daemon-a"))
+    #expect(ChatThreadLookup.tap(fromUserInfo: ["thread_id": NSNumber(value: 42)])
+        == NotificationTap(threadID: 42, daemonID: nil))
+    #expect(ChatThreadLookup.tap(fromUserInfo: ["thread_id": Int64(42), "daemon_id": ""])
+        == NotificationTap(threadID: 42, daemonID: nil))
+    #expect(ChatThreadLookup.tap(fromUserInfo: ["daemon_id": "daemon-a"]) == nil)
+}
