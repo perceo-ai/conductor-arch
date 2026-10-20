@@ -39,7 +39,7 @@ struct InteractionView: View {
                         .font(Typeface.micro)
                         .foregroundStyle(palette.danger)
                 } footer: {
-                    Text("Nothing was sent. Try again.")
+                    Text("We couldn't confirm your answer. Try again.")
                 }
             }
 

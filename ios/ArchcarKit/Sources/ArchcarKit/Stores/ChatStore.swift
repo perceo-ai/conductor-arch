@@ -209,6 +209,21 @@ public final class ChatStore {
         case failure(String)
     }
 
+    /// A sentence for a failed resolve, shown on the phone instead of a Swift
+    /// enum dump. None of these claim the answer was or was not applied: the
+    /// daemon applies it before replying, so a dropped link can lose the reply
+    /// to an answer that already went through.
+    nonisolated static func resolveFailureMessage(for error: any Error) -> String {
+        switch error as? DaemonSessionError {
+        case .daemon(let message)?: "The daemon said: \(message)"
+        case .authenticationFailed?: "Authentication failed."
+        case .disconnected?: "Connection to the daemon was lost."
+        case .timedOut?: "The request timed out."
+        case .closedWithoutResponse?: "The daemon closed the connection before confirming."
+        case nil: "Couldn't reach the daemon."
+        }
+    }
+
     /// Answers a blocked agent. This is the reason the app exists on a phone.
     ///
     /// A failure leaves the interaction pending: on a flaky link the caller
@@ -217,10 +232,17 @@ public final class ChatStore {
     public func resolve(
         _ interaction: ProviderInteraction, with resolution: InteractionResolution
     ) async -> ResolveOutcome {
-        guard await request(
-            ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution)) != nil
-        else {
-            return .failure(composerError ?? "The daemon did not confirm the response.")
+        // Not the shared `request` helper: it keeps only `String(describing:)`
+        // of the error, and the sheet needs a readable sentence.
+        do {
+            _ = try await session.request(
+                ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
+            isStale = false
+        } catch {
+            isStale = true
+            let message = Self.resolveFailureMessage(for: error)
+            composerError = message
+            return .failure(message)
         }
         composerError = nil
         await refreshInteractions()

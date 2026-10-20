@@ -195,19 +195,39 @@ private func connectedStore(
     #expect(store.isBlocked)
 
     let interaction = try #require(store.pendingInteractions.first)
+    let before = await daemon.receivedLines.count
     let outcome = await store.resolve(interaction, with: .approve)
 
     guard case .failure(let message) = outcome else {
         Issue.record("expected a failure outcome, got \(outcome)")
         return
     }
-    #expect(!message.isEmpty)
+    // The daemon's own words, not `daemon("…")`.
+    #expect(message == "The daemon said: interaction already resolved")
     // A failed resolve must leave the interaction pending rather than
-    // silently clearing it — refreshInteractions() only runs on success.
+    // silently clearing it. The mock re-serves the interaction on every read,
+    // so `isBlocked` alone can't show that; what proves it is that no
+    // refetch was sent after the resolve.
+    let lines = await daemon.receivedLines
+    let sent = lines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("resolve_provider_interaction"))
+    #expect(!sent.contains("list_provider_interactions"))
     #expect(store.isBlocked)
 
     await session.disconnect()
     await daemon.stop()
+}
+
+@Test func resolveFailuresReadAsSentences() {
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.daemon("interaction already resolved"))
+        == "The daemon said: interaction already resolved")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.disconnected)
+        == "Connection to the daemon was lost.")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.timedOut) == "The request timed out.")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.authenticationFailed)
+        == "Authentication failed.")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.closedWithoutResponse)
+        == "The daemon closed the connection before confirming.")
 }
 
 @MainActor
