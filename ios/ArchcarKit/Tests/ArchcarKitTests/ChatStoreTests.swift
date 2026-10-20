@@ -21,7 +21,8 @@ private func chatResponder(
     queued: [String] = [],
     pendingInteraction: Bool = false,
     spawnIsQueued: Bool = false,
-    resolveFails: Bool = false
+    resolveFails: Bool = false,
+    sessionExited: Bool = false
 ) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
@@ -56,8 +57,9 @@ private func chatResponder(
             return #"{"id":"\#(id)","payload":{"type":"provider_interactions","interactions":[\#(pendingInteraction ? interaction : "")]}}"#
         case "get_session_status":
             return """
-            {"id":"\(id)","payload":{"type":"session_status","session_id":3,"status":"running",\
-            "runtime_state":"streaming","ready":false,"pending_interactions":0}}
+            {"id":"\(id)","payload":{"type":"session_status","session_id":3,\
+            "status":"\(sessionExited ? "exited" : "running")",\
+            "runtime_state":"\(sessionExited ? "exited" : "streaming")","ready":false,"pending_interactions":0}}
             """
         case "ensure_chat_thread_session":
             return spawnIsQueued
@@ -363,6 +365,75 @@ private func connectedStore(
     #expect(sent.contains("list_queued_chat_inputs"))
     #expect(sent.contains("list_provider_interactions"))
     #expect(await eventually { @MainActor in !store.isStale })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aChatOpenedDuringAnOutageRecoversOnReconnect() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+
+    // The link drops before the chat's observer starts, as when a chat is
+    // opened while the phone is offline.
+    await daemon.endEventConnection()
+    #expect(await eventually { await session.connectionState != .connected })
+    let observing = Task { await store.observe() }
+    #expect(await eventually { @MainActor in store.isStale })
+    let before = await daemon.receivedLines.count
+
+    await session.reconnectNow()
+
+    // It must not sit on a subscription taken while disconnected: the
+    // reconnect refetches what is on screen.
+    #expect(await eventually {
+        await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("get_chat_projection")
+    })
+    #expect(await eventually { @MainActor in !store.isStale })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aSessionThatExitedDuringAnOutageLosesItsControls() async throws {
+    let daemon = try await MockDaemon()
+    // The daemon reports the session as exited, as it would after it ended
+    // while the link was down and its `session_exited` never arrived.
+    await daemon.respond(to: chatResponder(sessionExited: true))
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+    await daemon.push(
+        #"{"id":"e1","payload":{"type":"session_started","session_id":3,"thread_id":7,"workspace":"w","kind":"codex","pid":900}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == 3 })
+
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+    // The reconnect's replay does not name session 3: it is gone.
+    await session.reconnectNow()
+
+    #expect(await eventually { @MainActor in !store.hasLiveSession })
+    #expect(store.isTurnRunning == false)
 
     observing.cancel()
     await session.disconnect()

@@ -300,18 +300,19 @@ public final class ChatStore {
 
     /// Runs for as long as the chat is on screen.
     ///
-    /// When the stream drops the chat is marked stale straight away, without
-    /// waiting for a request to fail. Once the session has reconnected this
-    /// resubscribes and refetches everything on screen, because whatever
-    /// happened in between was missed.
+    /// While the stream is down — dropped, or not up yet when the chat opened
+    /// — the chat is marked stale, without waiting for a request to fail.
+    /// Once the session has reconnected this resubscribes and refetches
+    /// everything on screen, because whatever happened in between was missed.
     public func observe() async {
-        var resumed = false
+        var missedEvents = false
         while !Task.isCancelled {
+            if await session.connectionState != .connected { isStale = true }
             // Subscribe before refetching, so an event that lands during the
             // refetch is not lost between the two.
-            let events = await session.events
-            if resumed { await resync() }
-            for await event in events {
+            guard let subscription = await session.connectedEvents() else { return }
+            if missedEvents || subscription.waited { await resync() }
+            for await event in subscription.events {
                 // A session event also teaches the store which session backs
                 // this thread, which is what `interrupt` needs.
                 if case .sessionStarted(let sessionID, let threadID, _, _, _) = event,
@@ -334,8 +335,7 @@ public final class ChatStore {
             }
             guard !Task.isCancelled else { return }
             isStale = true
-            await session.waitUntilConnected()
-            resumed = true
+            missedEvents = true
         }
     }
 
@@ -345,14 +345,47 @@ public final class ChatStore {
         guard let threadID = selectedThreadID else { return }
         // The reconnect's replay may have named a session this store has not
         // seen, for instance one started while the link was down.
-        if let known = await session.cachedSessionID(forThread: threadID), selectedThreadID == threadID {
+        let known = await session.cachedSessionID(forThread: threadID)
+        guard selectedThreadID == threadID else { return }
+        if let known {
             sessionID = known
+        } else if let current = sessionID {
+            // The replay has not named it — it may not have landed yet, or
+            // the session exited while the link was down and its
+            // `session_exited` was missed. Ask, rather than keep Stop, Model
+            // and Effort pointed at a session that is gone.
+            await reconcileSession(current)
         }
         await refreshStatus()
         await refreshPlan()
         await refreshQueue()
         await refreshInteractions()
         await refreshTimeline()
+    }
+
+    /// Forgets `sessionID` if the daemon says it is no longer running.
+    ///
+    /// Only an answer counts: "unknown session" or a non-running status
+    /// clears it, while a dropped link keeps it, since that says nothing
+    /// about the session.
+    private func reconcileSession(_ sessionID: Int64) async {
+        let isGone: Bool
+        do {
+            let response = try await session.request(GetSessionStatusRequest(sessionID: sessionID))
+            if case .sessionStatus(let status) = response {
+                // The same test the daemon's subscribe replay applies.
+                isGone = status.status != "running"
+            } else {
+                isGone = false
+            }
+        } catch DaemonSessionError.daemon(_) {
+            isGone = true
+        } catch {
+            isGone = false
+        }
+        guard isGone, self.sessionID == sessionID else { return }
+        self.sessionID = nil
+        sessionStatus = nil
     }
 
     private func request<Body: ArchcarRequestBody>(_ body: Body) async -> ArchcarResponse? {

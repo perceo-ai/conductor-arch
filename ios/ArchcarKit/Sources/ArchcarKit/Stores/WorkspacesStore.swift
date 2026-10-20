@@ -229,25 +229,25 @@ public final class WorkspacesStore {
     /// connection plus a whole inventory snapshot over a VPN, so answering each
     /// event separately turns a busy daemon into a permanent backlog.
     ///
-    /// When the stream drops, the list is marked stale at once — events that
-    /// would have changed it can no longer arrive — and once the session has
-    /// reconnected it resubscribes and refetches, since whatever happened in
-    /// between was missed.
+    /// While the stream is down — dropped, or not up yet when this started —
+    /// the list is marked stale, because events that would change it cannot
+    /// arrive. Once the session has reconnected this resubscribes and
+    /// refetches, since whatever happened in between was missed.
     public func observe() async {
-        var resumed = false
+        var missedEvents = false
         while !Task.isCancelled {
+            if await session.connectionState != .connected { isStale = true }
             // Subscribe before refetching, so an event that lands during the
             // refetch is not lost between the two.
-            let events = await session.events
-            if resumed { await refresh() }
-            for await event in events where Self.invalidates(event) {
+            guard let subscription = await session.connectedEvents() else { return }
+            if missedEvents || subscription.waited { await refresh() }
+            for await event in subscription.events where Self.invalidates(event) {
                 refreshSoon()
             }
             coalescedRefresh?.cancel()
             guard !Task.isCancelled else { return }
             isStale = true
-            await session.waitUntilConnected()
-            resumed = true
+            missedEvents = true
         }
     }
 

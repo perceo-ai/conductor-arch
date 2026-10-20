@@ -146,17 +146,16 @@ public final class ReviewStore {
     /// session has reconnected, everything is refetched before listening
     /// again, since whatever changed in between was missed.
     public func observe() async {
-        var resumed = false
+        var missedEvents = false
         while !Task.isCancelled {
-            let events = await session.events
-            if resumed { await refreshAll() }
-            for await event in events where Self.invalidates(event, workspace: workspace) {
+            guard let subscription = await session.connectedEvents() else { return }
+            if missedEvents || subscription.waited { await refreshAll() }
+            for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
                 await refreshChanges()
                 await refreshChecks()
             }
             guard !Task.isCancelled else { return }
-            await session.waitUntilConnected()
-            resumed = true
+            missedEvents = true
         }
     }
 

@@ -143,11 +143,11 @@ final class AppModel {
 
     private func observeNotifications(session: DaemonSession) async {
         while !Task.isCancelled {
-            for await event in await session.events {
+            guard let subscription = await session.connectedEvents() else { return }
+            for await event in subscription.events {
                 guard let descriptor = EventNotificationDescriptor.from(event) else { continue }
                 await localNotifications.deliver(descriptor)
             }
-            await session.waitUntilConnected()
         }
     }
 

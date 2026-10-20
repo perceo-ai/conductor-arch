@@ -102,6 +102,31 @@ public actor DaemonSession {
         eventContinuations.removeValue(forKey: id)
     }
 
+    /// A subscription to a live stream, for observers that run as long as a
+    /// screen is open.
+    public struct Subscription: Sendable {
+        public let events: AsyncStream<ArchcarEvent>
+        /// The session was not connected when asked, so whatever happened
+        /// before this subscription was missed and should be refetched.
+        public let waited: Bool
+    }
+
+    /// Subscribes once the session is connected, waiting first if it is not.
+    ///
+    /// A plain `events` taken while disconnected would sit unfinished through
+    /// the reconnect with nothing to say events were missed; this hands out a
+    /// stream only when one is flowing. Nil if the calling task is cancelled
+    /// while waiting.
+    public func connectedEvents() async -> Subscription? {
+        var waited = false
+        while connectionState != .connected {
+            waited = true
+            await waitUntilConnected()
+            if Task.isCancelled { return nil }
+        }
+        return Subscription(events: events, waited: waited)
+    }
+
     /// The session the event stream last reported for a chat thread, if it is
     /// still running.
     public func cachedSessionID(forThread threadID: Int64) -> Int64? {

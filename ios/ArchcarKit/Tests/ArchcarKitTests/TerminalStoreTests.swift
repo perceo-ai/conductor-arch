@@ -89,3 +89,45 @@ Sessions
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func reattachesWhenTheShellWasReplacedDuringAnOutage() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { line in
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = object["id"] as? String,
+              let payload = object["payload"] as? [String: Any],
+              let type = payload["type"] as? String else { return nil }
+        switch type {
+        case "get_workspace_processes":
+            // Shell #2 exited while the link was down and #5 replaced it.
+            let text = "Sessions\\n#5 /bin/zsh running pid=9 exit=- started=2 log=/tmp/b.log\\n#2 /bin/zsh exited pid=8 exit=0 started=1 log=/tmp/a.log"
+            return #"{"id":"\#(id)","payload":{"type":"workspace_processes","workspace":"w","text":"\#(text)"}}"#
+        case "get_session_screen":
+            let sessionID = (payload["session_id"] as? NSNumber)?.int64Value ?? 0
+            return #"{"id":"\#(id)","payload":{"type":"session_screen","session_id":\#(sessionID),"screen":"shell \#(sessionID)"}}"#
+        default:
+            return nil
+        }
+    }
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = TerminalStore(session: session, workspace: "w")
+    store.attachForTesting(sessionID: 2)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { await session.connectionState != .connected })
+    await session.reconnectNow()
+
+    // Keystrokes must go to the shell that is running, not the one that left.
+    #expect(await eventually { @MainActor in store.sessionID == 5 })
+    #expect(await eventually { @MainActor in store.screen == "shell 5" })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
