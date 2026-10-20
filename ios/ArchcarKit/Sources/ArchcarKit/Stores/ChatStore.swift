@@ -27,7 +27,18 @@ public final class ChatStore {
     public private(set) var planMode = false
     public private(set) var planMarkdown: String?
     public private(set) var sessionStatus: SessionStatus?
-    public private(set) var isStale = false
+    // One mark per panel, so a refetch lifts only what it brought up to
+    // date: a thread-list refresh says nothing about a timeline that failed.
+    private var threadsStale = false
+    private var timelineStale = false
+    private var queueStale = false
+    private var planStale = false
+    private var interactionsStale = false
+    private var statusStale = false
+    /// Whether any panel is out of date.
+    public var isStale: Bool {
+        threadsStale || timelineStale || queueStale || planStale || interactionsStale || statusStale
+    }
     /// Bumped by every `markStale()`, so a clear decided before an `await`
     /// can tell a mark landed since; see `StaleClearing`.
     @ObservationIgnored private(set) var staleRevision = 0
@@ -60,7 +71,7 @@ public final class ChatStore {
     // --- Loading -----------------------------------------------------------
 
     public func refreshThreads() async {
-        await clearStale(afterRefetchSucceeded: await fetchThreads())
+        await clearStale(afterRefetchSucceeded: await fetchThreads(), clearing: .threads)
     }
 
     private func fetchThreads() async -> Bool {
@@ -93,19 +104,22 @@ public final class ChatStore {
     }
 
     public func refreshTimeline() async {
-        await clearStale(afterRefetchSucceeded: await fetchTimeline())
+        await clearStale(afterRefetchSucceeded: await fetchTimeline(), clearing: .timeline)
     }
 
     public func refreshQueue() async {
-        await clearStale(afterRefetchSucceeded: await fetchQueue())
+        // With no thread there is no queue to check, and skipping it must not
+        // clear anything: `removeQueued` and `moveQueued` route here.
+        guard selectedThreadID != nil else { return }
+        await clearStale(afterRefetchSucceeded: await fetchQueue(), clearing: .queue)
     }
 
     public func refreshInteractions() async {
-        await clearStale(afterRefetchSucceeded: await fetchInteractions())
+        await clearStale(afterRefetchSucceeded: await fetchInteractions(), clearing: .interactions)
     }
 
     public func refreshPlan() async {
-        await clearStale(afterRefetchSucceeded: await fetchPlan())
+        await clearStale(afterRefetchSucceeded: await fetchPlan(), clearing: .plan)
     }
 
     public func refreshStatus() async {
@@ -113,7 +127,7 @@ public final class ChatStore {
         // on its own, clear a mark some other refetch left: a session exiting
         // routes here after `sessionID` is gone, and that refetched nothing.
         guard sessionID != nil else { return }
-        await clearStale(afterRefetchSucceeded: await fetchStatus())
+        await clearStale(afterRefetchSucceeded: await fetchStatus(), clearing: .status)
     }
 
     // Each fetch reports whether it brought its panel up to date. Nothing to
@@ -121,7 +135,8 @@ public final class ChatStore {
     // is what `resync()` needs: a skipped panel must not fail the whole
     // resync, and it may clear only because every other fetch it ran also
     // succeeded. A standalone wrapper has no such company, which is why
-    // `refreshStatus()` returns before clearing when there is no session.
+    // `refreshStatus()` and `refreshQueue()` return before clearing when they
+    // have nothing to fetch.
 
     private func fetchTimeline() async -> Bool {
         guard let threadID = selectedThreadID else { return true }
@@ -289,7 +304,6 @@ public final class ChatStore {
         do {
             _ = try await session.request(
                 ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
-            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
         } catch {
             markStale()
             let message = Self.resolveFailureMessage(for: error)
@@ -391,7 +405,7 @@ public final class ChatStore {
         // Each runs regardless of the others, so no `&&` short-circuit.
         let gotThreads = await fetchThreads()
         guard let threadID = selectedThreadID else {
-            await clearStale(afterRefetchSucceeded: gotThreads)
+            await clearStale(afterRefetchSucceeded: gotThreads, clearing: .threads)
             return
         }
         // The reconnect's replay may have named a session this store has not
@@ -413,7 +427,8 @@ public final class ChatStore {
         let gotInteractions = await fetchInteractions()
         let gotTimeline = await fetchTimeline()
         await clearStale(
-            afterRefetchSucceeded: gotThreads && gotStatus && gotPlan && gotQueue && gotInteractions && gotTimeline)
+            afterRefetchSucceeded: gotThreads && gotStatus && gotPlan && gotQueue && gotInteractions && gotTimeline,
+            clearing: .all)
     }
 
     /// Forgets `sessionID` if the daemon says it is no longer running.
@@ -454,12 +469,38 @@ public final class ChatStore {
         }
     }
 
-    private func clearStale(afterRefetchSucceeded succeeded: Bool) async {
-        if await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self) { isStale = false }
+    private struct StalePanels: OptionSet {
+        let rawValue: Int
+        static let threads = StalePanels(rawValue: 1 << 0)
+        static let timeline = StalePanels(rawValue: 1 << 1)
+        static let queue = StalePanels(rawValue: 1 << 2)
+        static let plan = StalePanels(rawValue: 1 << 3)
+        static let interactions = StalePanels(rawValue: 1 << 4)
+        static let status = StalePanels(rawValue: 1 << 5)
+        static let all: StalePanels = [.threads, .timeline, .queue, .plan, .interactions, .status]
     }
 
+    /// Lifts the marks on `panels` only, the ones the refetch covered.
+    private func clearStale(afterRefetchSucceeded succeeded: Bool, clearing panels: StalePanels) async {
+        guard await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self)
+        else { return }
+        if panels.contains(.threads) { threadsStale = false }
+        if panels.contains(.timeline) { timelineStale = false }
+        if panels.contains(.queue) { queueStale = false }
+        if panels.contains(.plan) { planStale = false }
+        if panels.contains(.interactions) { interactionsStale = false }
+        if panels.contains(.status) { statusStale = false }
+    }
+
+    /// A failed request or a dropped stream says nothing about which panel
+    /// missed what, so every panel is marked.
     private func markStale() {
-        isStale = true
+        threadsStale = true
+        timelineStale = true
+        queueStale = true
+        planStale = true
+        interactionsStale = true
+        statusStale = true
         staleRevision += 1
     }
 }
