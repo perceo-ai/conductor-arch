@@ -145,11 +145,23 @@ export function loadThread(threadId: number): void {
   chatRefresh.flush(threadId);
 }
 
+/// Which workspace owns the event's chat, so the banner can name it rather
+/// than "Thread 42". Undefined when the thread list has not loaded it.
+function workspaceForThread(event: ArchcarEvent): string | undefined {
+  const threadId = (event as { thread_id?: number }).thread_id;
+  if (threadId == null) return undefined;
+  return Object.entries(threadsStore.state.byWorkspace).find(([, threads]) =>
+    threads.some((thread) => thread.id === threadId),
+  )?.[0];
+}
+
 export function applyEvent(event: ArchcarEvent) {
   // OS banners are for the window you are not looking at. While Archductor is
   // focused the chat itself shows the turn ending / ask arriving, and a native
   // notification on top of it is pure noise.
-  const notification = nav.windowFocused() ? null : notificationForArchcarEvent(event);
+  const notification = nav.windowFocused()
+    ? null
+    : notificationForArchcarEvent(event, workspaceForThread(event));
   if (notification) void notify(notification);
 
   switch (event.type) {

@@ -16,6 +16,13 @@ final class AppModel {
     private(set) var workspaces: WorkspacesStore?
     private(set) var connectionError: String?
     private(set) var isConnecting = false
+    /// A chat a tapped notification asked to open, once it is resolved. The
+    /// views act on it and then call `clearChatOpenRequest()`.
+    private(set) var chatOpenRequest: ChatThreadLookup.Resolution?
+    /// A tapped thread still waiting for a loaded workspace list — the tap may
+    /// have cold-launched the app, before any daemon is connected.
+    @ObservationIgnored private var pendingTapThreadID: Int64?
+    @ObservationIgnored private var isResolvingTap = false
 
     private var observation: Task<Void, Never>?
     private var notificationObservation: Task<Void, Never>?
@@ -29,6 +36,9 @@ final class AppModel {
     init(directory: DaemonDirectory = DaemonDirectory()) {
         self.directory = directory
         localNotifications.hasLiveDaemonSession = { [weak self] in self?.session != nil }
+        localNotifications.onNotificationTapped = { [weak self] threadID in
+            self?.handleNotificationTap(threadID: threadID)
+        }
     }
 
     func load() async {
@@ -104,7 +114,47 @@ final class AppModel {
         await store.refresh()
         observation = Task { await store.observe() }
         notificationObservation = Task { await observeNotifications(session: session) }
+        await resolvePendingTap()
         await localNotifications.requestAuthorizationAndRegister()
+    }
+
+    func handleNotificationTap(threadID: Int64) {
+        pendingTapThreadID = threadID
+        Task { await resolvePendingTap() }
+    }
+
+    func clearChatOpenRequest() {
+        chatOpenRequest = nil
+    }
+
+    /// Turns a tapped thread id into a chat to open, or a "no longer exists".
+    ///
+    /// Waits, rather than giving up, while there is no workspace list to look
+    /// in — `activate` and `handleForeground` call this again once one has
+    /// loaded. A miss refetches once before concluding the chat is gone, since
+    /// the snapshot may predate the chat the notification is about. A stale
+    /// list is never trusted to say "gone": the tap stays pending instead.
+    private func resolvePendingTap() async {
+        // One resolution at a time, so a tap racing a foreground refresh
+        // cannot open the same chat twice.
+        guard !isResolvingTap else { return }
+        isResolvingTap = true
+        defer { isResolvingTap = false }
+        while let threadID = pendingTapThreadID, let store = workspaces {
+            if store.lastError != nil { await store.refresh() }
+            var resolution = store.resolveThread(threadID)
+            if store.lastError == nil, case .notFound = resolution {
+                await store.refresh()
+                resolution = store.resolveThread(threadID)
+            }
+            // A reconnect or a newer tap during a fetch makes this answer
+            // stale: go round again against the current list and thread. A
+            // failed fetch leaves the tap pending for the next refresh.
+            guard workspaces === store, pendingTapThreadID == threadID else { continue }
+            guard store.lastError == nil else { return }
+            pendingTapThreadID = nil
+            chatOpenRequest = resolution
+        }
     }
 
     func refreshSavedList() async {
@@ -136,6 +186,7 @@ final class AppModel {
         }
         if await session.connectionState == .connected {
             await workspaces?.refresh()
+            await resolvePendingTap()
         } else {
             await session.reconnectNow()
         }
@@ -145,7 +196,12 @@ final class AppModel {
         while !Task.isCancelled {
             guard let subscription = await session.connectedEvents() else { return }
             for await event in subscription.events {
-                guard let descriptor = EventNotificationDescriptor.from(event) else { continue }
+                // Name the workspace rather than "Thread 42" when the list
+                // already knows the thread; otherwise fall back to the number.
+                let workspaceName = EventNotificationDescriptor.threadID(of: event)
+                    .flatMap { workspaces?.workspaceName(forThread: $0) }
+                guard let descriptor = EventNotificationDescriptor.from(event, workspaceName: workspaceName)
+                else { continue }
                 await localNotifications.deliver(descriptor)
             }
         }

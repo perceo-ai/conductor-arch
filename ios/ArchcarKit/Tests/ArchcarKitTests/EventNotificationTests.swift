@@ -19,7 +19,8 @@ import Testing
     #expect(descriptor == EventNotificationDescriptor(
         id: "interaction-ask-1",
         title: "Input required",
-        body: "Approve command? - cargo test",
+        // The interaction names its own workspace; no lookup needed.
+        body: "checkout: Approve command? - cargo test",
         threadID: 9))
 }
 
@@ -32,6 +33,43 @@ import Testing
         title: "Chat finished",
         body: "Thread 9 completed.",
         threadID: 9))
+}
+
+@Test func completedTurnNamesTheWorkspaceWhenItIsKnown() {
+    let descriptor = EventNotificationDescriptor.from(
+        .turnCompleted(sessionID: 11, threadID: 9, status: "completed"),
+        workspaceName: "checkout")
+
+    #expect(descriptor == EventNotificationDescriptor(
+        id: "turn-11-9-completed",
+        title: "Chat finished",
+        body: "The chat in checkout completed.",
+        threadID: 9))
+}
+
+@Test func blankWorkspaceNameFallsBackToTheThreadNumber() {
+    let descriptor = EventNotificationDescriptor.from(
+        .turnCompleted(sessionID: 11, threadID: 9, status: "interrupted"),
+        workspaceName: "  ")
+
+    #expect(descriptor?.body == "Thread 9 interrupted.")
+    #expect(descriptor?.title == "Chat stopped")
+}
+
+@Test func sessionErrorNamesTheWorkspaceWhenItIsKnown() {
+    let descriptor = EventNotificationDescriptor.from(
+        .sessionError(sessionID: 11, threadID: 9, message: "codex exited before it was ready"),
+        workspaceName: "checkout")
+
+    #expect(descriptor?.body == "checkout: codex exited before it was ready")
+}
+
+@Test func notificationThreadIDComesFromTheEvent() {
+    #expect(EventNotificationDescriptor.threadID(
+        of: .turnCompleted(sessionID: 11, threadID: 9, status: nil)) == 9)
+    #expect(EventNotificationDescriptor.threadID(
+        of: .sessionError(sessionID: nil, threadID: nil, message: "x")) == nil)
+    #expect(EventNotificationDescriptor.threadID(of: .sessionMessagesUpdated(threadID: 9)) == nil)
 }
 
 @Test func notificationDescriptorForSessionErrorEvent() {

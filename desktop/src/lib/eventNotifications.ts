@@ -6,7 +6,15 @@ export interface EventNotification {
   body: string;
 }
 
-export function notificationForArchcarEvent(event: ArchcarEvent): EventNotification | null {
+/// `workspaceName` is the workspace that owns the event's chat thread, when the
+/// caller could look it up; without it the text falls back to the thread
+/// number. Interactions carry their own workspace. The wording matches the
+/// iOS `EventNotificationDescriptor` and the APNs text in notifications.rs.
+export function notificationForArchcarEvent(
+  event: ArchcarEvent,
+  workspaceName?: string,
+): EventNotification | null {
+  const workspace = workspaceName?.trim() || undefined;
   switch (event.type) {
     case "provider_interaction_requested":
       return notificationForInteraction(
@@ -15,10 +23,12 @@ export function notificationForArchcarEvent(event: ArchcarEvent): EventNotificat
     case "turn_completed":
       return notificationForCompletedTurn(
         event as { session_id: number; thread_id: number; status?: string },
+        workspace,
       );
     case "session_error":
       return notificationForSessionError(
         event as { session_id?: number; thread_id?: number; message: string },
+        workspace,
       );
     case "background_task_updated":
       return notificationForBackgroundTask((event as { task: BackgroundTask }).task);
@@ -31,32 +41,43 @@ function notificationForInteraction(interaction: ProviderInteractionRecord): Eve
   return {
     id: `interaction-${interaction.id}`,
     title: "Input required",
-    body: joinBody(interaction.title, interaction.detail),
+    body: prefixed(
+      joinBody(interaction.title, interaction.detail),
+      interaction.workspace?.trim() || undefined,
+    ),
   };
 }
 
-function notificationForCompletedTurn(event: {
-  session_id: number;
-  thread_id: number;
-  status?: string;
-}): EventNotification {
+function notificationForCompletedTurn(
+  event: {
+    session_id: number;
+    thread_id: number;
+    status?: string;
+  },
+  workspace: string | undefined,
+): EventNotification {
   const status = event.status?.trim() || "completed";
   return {
     id: `turn-${event.session_id}-${event.thread_id}-${status}`,
     title: status === "completed" ? "Chat finished" : "Chat stopped",
-    body: `Thread ${event.thread_id} ${status}.`,
+    body: workspace
+      ? `The chat in ${workspace} ${status}.`
+      : `Thread ${event.thread_id} ${status}.`,
   };
 }
 
-function notificationForSessionError(event: {
-  session_id?: number;
-  thread_id?: number;
-  message: string;
-}): EventNotification {
+function notificationForSessionError(
+  event: {
+    session_id?: number;
+    thread_id?: number;
+    message: string;
+  },
+  workspace: string | undefined,
+): EventNotification {
   return {
     id: `session-error-${event.session_id ?? "unknown"}-${event.thread_id ?? "unknown"}`,
     title: "Chat failed",
-    body: event.message,
+    body: prefixed(event.message, workspace),
   };
 }
 
@@ -75,4 +96,9 @@ function joinBody(title: string, detail: string): string {
   if (!cleanTitle) return cleanDetail;
   if (!cleanDetail) return cleanTitle;
   return `${cleanTitle} - ${cleanDetail}`;
+}
+
+function prefixed(body: string, workspace: string | undefined): string {
+  if (!workspace) return body;
+  return body ? `${workspace}: ${body}` : workspace;
 }

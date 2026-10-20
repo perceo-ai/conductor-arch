@@ -23,8 +23,29 @@ describe("notificationForArchcarEvent", () => {
     expect(notificationForArchcarEvent(interactionEvent)).toEqual({
       id: "interaction-ask-1",
       title: "Input required",
-      body: "Approve command? - cargo test",
+      body: "checkout: Approve command? - cargo test",
     });
+  });
+
+  it("names the workspace that owns the chat when it is known", () => {
+    expect(
+      notificationForArchcarEvent(
+        { type: "turn_completed", session_id: 11, thread_id: 9, status: "completed" },
+        "checkout",
+      )?.body,
+    ).toBe("The chat in checkout completed.");
+    expect(
+      notificationForArchcarEvent(
+        { type: "session_error", session_id: 11, thread_id: 9, message: "codex exited" },
+        "checkout",
+      )?.body,
+    ).toBe("checkout: codex exited");
+    expect(
+      notificationForArchcarEvent(
+        { type: "turn_completed", session_id: 11, thread_id: 9, status: "completed" },
+        "  ",
+      )?.body,
+    ).toBe("Thread 9 completed.");
   });
 
   it("notifies when a chat turn finishes", () => {
