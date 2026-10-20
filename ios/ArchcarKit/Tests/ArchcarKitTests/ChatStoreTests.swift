@@ -20,7 +20,8 @@ private func chatResponder(
     projectionBody: String = "on it",
     queued: [String] = [],
     pendingInteraction: Bool = false,
-    spawnIsQueued: Bool = false
+    spawnIsQueued: Bool = false,
+    resolveFails: Bool = false
 ) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
@@ -71,7 +72,11 @@ private func chatResponder(
             {"id":9,"thread_id":7,"input":"ship it","kind":"user","session_kind":"codex",\
             "created_at":"1","updated_at":"1"}}}
             """
-        case "resolve_provider_interaction", "interrupt_turn", "set_chat_plan_mode":
+        case "resolve_provider_interaction":
+            return resolveFails
+                ? #"{"id":"\#(id)","payload":{"type":"error","message":"interaction already resolved"}}"#
+                : #"{"id":"\#(id)","payload":{"type":"ack"}}"#
+        case "interrupt_turn", "set_chat_plan_mode":
             return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
         default:
             return nil
@@ -175,6 +180,67 @@ private func connectedStore(
     // A blocked agent is the one thing worth interrupting someone for, so the
     // store surfaces it as its own flag rather than burying it in a list.
     #expect(store.isBlocked)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func resolveSurfacesFailureAndLeavesTheInteractionPending() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(
+        daemon, responder: chatResponder(pendingInteraction: true, resolveFails: true))
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isBlocked)
+
+    let interaction = try #require(store.pendingInteractions.first)
+    let before = await daemon.receivedLines.count
+    let outcome = await store.resolve(interaction, with: .approve)
+
+    guard case .failure(let message) = outcome else {
+        Issue.record("expected a failure outcome, got \(outcome)")
+        return
+    }
+    // The daemon's own words, not `daemon("…")`.
+    #expect(message == "The daemon said: interaction already resolved")
+    // A failed resolve must leave the interaction pending rather than
+    // silently clearing it. The mock re-serves the interaction on every read,
+    // so `isBlocked` alone can't show that; what proves it is that no
+    // refetch was sent after the resolve.
+    let lines = await daemon.receivedLines
+    let sent = lines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("resolve_provider_interaction"))
+    #expect(!sent.contains("list_provider_interactions"))
+    #expect(store.isBlocked)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@Test func resolveFailuresReadAsSentences() {
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.daemon("interaction already resolved"))
+        == "The daemon said: interaction already resolved")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.disconnected)
+        == "Connection to the daemon was lost.")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.timedOut) == "The request timed out.")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.authenticationFailed)
+        == "Authentication failed.")
+    #expect(ChatStore.resolveFailureMessage(for: DaemonSessionError.closedWithoutResponse)
+        == "The daemon closed the connection before confirming.")
+}
+
+@MainActor
+@Test func resolveSurfacesSuccessToTheCaller() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(
+        daemon, responder: chatResponder(pendingInteraction: true))
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    let interaction = try #require(store.pendingInteractions.first)
+
+    let outcome = await store.resolve(interaction, with: .approve)
+    #expect(outcome == .success)
 
     await session.disconnect()
     await daemon.stop()

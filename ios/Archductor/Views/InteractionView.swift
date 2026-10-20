@@ -15,6 +15,7 @@ struct InteractionView: View {
     @State private var otherText: [String: String] = [:]
     @State private var denyReason = ""
     @State private var working = false
+    @State private var resolveError: String?
 
     var body: some View {
         Form {
@@ -30,6 +31,16 @@ struct InteractionView: View {
                 }
             } header: {
                 Text(interaction.kindLabel)
+            }
+
+            if let resolveError {
+                Section {
+                    Text(resolveError)
+                        .font(Typeface.micro)
+                        .foregroundStyle(palette.danger)
+                } footer: {
+                    Text("We couldn't confirm your answer. Try again.")
+                }
             }
 
             switch interaction.kind {
@@ -135,9 +146,15 @@ struct InteractionView: View {
     private func resolve(_ resolution: InteractionResolution) {
         working = true
         Task {
-            await store.resolve(interaction, with: resolution)
+            let outcome = await store.resolve(interaction, with: resolution)
             working = false
-            dismiss()
+            switch outcome {
+            case .success:
+                dismiss()
+            case .failure(let message):
+                // Keep the sheet up: the agent is still blocked.
+                resolveError = message
+            }
         }
     }
 }

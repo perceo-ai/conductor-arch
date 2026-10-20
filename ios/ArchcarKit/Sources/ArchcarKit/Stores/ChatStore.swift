@@ -203,11 +203,50 @@ public final class ChatStore {
         planMode = enabled
     }
 
+    /// Whether the daemon took an answer to a blocked agent.
+    public enum ResolveOutcome: Sendable, Equatable {
+        case success
+        case failure(String)
+    }
+
+    /// A sentence for a failed resolve, shown on the phone instead of a Swift
+    /// enum dump. None of these claim the answer was or was not applied: the
+    /// daemon applies it before replying, so a dropped link can lose the reply
+    /// to an answer that already went through.
+    nonisolated static func resolveFailureMessage(for error: any Error) -> String {
+        switch error as? DaemonSessionError {
+        case .daemon(let message)?: "The daemon said: \(message)"
+        case .authenticationFailed?: "Authentication failed."
+        case .disconnected?: "Connection to the daemon was lost."
+        case .timedOut?: "The request timed out."
+        case .closedWithoutResponse?: "The daemon closed the connection before confirming."
+        case nil: "Couldn't reach the daemon."
+        }
+    }
+
     /// Answers a blocked agent. This is the reason the app exists on a phone.
-    public func resolve(_ interaction: ProviderInteraction, with resolution: InteractionResolution) async {
-        _ = await request(
-            ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
+    ///
+    /// A failure leaves the interaction pending: on a flaky link the caller
+    /// has to say so rather than let the user believe the agent is unblocked.
+    @discardableResult
+    public func resolve(
+        _ interaction: ProviderInteraction, with resolution: InteractionResolution
+    ) async -> ResolveOutcome {
+        // Not the shared `request` helper: it keeps only `String(describing:)`
+        // of the error, and the sheet needs a readable sentence.
+        do {
+            _ = try await session.request(
+                ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
+            isStale = false
+        } catch {
+            isStale = true
+            let message = Self.resolveFailureMessage(for: error)
+            composerError = message
+            return .failure(message)
+        }
+        composerError = nil
         await refreshInteractions()
+        return .success
     }
 
     public func createThread(provider: String, title: String) async -> ChatThread? {
