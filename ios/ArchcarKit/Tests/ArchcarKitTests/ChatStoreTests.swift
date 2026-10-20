@@ -908,3 +908,36 @@ private func sessionlessChatMadeStaleByAFailedSend() async throws -> (MockDaemon
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func aMarkLandingMidChatRefreshAllSurvivesItsClear() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(daemon)
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isStale == false)
+
+    // The timeline is the batch's last fetch: park it, so every other fetch
+    // has already answered when the mark lands.
+    await daemon.hold("get_chat_projection")
+    let batch = Task { @MainActor in await store.refreshAll() }
+    #expect(await eventually { await daemon.heldCount == 1 })
+
+    // Meanwhile a thread-list refetch fails, after the batch's own thread
+    // fetch had already succeeded: that panel is now genuinely out of date.
+    await daemon.respond(to: chatResponder(threadsFail: true))
+    await store.refreshThreads()
+    #expect(store.isStale)
+
+    await daemon.respond(to: chatResponder(projectionBody: "caught up"))
+    await daemon.release()
+    await batch.value
+    #expect(store.items.map(\.body) == ["caught up"])
+    #expect(await session.connectionState == .connected)
+
+    // The batch began before that mark, so its clear must not lift it.
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
