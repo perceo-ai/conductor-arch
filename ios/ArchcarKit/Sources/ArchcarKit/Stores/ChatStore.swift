@@ -245,7 +245,7 @@ public final class ChatStore {
         do {
             _ = try await session.request(
                 ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
-            isStale = false
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
         } catch {
             isStale = true
             let message = Self.resolveFailureMessage(for: error)
@@ -391,7 +391,7 @@ public final class ChatStore {
     private func request<Body: ArchcarRequestBody>(_ body: Body) async -> ArchcarResponse? {
         do {
             let response = try await session.request(body)
-            isStale = false
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
             return response
         } catch {
             isStale = true

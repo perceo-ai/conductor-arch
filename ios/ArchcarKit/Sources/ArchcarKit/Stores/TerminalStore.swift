@@ -26,7 +26,8 @@ public final class TerminalStore {
     public private(set) var isStarting = false
     public private(set) var lastError: String?
     /// The event stream has dropped, so the screen may be out of date.
-    /// Cleared by the next screen fetch that succeeds.
+    /// Cleared by the next screen fetch that succeeds while the stream is
+    /// connected; see `StaleClearing`.
     public private(set) var isStale = false
 
     private let session: DaemonSession
@@ -167,7 +168,9 @@ public final class TerminalStore {
             let response = try await session.request(GetSessionScreenRequest(sessionID: sessionID))
             guard case .sessionScreen(_, let screen) = response else { return }
             self.screen = screen
-            isStale = false
+            // Typing calls this too, on its own connection, so a fetch that
+            // succeeds while the stream is down must leave the mark up.
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
             lastError = nil
         } catch {
             isStale = true
@@ -240,10 +243,11 @@ public final class TerminalStore {
             await refreshScreen()
             return
         }
-        // The daemon answered, so the link is back whether or not a shell
-        // survived it. `refreshScreen()` clears the mark too, but only with a
-        // session to fetch; with none attached, nothing else would lift it.
-        isStale = false
+        // The daemon answered, so with the stream connected the link is back
+        // whether or not a shell survived it. `refreshScreen()` clears the
+        // mark too, but only with a session to fetch; with none attached,
+        // nothing else would lift it.
+        if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
         guard let attached = sessionID else { return }
         let running = TerminalStore.runningShells(in: text)
         if let replacement = running.max(), !running.contains(attached) {

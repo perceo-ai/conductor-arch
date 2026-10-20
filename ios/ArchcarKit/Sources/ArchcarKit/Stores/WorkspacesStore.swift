@@ -15,7 +15,8 @@ public final class WorkspacesStore {
     public private(set) var chatThreads: [String: [ChatThread]] = [:]
     /// True when the last refresh failed or the event stream dropped. The rows
     /// stay on screen — last-known state beats a spinner — but the UI marks
-    /// them and disables mutations.
+    /// them and disables mutations. Cleared only by a refresh that succeeds
+    /// while the stream is connected; see `StaleClearing`.
     public private(set) var isStale = false
     public private(set) var lastError: String?
     /// A create/archive/restore is in flight; the UI disables its controls so
@@ -210,7 +211,9 @@ public final class WorkspacesStore {
             self.repositories = repositories
             self.workspaces = workspaces.sorted { $0.updatedAt > $1.updatedAt }
             self.chatThreads = chatThreads
-            isStale = false
+            // A lifecycle action calls this too, on its own connection, so
+            // success alone does not mean the stream is back.
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session) { isStale = false }
             lastError = nil
         } catch {
             lastError = String(describing: error)
