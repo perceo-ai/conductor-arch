@@ -15,8 +15,12 @@ public final class WorkspacesStore {
     public private(set) var chatThreads: [String: [ChatThread]] = [:]
     /// True when the last refresh failed or the event stream dropped. The rows
     /// stay on screen — last-known state beats a spinner — but the UI marks
-    /// them and disables mutations.
+    /// them and disables mutations. Cleared only by a refresh that succeeds
+    /// while the stream is connected; see `StaleClearing`.
     public private(set) var isStale = false
+    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// can tell a mark landed since; see `StaleClearing`.
+    @ObservationIgnored private(set) var staleRevision = 0
     public private(set) var lastError: String?
     /// A create/archive/restore is in flight; the UI disables its controls so
     /// a slow worktree operation cannot be fired twice.
@@ -208,18 +212,20 @@ public final class WorkspacesStore {
             guard case .inventorySnapshot(let repositories, let workspaces, let chatThreads) = response
             else {
                 lastError = "unexpected response: \(response)"
-                isStale = true
+                markStale()
                 return
             }
             self.repositories = repositories
             self.workspaces = workspaces.sorted { $0.updatedAt > $1.updatedAt }
             self.chatThreads = chatThreads
-            isStale = false
+            // A lifecycle action calls this too, on its own connection, so
+            // success alone does not mean the stream is back.
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
             lastError = nil
             onRefreshed?()
         } catch {
             lastError = String(describing: error)
-            isStale = true
+            markStale()
             ArchcarLog.store.error(
                 "inventory refresh failed error=\(String(describing: error), privacy: .public)")
         }
@@ -241,7 +247,7 @@ public final class WorkspacesStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { isStale = true }
+            if await session.connectionState != .connected { markStale() }
             // Subscribe before refetching, so an event that lands during the
             // refetch is not lost between the two.
             guard let subscription = await session.connectedEvents() else { return }
@@ -251,7 +257,7 @@ public final class WorkspacesStore {
             }
             coalescedRefresh?.cancel()
             guard !Task.isCancelled else { return }
-            isStale = true
+            markStale()
             missedEvents = true
         }
     }
@@ -282,4 +288,11 @@ public final class WorkspacesStore {
             await refresh()
         } while refreshAgain && !Task.isCancelled
     }
+
+    private func markStale() {
+        isStale = true
+        staleRevision += 1
+    }
 }
+
+extension WorkspacesStore: StaleRevisioned {}

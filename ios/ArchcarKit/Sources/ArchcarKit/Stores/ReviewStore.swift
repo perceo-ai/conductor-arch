@@ -23,9 +23,13 @@ public final class ReviewStore {
     public private(set) var readiness: String?
     public private(set) var lastError: String?
     public private(set) var isBusy = false
-    /// The event stream has dropped, so what is shown may be out of date.
-    /// Cleared by the next request that succeeds.
+    /// The event stream has dropped, or a fetch failed, so what is shown may be
+    /// out of date. Cleared only by a refetch of the panels that succeeded
+    /// while the stream is connected; see `StaleClearing`.
     public private(set) var isStale = false
+    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// can tell a mark landed since; see `StaleClearing`.
+    @ObservationIgnored private(set) var staleRevision = 0
     /// Output from the last git/gh action, worth showing verbatim: when `gh`
     /// refuses, the reason is on the other machine and the text is all the
     /// phone has.
@@ -46,40 +50,72 @@ public final class ReviewStore {
         await refreshChanges()
     }
 
+    /// Refetches every panel, and clears the stale mark only if all of them
+    /// came back: a later fetch succeeding says nothing about an earlier one
+    /// that failed and left its panel showing old data.
     public func refreshAll() async {
-        await refreshChanges()
-        await refreshChecks()
-        await refreshTodos()
+        // Each runs regardless of the others, so no `&&` short-circuit.
+        let gotChanges = await fetchChanges()
+        let gotChecks = await fetchChecks()
+        let gotTodos = await fetchTodos()
+        await clearStale(afterRefetchSucceeded: gotChanges && gotChecks && gotTodos)
     }
 
     public func refreshChanges() async {
+        await clearStale(afterRefetchSucceeded: await fetchChanges())
+    }
+
+    public func refreshChecks() async {
+        await clearStale(afterRefetchSucceeded: await fetchChecks())
+    }
+
+    public func refreshTodos() async {
+        await clearStale(afterRefetchSucceeded: await fetchTodos())
+    }
+
+    // The fetches below report whether they got an answer and leave the
+    // stale mark to their caller, which knows how much was refetched.
+
+    private func fetchChanges() async -> Bool {
         guard case .workspaceChanges(_, let files)? = await request(
             GetWorkspaceChangesRequest(workspace: workspace, scope: scope))
         else {
             changesError = lastError ?? "The daemon did not answer."
             ArchcarLog.store.error(
                 "workspace changes failed workspace=\(self.workspace, privacy: .public) error=\(self.changesError ?? "", privacy: .public)")
-            return
+            return false
         }
         changesError = nil
         self.files = files.sorted { $0.path < $1.path }
+        return true
     }
 
-    public func refreshChecks() async {
+    private func fetchChecks() async -> Bool {
+        var fetched = true
         if case .checksSummary(_, let summary)? = await request(
             GetChecksSummaryRequest(workspace: workspace)) {
             checks = summary
+        } else {
+            fetched = false
         }
         if case .workflowRuns(_, let summary)? = await request(
             ListWorkflowRunsRequest(workspace: workspace)) {
             runs = summary
+        } else {
+            fetched = false
         }
+        return fetched
     }
 
-    public func refreshTodos() async {
+    private func fetchTodos() async -> Bool {
         guard case .todos(_, let todos)? = await request(
-            ListTodosRequest(workspace: workspace)) else { return }
+            ListTodosRequest(workspace: workspace)) else { return false }
         self.todos = todos
+        return true
+    }
+
+    private func clearStale(afterRefetchSucceeded succeeded: Bool) async {
+        if await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self) { isStale = false }
     }
 
     public func addTodo(_ text: String) async {
@@ -151,15 +187,16 @@ public final class ReviewStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { isStale = true }
+            if await session.connectionState != .connected { markStale() }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await refreshAll() }
             for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
-                await refreshChanges()
-                await refreshChecks()
+                let gotChanges = await fetchChanges()
+                let gotChecks = await fetchChecks()
+                await clearStale(afterRefetchSucceeded: gotChanges && gotChecks)
             }
             guard !Task.isCancelled else { return }
-            isStale = true
+            markStale()
             missedEvents = true
         }
     }
@@ -180,16 +217,25 @@ public final class ReviewStore {
         await refreshChecks()
     }
 
+    /// Marks the store stale on failure, but never clears it: a one-shot
+    /// request succeeding is not a refetch of the panels. Clearing is the
+    /// `refresh…` methods' job.
     private func request<Body: ArchcarRequestBody>(_ body: Body) async -> ArchcarResponse? {
         do {
             let response = try await session.request(body)
-            isStale = false
             lastError = nil
             return response
         } catch {
-            isStale = true
+            markStale()
             lastError = String(describing: error)
             return nil
         }
     }
+
+    private func markStale() {
+        isStale = true
+        staleRevision += 1
+    }
 }
+
+extension ReviewStore: StaleRevisioned {}

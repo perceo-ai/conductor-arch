@@ -439,3 +439,37 @@ private func connectedStore(
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func aRequestSucceedingWhileTheStreamIsDownKeepsTheChatStale() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    // Too slow to reconnect on its own within the test, so the stream stays
+    // down for as long as the test needs it to.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+
+    // Sending opens its own connection per request, so it succeeds even
+    // though the event stream is still down.
+    await store.send("ship it")
+    #expect(store.composerError == nil)
+    #expect(await daemon.receivedLines.compactMap(requestType).contains("queue_chat_input"))
+    #expect(await session.connectionState != .connected)
+
+    // The chat is still missing live updates, so it must still say so.
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}

@@ -26,8 +26,12 @@ public final class TerminalStore {
     public private(set) var isStarting = false
     public private(set) var lastError: String?
     /// The event stream has dropped, so the screen may be out of date.
-    /// Cleared by the next screen fetch that succeeds.
+    /// Cleared by the next screen fetch that succeeds while the stream is
+    /// connected; see `StaleClearing`.
     public private(set) var isStale = false
+    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// can tell a mark landed since; see `StaleClearing`.
+    @ObservationIgnored private(set) var staleRevision = 0
 
     private let session: DaemonSession
     public let workspace: String
@@ -167,10 +171,12 @@ public final class TerminalStore {
             let response = try await session.request(GetSessionScreenRequest(sessionID: sessionID))
             guard case .sessionScreen(_, let screen) = response else { return }
             self.screen = screen
-            isStale = false
+            // Typing calls this too, on its own connection, so a fetch that
+            // succeeds while the stream is down must leave the mark up.
+            if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
             lastError = nil
         } catch {
-            isStale = true
+            markStale()
             lastError = String(describing: error)
         }
     }
@@ -206,7 +212,7 @@ public final class TerminalStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { isStale = true }
+            if await session.connectionState != .connected { markStale() }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await reattach() }
             for await event in subscription.events {
@@ -224,7 +230,7 @@ public final class TerminalStore {
                 }
             }
             guard !Task.isCancelled else { return }
-            isStale = true
+            markStale()
             missedEvents = true
         }
     }
@@ -240,10 +246,11 @@ public final class TerminalStore {
             await refreshScreen()
             return
         }
-        // The daemon answered, so the link is back whether or not a shell
-        // survived it. `refreshScreen()` clears the mark too, but only with a
-        // session to fetch; with none attached, nothing else would lift it.
-        isStale = false
+        // The daemon answered, so with the stream connected the link is back
+        // whether or not a shell survived it. `refreshScreen()` clears the
+        // mark too, but only with a session to fetch; with none attached,
+        // nothing else would lift it.
+        if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
         guard let attached = sessionID else { return }
         let running = TerminalStore.runningShells(in: text)
         if let replacement = running.max(), !running.contains(attached) {
@@ -258,4 +265,11 @@ public final class TerminalStore {
         }
         await refreshScreen()
     }
+
+    private func markStale() {
+        isStale = true
+        staleRevision += 1
+    }
 }
+
+extension TerminalStore: StaleRevisioned {}

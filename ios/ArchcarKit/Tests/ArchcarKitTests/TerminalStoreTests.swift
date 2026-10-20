@@ -104,6 +104,8 @@ private func terminalResponder(processes: String) -> @Sendable (String) -> Strin
         case "get_session_screen":
             let sessionID = (payload["session_id"] as? NSNumber)?.int64Value ?? 0
             return #"{"id":"\#(id)","payload":{"type":"session_screen","session_id":\#(sessionID),"screen":"shell \#(sessionID)"}}"#
+        case "send_input":
+            return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
         default:
             return nil
         }
@@ -232,6 +234,64 @@ private func reconnectAttachedTerminal(processes: String) async throws -> (Termi
     })
     #expect(await eventually { @MainActor in store.screen == "shell 2" })
     #expect(await eventually { @MainActor in !store.isStale })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func typingWhileTheStreamIsUpKeepsTheTerminalCurrent() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: terminalResponder(processes: "Sessions"))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = TerminalStore(session: session, workspace: "w")
+    store.attachForTesting(sessionID: 2)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await store.send("ls")
+    await store.sendControl("c")
+
+    // The stream is up and the screen was just refetched: nothing is stale.
+    #expect(await session.connectionState == .connected)
+    #expect(store.screen == "shell 2")
+    #expect(store.isStale == false)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aScreenFetchWhileTheStreamIsDownKeepsTheTerminalStale() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: terminalResponder(processes: "Sessions"))
+    // Too slow to reconnect on its own within the test, so the stream stays
+    // down for as long as the test needs it to.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = TerminalStore(session: session, workspace: "w")
+    store.attachForTesting(sessionID: 2)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+
+    // Typing and the screen fetch each open their own connection, so they
+    // succeed even though the event stream is still down.
+    await store.send("ls")
+    await store.refreshScreen()
+    #expect(store.screen == "shell 2")
+    #expect(store.lastError == nil)
+    #expect(await session.connectionState != .connected)
+
+    // Screen updates are not arriving, so the terminal must still say so.
+    #expect(store.isStale)
 
     observing.cancel()
     await session.disconnect()
