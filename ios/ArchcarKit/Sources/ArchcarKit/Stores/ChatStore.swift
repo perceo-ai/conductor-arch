@@ -85,6 +85,22 @@ public final class ChatStore {
         return true
     }
 
+    /// Refetches every panel on screen and clears the stale mark only if all
+    /// of them came back: what a pull-to-refresh asks for, any time, rather
+    /// than only after a reconnect as `resync()` does.
+    public func refreshAll() async {
+        // Each runs regardless of the others, so no `&&` short-circuit.
+        let gotThreads = await fetchThreads()
+        let gotStatus = await fetchStatus()
+        let gotPlan = await fetchPlan()
+        let gotQueue = await fetchQueue()
+        let gotInteractions = await fetchInteractions()
+        let gotTimeline = await fetchTimeline()
+        await clearStale(
+            afterRefetchSucceeded: gotThreads && gotStatus && gotPlan && gotQueue && gotInteractions && gotTimeline,
+            clearing: .all)
+    }
+
     public func select(threadID: Int64) async {
         selectedThreadID = threadID
         items = []
@@ -97,7 +113,11 @@ public final class ChatStore {
         let known = await session.cachedSessionID(forThread: threadID)
         guard selectedThreadID == threadID else { return }
         sessionID = known
-        if known != nil { await refreshStatus() }
+        // Plan and status too, even with no session or plan traffic: a failed
+        // request marks every panel, and these need a way back besides a
+        // reconnect.
+        await refreshStatus()
+        await refreshPlan()
         await refreshTimeline()
         await refreshQueue()
         await refreshInteractions()
@@ -123,10 +143,9 @@ public final class ChatStore {
     }
 
     public func refreshStatus() async {
-        // With no session there is no status to check. Skipping it must not,
-        // on its own, clear a mark some other refetch left: a session exiting
-        // routes here after `sessionID` is gone, and that refetched nothing.
-        guard sessionID != nil else { return }
+        // With no session the status panel is empty, and that is current: it
+        // clears only the status mark, so a session exiting cannot lift a
+        // mark another panel's failed refetch left.
         await clearStale(afterRefetchSucceeded: await fetchStatus(), clearing: .status)
     }
 
@@ -134,9 +153,9 @@ public final class ChatStore {
     // fetch — no thread selected, no session yet — counts as up to date, which
     // is what `resync()` needs: a skipped panel must not fail the whole
     // resync, and it may clear only because every other fetch it ran also
-    // succeeded. A standalone wrapper has no such company, which is why
-    // `refreshStatus()` and `refreshQueue()` return before clearing when they
-    // have nothing to fetch.
+    // succeeded. `refreshQueue()` still returns before clearing with no
+    // thread: `removeQueued` and `moveQueued` route there, and they refetched
+    // nothing.
 
     private func fetchTimeline() async -> Bool {
         guard let threadID = selectedThreadID else { return true }

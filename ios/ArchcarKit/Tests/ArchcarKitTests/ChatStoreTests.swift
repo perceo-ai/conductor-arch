@@ -811,19 +811,6 @@ private func chatWithAStaleTimeline(
     await daemon.stop()
 }
 
-// Pre-fix stand-in for `ChatStore.refreshAll()`, so the RED run fails on an
-// assertion rather than on compiling: every public per-panel refresh, in turn.
-extension ChatStore {
-    func refreshAll() async {
-        await refreshThreads()
-        await refreshStatus()
-        await refreshPlan()
-        await refreshQueue()
-        await refreshInteractions()
-        await refreshTimeline()
-    }
-}
-
 /// A chat with no live session, marked stale by a send whose session spawn
 /// failed while the stream is up. That failure says nothing about the plan or
 /// the status, but marking is store-wide, so both are marked with the rest.
