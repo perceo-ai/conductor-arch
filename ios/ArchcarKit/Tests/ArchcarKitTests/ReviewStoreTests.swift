@@ -307,3 +307,37 @@ private func reviewResponder(
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func aMarkLandingMidReviewRefreshAllSurvivesItsClear() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder())
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+    await store.refreshAll()
+    #expect(store.isStale == false)
+
+    // Todos are the batch's last fetch: park them, so changes and checks
+    // have already answered when the mark lands.
+    await daemon.hold("list_todos")
+    let batch = Task { @MainActor in await store.refreshAll() }
+    #expect(await eventually { await daemon.heldCount == 1 })
+
+    // Meanwhile a changes refetch fails, after the batch's own changes
+    // fetch had already succeeded: that panel is now genuinely out of date.
+    await daemon.respond(to: reviewResponder(changesFail: true))
+    await store.refreshChanges()
+    #expect(store.changesStale)
+
+    await daemon.respond(to: reviewResponder())
+    await daemon.release()
+    await batch.value
+    #expect(await session.connectionState == .connected)
+
+    // The batch began before that mark, so its clear must not lift it.
+    #expect(store.changesStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}

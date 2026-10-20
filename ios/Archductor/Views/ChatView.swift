@@ -102,6 +102,7 @@ struct ChatView: View {
                 .padding(.vertical, 10)
             }
             .archductorScreen()
+            .refreshable { await store.refreshAll() }
             .overlay {
                 if store.items.isEmpty {
                     EmptyStateView(

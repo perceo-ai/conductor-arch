@@ -25,7 +25,8 @@ private func chatResponder(
     sessionExited: Bool = false,
     threadsFail: Bool = false,
     timelineFail: Bool = false,
-    timelineNeverAnswers: Bool = false
+    timelineNeverAnswers: Bool = false,
+    ensureFails: Bool = false
 ) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
@@ -36,6 +37,8 @@ private func chatResponder(
             return #"{"id":"\#(id)","payload":{"type":"error","message":"projection unavailable"}}"#
         case "get_chat_projection" where timelineNeverAnswers:
             return nil
+        case "ensure_chat_thread_session" where ensureFails:
+            return #"{"id":"\#(id)","payload":{"type":"error","message":"spawn refused"}}"#
         case "list_chat_threads":
             return """
             {"id":"\(id)","payload":{"type":"chat_threads","workspace":"w","threads":[\
@@ -803,6 +806,137 @@ private func chatWithAStaleTimeline(
     #expect(sent.contains("remove_queued_chat_input"))
     #expect(sent.contains("move_queued_chat_input"))
     #expect(!sent.contains("list_queued_chat_inputs"))
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+/// A chat with no live session, marked stale by a send whose session spawn
+/// failed while the stream is up. That failure says nothing about the plan or
+/// the status, but marking is store-wide, so both are marked with the rest.
+/// The returned daemon answers everything again.
+@MainActor
+private func sessionlessChatMadeStaleByAFailedSend() async throws -> (MockDaemon, DaemonSession, ChatStore) {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(daemon)
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession == false)
+    #expect(store.isStale == false)
+
+    await daemon.respond(to: chatResponder(ensureFails: true))
+    await store.send("ship it")
+    #expect(store.composerError != nil)
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    await daemon.respond(to: chatResponder())
+    return (daemon, session, store)
+}
+
+@MainActor
+@Test func selectingAChatFetchesItsPlanWithNoSessionOrPlanEvent() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(daemon)
+    let before = await daemon.receivedLines.count
+
+    await store.select(threadID: 7)
+
+    // No session and no `chat_plan_updated` ever arrived, yet opening the
+    // chat still asks for its plan.
+    #expect(store.hasLiveSession == false)
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("get_chat_plan"))
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func reopeningASessionlessChatClearsEveryPanel() async throws {
+    let (daemon, session, store) = try await sessionlessChatMadeStaleByAFailedSend()
+
+    // The thread list plus reopening the chat refetches every panel, plan
+    // and status included, so nothing is left marked.
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isStale == false)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aStatusRefreshWithNoSessionClearsTheStatusPanel() async throws {
+    let (daemon, session, store) = try await sessionlessChatMadeStaleByAFailedSend()
+
+    // Every other panel refetched: only the status mark is left.
+    await store.refreshThreads()
+    await store.refreshTimeline()
+    await store.refreshQueue()
+    await store.refreshInteractions()
+    await store.refreshPlan()
+    #expect(store.isStale)
+
+    // With no session there is no status to fetch, which counts as up to
+    // date, so the status panel's mark lifts too.
+    await store.refreshStatus()
+    #expect(store.isStale == false)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aPullToRefreshRecoversAStaleChatWithNoLiveSessionAndNoPlanTraffic() async throws {
+    let (daemon, session, store) = try await sessionlessChatMadeStaleByAFailedSend()
+    let before = await daemon.receivedLines.count
+
+    await store.refreshAll()
+
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("list_chat_threads"))
+    #expect(sent.contains("get_chat_plan"))
+    #expect(sent.contains("get_chat_projection"))
+    #expect(sent.contains("list_queued_chat_inputs"))
+    #expect(sent.contains("list_provider_interactions"))
+    // No session, so the status "fetch" sends nothing and counts as current.
+    #expect(!sent.contains("get_session_status"))
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale == false)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aMarkLandingMidChatRefreshAllSurvivesItsClear() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(daemon)
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isStale == false)
+
+    // The timeline is the batch's last fetch: park it, so every other fetch
+    // has already answered when the mark lands.
+    await daemon.hold("get_chat_projection")
+    let batch = Task { @MainActor in await store.refreshAll() }
+    #expect(await eventually { await daemon.heldCount == 1 })
+
+    // Meanwhile a thread-list refetch fails, after the batch's own thread
+    // fetch had already succeeded: that panel is now genuinely out of date.
+    await daemon.respond(to: chatResponder(threadsFail: true))
+    await store.refreshThreads()
+    #expect(store.isStale)
+
+    await daemon.respond(to: chatResponder(projectionBody: "caught up"))
+    await daemon.release()
+    await batch.value
+    #expect(store.items.map(\.body) == ["caught up"])
+    #expect(await session.connectionState == .connected)
+
+    // The batch began before that mark, so its clear must not lift it.
+    #expect(store.isStale)
 
     await session.disconnect()
     await daemon.stop()
