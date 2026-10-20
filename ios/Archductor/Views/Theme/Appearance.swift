@@ -8,6 +8,7 @@ import UIKit
 /// system-material background that reads as light grey on top of a near-black
 /// app. Nothing short of the appearance proxies changes that, so the same
 /// generated tokens are pushed into UIKit once at launch.
+@MainActor
 enum Appearance {
     static func apply() {
         for scheme in [ColorScheme.dark, .light] {
