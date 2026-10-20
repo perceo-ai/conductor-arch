@@ -203,11 +203,28 @@ public final class ChatStore {
         planMode = enabled
     }
 
+    /// Whether the daemon took an answer to a blocked agent.
+    public enum ResolveOutcome: Sendable, Equatable {
+        case success
+        case failure(String)
+    }
+
     /// Answers a blocked agent. This is the reason the app exists on a phone.
-    public func resolve(_ interaction: ProviderInteraction, with resolution: InteractionResolution) async {
-        _ = await request(
-            ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
+    ///
+    /// A failure leaves the interaction pending: on a flaky link the caller
+    /// has to say so rather than let the user believe the agent is unblocked.
+    @discardableResult
+    public func resolve(
+        _ interaction: ProviderInteraction, with resolution: InteractionResolution
+    ) async -> ResolveOutcome {
+        guard await request(
+            ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution)) != nil
+        else {
+            return .failure(composerError ?? "The daemon did not confirm the response.")
+        }
+        composerError = nil
         await refreshInteractions()
+        return .success
     }
 
     public func createThread(provider: String, title: String) async -> ChatThread? {

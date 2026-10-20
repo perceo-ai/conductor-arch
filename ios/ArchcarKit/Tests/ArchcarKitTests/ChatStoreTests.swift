@@ -20,7 +20,8 @@ private func chatResponder(
     projectionBody: String = "on it",
     queued: [String] = [],
     pendingInteraction: Bool = false,
-    spawnIsQueued: Bool = false
+    spawnIsQueued: Bool = false,
+    resolveFails: Bool = false
 ) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
@@ -71,7 +72,11 @@ private func chatResponder(
             {"id":9,"thread_id":7,"input":"ship it","kind":"user","session_kind":"codex",\
             "created_at":"1","updated_at":"1"}}}
             """
-        case "resolve_provider_interaction", "interrupt_turn", "set_chat_plan_mode":
+        case "resolve_provider_interaction":
+            return resolveFails
+                ? #"{"id":"\#(id)","payload":{"type":"error","message":"interaction already resolved"}}"#
+                : #"{"id":"\#(id)","payload":{"type":"ack"}}"#
+        case "interrupt_turn", "set_chat_plan_mode":
             return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
         default:
             return nil
@@ -175,6 +180,47 @@ private func connectedStore(
     // A blocked agent is the one thing worth interrupting someone for, so the
     // store surfaces it as its own flag rather than burying it in a list.
     #expect(store.isBlocked)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func resolveSurfacesFailureAndLeavesTheInteractionPending() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(
+        daemon, responder: chatResponder(pendingInteraction: true, resolveFails: true))
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isBlocked)
+
+    let interaction = try #require(store.pendingInteractions.first)
+    let outcome = await store.resolve(interaction, with: .approve)
+
+    guard case .failure(let message) = outcome else {
+        Issue.record("expected a failure outcome, got \(outcome)")
+        return
+    }
+    #expect(!message.isEmpty)
+    // A failed resolve must leave the interaction pending rather than
+    // silently clearing it — refreshInteractions() only runs on success.
+    #expect(store.isBlocked)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func resolveSurfacesSuccessToTheCaller() async throws {
+    let daemon = try await MockDaemon()
+    let (session, store) = try await connectedStore(
+        daemon, responder: chatResponder(pendingInteraction: true))
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    let interaction = try #require(store.pendingInteractions.first)
+
+    let outcome = await store.resolve(interaction, with: .approve)
+    #expect(outcome == .success)
 
     await session.disconnect()
     await daemon.stop()
