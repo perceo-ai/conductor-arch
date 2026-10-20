@@ -119,6 +119,13 @@ public final class TerminalStore {
         runningShells(in: report).max()
     }
 
+    /// Whether the report has a line for `sessionID` at all, running or not.
+    nonisolated static func lists(_ sessionID: Int64, in report: String) -> Bool {
+        report.split(separator: "\n").contains { line in
+            line.trimmingCharacters(in: .whitespaces).hasPrefix("#\(sessionID) ")
+        }
+    }
+
     /// Every running shell in the `Sessions` block.
     ///
     /// Lines look like `#2 /bin/zsh running pid=32518 exit=- started=…`. The
@@ -228,8 +235,14 @@ public final class TerminalStore {
             return
         }
         let running = TerminalStore.runningShells(in: text)
-        if !running.contains(attached) {
-            sessionID = running.max()
+        if let replacement = running.max(), !running.contains(attached) {
+            sessionID = replacement
+            screen = ""
+        } else if running.isEmpty, TerminalStore.lists(attached, in: text) {
+            // Listed, and not running: it exited. An empty list alone is not
+            // enough — the daemon reports `Could not read: …` when its own
+            // query fails, and that must not detach a live shell.
+            sessionID = nil
             screen = ""
         }
         await refreshScreen()

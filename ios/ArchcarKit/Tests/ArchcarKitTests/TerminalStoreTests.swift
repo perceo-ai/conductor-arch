@@ -90,19 +90,17 @@ Sessions
     await daemon.stop()
 }
 
-@MainActor
-@Test func reattachesWhenTheShellWasReplacedDuringAnOutage() async throws {
-    let daemon = try await MockDaemon()
-    await daemon.respond { line in
+/// Answers the processes report with `processes` and a screen naming the
+/// session it was asked for, so a test can tell which shell is attached.
+private func terminalResponder(processes: String) -> @Sendable (String) -> String? {
+    { line in
         guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
               let id = object["id"] as? String,
               let payload = object["payload"] as? [String: Any],
               let type = payload["type"] as? String else { return nil }
         switch type {
         case "get_workspace_processes":
-            // Shell #2 exited while the link was down and #5 replaced it.
-            let text = "Sessions\\n#5 /bin/zsh running pid=9 exit=- started=2 log=/tmp/b.log\\n#2 /bin/zsh exited pid=8 exit=0 started=1 log=/tmp/a.log"
-            return #"{"id":"\#(id)","payload":{"type":"workspace_processes","workspace":"w","text":"\#(text)"}}"#
+            return #"{"id":"\#(id)","payload":{"type":"workspace_processes","workspace":"w","text":"\#(processes)"}}"#
         case "get_session_screen":
             let sessionID = (payload["session_id"] as? NSNumber)?.int64Value ?? 0
             return #"{"id":"\#(id)","payload":{"type":"session_screen","session_id":\#(sessionID),"screen":"shell \#(sessionID)"}}"#
@@ -110,6 +108,14 @@ Sessions
             return nil
         }
     }
+}
+
+/// Attaches a store to shell #2, drops the event stream, and reconnects.
+/// Returns the store and a cleanup to run at the end of the test.
+@MainActor
+private func reconnectAttachedTerminal(processes: String) async throws -> (TerminalStore, () async -> Void) {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: terminalResponder(processes: processes))
     let session = DaemonSession(
         address: await daemon.address, token: "t",
         backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
@@ -122,12 +128,46 @@ Sessions
     await daemon.endEventConnection()
     #expect(await eventually { await session.connectionState != .connected })
     await session.reconnectNow()
+    // Every outcome starts with the processes report.
+    #expect(await eventually {
+        await daemon.receivedLines.contains { $0.contains("get_workspace_processes") }
+    })
+    return (store, {
+        observing.cancel()
+        await session.disconnect()
+        await daemon.stop()
+    })
+}
+
+@MainActor
+@Test func reattachesWhenTheShellWasReplacedDuringAnOutage() async throws {
+    // Shell #2 exited while the link was down and #5 replaced it.
+    let (store, finish) = try await reconnectAttachedTerminal(
+        processes: "Sessions\\n#5 /bin/zsh running pid=9 exit=- started=2 log=/tmp/b.log\\n#2 /bin/zsh exited pid=8 exit=0 started=1 log=/tmp/a.log")
 
     // Keystrokes must go to the shell that is running, not the one that left.
     #expect(await eventually { @MainActor in store.sessionID == 5 })
     #expect(await eventually { @MainActor in store.screen == "shell 5" })
+    await finish()
+}
 
-    observing.cancel()
-    await session.disconnect()
-    await daemon.stop()
+@MainActor
+@Test func keepsTheShellWhenTheListingFails() async throws {
+    // What the daemon reports when its own session query fails. No shells
+    // are listed, but that is no evidence #2 is gone.
+    let (store, finish) = try await reconnectAttachedTerminal(
+        processes: "Sessions\\nCould not read: database is locked")
+
+    #expect(await eventually { @MainActor in store.screen == "shell 2" })
+    #expect(store.sessionID == 2)
+    await finish()
+}
+
+@MainActor
+@Test func detachesWhenTheShellExitedAndNoneReplacedIt() async throws {
+    let (store, finish) = try await reconnectAttachedTerminal(
+        processes: "Sessions\\n#2 /bin/zsh exited pid=8 exit=0 started=1 log=/tmp/a.log")
+
+    #expect(await eventually { @MainActor in store.sessionID == nil })
+    await finish()
 }
