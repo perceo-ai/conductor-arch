@@ -605,3 +605,73 @@ private func connectedStore(
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func aSessionExitingDoesNotClearAStaleTimeline() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+    await daemon.push(
+        #"{"id":"e1","payload":{"type":"session_started","session_id":3,"thread_id":7,"workspace":"w","kind":"codex","pid":900}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == 3 })
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession)
+    #expect(store.isStale == false)
+
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    // The timeline fails while connected, leaving the chat correctly stale.
+    await daemon.respond(to: chatResponder(timelineFail: true))
+    await store.refreshTimeline()
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    // The session now exits — ordinary end-of-turn traffic, not a refetch of
+    // anything the failed timeline left stale.
+    await daemon.push(#"{"id":"e2","payload":{"type":"session_exited","session_id":3,"exit_code":0}}"#)
+    #expect(await eventually { @MainActor in !store.hasLiveSession })
+
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func anUnrelatedSessionExitingDoesNotClearAStaleTimeline() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession == false)
+    #expect(store.isStale == false)
+
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.respond(to: chatResponder(timelineFail: true))
+    await store.refreshTimeline()
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    // Some session in a thread this store does not have open exits.
+    // `refreshKind` maps `.sessionExited` to `.status` with no thread filter,
+    // so this chat's own `observe()` still processes it.
+    await daemon.push(#"{"id":"e2","payload":{"type":"session_exited","session_id":99,"exit_code":1}}"#)
+    try await Task.sleep(for: .milliseconds(150))
+
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
