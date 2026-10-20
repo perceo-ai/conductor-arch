@@ -329,6 +329,44 @@ describe("turn-finished sound", () => {
     expect(play).toHaveBeenCalledTimes(1);
   });
 
+  it("does not ring when the main agent asks a question while a just-launched subagent works", async () => {
+    const { applyEvent, daemonSays, play } = await setup();
+    const bgAgent = {
+      id: "claude:s:task:agent",
+      render_class: "background_card",
+      status: "running",
+      background_agent: true,
+    };
+    // Last pull: main agent busy, no subagent known yet.
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    // The main agent launches a background agent; no pull has seen it yet.
+    daemon[1] = { live_session: STREAMING, items: [bgAgent] };
+    // ...and asks a question before the next projection pull lands. The
+    // stored projection is stale and shows no subagent.
+    applyEvent({
+      type: "provider_interaction_requested",
+      interaction: {
+        id: "q-1",
+        provider_key: "claude",
+        workspace: "berlin",
+        thread_id: 1,
+        session_id: 10,
+        kind: "user_question",
+        title: "Which branch?",
+        detail: "",
+        questions: [],
+        status: "pending",
+      },
+    });
+    // Let the coalesced pull (100ms interval) land.
+    await new Promise((r) => setTimeout(r, 150));
+    await settle();
+    expect(play).not.toHaveBeenCalled();
+    // The question is still unanswered; the subagent finishing is the chime.
+    await daemonSays(1, { live_session: READY, items: [{ ...bgAgent, status: "complete" }] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
   it("does not wait on a backgrounded shell command", async () => {
     const { daemonSays, play } = await setup();
     const server = { id: "claude:s:task:bash", render_class: "background_card", status: "running" };

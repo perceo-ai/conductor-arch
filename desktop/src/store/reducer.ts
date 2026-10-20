@@ -226,8 +226,10 @@ export function applyEvent(event: ArchcarEvent) {
       const interaction = (event as { interaction: ProviderInteractionRecord }).interaction;
       interactionsStore.request(interaction);
       // An agent parked on a question is waiting on the operator: that is the
-      // moment the sound exists for.
-      observeChatGeneration(interaction.thread_id);
+      // moment the sound exists for, unless a subagent is still working. The
+      // stored projection may predate a subagent launched just before the
+      // ask, so let a settled pull decide, as session_ready does.
+      chatRefresh.request(interaction.thread_id);
       break;
     }
 
