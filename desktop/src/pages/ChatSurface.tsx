@@ -14,6 +14,7 @@ import type {
 } from "@/bridge/protocol";
 import { titleCaseWorkspace } from "@/lib/text";
 import { chatTabLabel } from "@/lib/chatTabLabel";
+import { seedForSelectedThread } from "@/lib/chatSeed";
 import { registerOpenFile, registerOpenCommit } from "./openFileBridge";
 import Icon from "@/components/Icon";
 import { ThreadTab, FileTab } from "./chat/ChatTabs";
@@ -113,6 +114,10 @@ export default function ChatSurface(props: { workspace: string }) {
   );
 
   function selectThread(thread: ArchcarChatThread) {
+    // A backend-created chat (a new workspace's first one) has no model yet;
+    // seed it with the default just as newChat() does.
+    const seed = seedForSelectedThread(thread, pendingSeed(), prefsStore.seedModelFor);
+    if (seed) setPendingSeed((p) => ({ ...p, [thread.id]: seed }));
     nav.selectChatThread(thread.id);
     chatStore.setCompletedTurnAttention(thread.id, false);
     setView({ kind: "chat" });
