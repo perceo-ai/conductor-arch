@@ -8,6 +8,8 @@ public protocol ChatInventory: AnyObject {
     var workspaces: [WorkspaceSummary] { get }
     var chatThreads: [String: [ChatThread]] { get }
     var lastError: String? { get }
+    /// Called after every successful `refresh()`.
+    var onRefreshed: (@MainActor () -> Void)? { get set }
     func refresh() async
 }
 
@@ -34,6 +36,10 @@ public final class NotificationTapRouter {
 
     @ObservationIgnored private var pending: NotificationTap?
     @ObservationIgnored private var isResolving = false
+    /// A `resolve()` arrived while one was running. The running one may be
+    /// about to give up on a fetch that was sent while offline, after the
+    /// newer call's list already loaded, so it must go round again.
+    @ObservationIgnored private var resolveAgain = false
 
     public init() {}
 
@@ -49,7 +55,7 @@ public final class NotificationTapRouter {
     }
 
     /// Retries a held tap after each successful refresh of `store`.
-    public func attach(to store: WorkspacesStore) {
+    public func attach(to store: any ChatInventory) {
         store.onRefreshed = { [weak self] in
             guard let self, self.pending != nil else { return }
             Task { await self.resolve() }
@@ -60,11 +66,21 @@ public final class NotificationTapRouter {
     /// nothing, and keeps the tap, when there is none or it cannot be fetched.
     public func resolve() async {
         // One resolution at a time, so a tap racing a refresh cannot open the
-        // same chat twice. A call skipped here is covered by the running one
-        // or by the next successful refresh.
-        guard !isResolving else { return }
+        // same chat twice. A call that arrives meanwhile is not dropped: it
+        // earns the running one another pass once this one finishes.
+        guard !isResolving else {
+            resolveAgain = true
+            return
+        }
         isResolving = true
         defer { isResolving = false }
+        repeat {
+            resolveAgain = false
+            await resolvePass()
+        } while resolveAgain && pending != nil
+    }
+
+    private func resolvePass() async {
         while let tap = pending, let store = inventory() {
             if store.lastError != nil { await store.refresh() }
             var answer = resolution(of: tap, in: store)

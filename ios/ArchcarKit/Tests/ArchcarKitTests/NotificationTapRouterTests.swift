@@ -26,18 +26,36 @@ private final class FakeInventory: ChatInventory {
     var workspaces: [WorkspaceSummary] = []
     var chatThreads: [String: [ChatThread]] = [:]
     var lastError: String?
+    var onRefreshed: (@MainActor () -> Void)?
     var online = true
     var snapshot: ([WorkspaceSummary], [String: [ChatThread]]) = ([], [:])
     var refreshes = 0
+    /// When set, the next fetch stays in flight until `releaseHeldFetch()`.
+    var holdNextFetch = false
+    private var heldFetch: CheckedContinuation<Void, Never>?
+    var hasHeldFetch: Bool { heldFetch != nil }
 
     func refresh() async {
         refreshes += 1
-        if online {
+        // Whether a fetch succeeds is decided when it is sent: one sent while
+        // offline fails even if the daemon is back by the time it times out.
+        let succeeds = online
+        if holdNextFetch {
+            holdNextFetch = false
+            await withCheckedContinuation { heldFetch = $0 }
+        }
+        if succeeds {
             (workspaces, chatThreads) = snapshot
             lastError = nil
+            onRefreshed?()
         } else {
             lastError = "connection failed"
         }
+    }
+
+    func releaseHeldFetch() {
+        heldFetch?.resume()
+        heldFetch = nil
     }
 }
 
@@ -115,6 +133,40 @@ private final class FakeInventory: ChatInventory {
     #expect(fake.refreshes == 1)
 }
 
+/// The race behind the CI failure of the reconnect test's first version: the
+/// tap's own refetch is still in flight (sent while offline) when the
+/// reconnect's refetch succeeds. The retry that success triggers must not be
+/// swallowed just because a resolution is already running and about to give
+/// up on its failed fetch.
+@MainActor
+@Test func retryDuringAnInFlightFailingFetchIsNotSwallowed() async throws {
+    let fake = FakeInventory()
+    fake.online = false
+    await fake.refresh()
+    let router = NotificationTapRouter()
+    router.inventory = { fake }
+    router.attach(to: fake)
+
+    // The tap's resolution refetches; that fetch was sent offline and hangs.
+    fake.holdNextFetch = true
+    let tapping = Task { await router.tapped(NotificationTap(threadID: 42, daemonID: nil)) }
+    #expect(await eventually { @MainActor in fake.hasHeldFetch })
+
+    // The daemon comes back and the reconnect's refetch succeeds, which asks
+    // the router to retry while the first resolution is still running.
+    fake.online = true
+    fake.snapshot = ([try workspace(name: "checkout")], ["checkout": [try thread(id: 42)]])
+    await fake.refresh()
+    try await Task.sleep(for: .milliseconds(50))
+
+    // Now the offline fetch fails. Nothing else will refresh.
+    fake.releaseHeldFetch()
+    await tapping.value
+
+    let checkout = try workspace(name: "checkout")
+    #expect(await eventually { @MainActor in router.request == .found(workspace: checkout, threadID: 42) })
+}
+
 /// The snapshot `ReconnectDaemon` serves once it is back: workspace
 /// `checkout` with chat 42.
 private let checkoutSnapshot = """
@@ -169,7 +221,10 @@ private final class Flag: @unchecked Sendable {
     // refetches the list. Nothing else calls the router.
     online.set(true)
     await daemon.endEventConnection()
-    #expect(await eventually { @MainActor in store.isStale })
+    // Wait for the session itself to see the drop. `isStale` is no signal
+    // here — the failed fetch above already set it — and `reconnectNow` does
+    // nothing while the session still believes it is connected.
+    #expect(await eventually { await session.connectionState != .connected })
     await session.reconnectNow()
 
     let checkout = try workspace(name: "checkout")
