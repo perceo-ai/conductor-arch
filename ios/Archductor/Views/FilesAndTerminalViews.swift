@@ -172,6 +172,11 @@ struct TerminalPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            if store.isStale {
+                StaleBanner()
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
+            }
             // Explicit scroll-to-bottom rather than a scroll anchor: with the
             // keyboard up, an anchored two-axis ScrollView keeps its full
             // height and parks the output underneath the keyboard.

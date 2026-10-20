@@ -13,6 +13,13 @@ struct ChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             transcript
+            // Below the transcript rather than inside it: the transcript
+            // follows its tail, so a row at its top would be scrolled away.
+            if store.isStale {
+                StaleBanner()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+            }
             if store.isBlocked { blockedBanner }
             if !store.queued.isEmpty { queueStrip }
             composer

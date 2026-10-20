@@ -250,6 +250,28 @@ struct SectionHeading: View {
     }
 }
 
+/// The "showing last known state" marker used wherever a store's event
+/// stream has dropped. Keeping one definition is what stops the chat,
+/// review and terminal screens from inventing their own visual language
+/// for the same situation the workspaces list already handles.
+struct StaleBanner: View {
+    @Environment(\.palette) private var palette
+    var text: String = "Showing last known state — not connected"
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wifi.slash")
+            Text(text)
+        }
+        .font(Typeface.secondary)
+        .foregroundStyle(palette.warning)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .panel(fill: \.surface)
+    }
+}
+
 /// An empty state that does not hand the screen back to the system's styling.
 struct EmptyStateView: View {
     @Environment(\.palette) private var palette

@@ -25,6 +25,9 @@ public final class TerminalStore {
     public private(set) var sessionID: Int64?
     public private(set) var isStarting = false
     public private(set) var lastError: String?
+    /// The event stream has dropped, so the screen may be out of date.
+    /// Cleared by the next screen fetch that succeeds.
+    public private(set) var isStale = false
 
     private let session: DaemonSession
     public let workspace: String
@@ -164,8 +167,10 @@ public final class TerminalStore {
             let response = try await session.request(GetSessionScreenRequest(sessionID: sessionID))
             guard case .sessionScreen(_, let screen) = response else { return }
             self.screen = screen
+            isStale = false
             lastError = nil
         } catch {
+            isStale = true
             lastError = String(describing: error)
         }
     }
@@ -201,6 +206,7 @@ public final class TerminalStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
+            if await session.connectionState != .connected { isStale = true }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await reattach() }
             for await event in subscription.events {
@@ -218,6 +224,7 @@ public final class TerminalStore {
                 }
             }
             guard !Task.isCancelled else { return }
+            isStale = true
             missedEvents = true
         }
     }

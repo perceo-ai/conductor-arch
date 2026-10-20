@@ -171,3 +171,41 @@ private func reconnectAttachedTerminal(processes: String) async throws -> (Termi
     #expect(await eventually { @MainActor in store.sessionID == nil })
     await finish()
 }
+
+@MainActor
+@Test func aDroppedStreamMarksTerminalStaleAndRefetchesOnReconnect() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: terminalResponder(
+        processes: "Sessions\\n#2 /bin/zsh running pid=8 exit=- started=1 log=/tmp/a.log"))
+    // Too slow to reconnect on its own within the test, so the stale state
+    // holds until `reconnectNow` ends it.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = TerminalStore(session: session, workspace: "w")
+    store.attachForTesting(sessionID: 2)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(store.isStale == false)
+    let before = await daemon.receivedLines.count
+
+    await daemon.endEventConnection()
+
+    // Stale straight away, and not because a request failed: none was sent.
+    #expect(await eventually { @MainActor in store.isStale })
+    #expect(await daemon.receivedLines.count == before)
+
+    await session.reconnectNow()
+
+    // The reattach check and screen refetch clear the mark.
+    #expect(await eventually {
+        await daemon.receivedLines.dropFirst(before).contains { $0.contains("get_workspace_processes") }
+    })
+    #expect(await eventually { @MainActor in store.screen == "shell 2" })
+    #expect(await eventually { @MainActor in !store.isStale })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}

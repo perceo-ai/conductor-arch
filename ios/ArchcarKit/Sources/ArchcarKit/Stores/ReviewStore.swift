@@ -23,6 +23,9 @@ public final class ReviewStore {
     public private(set) var readiness: String?
     public private(set) var lastError: String?
     public private(set) var isBusy = false
+    /// The event stream has dropped, so what is shown may be out of date.
+    /// Cleared by the next request that succeeds.
+    public private(set) var isStale = false
     /// Output from the last git/gh action, worth showing verbatim: when `gh`
     /// refuses, the reason is on the other machine and the text is all the
     /// phone has.
@@ -148,6 +151,7 @@ public final class ReviewStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
+            if await session.connectionState != .connected { isStale = true }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await refreshAll() }
             for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
@@ -155,6 +159,7 @@ public final class ReviewStore {
                 await refreshChecks()
             }
             guard !Task.isCancelled else { return }
+            isStale = true
             missedEvents = true
         }
     }
@@ -178,9 +183,11 @@ public final class ReviewStore {
     private func request<Body: ArchcarRequestBody>(_ body: Body) async -> ArchcarResponse? {
         do {
             let response = try await session.request(body)
+            isStale = false
             lastError = nil
             return response
         } catch {
+            isStale = true
             lastError = String(describing: error)
             return nil
         }
