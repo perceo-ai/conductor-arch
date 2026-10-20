@@ -109,11 +109,19 @@ public final class ChatStore {
     }
 
     public func refreshStatus() async {
+        // With no session there is no status to check. Skipping it must not,
+        // on its own, clear a mark some other refetch left: a session exiting
+        // routes here after `sessionID` is gone, and that refetched nothing.
+        guard sessionID != nil else { return }
         await clearStale(afterRefetchSucceeded: await fetchStatus())
     }
 
     // Each fetch reports whether it brought its panel up to date. Nothing to
-    // fetch — no thread selected, no session yet — counts as up to date.
+    // fetch — no thread selected, no session yet — counts as up to date, which
+    // is what `resync()` needs: a skipped panel must not fail the whole
+    // resync, and it may clear only because every other fetch it ran also
+    // succeeded. A standalone wrapper has no such company, which is why
+    // `refreshStatus()` returns before clearing when there is no session.
 
     private func fetchTimeline() async -> Bool {
         guard let threadID = selectedThreadID else { return true }
