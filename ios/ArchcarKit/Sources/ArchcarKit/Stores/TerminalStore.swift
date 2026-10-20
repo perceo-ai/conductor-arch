@@ -234,13 +234,17 @@ public final class TerminalStore {
     /// either way its `session_started`/`session_exited` never arrived here.
     /// Left alone, keystrokes would go to a shell that is gone.
     private func reattach() async {
-        guard let attached = sessionID else { return }
         guard case .workspaceProcesses(_, let text)? = try? await session.request(
             GetWorkspaceProcessesRequest(workspace: workspace)) else {
             // No report, so no evidence the shell is gone: keep it.
             await refreshScreen()
             return
         }
+        // The daemon answered, so the link is back whether or not a shell
+        // survived it. `refreshScreen()` clears the mark too, but only with a
+        // session to fetch; with none attached, nothing else would lift it.
+        isStale = false
+        guard let attached = sessionID else { return }
         let running = TerminalStore.runningShells(in: text)
         if let replacement = running.max(), !running.contains(attached) {
             sessionID = replacement
