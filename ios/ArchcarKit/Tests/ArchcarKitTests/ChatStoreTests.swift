@@ -22,11 +22,20 @@ private func chatResponder(
     pendingInteraction: Bool = false,
     spawnIsQueued: Bool = false,
     resolveFails: Bool = false,
-    sessionExited: Bool = false
+    sessionExited: Bool = false,
+    threadsFail: Bool = false,
+    timelineFail: Bool = false,
+    timelineNeverAnswers: Bool = false
 ) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
         switch type {
+        case "list_chat_threads" where threadsFail:
+            return #"{"id":"\#(id)","payload":{"type":"error","message":"threads unavailable"}}"#
+        case "get_chat_projection" where timelineFail:
+            return #"{"id":"\#(id)","payload":{"type":"error","message":"projection unavailable"}}"#
+        case "get_chat_projection" where timelineNeverAnswers:
+            return nil
         case "list_chat_threads":
             return """
             {"id":"\(id)","payload":{"type":"chat_threads","workspace":"w","threads":[\
@@ -467,6 +476,199 @@ private func connectedStore(
     #expect(await session.connectionState != .connected)
 
     // The chat is still missing live updates, so it must still say so.
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aReconnectWhoseThreadRefetchFailsKeepsTheChatStale() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isStale == false)
+
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+    // From here the thread list fails and everything else answers, with a
+    // timeline that reads differently so the resync's last refetch is visible.
+    await daemon.respond(to: chatResponder(projectionBody: "caught up", threadsFail: true))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+    await session.reconnectNow()
+
+    // The resync's last refetch, the timeline, has landed.
+    #expect(await eventually { @MainActor in store.items.map(\.body) == ["caught up"] })
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(await daemon.receivedLines.compactMap(requestType).filter { $0 == "list_chat_threads" }.count >= 2)
+    // The timeline succeeding says nothing about the thread list that failed
+    // before it, so the chat is still not up to date.
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aReconnectKeepsTheChatStaleUntilEveryRefetchHasAnswered() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    // A short timeout, so the refetch that never answers fails within the test.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t", requestTimeout: .seconds(1),
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isStale == false)
+
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+    let before = await daemon.receivedLines.count
+    // Threads, plan, queue and interactions answer; the timeline, refetched
+    // last, never does.
+    await daemon.respond(to: chatResponder(timelineNeverAnswers: true))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+    await session.reconnectNow()
+
+    #expect(await eventually {
+        await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("get_chat_projection")
+    })
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("list_chat_threads"))
+    #expect(sent.contains("get_chat_plan"))
+    #expect(sent.contains("list_queued_chat_inputs"))
+    #expect(sent.contains("list_provider_interactions"))
+    // Every earlier refetch succeeded while connected, but the resync is not
+    // done, so nothing has cleared the mark mid-sequence.
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    // And once the timeline times out, the resync as a whole failed.
+    #expect(await eventually { @MainActor in store.composerError != nil })
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aSucceedingActionDoesNotClearAStaleTimeline() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+    // A running session, so Stop has something to reach.
+    await daemon.push(
+        #"{"id":"e1","payload":{"type":"session_started","session_id":3,"thread_id":7,"workspace":"w","kind":"codex","pid":900}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == 3 })
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession)
+    #expect(store.isStale == false)
+
+    await daemon.respond(to: chatResponder(timelineFail: true))
+    await store.refreshTimeline()
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    // Neither action refetches anything, so neither says the timeline is
+    // current, however it answers.
+    let before = await daemon.receivedLines.count
+    await store.interrupt()
+    #expect(store.isStale)
+    await store.setPlanMode(true)
+    #expect(store.planMode)
+    #expect(store.isStale)
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("interrupt_turn"))
+    #expect(sent.contains("set_chat_plan_mode"))
+    #expect(!sent.contains("get_chat_projection"))
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aSessionExitingDoesNotClearAStaleTimeline() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+    await daemon.push(
+        #"{"id":"e1","payload":{"type":"session_started","session_id":3,"thread_id":7,"workspace":"w","kind":"codex","pid":900}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == 3 })
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession)
+    #expect(store.isStale == false)
+
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    // The timeline fails while connected, leaving the chat correctly stale.
+    await daemon.respond(to: chatResponder(timelineFail: true))
+    await store.refreshTimeline()
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    // The session now exits — ordinary end-of-turn traffic, not a refetch of
+    // anything the failed timeline left stale.
+    await daemon.push(#"{"id":"e2","payload":{"type":"session_exited","session_id":3,"exit_code":0}}"#)
+    #expect(await eventually { @MainActor in !store.hasLiveSession })
+
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func anUnrelatedSessionExitingDoesNotClearAStaleTimeline() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.hasLiveSession == false)
+    #expect(store.isStale == false)
+
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.respond(to: chatResponder(timelineFail: true))
+    await store.refreshTimeline()
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    // Some session in a thread this store does not have open exits.
+    // `refreshKind` maps `.sessionExited` to `.status` with no thread filter,
+    // so this chat's own `observe()` still processes it.
+    await daemon.push(#"{"id":"e2","payload":{"type":"session_exited","session_id":99,"exit_code":1}}"#)
+    try await Task.sleep(for: .milliseconds(150))
+
     #expect(store.isStale)
 
     observing.cancel()
