@@ -18,7 +18,7 @@ struct ChangesPanel: View {
 
             ScrollView {
                 LazyVStack(spacing: 6) {
-                    if store.isStale { StaleBanner() }
+                    if store.changesStale { StaleBanner() }
                     ForEach(store.files) { file in
                         NavigationLink {
                             DiffView(store: store, path: file.path)
@@ -223,7 +223,7 @@ struct ChecksPanel: View {
 
     var body: some View {
         List {
-            if store.isStale {
+            if store.checksStale {
                 Section { StaleBanner() }
             }
             if let checks = store.checks {
@@ -348,7 +348,7 @@ struct TodosPanel: View {
 
     var body: some View {
         List {
-            if store.isStale { StaleBanner() }
+            if store.todosStale { StaleBanner() }
             ForEach(store.todos) { todo in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: todo.isOpen ? "circle" : "checkmark.circle.fill")

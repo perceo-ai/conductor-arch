@@ -253,3 +253,57 @@ private func reviewResponder(
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func eachReviewPanelRefreshClearsOnlyItsOwnStaleMark() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder(checksFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+
+    // A failed request cannot say which panel it was for, so it marks all.
+    await store.refreshChecks()
+    #expect(store.changesStale)
+    #expect(store.checksStale)
+    #expect(store.todosStale)
+
+    await store.refreshTodos()
+    #expect(store.todosStale == false)
+    #expect(store.changesStale)
+    #expect(store.checksStale)
+
+    await store.refreshChanges()
+    #expect(store.changesStale == false)
+    #expect(store.checksStale)
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func anEventDrivenRefreshClearsChangesAndChecksMarksButKeepsTodos() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder(todosFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+    let observing = Task { await store.observe() }
+    await daemon.waitForSubscribes(1)
+    try await Task.sleep(for: .milliseconds(150))
+
+    await store.refreshTodos()
+    #expect(store.changesStale && store.checksStale && store.todosStale)
+
+    await daemon.push(#"{"id":"e1","payload":{"type":"turn_completed","session_id":4,"thread_id":6}}"#)
+
+    // The event refetched changes and checks, which clears exactly those.
+    #expect(await eventually { @MainActor in !store.changesStale && !store.checksStale })
+    #expect(store.todosStale)
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
