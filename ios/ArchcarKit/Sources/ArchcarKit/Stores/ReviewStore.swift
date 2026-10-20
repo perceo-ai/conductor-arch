@@ -23,10 +23,15 @@ public final class ReviewStore {
     public private(set) var readiness: String?
     public private(set) var lastError: String?
     public private(set) var isBusy = false
-    /// The event stream has dropped, or a fetch failed, so what is shown may be
-    /// out of date. Cleared only by a refetch of the panels that succeeded
-    /// while the stream is connected; see `StaleClearing`.
-    public private(set) var isStale = false
+    /// Whether each panel may be showing out-of-date data: the event stream
+    /// has dropped, or a fetch failed. Each is cleared only by a refetch of
+    /// that panel that succeeded while the stream is connected; see
+    /// `StaleClearing`.
+    public private(set) var changesStale = false
+    public private(set) var checksStale = false
+    public private(set) var todosStale = false
+    /// Whether any panel is out of date.
+    public var isStale: Bool { changesStale || checksStale || todosStale }
     /// Bumped by every `markStale()`, so a clear decided before an `await`
     /// can tell a mark landed since; see `StaleClearing`.
     @ObservationIgnored private(set) var staleRevision = 0
@@ -58,19 +63,19 @@ public final class ReviewStore {
         let gotChanges = await fetchChanges()
         let gotChecks = await fetchChecks()
         let gotTodos = await fetchTodos()
-        await clearStale(afterRefetchSucceeded: gotChanges && gotChecks && gotTodos)
+        await clearStale(afterRefetchSucceeded: gotChanges && gotChecks && gotTodos, clearing: .all)
     }
 
     public func refreshChanges() async {
-        await clearStale(afterRefetchSucceeded: await fetchChanges())
+        await clearStale(afterRefetchSucceeded: await fetchChanges(), clearing: .changes)
     }
 
     public func refreshChecks() async {
-        await clearStale(afterRefetchSucceeded: await fetchChecks())
+        await clearStale(afterRefetchSucceeded: await fetchChecks(), clearing: .checks)
     }
 
     public func refreshTodos() async {
-        await clearStale(afterRefetchSucceeded: await fetchTodos())
+        await clearStale(afterRefetchSucceeded: await fetchTodos(), clearing: .todos)
     }
 
     // The fetches below report whether they got an answer and leave the
@@ -114,8 +119,21 @@ public final class ReviewStore {
         return true
     }
 
-    private func clearStale(afterRefetchSucceeded succeeded: Bool) async {
-        if await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self) { isStale = false }
+    /// The panels a refetch covered, and so the only ones it may clear.
+    private struct StalePanels: OptionSet {
+        let rawValue: Int
+        static let changes = StalePanels(rawValue: 1 << 0)
+        static let checks = StalePanels(rawValue: 1 << 1)
+        static let todos = StalePanels(rawValue: 1 << 2)
+        static let all: StalePanels = [.changes, .checks, .todos]
+    }
+
+    private func clearStale(afterRefetchSucceeded succeeded: Bool, clearing panels: StalePanels) async {
+        guard await StaleClearing.mayClear(afterRefetchSucceeded: succeeded, on: session, store: self)
+        else { return }
+        if panels.contains(.changes) { changesStale = false }
+        if panels.contains(.checks) { checksStale = false }
+        if panels.contains(.todos) { todosStale = false }
     }
 
     public func addTodo(_ text: String) async {
@@ -193,7 +211,8 @@ public final class ReviewStore {
             for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
                 let gotChanges = await fetchChanges()
                 let gotChecks = await fetchChecks()
-                await clearStale(afterRefetchSucceeded: gotChanges && gotChecks)
+                // Todos are not refetched here, so their mark stays.
+                await clearStale(afterRefetchSucceeded: gotChanges && gotChecks, clearing: [.changes, .checks])
             }
             guard !Task.isCancelled else { return }
             markStale()
@@ -232,8 +251,12 @@ public final class ReviewStore {
         }
     }
 
+    /// Marks every panel: a failed request does not say which panel it was
+    /// for, and a dropped stream leaves them all missing updates.
     private func markStale() {
-        isStale = true
+        changesStale = true
+        checksStale = true
+        todosStale = true
         staleRevision += 1
     }
 }

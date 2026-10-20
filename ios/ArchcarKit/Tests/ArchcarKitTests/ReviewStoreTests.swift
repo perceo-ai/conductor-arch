@@ -16,12 +16,17 @@ private func replyID(_ line: String) -> String? {
 }
 
 /// A mock that answers the four RPCs `ReviewStore.refreshAll()` issues, plus
-/// the todo and push actions. `checksFail` makes the daemon refuse the checks
-/// summary, so one leg of a refresh fails while the others succeed.
-private func reviewResponder(checksFail: Bool = false) -> @Sendable (String) -> String? {
+/// the todo and push actions. `checksFail`, `changesFail` and `todosFail` make
+/// the daemon refuse that panel's fetch, so one leg of a refresh fails while
+/// the others succeed.
+private func reviewResponder(
+    checksFail: Bool = false, changesFail: Bool = false, todosFail: Bool = false
+) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
         switch type {
+        case "get_workspace_changes" where changesFail:
+            return #"{"id":"\#(id)","payload":{"type":"error","message":"git status failed"}}"#
         case "get_workspace_changes":
             return #"{"id":"\#(id)","payload":{"type":"workspace_changes","workspace":"w","files":[]}}"#
         case "get_checks_summary" where checksFail:
@@ -37,6 +42,8 @@ private func reviewResponder(checksFail: Bool = false) -> @Sendable (String) -> 
             {"id":"\(id)","payload":{"type":"workflow_runs","workspace":"w","summary":\
             {"runs":[],"failing":0,"running":0,"succeeded":0,"unavailable":null}}}
             """
+        case "list_todos" where todosFail:
+            return #"{"id":"\#(id)","payload":{"type":"error","message":"todo store unavailable"}}"#
         case "list_todos":
             return #"{"id":"\#(id)","payload":{"type":"todos","workspace":"w","todos":[]}}"#
         case "add_todo", "push_branch":
@@ -139,6 +146,164 @@ private func reviewResponder(checksFail: Bool = false) -> @Sendable (String) -> 
     #expect(store.runs != nil)
     #expect(store.isStale)
 
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aFailedChecksFetchKeepsStaleAfterRefreshTodos() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder(checksFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+
+    await store.refreshChecks()
+    #expect(store.checks == nil)
+    #expect(store.isStale)
+
+    await store.refreshTodos()
+
+    // The todos came back, but the checks on screen are still the ones that
+    // failed to refresh, so the store is not up to date.
+    #expect(await session.connectionState == .connected)
+    #expect(store.lastError == nil)
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aFailedChecksFetchKeepsStaleAfterRefreshChanges() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder(checksFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+
+    await store.refreshChecks()
+    #expect(store.isStale)
+
+    await store.refreshChanges()
+
+    #expect(await session.connectionState == .connected)
+    #expect(store.changesError == nil)
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aRunActionOnlyClearsItsOwnPanel() async throws {
+    let daemon = try await MockDaemon()
+    // Only the changes fetch fails; the push and the checks after it succeed.
+    await daemon.respond(to: reviewResponder(changesFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+
+    await store.refreshChanges()
+    #expect(store.changesError != nil)
+    #expect(store.isStale)
+
+    // The push ends by refetching the checks, which succeeds — but that is
+    // the checks panel, not the changes panel that failed.
+    await store.push()
+    #expect(store.actionOutput == "Done.")
+    #expect(store.checks != nil)
+    #expect(store.runs != nil)
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func anEventDrivenRefreshClearsOnlyChangesAndChecksNotTodos() async throws {
+    let daemon = try await MockDaemon()
+    // Changes and checks answer; todos do not.
+    await daemon.respond(to: reviewResponder(todosFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+    let observing = Task { await store.observe() }
+    await daemon.waitForSubscribes(1)
+    try await Task.sleep(for: .milliseconds(150))
+
+    await store.refreshTodos()
+    #expect(store.isStale)
+    let before = await daemon.receivedLines.count
+
+    // An event the review store refetches changes and checks for — not todos.
+    await daemon.push(#"{"id":"e1","payload":{"type":"inventory_changed","scope":"workspace","workspace":"w"}}"#)
+    #expect(await eventually {
+        await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("list_workflow_runs")
+    })
+    // Give the event-driven clear time to land, if it is going to.
+    try await Task.sleep(for: .milliseconds(300))
+
+    #expect(await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("list_todos") == false)
+    #expect(await session.connectionState == .connected)
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func eachReviewPanelRefreshClearsOnlyItsOwnStaleMark() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder(checksFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+
+    // A failed request cannot say which panel it was for, so it marks all.
+    await store.refreshChecks()
+    #expect(store.changesStale)
+    #expect(store.checksStale)
+    #expect(store.todosStale)
+
+    await store.refreshTodos()
+    #expect(store.todosStale == false)
+    #expect(store.changesStale)
+    #expect(store.checksStale)
+
+    await store.refreshChanges()
+    #expect(store.changesStale == false)
+    #expect(store.checksStale)
+    #expect(store.isStale)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func anEventDrivenRefreshClearsChangesAndChecksMarksButKeepsTodos() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder(todosFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+    let observing = Task { await store.observe() }
+    await daemon.waitForSubscribes(1)
+    try await Task.sleep(for: .milliseconds(150))
+
+    await store.refreshTodos()
+    #expect(store.changesStale && store.checksStale && store.todosStale)
+
+    await daemon.push(#"{"id":"e1","payload":{"type":"turn_completed","session_id":4,"thread_id":6}}"#)
+
+    // The event refetched changes and checks, which clears exactly those.
+    #expect(await eventually { @MainActor in !store.changesStale && !store.checksStale })
+    #expect(store.todosStale)
+    #expect(store.isStale)
+
+    observing.cancel()
     await session.disconnect()
     await daemon.stop()
 }
