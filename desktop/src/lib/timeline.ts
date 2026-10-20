@@ -123,6 +123,17 @@ export function timelineWindow<T>(items: T[], visibleCount: number): TimelineWin
 }
 
 /**
+ * How many of a subagent's rows an open Agent card mounts. The top-level
+ * window does not reach inside a card: a subagent that ran 300 tools mounted
+ * all 300 rows the moment it was opened. Like the timeline, the card keeps the
+ * newest rows — while the subagent runs, that is where its work arrives.
+ */
+export const NESTED_WINDOW_SIZE = 50;
+
+/** How many older subagent rows each "show earlier" reveals. */
+export const NESTED_WINDOW_STEP = 50;
+
+/**
  * Whether a card should read as still running.
  *
  * An interrupted turn leaves its tool cards marked running, so once the agent
