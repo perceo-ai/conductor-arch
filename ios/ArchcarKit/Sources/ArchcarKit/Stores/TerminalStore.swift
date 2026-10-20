@@ -184,21 +184,30 @@ public final class TerminalStore {
     }
 
     /// Follows the session's screen updates rather than polling on a timer: the
-    /// daemon already emits an event per change.
+    /// daemon already emits an event per change. A dropped stream is waited
+    /// out, and the screen refetched once the session has reconnected.
     public func observe() async {
-        for await event in await session.events {
-            switch event {
-            case .sessionStarted(let id, _, let eventWorkspace, let kind, _)
-                where eventWorkspace == workspace && kind == .shell && sessionID == nil:
-                sessionID = id
-                await refreshScreen()
-            case .sessionScreenUpdated(let id) where id == sessionID:
-                await refreshScreen()
-            case .sessionExited(let id, _) where id == sessionID:
-                sessionID = nil
-            default:
-                continue
+        var resumed = false
+        while !Task.isCancelled {
+            let events = await session.events
+            if resumed { await refreshScreen() }
+            for await event in events {
+                switch event {
+                case .sessionStarted(let id, _, let eventWorkspace, let kind, _)
+                    where eventWorkspace == workspace && kind == .shell && sessionID == nil:
+                    sessionID = id
+                    await refreshScreen()
+                case .sessionScreenUpdated(let id) where id == sessionID:
+                    await refreshScreen()
+                case .sessionExited(let id, _) where id == sessionID:
+                    sessionID = nil
+                default:
+                    continue
+                }
             }
+            guard !Task.isCancelled else { return }
+            await session.waitUntilConnected()
+            resumed = true
         }
     }
 }

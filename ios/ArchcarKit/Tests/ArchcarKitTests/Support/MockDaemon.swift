@@ -19,6 +19,10 @@ actor MockDaemon {
     private(set) var receivedLines: [String] = []
     private(set) var tokenLine: String?
     private(set) var connectionCount = 0
+    /// Connections that sent `subscribe`: the long-lived event streams.
+    private var subscribers: [NWConnection] = []
+    /// How many `subscribe` requests have arrived, across reconnects.
+    private(set) var subscribeCount = 0
 
     init() async throws {
         let parameters = NWParameters.tcp
@@ -54,6 +58,28 @@ actor MockDaemon {
         }
     }
 
+    /// Drops only the event connection, leaving the listener up so the client
+    /// can reconnect. Waits briefly for the `subscribe` line to land first,
+    /// since the client's `connect` returns as soon as it has sent it.
+    func endEventConnection() async {
+        for _ in 0..<200 where subscribers.isEmpty {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let ending = subscribers
+        subscribers.removeAll()
+        connections.removeAll { connection in ending.contains { $0 === connection } }
+        for connection in ending { connection.cancel() }
+    }
+
+    /// Waits until at least `count` subscribes have arrived, or about two
+    /// seconds have passed.
+    func waitForSubscribes(_ count: Int, timeout: Duration = .seconds(2)) async {
+        let deadline = ContinuousClock.now + timeout
+        while subscribeCount < count, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     func stop() {
         for connection in connections { connection.cancel() }
         connections.removeAll()
@@ -71,11 +97,13 @@ actor MockDaemon {
     private func receive(on connection: NWConnection) {
         let box = UncheckedBox<MockDaemon>(self)
         let connectionBox = UncheckedBox<NWConnection>(connection)
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, _ in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
             if let data, !data.isEmpty {
                 Task { await box.value.ingest(data, on: connectionBox.value) }
             }
-            if !isComplete {
+            // A cancelled connection (see `endEventConnection`) reports an
+            // error; asking it again would only spin.
+            if !isComplete && error == nil {
                 Task { await box.value.receive(on: connectionBox.value) }
             }
         }
@@ -99,6 +127,10 @@ actor MockDaemon {
                 continue
             }
             receivedLines.append(text)
+            if Self.isSubscribe(text) {
+                subscribeCount += 1
+                subscribers.append(connection)
+            }
             if let reply = matcher?(text) ?? Self.handshakeProbeReply(to: text) {
                 connection.send(content: Data((reply + "\n").utf8), completion: .idempotent)
             }
@@ -107,6 +139,12 @@ actor MockDaemon {
 }
 
 extension MockDaemon {
+    static func isSubscribe(_ line: String) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let payload = object["payload"] as? [String: Any] else { return false }
+        return payload["type"] as? String == "subscribe"
+    }
+
     /// `DaemonSession.connect` proves its token with a `list_repositories`
     /// round trip, so a mock that never answers one would hang every connect.
     /// The real daemon always answers it; this keeps the stand-in honest.

@@ -76,6 +76,8 @@ private func chatResponder(
             return resolveFails
                 ? #"{"id":"\#(id)","payload":{"type":"error","message":"interaction already resolved"}}"#
                 : #"{"id":"\#(id)","payload":{"type":"ack"}}"#
+        case "get_chat_plan":
+            return #"{"id":"\#(id)","payload":{"type":"chat_plan","thread_id":7,"plan_mode":false}}"#
         case "interrupt_turn", "set_chat_plan_mode":
             return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
         default:
@@ -285,4 +287,84 @@ private func connectedStore(
     let event = try JSONDecoder().decode(EventEnvelope.self, from: Data(json.utf8)).payload
     #expect(ChatStore.refreshKind(for: event, thread: 7) == .interactions)
     #expect(ChatStore.refreshKind(for: event, thread: 9) == nil)
+}
+
+@MainActor
+@Test func adoptsASessionThatWasRunningBeforeTheChatOpened() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    await daemon.waitForSubscribes(1)
+
+    // The daemon's subscribe-time replay of a running agent. Only the session
+    // is listening yet: no chat store exists to catch it.
+    await daemon.push(
+        #"{"id":"e1","payload":{"type":"session_started","session_id":3,"thread_id":7,"workspace":"w","kind":"codex","pid":900}}"#)
+    await daemon.push(#"{"id":"e2","payload":{"type":"session_ready","session_id":3,"thread_id":7}}"#)
+    #expect(await eventually { await session.cachedSessionID(forThread: 7) == 3 })
+
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+
+    // Model and Effort are enabled, and the composer shows Stop: the mock
+    // reports the session as streaming.
+    #expect(store.hasLiveSession)
+    #expect(store.isTurnRunning)
+
+    // And Stop reaches that session.
+    let before = await daemon.receivedLines.count
+    await store.interrupt()
+    let lines = await daemon.receivedLines
+    let interrupt = try #require(lines.dropFirst(before).first { requestType($0) == "interrupt_turn" })
+    let decoded = try JSONSerialization.jsonObject(with: Data(interrupt.utf8))
+    let payload = try #require((decoded as? [String: Any])?["payload"] as? [String: Any])
+    #expect((payload["session_id"] as? NSNumber)?.int64Value == 3)
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aDroppedStreamMarksTheChatStaleAndRefetchesOnReconnect() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: chatResponder())
+    // Too slow to reconnect on its own within the test, so the stale state
+    // holds until `reconnectNow` ends it.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = ChatStore(session: session, workspace: "w")
+    await store.refreshThreads()
+    await store.select(threadID: 7)
+    #expect(store.isStale == false)
+
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+    let before = await daemon.receivedLines.count
+
+    await daemon.endEventConnection()
+
+    // Stale straight away, and not because a request failed: none was sent.
+    #expect(await eventually { @MainActor in store.isStale })
+    #expect(await daemon.receivedLines.count == before)
+
+    await session.reconnectNow()
+
+    // Everything on screen is refetched once the stream is back.
+    #expect(await eventually {
+        await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("get_chat_projection")
+    })
+    let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
+    #expect(sent.contains("subscribe"))
+    #expect(sent.contains("list_chat_threads"))
+    #expect(sent.contains("list_queued_chat_inputs"))
+    #expect(sent.contains("list_provider_interactions"))
+    #expect(await eventually { @MainActor in !store.isStale })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
 }

@@ -34,7 +34,8 @@ public final class ChatStore {
     private let session: DaemonSession
     public let workspace: String
     /// The live session behind the selected thread, learned from
-    /// `ensure_chat_thread_session` or a session event.
+    /// `ensure_chat_thread_session`, a session event, or what the session
+    /// already knew when the chat was opened.
     private var sessionID: Int64?
 
     public init(session: DaemonSession, workspace: String) {
@@ -70,7 +71,14 @@ public final class ChatStore {
         items = []
         queued = []
         pendingInteractions = []
-        sessionID = nil
+        sessionStatus = nil
+        // An agent started before this store existed announced itself on the
+        // event stream before anything here was listening. The session kept
+        // that, so a chat opened mid-turn still gets Stop, Model and Effort.
+        let known = await session.cachedSessionID(forThread: threadID)
+        guard selectedThreadID == threadID else { return }
+        sessionID = known
+        if known != nil { await refreshStatus() }
         await refreshTimeline()
         await refreshQueue()
         await refreshInteractions()
@@ -291,24 +299,60 @@ public final class ChatStore {
     }
 
     /// Runs for as long as the chat is on screen.
+    ///
+    /// When the stream drops the chat is marked stale straight away, without
+    /// waiting for a request to fail. Once the session has reconnected this
+    /// resubscribes and refetches everything on screen, because whatever
+    /// happened in between was missed.
     public func observe() async {
-        for await event in await session.events {
-            // A session event also teaches the store which session backs this
-            // thread, which is what `interrupt` needs.
-            if case .sessionStarted(let sessionID, let threadID, _, _, _) = event,
-               threadID == selectedThreadID {
-                self.sessionID = sessionID
+        var resumed = false
+        while !Task.isCancelled {
+            // Subscribe before refetching, so an event that lands during the
+            // refetch is not lost between the two.
+            let events = await session.events
+            if resumed { await resync() }
+            for await event in events {
+                // A session event also teaches the store which session backs
+                // this thread, which is what `interrupt` needs.
+                if case .sessionStarted(let sessionID, let threadID, _, _, _) = event,
+                   threadID == selectedThreadID {
+                    self.sessionID = sessionID
+                }
+                if case .sessionExited(let sessionID, _) = event, sessionID == self.sessionID {
+                    self.sessionID = nil
+                    sessionStatus = nil
+                }
+                guard let kind = Self.refreshKind(for: event, thread: selectedThreadID) else { continue }
+                switch kind {
+                case .threads: await refreshThreads()
+                case .timeline: await refreshTimeline()
+                case .queue: await refreshQueue()
+                case .plan: await refreshPlan()
+                case .interactions: await refreshInteractions()
+                case .status: await refreshStatus()
+                }
             }
-            guard let kind = Self.refreshKind(for: event, thread: selectedThreadID) else { continue }
-            switch kind {
-            case .threads: await refreshThreads()
-            case .timeline: await refreshTimeline()
-            case .queue: await refreshQueue()
-            case .plan: await refreshPlan()
-            case .interactions: await refreshInteractions()
-            case .status: await refreshStatus()
-            }
+            guard !Task.isCancelled else { return }
+            isStale = true
+            await session.waitUntilConnected()
+            resumed = true
         }
+    }
+
+    /// Refetches everything on screen after a reconnect.
+    private func resync() async {
+        await refreshThreads()
+        guard let threadID = selectedThreadID else { return }
+        // The reconnect's replay may have named a session this store has not
+        // seen, for instance one started while the link was down.
+        if let known = await session.cachedSessionID(forThread: threadID), selectedThreadID == threadID {
+            sessionID = known
+        }
+        await refreshStatus()
+        await refreshPlan()
+        await refreshQueue()
+        await refreshInteractions()
+        await refreshTimeline()
     }
 
     private func request<Body: ArchcarRequestBody>(_ body: Body) async -> ArchcarResponse? {
