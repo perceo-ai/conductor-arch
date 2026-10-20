@@ -11,14 +11,26 @@ final class LocalNotificationService: NSObject, UNUserNotificationCenterDelegate
     /// app model, read when a remote push arrives in the foreground so the
     /// duplicate of an already-scheduled local notification is not shown.
     var hasLiveDaemonSession: @MainActor () -> Bool = { false }
+    /// Called with the chat (and, for a local notification, the daemon that
+    /// sent it) when the user taps a notification — set by the app model,
+    /// which opens that chat.
+    var onNotificationTapped: @MainActor (NotificationTap) -> Void = { _ in }
 
+    /// This object is the notification center's only delegate, so taps on
+    /// local notifications *and* APNs pushes both arrive at `didReceive` below.
+    /// Apple requires the delegate to be set before launch finishes for a tap
+    /// that cold-launches the app to be delivered; `AppModel` (and so this) is
+    /// built in `ArchductorApp`'s initializer, which runs before that.
     init(center: UNUserNotificationCenter = .current()) {
         self.center = center
         super.init()
         center.delegate = self
     }
 
-    func deliver(_ descriptor: EventNotificationDescriptor) async {
+    /// - Parameter daemonID: the daemon the event came from, stamped next to
+    ///   `thread_id` so a tap is never resolved against a different daemon
+    ///   whose thread ids overlap.
+    func deliver(_ descriptor: EventNotificationDescriptor, daemonID: String?) async {
         guard await ensureAuthorized() else { return }
 
         let content = UNMutableNotificationContent()
@@ -26,7 +38,9 @@ final class LocalNotificationService: NSObject, UNUserNotificationCenterDelegate
         content.body = descriptor.body
         content.sound = .default
         if let threadID = descriptor.threadID {
-            content.userInfo = ["thread_id": threadID]
+            var userInfo: [AnyHashable: Any] = ["thread_id": threadID]
+            if let daemonID { userInfo["daemon_id"] = daemonID }
+            content.userInfo = userInfo
         }
 
         let request = UNNotificationRequest(
@@ -34,6 +48,14 @@ final class LocalNotificationService: NSObject, UNUserNotificationCenterDelegate
             content: content,
             trigger: nil)
         try? await center.add(request)
+    }
+
+    /// Clears every delivered and scheduled notification. Run when switching
+    /// daemons: what is in the tray belongs to the daemon being left, and its
+    /// thread ids mean other chats on the next one.
+    func removeAll() {
+        center.removeAllDeliveredNotifications()
+        center.removeAllPendingNotificationRequests()
     }
 
     private func ensureAuthorized() async -> Bool {
@@ -86,5 +108,18 @@ final class LocalNotificationService: NSObject, UNUserNotificationCenterDelegate
         return NotificationPresentationPolicy.shouldPresent(
             isRemotePush: isRemotePush, hasLiveDaemonSession: connected)
             ? [.banner, .sound] : []
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse
+    ) async {
+        // Only a plain tap opens the chat; dismissing the notification is not
+        // a request to look at it.
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        guard let tap = ChatThreadLookup.tap(
+            fromUserInfo: response.notification.request.content.userInfo)
+        else { return }
+        await MainActor.run { onNotificationTapped(tap) }
     }
 }

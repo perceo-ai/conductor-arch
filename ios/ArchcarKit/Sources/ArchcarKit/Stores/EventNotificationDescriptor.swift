@@ -13,41 +13,76 @@ public struct EventNotificationDescriptor: Sendable, Equatable, Hashable {
         self.threadID = threadID
     }
 
-    public static func from(_ event: ArchcarEvent) -> EventNotificationDescriptor? {
+    /// The chat thread an event is about, so the caller can look up which
+    /// workspace to name before building the descriptor.
+    public static func threadID(of event: ArchcarEvent) -> Int64? {
+        switch event {
+        case .providerInteractionRequested(let interaction): return interaction.threadID
+        case .turnCompleted(_, let threadID, _): return threadID
+        case .sessionError(_, let threadID, _): return threadID
+        default: return nil
+        }
+    }
+
+    /// - Parameter workspaceName: the workspace that owns the event's thread,
+    ///   when the caller could resolve it. Without it the text falls back to
+    ///   naming the thread number. Interactions carry their own workspace.
+    ///
+    /// The wording matches `event_notification` in
+    /// `crates/core/src/notifications.rs`, which renders the APNs copy of the
+    /// same event.
+    public static func from(
+        _ event: ArchcarEvent,
+        workspaceName: String? = nil
+    ) -> EventNotificationDescriptor? {
+        let workspace = workspaceName.flatMap(nonEmpty)
         switch event {
         case .providerInteractionRequested(let interaction):
-            EventNotificationDescriptor(
+            return EventNotificationDescriptor(
                 id: "interaction-\(interaction.id)",
                 title: "Input required",
-                body: joinedBody(title: interaction.title, detail: interaction.detail),
+                body: prefixed(
+                    joinedBody(title: interaction.title, detail: interaction.detail),
+                    workspace: nonEmpty(interaction.workspace) ?? workspace),
                 threadID: interaction.threadID)
         case .turnCompleted(let sessionID, let threadID, let status):
-            completedTurn(sessionID: sessionID, threadID: threadID, status: status)
+            return completedTurn(sessionID: sessionID, threadID: threadID, status: status, workspace: workspace)
         case .sessionError(let sessionID, let threadID, let message):
-            EventNotificationDescriptor(
+            return EventNotificationDescriptor(
                 id: "session-error-\(sessionID.map(String.init) ?? "unknown")-\(threadID.map(String.init) ?? "unknown")",
                 title: "Chat failed",
-                body: message,
+                body: prefixed(message, workspace: workspace),
                 threadID: threadID)
         case .backgroundTaskUpdated(let rawTask):
-            backgroundTask(rawTask)
+            return backgroundTask(rawTask)
         default:
-            nil
+            return nil
         }
     }
 
     private static func completedTurn(
         sessionID: Int64,
         threadID: Int64,
-        status rawStatus: String?
+        status rawStatus: String?,
+        workspace: String?
     ) -> EventNotificationDescriptor {
         let status = rawStatus?.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalStatus = status?.isEmpty == false ? status! : "completed"
         return EventNotificationDescriptor(
             id: "turn-\(sessionID)-\(threadID)-\(finalStatus)",
             title: finalStatus == "completed" ? "Chat finished" : "Chat stopped",
-            body: "Thread \(threadID) \(finalStatus).",
+            body: workspace.map { "The chat in \($0) \(finalStatus)." } ?? "Thread \(threadID) \(finalStatus).",
             threadID: threadID)
+    }
+
+    private static func nonEmpty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func prefixed(_ body: String, workspace: String?) -> String {
+        guard let workspace else { return body }
+        return body.isEmpty ? workspace : "\(workspace): \(body)"
     }
 
     private static func joinedBody(title: String, detail: String) -> String {

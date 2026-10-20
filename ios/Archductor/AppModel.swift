@@ -16,6 +16,12 @@ final class AppModel {
     private(set) var workspaces: WorkspacesStore?
     private(set) var connectionError: String?
     private(set) var isConnecting = false
+    /// Holds a tapped notification until the active daemon's list can answer
+    /// it, then publishes the chat to open.
+    let notificationTaps = NotificationTapRouter()
+    /// A chat a tapped notification asked to open, once it is resolved. The
+    /// views act on it and then call `clearChatOpenRequest()`.
+    var chatOpenRequest: ChatThreadLookup.Resolution? { notificationTaps.request }
 
     private var observation: Task<Void, Never>?
     private var notificationObservation: Task<Void, Never>?
@@ -29,6 +35,11 @@ final class AppModel {
     init(directory: DaemonDirectory = DaemonDirectory()) {
         self.directory = directory
         localNotifications.hasLiveDaemonSession = { [weak self] in self?.session != nil }
+        localNotifications.onNotificationTapped = { [weak self] tap in
+            self?.handleNotificationTap(tap)
+        }
+        notificationTaps.inventory = { [weak self] in self?.workspaces }
+        notificationTaps.activeDaemonID = { [weak self] in self?.activeDaemon?.id }
     }
 
     func load() async {
@@ -68,6 +79,11 @@ final class AppModel {
     }
 
     func activate(_ daemon: SavedDaemon) async {
+        // The tray holds the old daemon's notifications; their thread ids
+        // would point at unrelated chats on this one.
+        if let previous = activeDaemon, previous.id != daemon.id {
+            localNotifications.removeAll()
+        }
         await disconnect()
         await directory.setActive(daemon.id)
         activeDaemon = daemon
@@ -101,10 +117,21 @@ final class AppModel {
         self.session = session
         let store = WorkspacesStore(session: session)
         workspaces = store
+        // Every successful refresh from here on — this first load, a
+        // foreground refetch, the refetch after a reconnect — retries a held tap.
+        notificationTaps.attach(to: store)
         await store.refresh()
         observation = Task { await store.observe() }
-        notificationObservation = Task { await observeNotifications(session: session) }
+        notificationObservation = Task { await observeNotifications(session: session, daemonID: daemon.id) }
         await localNotifications.requestAuthorizationAndRegister()
+    }
+
+    func handleNotificationTap(_ tap: NotificationTap) {
+        Task { await notificationTaps.tapped(tap) }
+    }
+
+    func clearChatOpenRequest() {
+        notificationTaps.clearRequest()
     }
 
     func refreshSavedList() async {
@@ -141,12 +168,17 @@ final class AppModel {
         }
     }
 
-    private func observeNotifications(session: DaemonSession) async {
+    private func observeNotifications(session: DaemonSession, daemonID: String) async {
         while !Task.isCancelled {
             guard let subscription = await session.connectedEvents() else { return }
             for await event in subscription.events {
-                guard let descriptor = EventNotificationDescriptor.from(event) else { continue }
-                await localNotifications.deliver(descriptor)
+                // Name the workspace rather than "Thread 42" when the list
+                // already knows the thread; otherwise fall back to the number.
+                let workspaceName = EventNotificationDescriptor.threadID(of: event)
+                    .flatMap { workspaces?.workspaceName(forThread: $0) }
+                guard let descriptor = EventNotificationDescriptor.from(event, workspaceName: workspaceName)
+                else { continue }
+                await localNotifications.deliver(descriptor, daemonID: daemonID)
             }
         }
     }

@@ -134,6 +134,19 @@ impl NotificationDeviceStore {
 }
 
 pub fn event_notification(event: &ArchcarEvent) -> Option<EventNotification> {
+    event_notification_in(event, None)
+}
+
+/// Builds the notification for `event`, naming `workspace` — the workspace
+/// that owns the event's chat thread, when the caller could look it up — in
+/// the body instead of the bare thread number. Interactions carry their own
+/// workspace. The wording matches the iOS app's `EventNotificationDescriptor`,
+/// which renders the local copy of the same event.
+fn event_notification_in(
+    event: &ArchcarEvent,
+    workspace: Option<&str>,
+) -> Option<EventNotification> {
+    let workspace = workspace.map(str::trim).filter(|name| !name.is_empty());
     match event {
         ArchcarEvent::ProviderInteractionRequested { interaction } => {
             Some(interaction_notification(interaction))
@@ -156,7 +169,10 @@ pub fn event_notification(event: &ArchcarEvent) -> Option<EventNotification> {
                 } else {
                     "Chat stopped".to_owned()
                 },
-                body: format!("Thread {thread_id} {final_status}."),
+                body: match workspace {
+                    Some(workspace) => format!("The chat in {workspace} {final_status}."),
+                    None => format!("Thread {thread_id} {final_status}."),
+                },
                 thread_id: Some(*thread_id),
             })
         }
@@ -175,7 +191,7 @@ pub fn event_notification(event: &ArchcarEvent) -> Option<EventNotification> {
                     .unwrap_or_else(|| "unknown".to_owned())
             ),
             title: "Chat failed".to_owned(),
-            body: message.clone(),
+            body: prefixed(message, workspace),
             thread_id: *thread_id,
         }),
         ArchcarEvent::BackgroundTaskUpdated { task } => background_task_notification(task),
@@ -184,7 +200,13 @@ pub fn event_notification(event: &ArchcarEvent) -> Option<EventNotification> {
 }
 
 pub fn notify_event(db_path: PathBuf, event: ArchcarEvent) {
-    let Some(notification) = event_notification(&event) else {
+    let thread_id = match &event {
+        ArchcarEvent::TurnCompleted { thread_id, .. } => Some(*thread_id),
+        ArchcarEvent::SessionError { thread_id, .. } => *thread_id,
+        _ => None,
+    };
+    let workspace = thread_id.and_then(|thread_id| workspace_for_thread(&db_path, thread_id));
+    let Some(notification) = event_notification_in(&event, workspace.as_deref()) else {
         return;
     };
     let Some(config) = ApnsConfig::from_env() else {
@@ -194,6 +216,28 @@ pub fn notify_event(db_path: PathBuf, event: ArchcarEvent) {
     if let Err(err) = send_apns_notification(&db_path, &config, &notification) {
         warn!("APNs notification failed: {err:#}");
     }
+}
+
+/// The name of the workspace that owns `thread_id`, so a push can say which
+/// workspace's chat finished. A missing database or row only costs the nicer
+/// wording, never the notification.
+fn workspace_for_thread(db_path: &Path, thread_id: i64) -> Option<String> {
+    let lookup = || -> Result<Option<String>> {
+        let conn =
+            Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.query_row(
+            "SELECT w.name FROM chat_threads t JOIN workspaces w ON w.id = t.workspace_id
+             WHERE t.id = ?1",
+            params![thread_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    };
+    lookup().unwrap_or_else(|err| {
+        debug!("workspace lookup for thread {thread_id} failed: {err:#}");
+        None
+    })
 }
 
 pub fn send_apns_notification(
@@ -267,7 +311,10 @@ fn interaction_notification(interaction: &ProviderInteractionRecord) -> EventNot
     EventNotification {
         id: format!("interaction-{}", interaction.id),
         title: "Input required".to_owned(),
-        body: joined_body(&interaction.title, &interaction.detail),
+        body: prefixed(
+            &joined_body(&interaction.title, &interaction.detail),
+            Some(interaction.workspace.trim()).filter(|name| !name.is_empty()),
+        ),
         thread_id: Some(interaction.thread_id),
     }
 }
@@ -483,6 +530,14 @@ fn joined_body(title: &str, detail: &str) -> String {
     }
 }
 
+fn prefixed(body: &str, workspace: Option<&str>) -> String {
+    match workspace {
+        Some(workspace) if body.is_empty() => workspace.to_owned(),
+        Some(workspace) => format!("{workspace}: {body}"),
+        None => body.to_owned(),
+    }
+}
+
 fn timestamp() -> String {
     unix_seconds().to_string()
 }
@@ -642,7 +697,7 @@ mod tests {
             Some(EventNotification {
                 id: "interaction-ask-1".to_owned(),
                 title: "Input required".to_owned(),
-                body: "Approve command? - cargo test".to_owned(),
+                body: "checkout: Approve command? - cargo test".to_owned(),
                 thread_id: Some(9),
             })
         );
@@ -655,6 +710,61 @@ mod tests {
             .unwrap()
             .title,
             "Chat finished"
+        );
+    }
+
+    #[test]
+    fn names_the_workspace_that_owns_the_thread() {
+        let (_temp, db_path) = migrated_db();
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO repositories (id, name, root_path, default_branch, workspace_parent_path, created_at, updated_at)
+               VALUES (1, 'repo', '/repo', 'main', '/ws', '1', '1');
+             INSERT INTO workspaces (id, repository_id, name, path, branch, base_ref, port_base, status, created_at, updated_at)
+               VALUES (5, 1, 'checkout', '/ws/checkout', 'b', 'main', 4000, 'active', '1', '1');
+             INSERT INTO chat_threads (id, workspace_id, provider, title, status, created_at, updated_at)
+               VALUES (9, 5, 'claude', 't', 'idle', '1', '1');",
+        )
+        .unwrap();
+
+        assert_eq!(
+            workspace_for_thread(&db_path, 9).as_deref(),
+            Some("checkout")
+        );
+        assert_eq!(workspace_for_thread(&db_path, 404), None);
+        assert_eq!(
+            workspace_for_thread(&db_path.with_file_name("missing.db"), 9),
+            None
+        );
+
+        let completed = ArchcarEvent::TurnCompleted {
+            session_id: 11,
+            thread_id: 9,
+            status: Some("completed".to_owned()),
+        };
+        assert_eq!(
+            event_notification_in(&completed, Some("checkout"))
+                .unwrap()
+                .body,
+            "The chat in checkout completed."
+        );
+        // Unresolved falls back to the thread number rather than an empty name.
+        assert_eq!(
+            event_notification_in(&completed, Some("  ")).unwrap().body,
+            "Thread 9 completed."
+        );
+        assert_eq!(
+            event_notification_in(
+                &ArchcarEvent::SessionError {
+                    session_id: Some(11),
+                    thread_id: Some(9),
+                    message: "codex exited".to_owned(),
+                },
+                Some("checkout"),
+            )
+            .unwrap()
+            .body,
+            "checkout: codex exited"
         );
     }
 
