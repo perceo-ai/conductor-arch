@@ -934,6 +934,24 @@ jobs:
       - name: Test ArchcarKit
         run: cd ios/ArchcarKit && swift test
 
+      # Archductor.xcodeproj is generated from ios/project.yml and gitignored.
+      # A plain `build` of the Archductor scheme compiles only the app target;
+      # ArchductorUITests is wired to build for the `test` action only.
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: cd ios && xcodegen generate
+
+      - name: Build Archductor app target
+        run: |
+          cd ios
+          xcodebuild -project Archductor.xcodeproj \
+            -scheme Archductor \
+            -destination 'generic/platform=iOS Simulator' \
+            -configuration Debug \
+            build CODE_SIGNING_ALLOWED=NO
+
   ci-gate:
     name: archductor/ci-gate
     needs:
