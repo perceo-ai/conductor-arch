@@ -166,6 +166,11 @@ impl ProjectionRenderClass {
     }
 }
 
+/// Provider subtype for a background task that is a subagent rather than a
+/// shell command. Still contains `background_task`, so it projects to the same
+/// background card.
+pub const BACKGROUND_AGENT_TASK_SUBTYPE: &str = "background_task:agent";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderProjectionEvent {
     pub canonical_id: String,
@@ -179,6 +184,7 @@ pub struct ProviderProjectionEvent {
     pub parent_id: Option<String>,
     pub nested_thread_id: Option<String>,
     pub raw_payload: Option<Value>,
+    pub background_agent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +202,8 @@ pub struct ProviderProjectionItem {
     pub nested_thread_id: Option<String>,
     pub raw_payload: Option<String>,
     pub inspectable: bool,
+    /// A background card for a subagent, not a shell command.
+    pub background_agent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +270,7 @@ pub fn render_provider_event_projection(
             items[index] = ProviderProjectionItem {
                 sequence: items[index].sequence,
                 timeline_seq: items[index].timeline_seq.or(item.timeline_seq),
+                background_agent: items[index].background_agent || item.background_agent,
                 ..item
             };
         } else {
@@ -396,6 +405,7 @@ fn provider_projection_event_from_record(
         parent_id: provider_projection_parent_id(record),
         nested_thread_id: record.parent_provider_thread_id.clone(),
         raw_payload,
+        background_agent: record.provider_subtype.as_deref() == Some(BACKGROUND_AGENT_TASK_SUBTYPE),
     }
 }
 
@@ -730,6 +740,7 @@ fn projection_item_from_event(
         nested_thread_id: event.nested_thread_id,
         raw_payload,
         inspectable,
+        background_agent: event.background_agent,
     }
 }
 
@@ -1740,6 +1751,67 @@ mod tests {
 
     const SUBAGENTS_AND_BACKGROUND_TASKS: &str =
         include_str!("../tests/fixtures/claude_stream/subagents_and_background_tasks.jsonl");
+
+    const BACKGROUND_AGENT_AND_COMMAND: &str = concat!(
+        r#"{"type":"system","subtype":"init","session_id":"sess_bg","uuid":"init_1","cwd":"/w","model":"claude-fixture","tools":["Bash","Agent"],"mcp_servers":[],"plugins":[]}"#,
+        "\n",
+        r#"{"type":"system","subtype":"task_started","session_id":"sess_bg","uuid":"agent_start","task_id":"agent_task","tool_use_id":"toolu_agent","description":"Audit the renderer","task_type":"local_agent","is_backgrounded":true}"#,
+        "\n",
+        r#"{"type":"system","subtype":"task_started","session_id":"sess_bg","uuid":"bash_start","task_id":"bash_task","tool_use_id":"toolu_bash","description":"Serve the app","task_type":"local_bash","is_backgrounded":true}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","session_id":"sess_bg","uuid":"result_1","is_error":false,"result":"Both are running.","duration_ms":10,"num_turns":1}"#,
+        "\n",
+        r#"{"type":"system","subtype":"task_progress","session_id":"sess_bg","uuid":"agent_progress","task_id":"agent_task","tool_use_id":"toolu_agent","description":"Reading files","usage":{"tool_uses":2}}"#,
+        "\n",
+    );
+
+    const BACKGROUND_AGENT_DONE: &str = r#"{"type":"system","subtype":"task_notification","session_id":"sess_bg","uuid":"agent_done","task_id":"agent_task","tool_use_id":"toolu_agent","status":"completed","summary":"Audit the renderer","output_file":""}"#;
+
+    fn background_cards(native: &str) -> Vec<(String, ProviderProjectionStatus, bool)> {
+        chat_items_for_claude_fixture(native)
+            .into_iter()
+            .filter(|item| item.render_class == ProjectionRenderClass::BackgroundCard)
+            .map(|item| (item.title, item.status, item.background_agent))
+            .collect()
+    }
+
+    #[test]
+    fn a_background_agent_card_is_marked_as_an_agent_and_a_background_command_is_not() {
+        assert_eq!(
+            background_cards(BACKGROUND_AGENT_AND_COMMAND),
+            vec![
+                (
+                    "Audit the renderer".to_owned(),
+                    ProviderProjectionStatus::Running,
+                    true
+                ),
+                (
+                    "Serve the app".to_owned(),
+                    ProviderProjectionStatus::Running,
+                    false
+                ),
+            ]
+        );
+
+        // Finishing keeps the mark: the notification record merges into the
+        // same card, and the agent card stops running while the command runs on.
+        let finished = format!("{BACKGROUND_AGENT_AND_COMMAND}{BACKGROUND_AGENT_DONE}\n");
+        assert_eq!(
+            background_cards(&finished),
+            vec![
+                (
+                    "Audit the renderer".to_owned(),
+                    ProviderProjectionStatus::Complete,
+                    true
+                ),
+                (
+                    "Serve the app".to_owned(),
+                    ProviderProjectionStatus::Running,
+                    false
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn a_backgrounded_command_gets_a_card_that_follows_it_to_the_end() {

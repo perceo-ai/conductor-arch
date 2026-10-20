@@ -12,6 +12,7 @@ import Icon, {  } from "@/components/Icon";
 import {
   SETTINGS_SECTIONS,
   type SettingsSection,
+  OnOffSegmented,
   SettingsBoolSelect,
   SettingsNavButton,
   SettingsRow,
@@ -339,6 +340,28 @@ export function SettingsPage() {
                       )}
                     </For>
                   </div>
+                }
+              />
+            </SettingsSectionBlock>
+            <SettingsSectionBlock title="Sounds">
+              <SettingsRow
+                title="Sound when a chat finishes"
+                description="Play a chime when a chat and all of its subagents stop generating. Silent while the OS is in do-not-disturb, where the platform exposes it."
+                control={
+                  <OnOffSegmented
+                    value={prefsStore.state.turnSound}
+                    onChange={(on) => prefsStore.setTurnSound(on)}
+                  />
+                }
+              />
+              <SettingsRow
+                title="Quiet for the chat on screen"
+                description="Skip the chime for the chat you are looking at while Archductor is focused."
+                control={
+                  <OnOffSegmented
+                    value={prefsStore.state.turnSoundSuppressWhenViewing}
+                    onChange={(on) => prefsStore.setTurnSoundSuppressWhenViewing(on)}
+                  />
                 }
               />
             </SettingsSectionBlock>

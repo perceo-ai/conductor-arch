@@ -13,6 +13,8 @@ import { nav } from "./nav";
 import { workspacesStore } from "./workspaces";
 import { threadsStore } from "./threads";
 import { intelStore } from "./intel";
+import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
+import { observeChatGeneration } from "./turnSound";
 
 async function refreshWorkspaceInventoryAndChats() {
   try {
@@ -77,6 +79,12 @@ async function refreshThreadSnapshot(threadId: number) {
     return;
   }
   inflightSnapshot.add(threadId);
+  // Whether this pull may decide the chat finished: both the snapshot (main
+  // agent) and the projection (subagents) must have come back, from the daemon
+  // still connected. A failed half leaves the other half stale, and a stale
+  // projection is exactly how a running subagent gets missed.
+  const epoch = daemonEpoch();
+  let fresh = false;
   try {
     // Interactions and plan state are pulled, not just listened for: an ask
     // raised before this window opened (or before this chat was selected) has
@@ -104,13 +112,19 @@ async function refreshThreadSnapshot(threadId: number) {
       chatStore.setPlanMode(threadId, plan.plan_mode);
       chatStore.setPlanPath(threadId, plan.plan_path ?? null);
     }
+    fresh = snap.type === "chat_snapshot" && proj.type === "chat_projection";
   } catch {
     // page owns its own error surface; ignore transient failures
   } finally {
     inflightSnapshot.delete(threadId);
-    if (pendingSnapshot.delete(threadId)) {
-      void refreshThreadSnapshot(threadId);
+    const followUp = pendingSnapshot.delete(threadId);
+    if (fresh && !daemonChangedSince(epoch)) {
+      // Busy is recorded from every pull, so a turn whose pulls always have a
+      // follow-up queued still has a busy baseline. Finished is only judged on
+      // a settled pull: one with a follow-up queued is already stale.
+      observeChatGeneration(threadId, { canFinish: !followUp });
     }
+    if (followUp) void refreshThreadSnapshot(threadId);
   }
 }
 
@@ -161,6 +175,9 @@ export function applyEvent(event: ArchcarEvent) {
         session_id: number;
         workspace: string;
         kind: string;
+        replayed?: boolean;
+        ready?: boolean;
+        runtime_state?: string;
       };
       // Shell sessions back the Terminal tab; correlate the async spawn to its
       // workspace and pull the first screen.
@@ -168,17 +185,29 @@ export function applyEvent(event: ArchcarEvent) {
         terminalStore.attachSession(e.workspace, e.session_id);
         void refreshTerminalScreen(e.session_id);
       } else {
+        // A replay on connect carries the session's real readiness and
+        // runtime state (an agent parked on a question is not ready but
+        // `waiting_for_input`, which is not work); a genuine start is never
+        // ready yet and carries neither.
         chatStore.setSession(e.thread_id, {
           session_id: e.session_id,
-          status: "starting",
-          runtime_state: "starting",
-          ready: false,
+          status: e.ready ? "ready" : "starting",
+          runtime_state: e.runtime_state ?? (e.ready ? "idle" : "starting"),
+          ready: e.ready ?? false,
         });
         // A fresh session starting clears any stale "failed" phase from a prior
         // turn so the composer doesn't keep showing an error.
         if (chatStore.slice(e.thread_id).phase.kind === "failed") {
           chatStore.setPhase(e.thread_id, { kind: "ready" });
         }
+        // Record busy now rather than waiting for a pull: a short turn can
+        // start and finish inside one refresh interval, and a detector that
+        // never saw it busy cannot hear it finish. This only ever records
+        // busy (canFinish: false). Deciding a chat finished needs a settled
+        // snapshot-and-projection pull: on a reconnect the stored subagent
+        // cards are stale, and a background agent launched while disconnected
+        // would otherwise be missed.
+        observeChatGeneration(e.thread_id, { canFinish: false });
       }
       void refreshThreadWorkspace(e.thread_id);
       break;
@@ -186,22 +215,26 @@ export function applyEvent(event: ArchcarEvent) {
 
     case "session_exited": {
       // Clear the exited session so running/busy spinners don't stick on.
-      chatStore.markSessionExited((event as { session_id: number }).session_id);
+      for (const threadId of chatStore.markSessionExited((event as { session_id: number }).session_id)) {
+        observeChatGeneration(threadId);
+      }
       void refreshWorkspaceInventoryAndChats();
       break;
     }
 
     case "provider_interaction_requested": {
-      interactionsStore.request(
-        (event as { interaction: ProviderInteractionRecord }).interaction,
-      );
+      const interaction = (event as { interaction: ProviderInteractionRecord }).interaction;
+      interactionsStore.request(interaction);
+      // An agent parked on a question is waiting on the operator: that is the
+      // moment the sound exists for.
+      observeChatGeneration(interaction.thread_id);
       break;
     }
 
     case "provider_interaction_resolved": {
-      interactionsStore.resolve(
-        (event as { interaction: ProviderInteractionRecord }).interaction,
-      );
+      const interaction = (event as { interaction: ProviderInteractionRecord }).interaction;
+      interactionsStore.resolve(interaction);
+      observeChatGeneration(interaction.thread_id);
       break;
     }
 
@@ -219,6 +252,9 @@ export function applyEvent(event: ArchcarEvent) {
         runtime_state: "idle",
         ready: true,
       });
+      // Pull the projection too: whether a subagent outlives this turn is only
+      // known from it, and the sound waits on that answer.
+      chatRefresh.request(e.thread_id);
       void refreshThreadWorkspace(e.thread_id);
       break;
     }

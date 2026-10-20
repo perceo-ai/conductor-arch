@@ -80,4 +80,23 @@ describe("prefsStore", () => {
     expect(ACCENT_HEX.amber).toMatch(/^#[0-9a-f]{6}$/i);
     expect(Object.keys(ACCENT_HEX)).toEqual(["amber", "blue", "green", "rose"]);
   });
+
+  it("plays the turn-finished sound by default and persists turning it off across restart", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => void storage.set(k, v),
+    });
+    const first = await import("./prefs");
+    expect(first.prefsStore.state.turnSound).toBe(true);
+    expect(first.prefsStore.state.turnSoundSuppressWhenViewing).toBe(false);
+    first.prefsStore.setTurnSound(false);
+    first.prefsStore.setTurnSoundSuppressWhenViewing(true);
+
+    // A fresh module load is what an app restart looks like to the store.
+    vi.resetModules();
+    const second = await import("./prefs");
+    expect(second.prefsStore.state.turnSound).toBe(false);
+    expect(second.prefsStore.state.turnSoundSuppressWhenViewing).toBe(true);
+  });
 });

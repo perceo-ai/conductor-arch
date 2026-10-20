@@ -121,6 +121,9 @@ const api = {
   notify: (opts: { id: string; title: string; body: string }): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke("app:notify", opts),
 
+  /** Whether the OS is in do-not-disturb, where the platform exposes it. */
+  doNotDisturb: (): Promise<boolean> => ipcRenderer.invoke("app:do-not-disturb"),
+
   /**
    * Shows a pairing QR for the iOS app in its own isolated window.
    *

@@ -1646,6 +1646,11 @@ pub struct ArchcarProjectionItem {
     /// calls name the Agent card that spawned them. Absent for top-level rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// A `background_card` for a subagent rather than a shell command. While
+    /// one runs, the chat is still working even though the main agent is
+    /// idle. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background_agent: bool,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,
@@ -3059,6 +3064,7 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             workspace,
             kind,
             pid,
+            ..
         } => format!(
             "session_started workspace={workspace} kind={} session_id={session_id} thread_id={thread_id} pid={pid}",
             session_kind_label(*kind)
@@ -3183,6 +3189,23 @@ pub enum ArchcarEvent {
         workspace: String,
         kind: SessionKind,
         pid: u32,
+        /// True when this event is the daemon replaying already-live session
+        /// state to a newly connected or reconnected client, not a session that
+        /// just started. The desktop sound detector must not treat a replay as
+        /// new work. Omitted when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        replayed: bool,
+        /// True when this replayed session was already ready and idle; only
+        /// meaningful when `replayed` is true, a session that is genuinely just
+        /// starting is always not-ready. Omitted when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ready: bool,
+        /// The replayed session's actual runtime state. `ready = false` alone
+        /// cannot tell an agent mid-turn from one parked on a question for
+        /// the user (`waiting_for_input`), and only the first is busy. Only
+        /// set on replay; omitted otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_state: Option<AgentSessionState>,
     },
     SessionReady {
         session_id: i64,
@@ -3330,11 +3353,34 @@ mod tests {
                 workspace: "berlin".to_owned(),
                 kind: SessionKind::CODEX,
                 pid: 123,
+                replayed: false,
+                ready: false,
+                runtime_state: None,
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();
+        // A genuine start keeps the wire shape older clients know.
+        assert!(!json.contains("replayed"), "{json}");
         let decoded: RpcEnvelope<ArchcarEvent> = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, envelope);
+
+        let replay = RpcEnvelope {
+            id: "2".to_owned(),
+            payload: ArchcarEvent::SessionStarted {
+                session_id: 4,
+                thread_id: 6,
+                workspace: "berlin".to_owned(),
+                kind: SessionKind::CODEX,
+                pid: 123,
+                replayed: true,
+                ready: false,
+                runtime_state: None,
+            },
+        };
+        let json = serde_json::to_string(&replay).unwrap();
+        assert!(json.contains("\"replayed\":true"), "{json}");
+        let decoded: RpcEnvelope<ArchcarEvent> = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, replay);
     }
 
     #[test]

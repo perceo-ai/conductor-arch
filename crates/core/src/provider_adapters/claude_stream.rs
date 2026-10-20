@@ -13,6 +13,7 @@ use crate::archcar::harness_contract::{
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
+use crate::provider_projection::BACKGROUND_AGENT_TASK_SUBTYPE;
 use crate::workspace::SessionKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1069,6 +1070,12 @@ pub struct ClaudeProviderEventDraft {
     pub usage: ClaudeUsageDraft,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     reasoning_blocks: Vec<ClaudeReasoningBlockDraft>,
+    /// A background task record for a subagent (`task_type: local_agent`),
+    /// as opposed to a backgrounded shell command. Clients need the
+    /// difference: an agent still working means the chat is not done; a dev
+    /// server still running does not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background_agent: bool,
     pub raw_json: Value,
 }
 
@@ -1142,6 +1149,7 @@ impl ClaudeProviderEventDraft {
                 subtype: Some("thinking".to_owned()),
                 usage: ClaudeUsageDraft::default(),
                 reasoning_blocks: Vec::new(),
+                background_agent: false,
                 raw_json: reasoning_base.raw_json.clone(),
             }
             .into_provider_event_draft(context.clone())
@@ -1163,6 +1171,7 @@ impl ClaudeProviderEventDraft {
                 self.kind,
                 self.tool_name.as_deref(),
                 self.subtype,
+                self.background_agent,
             ),
         };
         let phase = claude_phase_for(self.kind, &self.raw_json);
@@ -1280,6 +1289,8 @@ pub struct ClaudeStreamParser {
 struct ClaudeTaskState {
     description: Option<String>,
     backgrounded: bool,
+    /// `task_type: local_agent`: the task is a subagent, not a shell command.
+    agent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1330,6 +1341,7 @@ impl ClaudeStreamParser {
             } else {
                 Vec::new()
             },
+            background_agent: false,
             raw_json,
         };
 
@@ -1355,6 +1367,7 @@ impl ClaudeStreamParser {
                     .get("is_backgrounded")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                task.agent |= claude_task_is_agent(value);
             }
             Some("task_updated") => {
                 if value
@@ -1379,6 +1392,7 @@ impl ClaudeStreamParser {
                     };
                     let state = self.tasks.entry(task_id).or_default();
                     state.backgrounded = true;
+                    state.agent |= claude_task_is_agent(task);
                     if state.description.is_none() {
                         state.description = string_at(task, &["description"]);
                     }
@@ -1638,9 +1652,9 @@ impl ClaudeStreamParser {
         };
 
         if draft.kind == ClaudeProviderEventKind::BackgroundTask {
-            draft.tool_target = string_at(&draft.raw_json, &["task_id"])
-                .and_then(|task_id| self.tasks.get(&task_id))
-                .and_then(|task| task.description.clone());
+            let task = string_at(&draft.raw_json, &["task_id"]).and_then(|id| self.tasks.get(&id));
+            draft.tool_target = task.and_then(|task| task.description.clone());
+            draft.background_agent = task.is_some_and(|task| task.agent);
         }
 
         if string_at(&draft.raw_json, &["event", "type"]).as_deref() == Some("content_block_stop") {
@@ -2134,10 +2148,15 @@ fn claude_subagent_message(kind: ClaudeProviderEventKind) -> Option<(&'static st
     }
 }
 
+fn claude_task_is_agent(value: &Value) -> bool {
+    string_at(value, &["task_type"]).as_deref() == Some("local_agent")
+}
+
 fn claude_canonical_kind_and_subtype(
     kind: ClaudeProviderEventKind,
     tool_name: Option<&str>,
     subtype: Option<String>,
+    background_agent: bool,
 ) -> (ProviderEventKind, Option<String>) {
     if kind == ClaudeProviderEventKind::SkillInjection {
         return (ProviderEventKind::SkillPluginHook, Some("skill".to_owned()));
@@ -2149,10 +2168,12 @@ fn claude_canonical_kind_and_subtype(
         );
     }
     if kind == ClaudeProviderEventKind::BackgroundTask {
-        return (
-            ProviderEventKind::GoalTask,
-            Some("background_task".to_owned()),
-        );
+        let subtype = if background_agent {
+            BACKGROUND_AGENT_TASK_SUBTYPE
+        } else {
+            "background_task"
+        };
+        return (ProviderEventKind::GoalTask, Some(subtype.to_owned()));
     }
     if matches!(
         kind,

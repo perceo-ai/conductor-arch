@@ -244,6 +244,39 @@ Constraints worth knowing before you rely on it:
 - `--no-checks` skips the repository's configured checks.
 - `--open-pr` opens a draft; add `--ready-pr` for a ready-for-review PR.
 
+## Knowing when a chat is done
+
+The desktop app plays a short chime when a chat stops generating, in any
+chat, including ones you are not looking at and while the window is in the
+background. "Stopped" means nothing in the chat is working any more:
+
+- the main agent is not streaming, calling tools, or starting, **and**
+- no subagent is running, including an agent Claude has put in the
+  background. A main agent that ends its turn while a background agent works
+  does not chime; the chime comes when that agent finishes.
+
+A backgrounded shell command (a dev server, a watch build) does not hold the
+chime back. An agent stopping to ask you something also chimes, because the
+chat is waiting on you. Each chat chimes once per stop: reconnecting, switching
+chats, or refreshing does not repeat it.
+
+Two settings live under **Settings → General → Sounds**. Both are stored per
+machine with the app's other preferences:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| Sound when a chat finishes | On | Turns the chime off entirely. |
+| Quiet for the chat on screen | Off | Skips the chime for the chat you are looking at while Archductor is focused. |
+
+The chime respects the OS's do-not-disturb where the platform exposes it:
+GNOME (and desktops built on its notification settings) on Linux. macOS Focus
+and Windows Focus Assist have no public API, so on those platforms use the
+setting above.
+
+The CLI has no equivalent yet. It has no long-running command that watches a
+chat finish; `archductor status` shows each agent's state (`working`,
+`finished`, `awaiting_input`) when you ask.
+
 ## MCP
 
 Archductor is an MCP server, so an agent can query and drive Archductor itself.

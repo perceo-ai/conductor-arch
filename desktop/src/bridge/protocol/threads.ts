@@ -20,6 +20,11 @@ export interface ArchcarProjectionItem {
    * calls name the Agent card that spawned them. Absent for top-level rows.
    */
   parent_id?: string | null;
+  /**
+   * A `background_card` for a backgrounded subagent rather than a shell
+   * command. Absent (false) from daemons that predate it.
+   */
+  background_agent?: boolean;
 }
 
 export interface ArchcarChatThread {

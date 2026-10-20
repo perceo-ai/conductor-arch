@@ -1287,6 +1287,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             stream_state: item.stream_state.as_str().to_owned(),
                             timeline_seq: item.timeline_seq,
                             parent_id: item.parent_id,
+                            background_agent: item.background_agent,
                         })
                         .collect(),
                     }
@@ -6533,6 +6534,9 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
             workspace: snapshot.workspace,
             kind: snapshot.kind,
             pid: snapshot.pid,
+            replayed: true,
+            ready: snapshot.ready,
+            runtime_state: Some(snapshot.runtime_state),
         });
         if snapshot.ready {
             let _ = subscriber.send(ArchcarEvent::SessionReady {
@@ -9323,6 +9327,9 @@ exit 1
             workspace: "berlin".to_owned(),
             kind: SessionKind::CODEX,
             pid: 12345,
+            replayed: true,
+            ready: true,
+            runtime_state: Some(crate::session_state::AgentSessionState::WaitingForInput),
         }));
         assert!(events.contains(&ArchcarEvent::SessionReady {
             session_id: 9,
@@ -9334,6 +9341,9 @@ exit 1
             workspace: "paris".to_owned(),
             kind: SessionKind::CODEX,
             pid: 12346,
+            replayed: true,
+            ready: false,
+            runtime_state: Some(crate::session_state::AgentSessionState::Starting),
         }));
         assert!(!events.contains(&ArchcarEvent::SessionReady {
             session_id: 10,

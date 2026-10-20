@@ -145,3 +145,17 @@ export function SettingsBoolSelect(props: { value: string; onInput: (value: stri
     </select>
   );
 }
+
+/** On/Off as the same segmented buttons the appearance prefs use. */
+export function OnOffSegmented(props: { value: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <div class="settings-segmented">
+      <button classList={{ active: props.value }} onClick={() => props.onChange(true)}>
+        On
+      </button>
+      <button classList={{ active: !props.value }} onClick={() => props.onChange(false)}>
+        Off
+      </button>
+    </div>
+  );
+}
