@@ -182,3 +182,51 @@ private func summary(
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func aLifecycleRequestSucceedingWhileTheStreamIsDownKeepsTheListStale() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond { line in
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = object["id"] as? String,
+              let payload = object["payload"] as? [String: Any] else { return nil }
+        switch payload["type"] as? String {
+        case "get_inventory_snapshot":
+            return #"{"id":"\#(id)","payload":{"type":"inventory_snapshot","repositories":[],"workspaces":[],"chat_threads":{}}}"#
+        case "archive_workspace":
+            return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
+        default:
+            return nil
+        }
+    }
+    // Too slow to reconnect on its own within the test, so the stream stays
+    // down for as long as the test needs it to.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = WorkspacesStore(session: session)
+    await store.refresh()
+    #expect(store.isStale == false)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+    let refreshesBefore = store.refreshCount
+
+    // The archive and the refresh after it each open their own connection,
+    // so both succeed even though the event stream is still down.
+    let archived = await store.archive(try summary(name: "w"), removeWorktree: false)
+    #expect(archived)
+    #expect(store.refreshCount == refreshesBefore + 1)
+    #expect(store.lastError == nil)
+    #expect(await session.connectionState != .connected)
+
+    // The list is still missing live updates, so it must still say so.
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}

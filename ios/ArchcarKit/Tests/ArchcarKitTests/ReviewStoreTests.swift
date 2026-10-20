@@ -15,13 +15,17 @@ private func replyID(_ line: String) -> String? {
     return object["id"] as? String
 }
 
-/// A mock that answers the four RPCs `ReviewStore.refreshAll()` issues.
-private func reviewResponder() -> @Sendable (String) -> String? {
+/// A mock that answers the four RPCs `ReviewStore.refreshAll()` issues, plus
+/// the todo and push actions. `checksFail` makes the daemon refuse the checks
+/// summary, so one leg of a refresh fails while the others succeed.
+private func reviewResponder(checksFail: Bool = false) -> @Sendable (String) -> String? {
     { line in
         guard let id = replyID(line), let type = requestType(line) else { return nil }
         switch type {
         case "get_workspace_changes":
             return #"{"id":"\#(id)","payload":{"type":"workspace_changes","workspace":"w","files":[]}}"#
+        case "get_checks_summary" where checksFail:
+            return #"{"id":"\#(id)","payload":{"type":"error","message":"gh is not authenticated"}}"#
         case "get_checks_summary":
             return """
             {"id":"\(id)","payload":{"type":"checks_summary","workspace":"w","summary":\
@@ -35,6 +39,8 @@ private func reviewResponder() -> @Sendable (String) -> String? {
             """
         case "list_todos":
             return #"{"id":"\#(id)","payload":{"type":"todos","workspace":"w","todos":[]}}"#
+        case "add_todo", "push_branch":
+            return #"{"id":"\#(id)","payload":{"type":"ack"}}"#
         default:
             return nil
         }
@@ -76,6 +82,63 @@ private func reviewResponder() -> @Sendable (String) -> String? {
     #expect(await eventually { @MainActor in !store.isStale })
 
     observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aRequestSucceedingWhileTheStreamIsDownKeepsReviewStale() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder())
+    // Too slow to reconnect on its own within the test, so the stream stays
+    // down for as long as the test needs it to.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+    await store.refreshAll()
+    #expect(store.isStale == false)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+
+    // Each of these opens its own connection, so they succeed even though
+    // the event stream is still down.
+    await store.addTodo("write the changelog")
+    await store.push()
+    #expect(store.lastError == nil)
+    #expect(store.actionOutput == "Done.")
+    #expect(await session.connectionState != .connected)
+
+    // The panels are still missing live updates, so they must still say so.
+    #expect(store.isStale)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aPartialRefreshKeepsReviewStale() async throws {
+    let daemon = try await MockDaemon()
+    // Changes, workflow runs and todos answer; the checks summary does not.
+    await daemon.respond(to: reviewResponder(checksFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+
+    await store.refreshAll()
+
+    // The fetches after the failed one succeeded, but the checks on screen
+    // were never refreshed, so the panel is not up to date.
+    #expect(await session.connectionState == .connected)
+    #expect(store.checks == nil)
+    #expect(store.runs != nil)
+    #expect(store.isStale)
+
     await session.disconnect()
     await daemon.stop()
 }
