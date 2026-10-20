@@ -79,18 +79,7 @@ struct WorkspaceList: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18, pinnedViews: []) {
-                if store.isStale {
-                    HStack(spacing: 6) {
-                        Image(systemName: "wifi.slash")
-                        Text("Showing last known state — not connected")
-                    }
-                    .font(Typeface.secondary)
-                    .foregroundStyle(palette.warning)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .panel(fill: \.surface)
-                }
+                if store.isStale { StaleBanner() }
 
                 ForEach(store.groups) { group in
                     section(

@@ -169,5 +169,71 @@ private func reconnectAttachedTerminal(processes: String) async throws -> (Termi
         processes: "Sessions\\n#2 /bin/zsh exited pid=8 exit=0 started=1 log=/tmp/a.log")
 
     #expect(await eventually { @MainActor in store.sessionID == nil })
+    #expect(store.isStale == false)
     await finish()
+}
+
+@MainActor
+@Test func clearsTheStaleMarkWhenNoShellWasAttachedAtTheDrop() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: terminalResponder(processes: "Sessions"))
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    // Nothing attached: the panel is open, but no shell is running.
+    let store = TerminalStore(session: session, workspace: "w")
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await daemon.endEventConnection()
+    #expect(await eventually { @MainActor in store.isStale })
+    await session.reconnectNow()
+
+    // The daemon answering is what proves the link is back; there being no
+    // shell to show must not keep the mark up.
+    #expect(await eventually { @MainActor in !store.isStale })
+    #expect(store.sessionID == nil)
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aDroppedStreamMarksTerminalStaleAndRefetchesOnReconnect() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: terminalResponder(
+        processes: "Sessions\\n#2 /bin/zsh running pid=8 exit=- started=1 log=/tmp/a.log"))
+    // Too slow to reconnect on its own within the test, so the stale state
+    // holds until `reconnectNow` ends it.
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = TerminalStore(session: session, workspace: "w")
+    store.attachForTesting(sessionID: 2)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+    #expect(store.isStale == false)
+    let before = await daemon.receivedLines.count
+
+    await daemon.endEventConnection()
+
+    // Stale straight away, and not because a request failed: none was sent.
+    #expect(await eventually { @MainActor in store.isStale })
+    #expect(await daemon.receivedLines.count == before)
+
+    await session.reconnectNow()
+
+    // The reattach check and screen refetch clear the mark.
+    #expect(await eventually {
+        await daemon.receivedLines.dropFirst(before).contains { $0.contains("get_workspace_processes") }
+    })
+    #expect(await eventually { @MainActor in store.screen == "shell 2" })
+    #expect(await eventually { @MainActor in !store.isStale })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
 }
