@@ -4154,6 +4154,12 @@ fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
         }
     };
 
+    // One queued input per turn. Mark the session busy before handing the
+    // input over, not after: a `session send` that read `ready` in between
+    // would be steered into the turn this input starts — which merges two
+    // prompts and leaves the harness's turn accounting waiting for a
+    // completion that never comes. TurnCompleted drains the next one.
+    let readiness_before = note_session_not_ready_for_queue(&handle);
     match handle
         .command_tx
         .send(crate::archcar::session::SessionCommand::SendInput {
@@ -4163,18 +4169,15 @@ fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
             delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
         }) {
         Ok(()) => {
+            crate::archcar::test_hooks::pause_after_provider_handoff();
             broadcast(
                 &mut state.lock().unwrap(),
                 ArchcarEvent::ChatQueueUpdated { thread_id },
             );
-            // One queued input per turn. The session does not report "busy"
-            // until the provider starts the turn, so a message queued in that
-            // gap would otherwise be written into the same turn — which merges
-            // two prompts and leaves the harness's turn accounting waiting for
-            // a completion that never comes. TurnCompleted drains the next one.
-            note_session_not_ready_for_queue(&handle);
         }
         Err(err) => {
+            // The input never reached the session; undo the busy mark.
+            restore_session_readiness(&handle, readiness_before);
             if let Err(restore_err) = store.requeue_claimed_chat_input_front(&queued) {
                 warn!(
                     thread_id,
@@ -4636,13 +4639,30 @@ fn start_session_for_queued_thread(
     });
 }
 
-fn note_session_not_ready_for_queue(handle: &SessionHandle) {
+/// Marks a codex/claude session busy and returns the readiness it replaced,
+/// for [`restore_session_readiness`] if the input then fails to send.
+fn note_session_not_ready_for_queue(handle: &SessionHandle) -> Option<(bool, AgentSessionState)> {
+    let mut snapshot = handle.snapshot.lock().ok()?;
+    if !matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
+        return None;
+    }
+    let before = (snapshot.ready, snapshot.runtime_state);
+    snapshot.ready = false;
+    snapshot.runtime_state = AgentSessionState::Running;
+    Some(before)
+}
+
+fn restore_session_readiness(handle: &SessionHandle, before: Option<(bool, AgentSessionState)>) {
+    let Some((ready, runtime_state)) = before else {
+        return;
+    };
     let Ok(mut snapshot) = handle.snapshot.lock() else {
         return;
     };
-    if matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
-        snapshot.ready = false;
-        snapshot.runtime_state = crate::session_state::AgentSessionState::Running;
+    // Only undo our own mark; anything the session reported since stands.
+    if !snapshot.ready && snapshot.runtime_state == AgentSessionState::Running {
+        snapshot.ready = ready;
+        snapshot.runtime_state = runtime_state;
     }
 }
 

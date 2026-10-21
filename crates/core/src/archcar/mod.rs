@@ -7,6 +7,7 @@ pub mod protocol;
 pub mod remote;
 pub mod server;
 pub mod session;
+mod test_hooks;
 pub mod transport;
 
 #[cfg(test)]

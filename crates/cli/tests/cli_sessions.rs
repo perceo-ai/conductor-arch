@@ -838,6 +838,169 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
     wait_for_session_exit(temp.path(), session_id);
 }
 
+/// Failure this guards: when the daemon delivered a queued message at a turn
+/// boundary, it handed the turn to the provider first and only afterwards
+/// marked the session not ready. A `session send` landing in that gap read
+/// `ready = true`, went straight in, and was steered into the turn that had
+/// just started -- two prompts merged into one turn. The daemon now marks the
+/// session busy before the handoff, so the send queues for the next turn.
+///
+/// The gap is a few milliseconds in a real daemon. The test daemon is built
+/// with the `test-handoff-delay` seam, which stalls right after each handoff,
+/// so the send below lands in the gap every time.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_while_a_queued_message_is_handed_off_queues_behind_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            ("ARCHDUCTOR_TEST_HANDOFF_DELAY_MS", Path::new("1500")),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    app()
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app()
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "codex_executable_path = {:?}\n",
+            fake_codex.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the second task",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("queued codex message"));
+
+    // End turn 1. The daemon drains the queue and hands "Then the second
+    // task" to the provider; the moment the provider has it, send again.
+    fs::write(release.with_extension("1"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the third task",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("queued codex message"),
+        "a send during the queued handoff must queue, not join the live turn: {stdout}"
+    );
+
+    // Turn 2 is still held: the third message waits, then opens turn 3.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "the third message must wait for turn 2 to end"
+    );
+    fs::write(release.with_extension("2"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(captured.len(), 3, "{captured:?}");
+    assert_eq!(captured[0].0, "turn/start", "{captured:?}");
+    assert!(
+        captured[0].1.ends_with("Start the long task"),
+        "{captured:?}"
+    );
+    assert_eq!(
+        captured[1],
+        ("turn/start".to_owned(), "Then the second task".to_owned())
+    );
+    assert_eq!(
+        captured[2],
+        ("turn/start".to_owned(), "Then the third task".to_owned())
+    );
+
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let session_id = store.list_sessions("berlin").unwrap()[0].id;
+    app()
+        .args(["archcar", "kill", &session_id.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), session_id);
+}
+
 /// Failure this guards: a provider that dies mid-handshake leaves the session
 /// with `runtime_state = failed` while its process `status` still reads
 /// `running`, and `session send` printed both side by side, e.g. "session 1 is
@@ -1032,6 +1195,62 @@ for raw in sys.stdin:
             threading.Thread(target=complete_when_released, args=(turn_id,), daemon=True).start()
         else:
             complete(turn_id)
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+/// A codex app-server stand-in that holds turn N open until
+/// `$ARCHDUCTOR_RELEASE_PATH.N` exists, and records every input it receives
+/// as a `[method, text]` line, so a steer into a live turn shows up as such.
+#[cfg(unix)]
+fn write_fake_held_codex(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import threading
+import time
+
+capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
+release = os.environ["ARCHDUCTOR_RELEASE_PATH"]
+lock = threading.Lock()
+
+def emit(message):
+    with lock:
+        print(json.dumps(message), flush=True)
+
+def record(method, params):
+    with open(capture, "a", encoding="utf-8") as output:
+        output.write(json.dumps([method, params["input"][0]["text"]]) + "\n")
+
+def complete_when_released(turn, turn_id):
+    while not os.path.exists("%s.%d" % (release, turn)):
+        time.sleep(0.05)
+    emit({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}})
+
+turns = 0
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        emit({"id": message["id"], "result": {}})
+    elif method in ("thread/start", "thread/resume"):
+        emit({"id": message["id"], "result": {"thread": {"id": "thread-held"}}})
+    elif method == "turn/start":
+        turns += 1
+        record(method, message["params"])
+        turn_id = "turn-%d" % turns
+        emit({"id": message["id"], "result": {"turn": {"id": turn_id}}})
+        emit({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
+        threading.Thread(target=complete_when_released, args=(turns, turn_id), daemon=True).start()
+    elif method == "turn/steer":
+        record(method, message["params"])
+        emit({"id": message["id"], "result": {"turnId": "turn-%d" % turns}})
 "#,
     )?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
@@ -1801,6 +2020,25 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for {expected} line(s) in {}",
+        path.display()
+    );
+}
+
+/// [`wait_for_file_lines`] for a daemon built with `test-handoff-delay`:
+/// every handoff stalls it, so allow several stalls' worth of time.
+fn wait_for_file_lines_through_stalls(path: &Path, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if fs::read_to_string(path)
+            .map(|contents| contents.lines().count() >= expected)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
     panic!(
         "timed out waiting for {expected} line(s) in {}",

@@ -2618,6 +2618,15 @@ fn run_codex_app_server_session_loop(
                         );
                         continue;
                     }
+                    // Busy before the provider has the turn, not after: a
+                    // send that read `ready` once the turn was written would
+                    // be steered into it. If the write fails, the session is
+                    // marked failed below, so this never outlives a turn the
+                    // provider did not get.
+                    if let Ok(mut state) = snapshot.lock() {
+                        state.ready = false;
+                        state.runtime_state = AgentSessionState::Running;
+                    }
                     let write_result = match route {
                         CodexInputRoute::Steer { expected_turn_id } => {
                             write_turn_steer_request_with_id(
@@ -2642,6 +2651,9 @@ fn run_codex_app_server_session_loop(
                             )
                         }
                     };
+                    if write_result.is_ok() {
+                        crate::archcar::test_hooks::pause_after_provider_handoff();
+                    }
                     if let Err(err) = write_result {
                         let _ = runtime_store
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
@@ -2688,10 +2700,6 @@ fn run_codex_app_server_session_loop(
                         let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                             thread_id: started.thread_id,
                         });
-                        if let Ok(mut state) = snapshot.lock() {
-                            state.ready = false;
-                            state.runtime_state = AgentSessionState::Running;
-                        }
                     }
                 }
                 SessionCommand::Kill => {
@@ -2887,6 +2895,15 @@ fn run_claude_stream_session_loop(
                         );
                         continue;
                     }
+                    // Busy before the provider has the turn, not after: a
+                    // send that read `ready` once the turn was written would
+                    // be steered into it. If the write fails, the session is
+                    // marked failed below, so this never outlives a turn the
+                    // provider did not get.
+                    if let Ok(mut state) = snapshot.lock() {
+                        state.ready = false;
+                        state.runtime_state = AgentSessionState::Running;
+                    }
                     let native_write = adapter.encode_input(HarnessInput {
                         local_input_id: local_input_id.clone(),
                         content: provider_input.clone(),
@@ -2904,6 +2921,9 @@ fn run_claude_stream_session_loop(
                         connection.stdin.flush()?;
                         Ok(())
                     });
+                    if write_result.is_ok() {
+                        crate::archcar::test_hooks::pause_after_provider_handoff();
+                    }
                     if let Err(err) = write_result {
                         let _ = runtime_store
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
@@ -2938,10 +2958,6 @@ fn run_claude_stream_session_loop(
                             &kind,
                             user_input_sequence,
                         );
-                        if let Ok(mut state) = snapshot.lock() {
-                            state.ready = false;
-                            state.runtime_state = AgentSessionState::Running;
-                        }
                     }
                 }
                 SessionCommand::Kill => {
