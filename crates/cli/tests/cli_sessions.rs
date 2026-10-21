@@ -2646,8 +2646,13 @@ fn wait_for_empty_chat_queue(root: &Path, workspace: &str) {
     }
 }
 
-/// Subscribes to the daemon's event broadcast over its local socket. Events
-/// arrive as their JSON payloads.
+/// Subscribes to the daemon's event broadcast over its local socket and
+/// returns once the daemon has the subscriber registered. Events arrive as
+/// their JSON payloads. Needs a running session: the proof of registration is
+/// the `session_started` the daemon replays for it, which it sends under the
+/// same lock as it registers the subscriber, and every later broadcast takes
+/// that lock too. Returning before that proof would let an event broadcast in
+/// between go to every subscriber but this one.
 #[cfg(unix)]
 fn subscribe_to_archcar_events(root: &Path) -> std::sync::mpsc::Receiver<serde_json::Value> {
     use std::io::{BufRead, BufReader, Write};
@@ -2670,7 +2675,17 @@ fn subscribe_to_archcar_events(root: &Path) -> std::sync::mpsc::Receiver<serde_j
             }
         }
     });
-    rx
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(event) if event["type"] == "session_started" && event["replayed"] == true => {
+                return rx;
+            }
+            Ok(_) => {}
+            Err(err) => panic!("the daemon never confirmed the event subscription: {err}"),
+        }
+    }
 }
 
 /// Waits for the daemon to broadcast an event of type `event_type`. The
