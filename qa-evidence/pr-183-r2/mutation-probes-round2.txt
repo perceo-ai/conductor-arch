@@ -1,0 +1,86 @@
+qa round-2 mutation probes, PR #183 — distilled findings
+=========================================================
+
+Purpose: re-prove each of my round-1 remedies with its OWN mutation, reverting
+that remedy ALONE on the current head (103960e5), so one executed RED is
+attributable to one finding. Both probes keep every other fix in place.
+
+Both probes dispatched through the repo's own CI workflow (workflow_dispatch on
+ci.yml) and run on the project's macOS runners. This Linux box has no Xcode, no
+simulator and no Swift toolchain, so CI is the only execution path — for the dev
+and for me.
+
+--------------------------------------------------------------------------
+M1 — reverts the checksError remedy alone
+--------------------------------------------------------------------------
+Branch: qa-probe/pr183r2-checks  commit 3b0b1d9  (NOT FOR MERGE, deleted)
+Diff vs head, one line, ReviewStore.swift:131:
+    -        checksError = failure
+    +        checksError = lastError  // qa mutation M1
+
+That reinstates round-1's exact defect: ChecksPanel's cause follows the volatile
+`lastError`, which the successful second leg of fetchChecks() has already nil'd.
+
+Run 39573601864, job 119133642329, HEAD is now at 3b0b1d9.
+Step conclusions: 6 "Build ArchcarKit" SUCCESS, 7 "Test ArchcarKit" FAILURE,
+steps 8-10 skipped. Compiler `error:` lines in the log: ZERO.
+=> assertion-level RED, not a compile-level one.
+
+  Test run with 220 tests failed   (219 passed, exactly 1 failed)
+
+The single failure is aPartialRefreshKeepsReviewStale — the AC1/AC3 test:
+
+  ReviewStoreTests.swift:156:5: Expectation failed:
+    (store.checksError?.contains("gh is not authenticated") -> nil) == true
+  ReviewStoreTests.swift:158:5: Expectation failed:
+    (checksBanner -> "Could not refresh the latest data").contains("gh is not authenticated")
+  ReviewStoreTests.swift:159:5: Expectation failed:
+    (checksBanner -> "Could not refresh the latest data")
+      != (StaleBannerCopy.text(isDisconnected: false, cause: nil) -> "Could not refresh the latest data")
+
+Surgical: lines 151/152 (isDisconnected == false, text != disconnected) PASSED,
+and line 155 (store.lastError == nil) PASSED — so the mechanism I described in
+round 1 is confirmed by the probe itself, and only the cause-bearing assertions
+moved. The rendered text in the failure message is byte-for-byte what I reported
+as the AC3 failure in round 1.
+
+--------------------------------------------------------------------------
+M2 — reverts the todosError remedy alone
+--------------------------------------------------------------------------
+Branch: qa-probe/pr183r2-todos  commit bb93c6c  (NOT FOR MERGE, deleted)
+Diff vs head, one line added in ReviewStore.request()'s success branch:
+    +            todosError = nil  // qa mutation M2
+
+That reinstates the sibling exposure I named: the todos cause no longer survives
+another request's success, which is exactly what observe()'s event loop does
+(it refetches changes and checks, never todos).
+
+Run 39573626152, job 119133708309, HEAD is now at bb93c6c.
+Step conclusions: 6 "Build ArchcarKit" SUCCESS, 7 "Test ArchcarKit" FAILURE,
+steps 8-10 skipped. Compiler `error:` lines in the log: ZERO.
+=> assertion-level RED.
+
+  Test run with 220 tests failed   (219 passed, exactly 1 failed)
+
+The single failure is aTodosFailureKeepsItsCauseThroughAnEventDrivenRefresh:
+
+  ReviewStoreTests.swift:187:5: Expectation failed:
+    (store.todosError?.contains("todo store unavailable") -> nil) == true
+  ReviewStoreTests.swift:189:5: Expectation failed:
+    (todosBanner -> "Could not refresh the latest data").contains("todo store unavailable")
+
+Surgical, and the passing lines are the informative half: 183 (changes and
+checks cleared), 184 (todosStale still set), 185 (lastError == nil), 186
+(isDisconnected == false) ALL PASSED, so the test's setup reproduced the state
+rather than dying in a fixture. Line 190 (!contains("not connected")) also
+passed under the mutation — which is precisely why round 1's weaker assertion
+(`!= StaleBannerCopy.disconnected`) let the dropped cause through green CI, and
+why the strengthened assertion was the right ask.
+
+--------------------------------------------------------------------------
+Attribution
+--------------------------------------------------------------------------
+Each probe reds exactly one test, and the two tests are disjoint in what they
+assert (checksError vs todosError), so each of my two round-1 remedies is
+independently proven load-bearing. 219 of 220 passing in both runs rules out a
+broken build masquerading as a targeted RED.
