@@ -163,6 +163,34 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// When `pid`'s current process started, in clock ticks since boot
+/// (`/proc/<pid>/stat` field 22).
+///
+/// The kernel hands a dead process's pid to the next one it starts, but never
+/// its start time, so a recorded (pid, start time) pair names one process: a
+/// live pid whose start time differs is a different process. `None` when the
+/// pid is gone, and always on platforms without procfs (macOS, Windows).
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // `pid (comm) state …`; comm may contain spaces or parens, so count
+        // from the last ')'. The field after it is field 3, so field 22 is the
+        // 20th one there.
+        stat.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(19)?
+            .parse()
+            .ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 #[cfg(unix)]
 pub fn configure_new_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;

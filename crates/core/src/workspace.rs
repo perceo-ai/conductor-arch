@@ -3035,12 +3035,14 @@ impl WorkspaceStore {
     pub fn update_session_process_pid(&self, process_id: i64, pid: u32) -> Result<()> {
         anyhow::ensure!(pid > 0, "session process id is required");
         let changed = self.conn.execute(
-            "UPDATE processes SET pid = ?1 WHERE id = ?2 AND kind = ?3 AND status = ?4",
+            "UPDATE processes SET pid = ?1, pid_start_time = ?5
+             WHERE id = ?2 AND kind = ?3 AND status = ?4",
             params![
                 pid,
                 process_id,
                 ProcessKind::Session.as_str(),
-                ProcessStatus::Running.as_str()
+                ProcessStatus::Running.as_str(),
+                pid_start_time(pid),
             ],
         )?;
         anyhow::ensure!(changed > 0, "no running session process #{process_id}");
@@ -3257,7 +3259,7 @@ impl WorkspaceStore {
 
         let mut reconciled = Vec::new();
         for process in running {
-            if process_alive(process.pid) {
+            if self.session_process_alive(&process)? {
                 continue;
             }
             let now = timestamp();
@@ -3270,6 +3272,67 @@ impl WorkspaceStore {
             reconciled.push(self.get_process(process.id)?);
         }
         Ok(reconciled)
+    }
+
+    /// The workspace's sessions, with each stale `running` row corrected
+    /// first; see [`Self::reconcile_session_process`]. Use this wherever a
+    /// session's running state is shown to someone or acted on.
+    pub fn list_sessions_reconciled(&self, name: &str) -> Result<Vec<ProcessRecord>> {
+        self.list_sessions(name)?
+            .into_iter()
+            .map(|session| self.reconcile_session_process(session))
+            .collect()
+    }
+
+    /// `process` with a stale `running` status corrected to `exited`.
+    ///
+    /// A session's exit is otherwise recorded only by the monitor thread in the
+    /// process that started it, and the `session start` CLI normally exits
+    /// before its session does, taking that thread with it. Without this a
+    /// session that dies afterwards reads as running forever. The exit code is
+    /// unknown here, so it is left NULL.
+    ///
+    /// Rows bound to a chat thread are returned as stored: archcar owns those,
+    /// and its startup restore takes a running row whose process is gone as a
+    /// session to resume or interrupt.
+    pub fn reconcile_session_process(&self, process: ProcessRecord) -> Result<ProcessRecord> {
+        if process.kind != ProcessKind::Session
+            || process.status != ProcessStatus::Running
+            || process.chat_thread_id.is_some()
+            || self.session_process_alive(&process)?
+        {
+            return Ok(process);
+        }
+        let changed = self.conn.execute(
+            "UPDATE processes
+             SET status = ?1, ended_at = ?2, exit_code = NULL
+             WHERE id = ?3 AND status = 'running'",
+            params![ProcessStatus::Exited.as_str(), timestamp(), process.id],
+        )?;
+        if changed > 0 {
+            if let Some(workspace_name) =
+                self.workspace_name_by_id_optional(process.workspace_id)?
+            {
+                self.record_workspace_event(
+                    process.workspace_id,
+                    &workspace_name,
+                    "session.exited",
+                    &format!("Session process #{} is no longer running", process.id),
+                )?;
+            }
+        }
+        self.get_process(process.id)
+    }
+
+    /// Whether the process a session row recorded is still running: its pid is
+    /// alive and, where the row recorded a start time, has not been reused.
+    pub fn session_process_alive(&self, process: &ProcessRecord) -> Result<bool> {
+        let recorded_start_time: Option<i64> = self.conn.query_row(
+            "SELECT pid_start_time FROM processes WHERE id = ?1",
+            [process.id],
+            |row| row.get(0),
+        )?;
+        Ok(recorded_process_alive(process.pid, recorded_start_time))
     }
 
     pub fn record_terminal_process(
@@ -3325,8 +3388,8 @@ impl WorkspaceStore {
 
         self.conn.execute(
             "INSERT INTO processes (
-                workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10)",
+                workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id, pid_start_time
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10, ?11)",
             params![
                 workspace.id,
                 chat_thread_id,
@@ -3338,6 +3401,7 @@ impl WorkspaceStore {
                 now,
                 session.harness_metadata,
                 session.resume_id,
+                pid_start_time(pid),
             ],
         )?;
         let process = self.get_process(self.conn.last_insert_rowid())?;
@@ -10206,8 +10270,8 @@ mutation($threadId: ID!) {{
 
         self.conn.execute(
             "INSERT INTO processes (
-                workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10)",
+                workspace_id, chat_thread_id, kind, command, pid, log_path, status, started_at, exit_code, ended_at, session_harness_metadata, session_resume_id, pid_start_time
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL, ?9, ?10, ?11)",
             params![
                 workspace.id,
                 chat_thread_id,
@@ -10219,6 +10283,7 @@ mutation($threadId: ID!) {{
                 now,
                 session.harness_metadata,
                 session.resume_id,
+                pid_start_time(child.id()),
             ],
         )?;
 
@@ -13482,6 +13547,27 @@ fn build_glob_set(patterns: &[String]) -> Result<GlobSet> {
 
 fn process_alive(pid: u32) -> bool {
     crate::platform::process_alive(pid)
+}
+
+/// `pid`'s start time as stored in `processes.pid_start_time`.
+fn pid_start_time(pid: u32) -> Option<i64> {
+    crate::platform::process_start_time(pid).and_then(|ticks| i64::try_from(ticks).ok())
+}
+
+/// Whether the process a `processes` row recorded is still the one at its pid.
+///
+/// `process_alive` alone would accept any process the OS has since given the
+/// same pid, so where the row recorded a start time the live pid must also
+/// have started then. Rows without one (written before the column existed, or
+/// on platforms without procfs) fall back to `process_alive` alone.
+fn recorded_process_alive(pid: u32, recorded_start_time: Option<i64>) -> bool {
+    if !process_alive(pid) {
+        return false;
+    }
+    match recorded_start_time {
+        Some(recorded) => pid_start_time(pid) == Some(recorded),
+        None => true,
+    }
 }
 
 fn workspace_port_block_available(
@@ -21961,6 +22047,169 @@ working_directory = "apps/worker"
         assert_eq!(reconciled.id, process.id);
         assert_eq!(reconciled.status, ProcessStatus::Exited);
         assert!(reconciled.ended_at.is_some());
+    }
+
+    fn berlin_session_store(root: &Path) -> WorkspaceStore {
+        let repo_path = init_repo(root.join("demo"));
+        let db_path = root.join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(root.join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, root.join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+    }
+
+    /// Start `script` as a session the way `session start` does: through
+    /// `start_process`, which records the row and spawns its exit monitor.
+    fn start_session_script(store: &WorkspaceStore, script: &str) -> ProcessRecord {
+        let workspace = store.get_by_name("berlin").unwrap();
+        let repository = store
+            .load_repository_by_id(workspace.repository_id)
+            .unwrap();
+        let settings = store.repository_settings(&repository.root_path).unwrap();
+        store
+            .start_process(StartProcessInput {
+                kind: ProcessKind::Session,
+                script,
+                settings: &settings,
+                repository: &repository,
+                workspace: &workspace,
+                chat_thread_id: None,
+                extra_env: &[],
+                session: ProcessSessionMetadata {
+                    harness_metadata: None,
+                    resume_id: None,
+                },
+            })
+            .unwrap()
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_session_that_died_after_its_monitor_did_reads_as_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = berlin_session_store(temp.path());
+
+        // Hold the database's write lock from before the spawn until after
+        // the read, so the exit monitor cannot record the exit first: this is
+        // the `session start` CLI having exited and taken the monitor with it.
+        store.conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let session = start_session_script(&store, "exit 0");
+        wait_until("the session process to exit", || {
+            !process_alive(session.pid)
+        });
+        let stored = store.get_process(session.id).unwrap();
+        assert_eq!(
+            stored.status,
+            ProcessStatus::Running,
+            "the monitor must not have recorded the exit yet"
+        );
+
+        let read = store
+            .list_sessions_reconciled("berlin")
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == session.id)
+            .unwrap();
+        store.conn.execute_batch("COMMIT").unwrap();
+
+        assert_eq!(read.status, ProcessStatus::Exited);
+        assert_eq!(read.exit_code, None, "the exit code was never observed");
+        assert!(read.ended_at.is_some());
+        // The correction is stored, and the monitor, once unblocked, finds the
+        // row no longer running and leaves it alone.
+        std::thread::sleep(Duration::from_millis(300));
+        let stored = store.get_process(session.id).unwrap();
+        assert_eq!(stored.status, ProcessStatus::Exited);
+        assert_eq!(stored.exit_code, None);
+    }
+
+    #[test]
+    fn a_session_whose_monitor_recorded_the_exit_reads_as_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = berlin_session_store(temp.path());
+
+        let session = start_session_script(&store, "exit 0");
+        wait_until("the exit monitor to record the exit", || {
+            store.get_process(session.id).unwrap().status == ProcessStatus::Exited
+        });
+
+        let read = store
+            .list_sessions_reconciled("berlin")
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.id == session.id)
+            .unwrap();
+        assert_eq!(read.status, ProcessStatus::Exited);
+        assert_eq!(
+            read.exit_code,
+            Some(0),
+            "the monitor's recorded exit code is kept"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_whose_pid_was_reused_reads_as_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = berlin_session_store(temp.path());
+
+        let session = start_session_script(&store, "exec sleep 30");
+        let read = store.reconcile_session_process(session.clone()).unwrap();
+        assert_eq!(
+            read.status,
+            ProcessStatus::Running,
+            "the start time recorded at spawn matches the live process"
+        );
+
+        // Make the row describe an earlier process that had this pid: one that
+        // started a tick before the live process did.
+        store
+            .conn
+            .execute(
+                "UPDATE processes SET pid_start_time = pid_start_time - 1 WHERE id = ?1",
+                [session.id],
+            )
+            .unwrap();
+        assert!(
+            process_alive(session.pid),
+            "process_alive alone still sees a process at the pid"
+        );
+
+        let read = store.reconcile_session_process(session.clone()).unwrap();
+        assert_eq!(read.status, ProcessStatus::Exited);
+        assert_eq!(read.exit_code, None);
+        assert!(
+            process_alive(session.pid),
+            "the unrelated process is untouched"
+        );
+
+        stop_process(session.pid).unwrap();
     }
 
     #[test]

@@ -5571,7 +5571,7 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     section(
         &mut out,
         "Sessions",
-        store.list_sessions(name),
+        store.list_sessions_reconciled(name),
         "No sessions recorded.",
         true,
     );
