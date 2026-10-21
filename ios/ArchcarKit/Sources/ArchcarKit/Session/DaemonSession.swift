@@ -15,6 +15,30 @@ public enum DaemonSessionError: Error, Equatable, Sendable {
     case closedWithoutResponse
 }
 
+/// The sentence a phone shows for each failure. Stores hand errors to the
+/// screens and the stale banner as `error.localizedDescription`, which lands
+/// here through `LocalizedError`, so this is the one place a case becomes words. The daemon's own
+/// message goes through verbatim: when `gh` refuses, it is the only diagnostic
+/// the user gets.
+extension DaemonSessionError: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .daemon(let message): "The daemon said: \(message)"
+        case .authenticationFailed: "Authentication failed."
+        case .disconnected: "Connection to the daemon was lost."
+        case .timedOut: "The request timed out."
+        case .closedWithoutResponse: "The daemon closed the connection before confirming."
+        }
+    }
+}
+
+/// The screens show `error.localizedDescription`, because they catch
+/// `any Error` and a decoding failure arrives as Foundation's error, not this.
+/// Same sentence as `description`.
+extension DaemonSessionError: LocalizedError {
+    public var errorDescription: String? { description }
+}
+
 /// One daemon, as the app talks to it.
 ///
 /// The daemon serves exactly one request per connection: `handle_connection`
@@ -196,7 +220,7 @@ public actor DaemonSession {
                 "connected host=\(self.address.host, privacy: .public) port=\(self.address.port, privacy: .public)")
         } catch {
             if lifecycle == self.lifecycle {
-                connectionState = .failed(String(describing: error))
+                connectionState = .failed(error.localizedDescription)
             }
             ArchcarLog.session.error(
                 "connect failed host=\(self.address.host, privacy: .public) port=\(self.address.port, privacy: .public) error=\(String(describing: error), privacy: .public)")

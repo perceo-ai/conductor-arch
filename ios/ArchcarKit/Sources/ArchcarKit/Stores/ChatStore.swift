@@ -302,18 +302,14 @@ public final class ChatStore {
         case failure(String)
     }
 
-    /// A sentence for a failed resolve, shown on the phone instead of a Swift
-    /// enum dump. None of these claim the answer was or was not applied: the
-    /// daemon applies it before replying, so a dropped link can lose the reply
-    /// to an answer that already went through.
+    /// A sentence for a failed resolve. The daemon and transport errors carry
+    /// their own (`LocalizedError`); none of them claim the answer was
+    /// or was not applied: the daemon applies it before replying, so a dropped
+    /// link can lose the reply to an answer that already went through.
     nonisolated static func resolveFailureMessage(for error: any Error) -> String {
-        switch error as? DaemonSessionError {
-        case .daemon(let message)?: "The daemon said: \(message)"
-        case .authenticationFailed?: "Authentication failed."
-        case .disconnected?: "Connection to the daemon was lost."
-        case .timedOut?: "The request timed out."
-        case .closedWithoutResponse?: "The daemon closed the connection before confirming."
-        case nil: "Couldn't reach the daemon."
+        switch error {
+        case is DaemonSessionError, is ArchcarTransportError: error.localizedDescription
+        default: "Couldn't reach the daemon."
         }
     }
 
@@ -325,8 +321,8 @@ public final class ChatStore {
     public func resolve(
         _ interaction: ProviderInteraction, with resolution: InteractionResolution
     ) async -> ResolveOutcome {
-        // Not the shared `request` helper: it keeps only `String(describing:)`
-        // of the error, and the sheet needs a readable sentence.
+        // Not the shared `request` helper: the sheet needs the sentence back
+        // as the outcome, not only in `composerError`.
         do {
             _ = try await session.request(
                 ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
@@ -494,7 +490,7 @@ public final class ChatStore {
         } catch {
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
-            composerError = String(describing: error)
+            composerError = error.localizedDescription
             return nil
         }
     }

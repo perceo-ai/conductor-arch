@@ -204,7 +204,7 @@ public final class WorkspacesStore {
             lastError = nil
             return response
         } catch {
-            lastError = String(describing: error)
+            lastError = error.localizedDescription
             return nil
         }
     }
@@ -229,7 +229,7 @@ public final class WorkspacesStore {
             lastError = nil
             onRefreshed?()
         } catch {
-            lastError = String(describing: error)
+            lastError = error.localizedDescription
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
             ArchcarLog.store.error(

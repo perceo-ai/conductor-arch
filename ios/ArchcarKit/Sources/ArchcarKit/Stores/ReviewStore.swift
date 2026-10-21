@@ -279,7 +279,7 @@ public final class ReviewStore {
         } catch {
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
-            lastError = String(describing: error)
+            lastError = error.localizedDescription
             return nil
         }
     }
