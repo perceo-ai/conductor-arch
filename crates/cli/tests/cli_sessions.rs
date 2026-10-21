@@ -1438,6 +1438,363 @@ fn cli_session_send_after_a_late_turn_boundary_mark_queues_behind_the_live_turn(
     kill_berlin_session(&app, temp.path());
 }
 
+/// Failure this guards: `session send --immediate` reaches a busy claude
+/// session and marks it busy for a new turn generation. Claude had no tool
+/// boundary left to take the message in at, so it ran it as a turn of its
+/// own after the open one. The open turn's completion still recorded every
+/// generation started so far as finished, so the daemon's ready mark for it
+/// reopened the session while the immediate message's turn was live, and the
+/// next ordinary send was steered into that turn instead of queueing. A
+/// completion now finishes only the inputs claude had taken in by its
+/// `result`.
+///
+/// No stall is needed: the immediate message is in before turn 1 ends, so the
+/// daemon's mark for turn 1 always sees its generation.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_after_an_immediate_claude_message_queues_behind_its_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    init_repo(temp.path().join("demo"));
+    let fake_claude = temp.path().join("fake-held-claude");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_claude(&fake_claude).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            ("ARCHDUCTOR_FAKE_CLAUDE_MIDTURN", Path::new("queue")),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+    create_berlin_workspace(
+        &app,
+        temp.path(),
+        "claude_code_executable_path",
+        &fake_claude,
+    );
+
+    app()
+        .args(["session", "start", "berlin", "--kind", "claude"])
+        .assert()
+        .success();
+    wait_for_archcar_ready(&app, wait_for_running_session(temp.path(), "berlin"));
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--immediate",
+            "--timeout-ms",
+            "5000",
+            "Also check the edge case",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent claude immediate message"));
+    // Claude has it, so the loop has marked the session busy for it.
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
+
+    // End turn 1. Claude moves straight on to the immediate message's turn,
+    // which stays held.
+    let events = subscribe_to_archcar_events(temp.path());
+    fs::write(release.with_extension("1"), "").unwrap();
+    // The daemon broadcasts turn 1's completion only after its ready mark.
+    wait_for_archcar_event(&events, "turn_completed");
+
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the third task",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("queued claude message"),
+        "a send while the immediate message's turn is live must queue, not join it: {stdout}"
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "the third message must wait for the immediate message's turn to end"
+    );
+    fs::write(release.with_extension("2"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured[1..],
+        [
+            ("queued".to_owned(), "Also check the edge case".to_owned()),
+            ("turn".to_owned(), "Then the third task".to_owned()),
+        ],
+        "{captured:?}"
+    );
+
+    kill_berlin_session(&app, temp.path());
+}
+
+/// The other way claude takes an immediate message: at the open turn's next
+/// tool boundary, folded into that turn, whose one `result` then answers
+/// both. Nothing of the message's own is left to run, so the session must
+/// come back ready at that `result` -- a completion that left the merged
+/// message's generation open would keep the session busy for good and strand
+/// every later send in the queue.
+#[cfg(unix)]
+#[test]
+fn cli_session_immediate_claude_message_merged_into_the_turn_leaves_the_session_ready() {
+    let temp = tempfile::tempdir().unwrap();
+    init_repo(temp.path().join("demo"));
+    let fake_claude = temp.path().join("fake-held-claude");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_claude(&fake_claude).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            ("ARCHDUCTOR_FAKE_CLAUDE_MIDTURN", Path::new("join")),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+    create_berlin_workspace(
+        &app,
+        temp.path(),
+        "claude_code_executable_path",
+        &fake_claude,
+    );
+
+    app()
+        .args(["session", "start", "berlin", "--kind", "claude"])
+        .assert()
+        .success();
+    let session_id = wait_for_running_session(temp.path(), "berlin");
+    wait_for_archcar_ready(&app, session_id);
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--immediate",
+            "--timeout-ms",
+            "5000",
+            "Also check the edge case",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent claude immediate message"));
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
+
+    let events = subscribe_to_archcar_events(temp.path());
+    fs::write(release.with_extension("1"), "").unwrap();
+    wait_for_archcar_event(&events, "turn_completed");
+    wait_for_archcar_ready(&app, session_id);
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "5000",
+            "Then the second task",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent claude message").and(contains("queued").not()));
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured[1..],
+        [
+            ("joined".to_owned(), "Also check the edge case".to_owned()),
+            ("turn".to_owned(), "Then the second task".to_owned()),
+        ],
+        "{captured:?}"
+    );
+
+    kill_berlin_session(&app, temp.path());
+}
+
+/// Failure this guards: a codex `--immediate` steer joins the open turn, so
+/// that turn's `turn/completed` honestly ends it too -- unless the turn ended
+/// on codex's side just before the steer arrived. Codex then refuses the
+/// steer and the loop starts the message as a new turn instead. That turn
+/// went out with the session still marked ready by the old turn's
+/// completion, so the next ordinary send was steered into it instead of
+/// queueing. The fallback start now marks the session busy for its turn.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_after_a_refused_codex_steer_queues_behind_the_fallback_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    init_repo(temp.path().join("demo"));
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            ("ARCHDUCTOR_FAKE_CODEX_STEER", Path::new("late")),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    create_berlin_workspace(&app, temp.path(), "codex_executable_path", &fake_codex);
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+
+    let events = subscribe_to_archcar_events(temp.path());
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--immediate",
+            "--timeout-ms",
+            "5000",
+            "Also check the edge case",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent codex immediate message"));
+    // The refused steer, then the turn the loop started for it instead.
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    wait_for_archcar_event(&events, "turn_completed");
+
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the third task",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("queued codex message"),
+        "a send while the fallback turn is live must queue, not join it: {stdout}"
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        3,
+        "the third message must wait for the fallback turn to end"
+    );
+    fs::write(release.with_extension("2"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 4);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured[1..],
+        [
+            (
+                "turn/steer".to_owned(),
+                "Also check the edge case".to_owned()
+            ),
+            (
+                "turn/start".to_owned(),
+                "Also check the edge case".to_owned()
+            ),
+            ("turn/start".to_owned(), "Then the third task".to_owned()),
+        ],
+        "{captured:?}"
+    );
+
+    kill_berlin_session(&app, temp.path());
+}
+
 /// Failure this guards: the daemon marks a session busy before it hands a
 /// queued message to the session loop, trusting the loop to either start the
 /// turn or mark the session failed. Two `continue` paths in the loop's
@@ -2067,6 +2424,11 @@ for raw in sys.stdin:
 /// A codex app-server stand-in that holds turn N open until
 /// `$ARCHDUCTOR_RELEASE_PATH.N` exists, and records every input it receives
 /// as a `[method, text]` line, so a steer into a live turn shows up as such.
+///
+/// With `$ARCHDUCTOR_FAKE_CODEX_STEER=late`, every steer arrives just after
+/// the open turn ended on codex's side: the turn's `turn/completed` goes out
+/// first, then the steer is refused, as codex refuses a steer whose
+/// `expectedTurnId` is no longer the active turn.
 #[cfg(unix)]
 fn write_fake_held_codex(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -2082,7 +2444,9 @@ import time
 
 capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
 release = os.environ["ARCHDUCTOR_RELEASE_PATH"]
-lock = threading.Lock()
+late_steer = os.environ.get("ARCHDUCTOR_FAKE_CODEX_STEER") == "late"
+lock = threading.RLock()
+completed = set()
 
 def emit(message):
     with lock:
@@ -2092,10 +2456,17 @@ def record(method, params):
     with open(capture, "a", encoding="utf-8") as output:
         output.write(json.dumps([method, params["input"][0]["text"]]) + "\n")
 
+def complete(turn_id):
+    with lock:
+        if turn_id in completed:
+            return
+        completed.add(turn_id)
+        emit({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}})
+
 def complete_when_released(turn, turn_id):
     while not os.path.exists("%s.%d" % (release, turn)):
         time.sleep(0.05)
-    emit({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}})
+    complete(turn_id)
 
 turns = 0
 for raw in sys.stdin:
@@ -2112,6 +2483,11 @@ for raw in sys.stdin:
         emit({"id": message["id"], "result": {"turn": {"id": turn_id}}})
         emit({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
         threading.Thread(target=complete_when_released, args=(turns, turn_id), daemon=True).start()
+    elif method == "turn/steer" and late_steer:
+        record(method, message["params"])
+        with lock:
+            complete(message["params"]["expectedTurnId"])
+            emit({"id": message["id"], "error": {"code": -32600, "message": "no active turn to steer"}})
     elif method == "turn/steer":
         record(method, message["params"])
         emit({"id": message["id"], "result": {"turnId": "turn-%d" % turns}})
@@ -2125,6 +2501,16 @@ for raw in sys.stdin:
 /// `$ARCHDUCTOR_RELEASE_PATH.N` exists; one that arrives during a turn joins
 /// it. Every message is recorded as a `["turn" | "joined", text]` line, so a
 /// message merged into a live turn shows up as such.
+///
+/// `$ARCHDUCTOR_FAKE_CLAUDE_MIDTURN` picks what a message arriving during a
+/// turn does, as real claude does one or the other depending on when it lands
+/// (checked against Claude Code 2.1.300), and either way echoes every message
+/// it takes in as an `isReplay` user record, as `--replay-user-messages` does:
+/// - `join`: claude takes it in at the turn's next tool boundary. It is echoed
+///   inside the open turn, and that turn's one `result` answers both.
+/// - `queue`: no boundary is left, so it waits and becomes the next turn,
+///   echoed and answered by its own `result` after the open turn's. Recorded
+///   as `["queued", text]` when it arrives.
 #[cfg(unix)]
 fn write_fake_held_claude(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -2140,25 +2526,40 @@ import time
 
 capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
 release = os.environ["ARCHDUCTOR_RELEASE_PATH"]
-lock = threading.Lock()
-state = {"turns": 0, "open": False}
+midturn = os.environ.get("ARCHDUCTOR_FAKE_CLAUDE_MIDTURN")
+lock = threading.RLock()
+state = {"turns": 0, "open": False, "waiting": []}
 
 def emit(message):
     message["session_id"] = "fake-claude-session"
     with lock:
         print(json.dumps(message), flush=True)
 
+def replay(text):
+    if midturn:
+        emit({"type": "user", "isReplay": True, "uuid": "replay-%s" % abs(hash(text)), "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+
 def record(how, text):
     with open(capture, "a", encoding="utf-8") as output:
         output.write(json.dumps([how, text]) + "\n")
+
+def start_turn(turn, text):
+    if turn == 1:
+        emit({"type": "system", "subtype": "init", "uuid": "init", "model": "claude-fixture"})
+    replay(text)
+    threading.Thread(target=complete_when_released, args=(turn,), daemon=True).start()
 
 def complete_when_released(turn):
     while not os.path.exists("%s.%d" % (release, turn)):
         time.sleep(0.05)
     emit({"type": "assistant", "uuid": "assistant-%d" % turn, "message": {"id": "msg-%d" % turn, "role": "assistant", "content": [{"type": "text", "text": "done %d" % turn}]}})
     with lock:
-        state["open"] = False
-    emit({"type": "result", "subtype": "success", "uuid": "result-%d" % turn, "result": "done %d" % turn, "duration_ms": 1})
+        emit({"type": "result", "subtype": "success", "uuid": "result-%d" % turn, "result": "done %d" % turn, "duration_ms": 1})
+        if state["waiting"]:
+            state["turns"] += 1
+            start_turn(state["turns"], state["waiting"].pop(0))
+        else:
+            state["open"] = False
 
 for raw in sys.stdin:
     message = json.loads(raw)
@@ -2170,14 +2571,14 @@ for raw in sys.stdin:
         if not joined:
             state["turns"] += 1
             state["open"] = True
-        turn = state["turns"]
-    if joined:
-        record("joined", text)
-        continue
-    record("turn", text)
-    if turn == 1:
-        emit({"type": "system", "subtype": "init", "uuid": "init", "model": "claude-fixture"})
-    threading.Thread(target=complete_when_released, args=(turn,), daemon=True).start()
+            record("turn", text)
+            start_turn(state["turns"], text)
+        elif midturn == "queue":
+            record("queued", text)
+            state["waiting"].append(text)
+        else:
+            record("joined", text)
+            replay(text)
 "#,
     )?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
