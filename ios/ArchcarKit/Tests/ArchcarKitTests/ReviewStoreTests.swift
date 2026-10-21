@@ -78,6 +78,8 @@ private func reviewResponder(
 
     // Stale straight away, and not because a request failed: none was sent.
     #expect(await eventually { @MainActor in store.isStale })
+    #expect(store.isDisconnected == true)
+    #expect(StaleBannerCopy.text(isDisconnected: store.isDisconnected, cause: store.lastError) == StaleBannerCopy.disconnected)
     #expect(await daemon.receivedLines.count == before)
 
     await session.reconnectNow()
@@ -145,7 +147,49 @@ private func reviewResponder(
     #expect(store.checks == nil)
     #expect(store.runs != nil)
     #expect(store.isStale)
+    // Still connected, so the banner must not claim otherwise.
+    #expect(store.isDisconnected == false)
+    #expect(StaleBannerCopy.text(isDisconnected: store.isDisconnected, cause: store.lastError) != StaleBannerCopy.disconnected)
+    // The runs request after the failed summary succeeded and cleared
+    // `lastError`, so the checks panel's cause has to come from `checksError`.
+    #expect(store.lastError == nil)
+    #expect(store.checksError?.contains("gh is not authenticated") == true)
+    let checksBanner = StaleBannerCopy.text(isDisconnected: store.isDisconnected, cause: store.checksError)
+    #expect(checksBanner.contains("gh is not authenticated"))
+    #expect(checksBanner != StaleBannerCopy.text(isDisconnected: false, cause: nil))
 
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func aTodosFailureKeepsItsCauseThroughAnEventDrivenRefresh() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: reviewResponder(todosFail: true))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+    let observing = Task { await store.observe() }
+    await daemon.waitForSubscribes(1)
+    try await Task.sleep(for: .milliseconds(150))
+
+    await store.refreshTodos()
+    #expect(store.todosStale)
+
+    // The event refetches changes and checks, not todos; both succeed and
+    // clear `lastError`, but the todos panel is still stale and must keep
+    // saying why.
+    await daemon.push(#"{"id":"e1","payload":{"type":"turn_completed","session_id":4,"thread_id":6}}"#)
+    #expect(await eventually { @MainActor in !store.changesStale && !store.checksStale })
+    #expect(store.todosStale)
+    #expect(store.lastError == nil)
+    #expect(store.isDisconnected == false)
+    #expect(store.todosError?.contains("todo store unavailable") == true)
+    let todosBanner = StaleBannerCopy.text(isDisconnected: store.isDisconnected, cause: store.todosError)
+    #expect(todosBanner.contains("todo store unavailable"))
+    #expect(!todosBanner.contains("not connected"))
+
+    observing.cancel()
     await session.disconnect()
     await daemon.stop()
 }

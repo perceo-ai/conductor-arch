@@ -29,9 +29,13 @@ public final class TerminalStore {
     /// Cleared by the next screen fetch that succeeds while the stream is
     /// connected; see `StaleClearing`.
     public private(set) var isStale = false
-    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// Bumped by every `markStale(disconnected:)`, so a clear decided before an `await`
     /// can tell a mark landed since; see `StaleClearing`.
     @ObservationIgnored private(set) var staleRevision = 0
+    /// Whether the latest stale mark came from the stream being down,
+    /// rather than one request failing on a live connection: it decides
+    /// whether the banner says "not connected" or shows the error.
+    public private(set) var isDisconnected = false
 
     private let session: DaemonSession
     public let workspace: String
@@ -176,7 +180,8 @@ public final class TerminalStore {
             if await StaleClearing.mayClear(afterRefetchSucceeded: true, on: session, store: self) { isStale = false }
             lastError = nil
         } catch {
-            markStale()
+            let connected = await session.connectionState == .connected
+            markStale(disconnected: !connected)
             lastError = String(describing: error)
         }
     }
@@ -212,7 +217,7 @@ public final class TerminalStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { markStale() }
+            if await session.connectionState != .connected { markStale(disconnected: true) }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await reattach() }
             for await event in subscription.events {
@@ -230,7 +235,7 @@ public final class TerminalStore {
                 }
             }
             guard !Task.isCancelled else { return }
-            markStale()
+            markStale(disconnected: true)
             missedEvents = true
         }
     }
@@ -266,8 +271,9 @@ public final class TerminalStore {
         await refreshScreen()
     }
 
-    private func markStale() {
+    private func markStale(disconnected: Bool) {
         isStale = true
+        isDisconnected = disconnected
         staleRevision += 1
     }
 }

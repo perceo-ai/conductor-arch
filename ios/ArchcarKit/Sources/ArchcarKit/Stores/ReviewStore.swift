@@ -19,7 +19,17 @@ public final class ReviewStore {
     public private(set) var scope: WorkspaceChangeScope = .all
     public private(set) var checks: ChecksSummary?
     public private(set) var runs: WorkflowRunSummary?
+    /// Why the last checks fetch failed, if either of its two requests did.
+    ///
+    /// Tracked separately from `lastError` for the stale banner: every
+    /// request that succeeds clears `lastError`, so the runs request after a
+    /// failed summary request would wipe the cause before the panel shows it.
+    public private(set) var checksError: String?
     public private(set) var todos: [Todo] = []
+    /// Why the last todos fetch failed, if it did. Separate from `lastError`
+    /// for the same reason as `checksError`: an event refetches changes and
+    /// checks but not todos, and their success would wipe the todos cause.
+    public private(set) var todosError: String?
     public private(set) var readiness: String?
     public private(set) var lastError: String?
     public private(set) var isBusy = false
@@ -32,9 +42,13 @@ public final class ReviewStore {
     public private(set) var todosStale = false
     /// Whether any panel is out of date.
     public var isStale: Bool { changesStale || checksStale || todosStale }
-    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// Bumped by every `markStale(disconnected:)`, so a clear decided before an `await`
     /// can tell a mark landed since; see `StaleClearing`.
     @ObservationIgnored private(set) var staleRevision = 0
+    /// Whether the latest stale mark came from the stream being down,
+    /// rather than one request failing on a live connection: it decides
+    /// whether the banner says "not connected" or shows the error.
+    public private(set) var isDisconnected = false
     /// Output from the last git/gh action, worth showing verbatim: when `gh`
     /// refuses, the reason is on the other machine and the text is all the
     /// phone has.
@@ -99,25 +113,33 @@ public final class ReviewStore {
     }
 
     private func fetchChecks() async -> Bool {
-        var fetched = true
+        // The cause is read right after the leg that failed: the next
+        // request's success clears `lastError`.
+        var failure: String?
         if case .checksSummary(_, let summary)? = await request(
             GetChecksSummaryRequest(workspace: workspace)) {
             checks = summary
         } else {
-            fetched = false
+            failure = lastError ?? "The daemon did not answer."
         }
         if case .workflowRuns(_, let summary)? = await request(
             ListWorkflowRunsRequest(workspace: workspace)) {
             runs = summary
         } else {
-            fetched = false
+            failure = failure ?? lastError ?? "The daemon did not answer."
         }
-        return fetched
+        checksError = failure
+        return failure == nil
     }
 
     private func fetchTodos() async -> Bool {
         guard case .todos(_, let todos)? = await request(
-            ListTodosRequest(workspace: workspace)) else { return false }
+            ListTodosRequest(workspace: workspace))
+        else {
+            todosError = lastError ?? "The daemon did not answer."
+            return false
+        }
+        todosError = nil
         self.todos = todos
         return true
     }
@@ -212,7 +234,7 @@ public final class ReviewStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { markStale() }
+            if await session.connectionState != .connected { markStale(disconnected: true) }
             guard let subscription = await session.connectedEvents() else { return }
             if missedEvents || subscription.waited { await refreshAll() }
             for await event in subscription.events where Self.invalidates(event, workspace: workspace) {
@@ -225,7 +247,7 @@ public final class ReviewStore {
                     unchangedSince: revision)
             }
             guard !Task.isCancelled else { return }
-            markStale()
+            markStale(disconnected: true)
             missedEvents = true
         }
     }
@@ -255,7 +277,8 @@ public final class ReviewStore {
             lastError = nil
             return response
         } catch {
-            markStale()
+            let connected = await session.connectionState == .connected
+            markStale(disconnected: !connected)
             lastError = String(describing: error)
             return nil
         }
@@ -263,10 +286,11 @@ public final class ReviewStore {
 
     /// Marks every panel: a failed request does not say which panel it was
     /// for, and a dropped stream leaves them all missing updates.
-    private func markStale() {
+    private func markStale(disconnected: Bool) {
         changesStale = true
         checksStale = true
         todosStale = true
+        isDisconnected = disconnected
         staleRevision += 1
     }
 }

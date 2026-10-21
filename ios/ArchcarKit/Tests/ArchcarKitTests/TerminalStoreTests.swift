@@ -225,6 +225,7 @@ private func reconnectAttachedTerminal(processes: String) async throws -> (Termi
     // Stale straight away, and not because a request failed: none was sent.
     #expect(await eventually { @MainActor in store.isStale })
     #expect(await daemon.receivedLines.count == before)
+    #expect(store.isDisconnected)
 
     await session.reconnectNow()
 

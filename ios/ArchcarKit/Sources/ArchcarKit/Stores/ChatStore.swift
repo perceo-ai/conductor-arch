@@ -39,9 +39,13 @@ public final class ChatStore {
     public var isStale: Bool {
         threadsStale || timelineStale || queueStale || planStale || interactionsStale || statusStale
     }
-    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// Bumped by every `markStale(disconnected:)`, so a clear decided before an `await`
     /// can tell a mark landed since; see `StaleClearing`.
     @ObservationIgnored private(set) var staleRevision = 0
+    /// Whether the latest stale mark came from the stream being down,
+    /// rather than one request failing on a live connection: it decides
+    /// whether the banner says "not connected" or shows the error.
+    public private(set) var isDisconnected = false
     public private(set) var composerError: String?
     public private(set) var isSending = false
 
@@ -327,7 +331,8 @@ public final class ChatStore {
             _ = try await session.request(
                 ResolveProviderInteractionRequest(interactionID: interaction.id, resolution: resolution))
         } catch {
-            markStale()
+            let connected = await session.connectionState == .connected
+            markStale(disconnected: !connected)
             let message = Self.resolveFailureMessage(for: error)
             composerError = message
             return .failure(message)
@@ -387,7 +392,7 @@ public final class ChatStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { markStale() }
+            if await session.connectionState != .connected { markStale(disconnected: true) }
             // Subscribe before refetching, so an event that lands during the
             // refetch is not lost between the two.
             guard let subscription = await session.connectedEvents() else { return }
@@ -414,7 +419,7 @@ public final class ChatStore {
                 }
             }
             guard !Task.isCancelled else { return }
-            markStale()
+            markStale(disconnected: true)
             missedEvents = true
         }
     }
@@ -487,7 +492,8 @@ public final class ChatStore {
         do {
             return try await session.request(body)
         } catch {
-            markStale()
+            let connected = await session.connectionState == .connected
+            markStale(disconnected: !connected)
             composerError = String(describing: error)
             return nil
         }
@@ -522,13 +528,14 @@ public final class ChatStore {
 
     /// A failed request or a dropped stream says nothing about which panel
     /// missed what, so every panel is marked.
-    private func markStale() {
+    private func markStale(disconnected: Bool) {
         threadsStale = true
         timelineStale = true
         queueStale = true
         planStale = true
         interactionsStale = true
         statusStale = true
+        isDisconnected = disconnected
         staleRevision += 1
     }
 }

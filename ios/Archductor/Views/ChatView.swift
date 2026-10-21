@@ -16,7 +16,7 @@ struct ChatView: View {
             // Below the transcript rather than inside it: the transcript
             // follows its tail, so a row at its top would be scrolled away.
             if store.isStale {
-                StaleBanner()
+                StaleBanner(isDisconnected: store.isDisconnected, cause: store.composerError)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
             }

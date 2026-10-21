@@ -250,18 +250,21 @@ struct SectionHeading: View {
     }
 }
 
-/// The "showing last known state" marker used wherever a store's event
-/// stream has dropped. Keeping one definition is what stops the chat,
-/// review and terminal screens from inventing their own visual language
-/// for the same situation the workspaces list already handles.
+/// The "showing last known state" marker used wherever a store is stale.
+/// It says what is known: a real disconnect reads "not connected", while a
+/// refresh that failed on a live connection shows the store's error instead.
+/// Keeping one definition is what stops the chat, review and terminal
+/// screens from inventing their own visual language for the same situation
+/// the workspaces list already handles.
 struct StaleBanner: View {
     @Environment(\.palette) private var palette
-    var text: String = "Showing last known state — not connected"
+    var isDisconnected: Bool = true
+    var cause: String? = nil
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "wifi.slash")
-            Text(text)
+            Text(StaleBannerCopy.text(isDisconnected: isDisconnected, cause: cause))
         }
         .font(Typeface.secondary)
         .foregroundStyle(palette.warning)
