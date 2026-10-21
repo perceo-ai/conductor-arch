@@ -141,6 +141,7 @@ private func summary(
 
     #expect(store.isStale)
     #expect(store.lastError != nil)
+    #expect(store.isDisconnected)
 }
 
 @MainActor
@@ -171,6 +172,7 @@ private func summary(
     // Stale without any request having failed: none was even attempted.
     #expect(await eventually { @MainActor in store.isStale })
     #expect(store.refreshCount == refreshesBefore)
+    #expect(store.isDisconnected)
 
     await session.reconnectNow()
 

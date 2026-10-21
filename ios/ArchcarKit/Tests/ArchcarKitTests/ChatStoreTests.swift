@@ -368,6 +368,7 @@ private func connectedStore(
     // Stale straight away, and not because a request failed: none was sent.
     #expect(await eventually { @MainActor in store.isStale })
     #expect(await daemon.receivedLines.count == before)
+    #expect(store.isDisconnected)
 
     await session.reconnectNow()
 
@@ -521,6 +522,8 @@ private func connectedStore(
     // before it, so the chat is still not up to date.
     #expect(await session.connectionState == .connected)
     #expect(store.isStale)
+    // The last mark came from a request failing on a live connection.
+    #expect(store.isDisconnected == false)
 
     observing.cancel()
     await session.disconnect()
