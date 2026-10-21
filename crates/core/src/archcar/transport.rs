@@ -468,10 +468,12 @@ mod tests {
             let Ok(request) = serde_json::from_str::<RpcEnvelope<ArchcarRequest>>(&line) else {
                 return false;
             };
+            // A reply line far longer than the probe reads, as a daemon with
+            // many saved layout presets sends; the probe must still see it.
             let reply = RpcEnvelope {
                 id: request.id,
-                payload: ArchcarResponse::LayoutPresets {
-                    presets: Vec::new(),
+                payload: ArchcarResponse::Error {
+                    message: "x".repeat(4096),
                 },
             };
             writeln!(writer, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
@@ -516,5 +518,36 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_ne!(std::fs::read_to_string(&endpoint).unwrap(), recorded);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_bounds_the_probe_of_a_lockless_endpoint_that_trickles_without_a_newline() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-trickle.endpoint");
+        // A listener on the recorded port that accepts and then sends a byte
+        // every 100ms, never a newline: each read succeeds well inside its
+        // own timeout, so only a deadline on the whole probe stops it.
+        let peer = LocalListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let recorded = format!("{}\nstaletoken\n", peer.local_addr().unwrap());
+        std::fs::write(&endpoint, &recorded).unwrap();
+        let trickle = std::thread::spawn(move || {
+            let (mut stream, _) = peer.accept().unwrap();
+            let stop = std::time::Instant::now() + PRE_LOCK_PROBE_TIMEOUT * 4;
+            while std::time::Instant::now() < stop && stream.write_all(b"x").is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let _listener = bind(&endpoint).unwrap();
+        let waited = started.elapsed();
+
+        assert!(
+            waited < PRE_LOCK_PROBE_TIMEOUT + Duration::from_secs(1),
+            "probe ran {waited:?}, past its {PRE_LOCK_PROBE_TIMEOUT:?} deadline"
+        );
+        assert_ne!(std::fs::read_to_string(&endpoint).unwrap(), recorded);
+        trickle.join().unwrap();
     }
 }
