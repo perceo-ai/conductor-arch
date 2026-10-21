@@ -13564,8 +13564,11 @@ fn recorded_process_alive(pid: u32, recorded_start_time: Option<i64>) -> bool {
     if !process_alive(pid) {
         return false;
     }
+    // Only a start time read back and found different proves the pid was
+    // reused. One that cannot be read proves nothing, and treating it as dead
+    // would report a live session as exited.
     match recorded_start_time {
-        Some(recorded) => pid_start_time(pid) == Some(recorded),
+        Some(recorded) => pid_start_time(pid).is_none_or(|now| now == recorded),
         None => true,
     }
 }
@@ -22210,6 +22213,38 @@ working_directory = "apps/worker"
         );
 
         stop_process(session.pid).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_live_session_whose_process_name_is_not_utf8_stays_running() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = berlin_session_store(temp.path());
+        // The kernel names a process after the file it execs, raw bytes and
+        // all, so this puts a non-UTF-8 byte, a ')' and a space in `comm`.
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        std::os::unix::fs::symlink(
+            "/bin/sleep",
+            bin.join(std::ffi::OsStr::from_bytes(b"bad\xff) name")),
+        )
+        .unwrap();
+
+        let script = format!("exec \"{}/$(printf 'bad\\377) name')\" 30", bin.display());
+        let session = start_session_script(&store, &script);
+        wait_until("the session to exec into the non-UTF-8 name", || {
+            fs::read(format!("/proc/{}/stat", session.pid)).is_ok_and(|stat| stat.contains(&0xff))
+        });
+
+        let read = store.reconcile_session_process(session.clone()).unwrap();
+        stop_process(session.pid).unwrap();
+        assert_eq!(
+            read.status,
+            ProcessStatus::Running,
+            "a live session must not read as exited because of its process name"
+        );
     }
 
     #[test]
