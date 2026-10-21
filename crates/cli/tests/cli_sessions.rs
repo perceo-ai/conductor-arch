@@ -1,6 +1,8 @@
+#[cfg(unix)]
+use archductor_core::archcar::handoff;
 use archductor_core::archcar::harness::managed_harness_for_kind;
 use archductor_core::archcar::harness_contract::{HarnessCapability, HarnessFeature, SupportMode};
-use archductor_core::archcar::{handoff, remote};
+use archductor_core::archcar::remote;
 use archductor_core::paths::AppPaths;
 use archductor_core::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
@@ -1213,7 +1215,7 @@ fn archcar_daemon_guard_stops_its_daemon_when_a_test_panics() {
 
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
-    for name in DEVELOPER_ARCHCAR_ENV {
+    for name in developer_archcar_env() {
         command.env_remove(name);
     }
     command.envs(app_env(root)).env(
@@ -1229,13 +1231,12 @@ fn app(root: &Path) -> AssertCommand {
 
 /// Set inside a developer's own Archductor session; a test must never reach
 /// that session's daemon or bind its remote listener.
-const DEVELOPER_ARCHCAR_ENV: [&str; 5] = [
-    remote::LISTEN_ENV,
-    remote::REMOTE_ENV,
-    remote::TOKEN_ENV,
-    handoff::LOCAL_FD_ENV,
-    handoff::REMOTE_FD_ENV,
-];
+fn developer_archcar_env() -> Vec<&'static str> {
+    let mut names = vec![remote::LISTEN_ENV, remote::REMOTE_ENV, remote::TOKEN_ENV];
+    #[cfg(unix)]
+    names.extend([handoff::LOCAL_FD_ENV, handoff::REMOTE_FD_ENV]);
+    names
+}
 
 fn app_env(root: &Path) -> [(&'static str, PathBuf); 6] {
     [
@@ -1266,7 +1267,7 @@ impl ArchcarDaemon {
     /// connections.
     fn start(root: &Path, extra_env: &[(&str, &Path)]) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_archductor"));
-        for name in DEVELOPER_ARCHCAR_ENV {
+        for name in developer_archcar_env() {
             command.env_remove(name);
         }
         let child = command
@@ -1299,23 +1300,31 @@ impl ArchcarDaemon {
 
 impl Drop for ArchcarDaemon {
     fn drop(&mut self) {
-        // Nothing has reaped the child yet, so its pid cannot have been
-        // reused: the signal reaches this daemon or, if it already exited,
-        // its zombie.
+        // Once `try_wait` has reaped the child (here, or in `start` before a
+        // readiness panic) its pid may already belong to another process, so
+        // signal nothing. While it reports the child still running, only this
+        // process can reap it, so the pid stays ours until the signal lands.
+        match self.child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => return,
+        }
         #[cfg(unix)]
-        let _ = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        // Bounded: a daemon stuck in shutdown is killed, never waited on.
-        let deadline = Instant::now() + ARCHCAR_DAEMON_STOP_GRACE;
-        while Instant::now() < deadline {
-            match self.child.try_wait() {
-                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Ok(Some(_)) | Err(_) => return,
+        {
+            let _ = Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            // Bounded: a daemon stuck in shutdown is killed, never waited on.
+            let deadline = Instant::now() + ARCHCAR_DAEMON_STOP_GRACE;
+            while Instant::now() < deadline {
+                match self.child.try_wait() {
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                    Ok(Some(_)) | Err(_) => return,
+                }
             }
         }
+        // `Child::kill` is a no-op on a child std has already reaped.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
