@@ -79,7 +79,7 @@ struct WorkspaceList: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 18, pinnedViews: []) {
-                if store.isStale { StaleBanner() }
+                if store.isStale { StaleBanner(isDisconnected: store.isDisconnected, cause: store.lastError) }
 
                 ForEach(store.groups) { group in
                     section(

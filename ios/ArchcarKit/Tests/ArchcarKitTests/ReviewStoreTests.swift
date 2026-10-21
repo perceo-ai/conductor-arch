@@ -78,6 +78,8 @@ private func reviewResponder(
 
     // Stale straight away, and not because a request failed: none was sent.
     #expect(await eventually { @MainActor in store.isStale })
+    #expect(store.isDisconnected == true)
+    #expect(StaleBannerCopy.text(isDisconnected: store.isDisconnected, cause: store.lastError) == StaleBannerCopy.disconnected)
     #expect(await daemon.receivedLines.count == before)
 
     await session.reconnectNow()
@@ -145,6 +147,9 @@ private func reviewResponder(
     #expect(store.checks == nil)
     #expect(store.runs != nil)
     #expect(store.isStale)
+    // Still connected, so the banner must not claim otherwise.
+    #expect(store.isDisconnected == false)
+    #expect(StaleBannerCopy.text(isDisconnected: store.isDisconnected, cause: store.lastError) != StaleBannerCopy.disconnected)
 
     await session.disconnect()
     await daemon.stop()

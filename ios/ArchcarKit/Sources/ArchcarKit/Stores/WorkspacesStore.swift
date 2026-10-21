@@ -18,9 +18,13 @@ public final class WorkspacesStore {
     /// them and disables mutations. Cleared only by a refresh that succeeds
     /// while the stream is connected; see `StaleClearing`.
     public private(set) var isStale = false
-    /// Bumped by every `markStale()`, so a clear decided before an `await`
+    /// Bumped by every `markStale(disconnected:)`, so a clear decided before an `await`
     /// can tell a mark landed since; see `StaleClearing`.
     @ObservationIgnored private(set) var staleRevision = 0
+    /// Whether the latest stale mark came from the stream being down,
+    /// rather than one request failing on a live connection: it decides
+    /// whether the banner says "not connected" or shows the error.
+    public private(set) var isDisconnected = false
     public private(set) var lastError: String?
     /// A create/archive/restore is in flight; the UI disables its controls so
     /// a slow worktree operation cannot be fired twice.
@@ -212,7 +216,8 @@ public final class WorkspacesStore {
             guard case .inventorySnapshot(let repositories, let workspaces, let chatThreads) = response
             else {
                 lastError = "unexpected response: \(response)"
-                markStale()
+                let connected = await session.connectionState == .connected
+                markStale(disconnected: !connected)
                 return
             }
             self.repositories = repositories
@@ -225,7 +230,8 @@ public final class WorkspacesStore {
             onRefreshed?()
         } catch {
             lastError = String(describing: error)
-            markStale()
+            let connected = await session.connectionState == .connected
+            markStale(disconnected: !connected)
             ArchcarLog.store.error(
                 "inventory refresh failed error=\(String(describing: error), privacy: .public)")
         }
@@ -247,7 +253,7 @@ public final class WorkspacesStore {
     public func observe() async {
         var missedEvents = false
         while !Task.isCancelled {
-            if await session.connectionState != .connected { markStale() }
+            if await session.connectionState != .connected { markStale(disconnected: true) }
             // Subscribe before refetching, so an event that lands during the
             // refetch is not lost between the two.
             guard let subscription = await session.connectedEvents() else { return }
@@ -257,7 +263,7 @@ public final class WorkspacesStore {
             }
             coalescedRefresh?.cancel()
             guard !Task.isCancelled else { return }
-            markStale()
+            markStale(disconnected: true)
             missedEvents = true
         }
     }
@@ -289,8 +295,9 @@ public final class WorkspacesStore {
         } while refreshAgain && !Task.isCancelled
     }
 
-    private func markStale() {
+    private func markStale(disconnected: Bool) {
         isStale = true
+        isDisconnected = disconnected
         staleRevision += 1
     }
 }

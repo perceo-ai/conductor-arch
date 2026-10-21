@@ -173,7 +173,7 @@ struct TerminalPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             if store.isStale {
-                StaleBanner()
+                StaleBanner(isDisconnected: store.isDisconnected, cause: store.lastError)
                     .padding(.horizontal, 8)
                     .padding(.top, 6)
             }
