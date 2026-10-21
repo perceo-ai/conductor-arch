@@ -139,8 +139,29 @@ fn acquire_singleton_lock(endpoint: &Path) -> io::Result<std::fs::File> {
         .open(singleton_lock_path(endpoint))
 }
 
+/// Windows has no socket file to probe, so ownership of the endpoint is an
+/// exclusive lock file held for the life of the daemon: a second daemon fails
+/// with `AddrInUse`, as on Unix. Probing the recorded TCP address instead was
+/// rejected because the OS can recycle a dead daemon's port to an unrelated
+/// process, which would read as a live listener and wedge every later start.
 #[cfg(windows)]
 pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
+    // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another process holds it.
+    const SHARING_VIOLATION: i32 = 32;
+    const LOCK_VIOLATION: i32 = 33;
+    let lock = match acquire_singleton_lock(endpoint) {
+        Ok(lock) => lock,
+        Err(err) if matches!(err.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "archcar endpoint already has a live listener",
+            ));
+        }
+        Err(err) => return Err(err),
+    };
+    // Held until this process exits, crash included; the OS release is what
+    // lets the next daemon in.
+    std::mem::forget(lock);
     let listener = LocalListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let address = listener.local_addr()?;
     let token = format!(
