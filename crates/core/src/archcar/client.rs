@@ -379,26 +379,35 @@ impl ArchcarClient {
         if self.endpoint.is_remote() {
             return self.connect_remote();
         }
-        match self.connect_validated() {
-            Ok(stream) => Ok(stream),
-            Err(first_err) => {
-                warn!(
-                    endpoint = %self.endpoint_path.display(),
-                    error = %first_err,
-                    "archcar endpoint was not responsive; spawning sidecar"
-                );
-                remove_stale_endpoint(&self.endpoint_path);
-                self.spawn_sidecar()?;
-                for _ in 0..ARCHCAR_STARTUP_ATTEMPTS {
-                    match self.connect_validated() {
-                        Ok(stream) => return Ok(stream),
-                        Err(_) => thread::sleep(ARCHCAR_STARTUP_POLL_INTERVAL),
-                    }
-                }
-                Err(first_err)
-                    .with_context(|| format!("connect archcar {}", self.endpoint_path.display()))
+        let first_err = match self.connect_checked() {
+            Ok(stream) => return Ok(stream),
+            // Something is listening there, maybe only too busy to answer in
+            // time. Removing its socket file would orphan that daemon and cut
+            // off every client of it, so surface the failure instead.
+            Err(ConnectFailure::Unresponsive(err)) => return Err(err),
+            Err(ConnectFailure::Dead(err)) => err,
+        };
+        warn!(
+            endpoint = %self.endpoint_path.display(),
+            error = %first_err,
+            "archcar endpoint has no listener; spawning sidecar"
+        );
+        match remove_stale_endpoint(&self.endpoint_path) {
+            Ok(()) => self.spawn_sidecar()?,
+            // Another client's sidecar came up in the meantime; use it.
+            Err(err) => warn!(
+                endpoint = %self.endpoint_path.display(),
+                error = %err,
+                "archcar endpoint gained a listener; not spawning a sidecar"
+            ),
+        }
+        for _ in 0..ARCHCAR_STARTUP_ATTEMPTS {
+            match self.connect_validated() {
+                Ok(stream) => return Ok(stream),
+                Err(_) => thread::sleep(ARCHCAR_STARTUP_POLL_INTERVAL),
             }
         }
+        Err(first_err).with_context(|| format!("connect archcar {}", self.endpoint_path.display()))
     }
 
     /// Open the transport for a non-local endpoint.
@@ -418,28 +427,40 @@ impl ArchcarClient {
         if self.endpoint.is_remote() {
             return self.connect_remote();
         }
-        let stream = match transport::connect(&self.endpoint_path).map(ArchcarStream::Local) {
-            Ok(stream) => stream,
-            Err(err) => {
-                self.clear_validation_cache();
-                return Err(err.into());
-            }
-        };
+        self.connect_checked().map_err(ConnectFailure::into_error)
+    }
+
+    /// Connect to the local endpoint and health-check it, telling apart an
+    /// endpoint nobody listens on from a listener that would not answer.
+    fn connect_checked(&self) -> std::result::Result<ArchcarStream, ConnectFailure> {
+        let stream = self.connect_raw()?;
         if self.validation_cache_is_fresh() {
             return Ok(stream);
         }
         if let Err(err) = validate_sidecar_responsive(&self.endpoint_path, stream) {
             self.clear_validation_cache();
-            return Err(err);
+            return Err(ConnectFailure::Unresponsive(
+                ArchcarEndpointUnresponsive {
+                    endpoint: self.endpoint_path.clone(),
+                    failure: format!(
+                        "did not respond to a health check within {ARCHCAR_HEALTHCHECK_TIMEOUT:?}"
+                    ),
+                    source: err,
+                }
+                .into(),
+            ));
         }
         self.mark_sidecar_validated();
-        match transport::connect(&self.endpoint_path).map(ArchcarStream::Local) {
-            Ok(stream) => Ok(stream),
-            Err(err) => {
+        self.connect_raw()
+    }
+
+    fn connect_raw(&self) -> std::result::Result<ArchcarStream, ConnectFailure> {
+        transport::connect(&self.endpoint_path)
+            .map(ArchcarStream::Local)
+            .map_err(|err| {
                 self.clear_validation_cache();
-                Err(err.into())
-            }
-        }
+                ConnectFailure::from_connect_error(&self.endpoint_path, err)
+            })
     }
 
     fn spawn_sidecar(&self) -> Result<()> {
@@ -568,15 +589,111 @@ fn clear_rpc_timeouts(stream: &ArchcarStream) -> Result<()> {
     Ok(())
 }
 
-fn remove_stale_endpoint(endpoint_path: &Path) {
-    if let Err(err) = std::fs::remove_file(endpoint_path) {
-        if err.kind() != std::io::ErrorKind::NotFound {
-            warn!(
-                endpoint = %endpoint_path.display(),
-                error = %err,
-                "failed to remove stale archcar endpoint"
-            );
+/// Remove the socket file at `endpoint_path`, but only once a fresh connect
+/// shows nobody listens on it. Returns an error, leaving the file alone, if
+/// anything still answers there or the probe fails in any other way.
+///
+/// Deliberately stricter than the server-side guard in `transport::bind`,
+/// which removes the file on any connect error short of a live listener: here
+/// only `ConnectionRefused` or `NotFound` counts as dead, because a client
+/// that guesses wrong orphans a daemon other clients are still using.
+fn remove_stale_endpoint(endpoint_path: &Path) -> Result<()> {
+    match transport::connect(endpoint_path) {
+        Ok(_) => anyhow::bail!(
+            "archcar endpoint {} has a live listener; refusing to remove its socket file",
+            endpoint_path.display()
+        ),
+        Err(err) if endpoint_has_no_listener(&err) => {}
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "probe archcar endpoint {}; refusing to remove its socket file",
+                    endpoint_path.display()
+                )
+            })
         }
+    }
+    match std::fs::remove_file(endpoint_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err)
+            .with_context(|| format!("remove stale archcar endpoint {}", endpoint_path.display())),
+    }
+}
+
+/// A connect error that proves nothing is listening at the endpoint, as
+/// opposed to one a live but busy listener can cause (a full backlog is
+/// `WouldBlock` on Linux).
+fn endpoint_has_no_listener(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+    )
+}
+
+/// Why a local endpoint could not be used.
+enum ConnectFailure {
+    /// Nobody listens there: the socket file is stale and a sidecar may
+    /// replace it.
+    Dead(anyhow::Error),
+    /// Something is, or may be, listening there: its socket file must not be
+    /// touched.
+    Unresponsive(anyhow::Error),
+}
+
+impl ConnectFailure {
+    fn from_connect_error(endpoint: &Path, err: std::io::Error) -> Self {
+        if endpoint_has_no_listener(&err) {
+            return Self::Dead(err.into());
+        }
+        let failure = format!("did not accept the connection ({err})");
+        Self::Unresponsive(
+            ArchcarEndpointUnresponsive {
+                endpoint: endpoint.to_path_buf(),
+                failure,
+                source: err.into(),
+            }
+            .into(),
+        )
+    }
+
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Dead(err) | Self::Unresponsive(err) => err,
+        }
+    }
+}
+
+/// The local endpoint has a listener that would not serve a request. The
+/// client returns this rather than replacing the daemon, which may only be
+/// overloaded; callers can downcast to it to tell it from "no daemon".
+#[derive(Debug)]
+pub struct ArchcarEndpointUnresponsive {
+    endpoint: PathBuf,
+    failure: String,
+    source: anyhow::Error,
+}
+
+impl ArchcarEndpointUnresponsive {
+    pub fn endpoint(&self) -> &Path {
+        &self.endpoint
+    }
+}
+
+impl std::fmt::Display for ArchcarEndpointUnresponsive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "archcar endpoint {} has a live listener that {}; refusing to touch its socket file (it may be overloaded) -- retry",
+            self.endpoint.display(),
+            self.failure
+        )
+    }
+}
+
+impl std::error::Error for ArchcarEndpointUnresponsive {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
     }
 }
 
@@ -802,6 +919,226 @@ mod tests {
 
         assert_eq!(requests.load(Ordering::SeqCst), 2);
         assert_eq!(healthchecks.load(Ordering::SeqCst), 1);
+    }
+
+    /// Points the sidecar spawn fallback at a binary that exits at once, so a
+    /// client test can never launch a real daemon, and restores it on drop.
+    struct ArchcarBinGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ArchcarBinGuard {
+        fn bin_false() -> Self {
+            let lock = archcar_bin_env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = std::env::var_os("ARCHDUCTOR_ARCHCAR_BIN");
+            std::env::set_var("ARCHDUCTOR_ARCHCAR_BIN", "/bin/false");
+            Self {
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for ArchcarBinGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("ARCHDUCTOR_ARCHCAR_BIN", value),
+                None => std::env::remove_var("ARCHDUCTOR_ARCHCAR_BIN"),
+            }
+        }
+    }
+
+    /// A daemon that answers every request at once except the first health
+    /// check, whose answer it holds until the test sends on the returned
+    /// channel: alive, but too busy for that one RPC.
+    #[cfg(unix)]
+    fn spawn_daemon_holding_first_healthcheck(
+        endpoint: &std::path::Path,
+    ) -> (
+        mpsc::Sender<()>,
+        mpsc::Receiver<()>,
+        Arc<AtomicBool>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = crate::archcar::transport::bind(endpoint).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let (held_tx, held_rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = stop.clone();
+        let server_endpoint = endpoint.to_path_buf();
+        let server = std::thread::spawn(move || {
+            let mut handlers = Vec::new();
+            while !server_stop.load(Ordering::SeqCst) {
+                let (mut stream, _) =
+                    match crate::archcar::transport::accept(&listener, &server_endpoint) {
+                        Ok(stream) => stream,
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                        Err(err) => panic!("accept archcar test connection: {err}"),
+                    };
+                let release_rx = release_rx.clone();
+                let held_tx = held_tx.clone();
+                handlers.push(std::thread::spawn(move || {
+                    let mut line = String::new();
+                    {
+                        let mut reader = BufReader::new(&mut stream);
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                    }
+                    let request: RpcEnvelope<ArchcarRequest> = serde_json::from_str(&line).unwrap();
+                    let response = match request.payload {
+                        ArchcarRequest::ListProviderInteractions { .. } => {
+                            let held = release_rx.lock().unwrap().take();
+                            if let Some(release) = held {
+                                held_tx.send(()).unwrap();
+                                let _ = release.recv_timeout(Duration::from_secs(30));
+                            }
+                            super::ArchcarResponse::ProviderInteractions {
+                                interactions: Vec::new(),
+                            }
+                        }
+                        ArchcarRequest::GetSessionMessages { thread_id } => {
+                            super::ArchcarResponse::SessionMessages {
+                                thread_id,
+                                messages: Vec::new(),
+                            }
+                        }
+                        other => panic!("unexpected archcar test request: {other:?}"),
+                    };
+                    let line = serde_json::to_string(&RpcEnvelope {
+                        id: request.id,
+                        payload: response,
+                    })
+                    .unwrap();
+                    // The client may have given up on this answer already.
+                    let _ = stream.write_all(format!("{line}\n").as_bytes());
+                }));
+            }
+            for handler in handlers {
+                handler.join().unwrap();
+            }
+        });
+        (release_tx, held_rx, stop, server)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_keeps_the_socket_of_a_live_daemon_whose_healthcheck_times_out() {
+        let _bin = ArchcarBinGuard::bin_false();
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar.sock");
+        let (release, held, stop, server) = spawn_daemon_holding_first_healthcheck(&endpoint);
+
+        let err = super::ArchcarClient::new(endpoint.clone())
+            .send(ArchcarRequest::GetSessionMessages { thread_id: 1 })
+            .expect_err("a health check the daemon has not answered cannot pass");
+        held.try_recv()
+            .expect("the client should have reached the daemon's health check");
+
+        assert!(
+            endpoint.exists(),
+            "the client removed the socket file of a live daemon: {err:#}"
+        );
+        assert!(
+            std::os::unix::net::UnixStream::connect(&endpoint).is_ok(),
+            "the live daemon no longer accepts at {}",
+            endpoint.display()
+        );
+        let answer = super::ArchcarClient::new(endpoint.clone())
+            .send_without_spawning(ArchcarRequest::GetSessionMessages { thread_id: 7 })
+            .expect("the live daemon should still answer requests");
+        assert!(matches!(
+            answer,
+            super::ArchcarResponse::SessionMessages { thread_id: 7, .. }
+        ));
+        let message = err.to_string();
+        assert!(
+            message.contains("has a live listener that did not respond to a health check")
+                && message.contains("refusing to touch its socket file"),
+            "expected the unresponsive-listener error, got: {err:#}"
+        );
+
+        release.send(()).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_reports_an_unresponsive_listener_as_its_own_error() {
+        let _bin = ArchcarBinGuard::bin_false();
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar.sock");
+        let (release, _held, stop, server) = spawn_daemon_holding_first_healthcheck(&endpoint);
+
+        let err = super::ArchcarClient::new(endpoint.clone())
+            .send(ArchcarRequest::GetSessionMessages { thread_id: 1 })
+            .unwrap_err();
+        let unresponsive = err
+            .downcast_ref::<super::ArchcarEndpointUnresponsive>()
+            .expect("expected ArchcarEndpointUnresponsive");
+        assert_eq!(unresponsive.endpoint(), endpoint.as_path());
+
+        release.send(()).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn client_replaces_a_socket_file_nobody_listens_on() {
+        let _bin = ArchcarBinGuard::bin_false();
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar.sock");
+        // Binding and dropping leaves the file behind with no listener.
+        drop(crate::archcar::transport::bind(&endpoint).unwrap());
+        assert!(endpoint.exists());
+
+        let err = super::ArchcarClient::new(endpoint.clone())
+            .send(ArchcarRequest::GetSessionMessages { thread_id: 1 })
+            .expect_err("the spawn fallback is /bin/false, so no daemon comes up");
+
+        assert!(
+            !endpoint.exists(),
+            "the stale socket file should have been removed"
+        );
+        assert!(err
+            .downcast_ref::<super::ArchcarEndpointUnresponsive>()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_stale_endpoint_refuses_a_socket_with_a_live_listener() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar.sock");
+        let _listener = crate::archcar::transport::bind(&endpoint).unwrap();
+
+        let err = super::remove_stale_endpoint(&endpoint).unwrap_err();
+
+        assert!(err.to_string().contains("has a live listener"), "{err:#}");
+        assert!(endpoint.exists());
+        assert!(std::os::unix::net::UnixStream::connect(&endpoint).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_stale_endpoint_removes_a_dead_or_missing_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar.sock");
+        drop(crate::archcar::transport::bind(&endpoint).unwrap());
+
+        super::remove_stale_endpoint(&endpoint).unwrap();
+        assert!(!endpoint.exists());
+        super::remove_stale_endpoint(&endpoint).unwrap();
     }
 
     #[test]
