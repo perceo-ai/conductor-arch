@@ -45,14 +45,20 @@ enum StaleClearing {
     /// that mark would then clear it for the whole outage. So the store's
     /// revision is captured before the `await` and checked after it, and a
     /// clear is refused if any mark landed in between.
+    ///
+    /// A batch of fetches has a wider window: a mark can land while a later
+    /// fetch in the batch is in flight, before this is ever called. Such a
+    /// caller passes the revision it read before its first fetch as
+    /// `unchangedSince`, and any mark since then refuses the clear too.
     @MainActor
     static func mayClear<Store: StaleRevisioned>(
         afterRefetchSucceeded succeeded: Bool,
         on session: DaemonSession,
-        store: Store
+        store: Store,
+        unchangedSince: Int? = nil
     ) async -> Bool {
         guard succeeded else { return false }
-        let revisionWhenDecided = store.staleRevision
+        let revisionWhenDecided = unchangedSince ?? store.staleRevision
         let connected = await session.connectionState == .connected
         guard revisionStillValid(decidedAt: revisionWhenDecided, now: store.staleRevision) else {
             // The store marked itself stale again while the connection was

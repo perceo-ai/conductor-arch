@@ -26,6 +26,11 @@ actor MockDaemon {
     /// The self-id the default handshake reply carries. Nil (the default)
     /// answers like an older daemon that predates `daemon_self_id`.
     private var handshakeDaemonSelfID: String?
+    /// Requests of this type are parked unanswered until `release()`.
+    private var heldType: String?
+    private var held: [(connection: NWConnection, line: String)] = []
+    /// How many requests are parked by `hold(_:)`.
+    var heldCount: Int { held.count }
 
     init() async throws {
         let parameters = NWParameters.tcp
@@ -53,6 +58,23 @@ actor MockDaemon {
 
     func respond(to matcher: @escaping @Sendable (String) -> String?) {
         self.matcher = matcher
+    }
+
+    /// Parks every request of `type` without answering it, so a test can
+    /// act while a store is suspended on that fetch.
+    func hold(_ type: String) { heldType = type }
+
+    /// Stops holding, and answers every parked request with the current
+    /// matcher.
+    func release() {
+        heldType = nil
+        let parked = held
+        held.removeAll()
+        for (connection, line) in parked {
+            if let reply = matcher?(line) {
+                connection.send(content: Data((reply + "\n").utf8), completion: .idempotent)
+            }
+        }
     }
 
     /// Pushes an unsolicited line to every open connection — the daemon's
@@ -136,6 +158,10 @@ actor MockDaemon {
                 subscribeCount += 1
                 subscribers.append(connection)
             }
+            if let heldType, Self.requestType(text) == heldType {
+                held.append((connection, text))
+                continue
+            }
             if let reply = matcher?(text) ?? handshakeProbeReply(to: text) {
                 connection.send(content: Data((reply + "\n").utf8), completion: .idempotent)
             }
@@ -145,9 +171,13 @@ actor MockDaemon {
 
 extension MockDaemon {
     static func isSubscribe(_ line: String) -> Bool {
+        requestType(line) == "subscribe"
+    }
+
+    static func requestType(_ line: String) -> String? {
         guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-              let payload = object["payload"] as? [String: Any] else { return false }
-        return payload["type"] as? String == "subscribe"
+              let payload = object["payload"] as? [String: Any] else { return nil }
+        return payload["type"] as? String
     }
 
     /// `DaemonSession.connect` proves its token with a `list_repositories`
