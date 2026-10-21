@@ -394,19 +394,25 @@ jobs:
         run: ${{ matrix.command }}
 
       # The runner's `/tmp` is short, so the step above never makes the archcar
-      # endpoint fall back past the test root. Under a TMPDIR of 66+ bytes it
-      # does, and `cli_sessions` only finds the daemon if it resolves that
-      # endpoint through the CLI's own environment (PR #181), not the test
-      # process's. Runs even when the step above failed, so its verdict is its
-      # own and not skipped behind another failure.
+      # endpoint fall back past the test root. Under a TMPDIR of 66+ bytes every
+      # test root is too long for a socket path, and the fallback differs by
+      # environment: the test process's short XDG_RUNTIME_DIR (pinned here, not
+      # left to the runner image) versus the daemon's, which `app_env` pins
+      # under the test root. `cli_sessions` only finds the daemon if it asks the
+      # CLI for the endpoint (PR #181) instead of resolving it in-process. Runs
+      # even when the step above failed, so its verdict is its own.
       - name: Adverse TMPDIR lane (cli_sessions endpoint resolution)
         if: ${{ !cancelled() && matrix.suite == 'core-cli-archcar' }}
         run: |
           set -euo pipefail
           long_tmpdir="$RUNNER_TEMP/adverse-tmpdir-$(printf 'x%.0s' $(seq 1 70))"
+          runtime_dir="$RUNNER_TEMP/xdg-runtime"
           mkdir -p "$long_tmpdir"
+          mkdir -p -m 700 "$runtime_dir"
           echo "TMPDIR is ${#long_tmpdir} bytes: $long_tmpdir"
-          TMPDIR="$long_tmpdir" cargo test -p archductor --test cli_sessions --locked -- --test-threads=1
+          echo "XDG_RUNTIME_DIR is $runtime_dir"
+          TMPDIR="$long_tmpdir" XDG_RUNTIME_DIR="$runtime_dir" \
+            cargo test -p archductor --test cli_sessions --locked -- --test-threads=1
 
   linux-smoke:
     name: Linux build and smoke
