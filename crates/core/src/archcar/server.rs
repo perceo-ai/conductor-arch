@@ -305,6 +305,10 @@ impl ArchcarServer {
             wait_for_in_flight_requests(Duration::from_secs(30));
             self.restart_in_place(remote_handoff.as_ref());
         }
+        // Past here the process is going away for good: a successful restart
+        // never returns from `restart_in_place`.
+        #[cfg(unix)]
+        unlink_own_endpoint(&self.endpoint_path);
         match (serve_error, shutdown_result) {
             (Some(err), Ok(())) => Err(err),
             (Some(err), Err(cleanup_err)) => {
@@ -335,6 +339,38 @@ impl ArchcarServer {
 
     #[cfg(not(unix))]
     fn restart_in_place(&self, _remote: Option<&std::net::TcpListener>) {}
+}
+
+/// Remove the endpoint file this daemon bound, as it exits for good. Without
+/// this every exit left the file behind, and the short fallback endpoints in a
+/// shared `/tmp/archductor` accumulated one per daemon ever started.
+///
+/// Safe because no client reads the file's presence as a live daemon: the
+/// client treats `NotFound` exactly like `ConnectionRefused`
+/// (`endpoint_has_no_listener` in `client.rs`). And the file is still this
+/// daemon's: it holds the listener while unlinking, and unix `transport::bind`
+/// refuses with `AddrInUse` while a live listener answers, so no newer daemon
+/// can have taken the path over. The caller must run this only after the
+/// in-place restart attempt: a successful restart execs into the new binary,
+/// which keeps serving on this same path.
+///
+/// Unix only. Windows `transport::bind` (the `#[cfg(windows)]` one in
+/// `transport.rs`) has no liveness probe: it removes and renames over an
+/// existing endpoint file unconditionally, so a newer daemon may own the file
+/// by the time this one exits, and removing it would shut that daemon down on
+/// its next accept. Windows must not share this cleanup until it can check the
+/// file still belongs to this listener.
+#[cfg(unix)]
+fn unlink_own_endpoint(endpoint_path: &Path) {
+    match fs::remove_file(endpoint_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => warn!(
+            error = %err,
+            endpoint = %endpoint_path.display(),
+            "archcar could not remove its endpoint on exit"
+        ),
+    }
 }
 
 fn bind_remote_listener(paths: &AppPaths, addr: std::net::SocketAddr) -> Result<RemoteListener> {
