@@ -590,8 +590,13 @@ fn clear_rpc_timeouts(stream: &ArchcarStream) -> Result<()> {
 }
 
 /// Remove the socket file at `endpoint_path`, but only once a fresh connect
-/// shows nobody listens on it (the same rule `transport::bind` applies).
-/// Returns an error, leaving the file alone, if anything still answers there.
+/// shows nobody listens on it. Returns an error, leaving the file alone, if
+/// anything still answers there or the probe fails in any other way.
+///
+/// Deliberately stricter than the server-side guard in `transport::bind`,
+/// which removes the file on any connect error short of a live listener: here
+/// only `ConnectionRefused` or `NotFound` counts as dead, because a client
+/// that guesses wrong orphans a daemon other clients are still using.
 fn remove_stale_endpoint(endpoint_path: &Path) -> Result<()> {
     match transport::connect(endpoint_path) {
         Ok(_) => anyhow::bail!(

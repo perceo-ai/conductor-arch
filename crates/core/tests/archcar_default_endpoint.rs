@@ -3,7 +3,8 @@
 //!
 //! This resolves the endpoint through the real `AppPaths::from_env()`, so it
 //! edits the process environment; it is the only test in this binary to keep
-//! that single-threaded. Every XDG directory and `HOME` point into a tempdir
+//! that single-threaded. Every XDG directory (`XDG_RUNTIME_DIR` too: it is the
+//! first base of the short-socket fallback) and `HOME` point into a tempdir
 //! first, so the developer's own state dir is never touched.
 #![cfg(unix)]
 
@@ -14,7 +15,12 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 #[test]
 fn serve_on_the_default_endpoint_refuses_a_live_listener() {
-    let temp = tempfile::tempdir().unwrap();
+    // Not `tempdir()`: a long `TMPDIR` would push the direct socket path past
+    // the unix limit and onto the short fallback, so root it at a short path.
+    let temp = tempfile::Builder::new()
+        .prefix("archcar-default-")
+        .tempdir_in("/tmp")
+        .unwrap();
     let root = temp.path();
     for name in [
         remote::LISTEN_ENV,
@@ -30,13 +36,14 @@ fn serve_on_the_default_endpoint_refuses_a_live_listener() {
     std::env::set_var("XDG_DATA_HOME", root.join("xdg/data"));
     std::env::set_var("XDG_STATE_HOME", root.join("xdg/state"));
     std::env::set_var("XDG_CACHE_HOME", root.join("xdg/cache"));
+    std::env::set_var("XDG_RUNTIME_DIR", root.join("xdg/runtime"));
 
     let paths = AppPaths::from_env();
     let endpoint = paths.archcar_endpoint_path();
     assert_eq!(
         endpoint,
         root.join("xdg/state/archductor/archcar.sock"),
-        "from_env should resolve the default endpoint inside the test's state dir"
+        "from_env should resolve the default-shaped endpoint inside the test's tempdir"
     );
     std::fs::create_dir_all(endpoint.parent().unwrap()).unwrap();
     let live = UnixListener::bind(&endpoint).unwrap();
