@@ -688,11 +688,6 @@ pub fn is_public_addr(addr: &SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
-/// The listen address from the environment, if the operator asked for one.
-pub fn listen_addr_from_env() -> Option<Result<SocketAddr>> {
-    listen_addr_from(std::env::var(LISTEN_ENV).ok().as_deref())
-}
-
 fn listen_addr_from(env_value: Option<&str>) -> Option<Result<SocketAddr>> {
     env_value.map(parse_listen_addr)
 }
