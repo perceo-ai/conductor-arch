@@ -4648,8 +4648,7 @@ fn note_session_not_ready_for_queue(handle: &SessionHandle) -> Option<(bool, Age
         return None;
     }
     let before = (snapshot.ready, snapshot.runtime_state);
-    snapshot.ready = false;
-    snapshot.runtime_state = AgentSessionState::Running;
+    crate::archcar::session::mark_session_busy_for_input(&mut snapshot);
     Some(before)
 }
 
@@ -4682,9 +4681,14 @@ fn mark_session_ready_at_turn_boundary(
     let Ok(mut snapshot) = handle.snapshot.lock() else {
         return;
     };
+    // The loop marks the session ready itself before this runs, and a send
+    // can open the next turn in between. Its busy mark looks the same as the
+    // one this event ends, so only the turn generation tells them apart: a
+    // late mark for an earlier turn must not reopen the live one to sends.
     if snapshot.thread_id == thread_id
         && matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE)
         && snapshot.status == crate::workspace::ProcessStatus::Running
+        && snapshot.turns.latest_turn_completed()
     {
         snapshot.ready = true;
         snapshot.runtime_state = crate::session_state::AgentSessionState::WaitingForInput;
@@ -4806,6 +4810,7 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         // Completion is the queue's authoritative turn boundary. Providers
         // also emit SessionReady, but relying on that second event leaves a
         // follow-up stuck when it is delayed or lost.
+        crate::archcar::test_hooks::pause_before_turn_boundary_ready_mark();
         mark_session_ready_at_turn_boundary(state, *session_id, *thread_id);
         raise_codex_plan_approval(state, *thread_id, *session_id);
     }
@@ -8285,6 +8290,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8397,6 +8403,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8490,6 +8497,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8582,6 +8590,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         }));
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8670,6 +8679,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8751,6 +8761,7 @@ exit 1
                     ready: false,
                     capabilities: None,
                     screen: String::new(),
+                    turns: Default::default(),
                 })),
                 command_tx,
             },
@@ -8869,6 +8880,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8923,6 +8935,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let handle_snapshot = Arc::new(Mutex::new(snapshot));
         let (command_tx, command_rx) = mpsc::channel();
@@ -9040,6 +9053,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9157,6 +9171,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9516,6 +9531,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9573,6 +9589,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let starting_snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 10,
@@ -9585,6 +9602,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (ready_tx, _ready_rx) = mpsc::channel();
         let (starting_tx, _starting_rx) = mpsc::channel();
@@ -9717,6 +9735,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let state = Arc::new(Mutex::new(ServerState {
@@ -9796,6 +9815,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9850,6 +9870,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9906,6 +9927,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();

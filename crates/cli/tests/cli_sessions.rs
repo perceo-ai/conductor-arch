@@ -1010,6 +1010,185 @@ fn cli_session_send_while_a_queued_message_is_handed_off_queues_behind_it() {
     wait_for_session_exit(temp.path(), session_id);
 }
 
+/// Failure this guards: the daemon marks a session ready on `TurnCompleted`
+/// as a safety net for a provider `Ready` that is delayed or lost. It does so
+/// on its event pump, after the session loop has already marked the session
+/// ready itself. A `session send` landing between the two opened the next
+/// turn and marked the session busy for it; the daemon's late mark for the
+/// turn before then set `ready = true` again while that turn was live, and
+/// the send after it was steered into the live turn instead of queueing. The
+/// late mark now checks the session's turn generation and leaves a newer
+/// turn's busy mark alone.
+///
+/// The gap is the pump's latency in a real daemon. The test daemon is built
+/// with the `test-handoff-delay` seams; one stalls the pump just before the
+/// late mark, so the second send lands in the gap every time.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_after_a_late_turn_boundary_mark_queues_behind_the_live_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            (
+                "ARCHDUCTOR_TEST_TURN_BOUNDARY_MARK_DELAY_MS",
+                Path::new("3000"),
+            ),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    app()
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app()
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "codex_executable_path = {:?}\n",
+            fake_codex.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+
+    // End turn 1. The loop marks the session ready at once; the daemon's own
+    // mark for the same `TurnCompleted` is held back by the stall.
+    let events = subscribe_to_archcar_events(temp.path());
+    fs::write(release.with_extension("1"), "").unwrap();
+    wait_for_session_state(&app, "berlin", "finished", "working");
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the second task",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent codex message"));
+    // Turn 2 is open and held. Only once the provider has it is the session
+    // marked busy for it -- the loop marks busy before it writes the turn.
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
+    // The race needs turn 2 open before the late mark; if the stall ever ran
+    // out first, this test would pass without exercising it.
+    assert!(
+        !events
+            .try_iter()
+            .any(|event| event["type"] == "turn_completed"),
+        "turn 1's late ready mark landed before turn 2 started; lengthen the stall"
+    );
+    // Let the late mark for turn 1 land. The daemon broadcasts the event
+    // only after it has handled it.
+    wait_for_archcar_event(&events, "turn_completed");
+
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the third task",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("queued codex message"),
+        "a send after turn 1's late ready mark must queue behind turn 2, not join it: {stdout}"
+    );
+
+    // Turn 2 is still held: the third message waits, then opens turn 3.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "the third message must wait for turn 2 to end"
+    );
+    fs::write(release.with_extension("2"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured[1..],
+        [
+            ("turn/start".to_owned(), "Then the second task".to_owned()),
+            ("turn/start".to_owned(), "Then the third task".to_owned()),
+        ],
+        "{captured:?}"
+    );
+
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let session_id = store.list_sessions("berlin").unwrap()[0].id;
+    app()
+        .args(["archcar", "kill", &session_id.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), session_id);
+}
+
 /// Failure this guards: the daemon marks a session busy before it hands a
 /// queued message to the session loop, trusting the loop to either start the
 /// turn or mark the session failed. Two `continue` paths in the loop's
@@ -2215,6 +2394,62 @@ fn wait_for_file_lines_through_stalls(path: &Path, expected: usize) {
         "timed out waiting for {expected} line(s) in {}",
         path.display()
     );
+}
+
+/// Subscribes to the daemon's event stream and returns a receiver of
+/// their JSON payloads. Needs a running session: the proof of registration is
+/// the `session_started` the daemon replays for it, which it sends under the
+/// same lock as it registers the subscriber, and every later broadcast takes
+/// that lock too. Returning before that proof would let an event broadcast in
+/// between go to every subscriber but this one.
+#[cfg(unix)]
+fn subscribe_to_archcar_events(root: &Path) -> std::sync::mpsc::Receiver<serde_json::Value> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let mut stream = std::os::unix::net::UnixStream::connect(archcar_endpoint_path(root)).unwrap();
+    let request = json!({
+        "id": "test-subscribe",
+        "payload": archductor_core::archcar::protocol::ArchcarRequest::Subscribe,
+    });
+    writeln!(stream, "{request}").unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stream).lines() {
+            let Ok(line) = line else { break };
+            let Ok(mut envelope) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if tx.send(envelope["payload"].take()).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(event) if event["type"] == "session_started" && event["replayed"] == true => {
+                return rx;
+            }
+            Ok(_) => {}
+            Err(err) => panic!("the daemon never confirmed the event subscription: {err}"),
+        }
+    }
+}
+
+/// Waits for the daemon to broadcast an event of type `event_type`. The
+/// daemon broadcasts a session event only after it has handled it.
+#[cfg(unix)]
+fn wait_for_archcar_event(events: &std::sync::mpsc::Receiver<serde_json::Value>, event_type: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match events.recv_timeout(remaining) {
+            Ok(event) if event["type"] == event_type => return,
+            Ok(_) => {}
+            Err(err) => panic!("no {event_type} event from the daemon: {err}"),
+        }
+    }
 }
 
 /// Polls `status <workspace> --json` until the first session reports `want`,
