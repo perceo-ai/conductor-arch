@@ -397,9 +397,10 @@ jobs:
       # endpoint fall back past the test root. Under a TMPDIR of 66+ bytes it
       # does, and `cli_sessions` only finds the daemon if it resolves that
       # endpoint through the CLI's own environment (PR #181), not the test
-      # process's.
+      # process's. Runs even when the step above failed, so its verdict is its
+      # own and not skipped behind another failure.
       - name: Adverse TMPDIR lane (cli_sessions endpoint resolution)
-        if: matrix.suite == 'core-cli-archcar'
+        if: ${{ !cancelled() && matrix.suite == 'core-cli-archcar' }}
         run: |
           set -euo pipefail
           long_tmpdir="$RUNNER_TEMP/adverse-tmpdir-$(printf 'x%.0s' $(seq 1 70))"
