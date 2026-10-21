@@ -1,0 +1,32 @@
+import Testing
+
+@testable import ArchcarKit
+
+// Stores put `String(describing: error)` straight into the fields the screens
+// and the stale banner show, so these sentences are what the user reads. Every
+// case is listed: a new case must get a sentence, not fall back to its name.
+
+@Test func daemonSessionErrorsRenderAsSentences() {
+    #expect(String(describing: DaemonSessionError.daemon("gh is not authenticated"))
+        == "The daemon said: gh is not authenticated")
+    #expect(String(describing: DaemonSessionError.authenticationFailed) == "Authentication failed.")
+    #expect(String(describing: DaemonSessionError.disconnected) == "Connection to the daemon was lost.")
+    #expect(String(describing: DaemonSessionError.timedOut) == "The request timed out.")
+    #expect(String(describing: DaemonSessionError.closedWithoutResponse)
+        == "The daemon closed the connection before confirming.")
+}
+
+@Test func transportErrorsRenderAsSentences() {
+    #expect(String(describing: ArchcarTransportError.notConnected) == "Not connected to the daemon.")
+    #expect(String(describing: ArchcarTransportError.connectionFailed("Socket is not connected"))
+        == "The connection to the daemon failed: Socket is not connected")
+    #expect(String(describing: ArchcarTransportError.authenticationFailed) == "Authentication failed.")
+    #expect(String(describing: ArchcarTransportError.closed) == "The daemon closed the connection.")
+}
+
+@Test func errorsRenderTheSameWhenTypeErased() {
+    // The stores catch `any Error`; the sentence must survive the erasure.
+    let errors: [any Error] = [DaemonSessionError.timedOut, ArchcarTransportError.closed]
+    #expect(errors.map { String(describing: $0) }
+        == ["The request timed out.", "The daemon closed the connection."])
+}

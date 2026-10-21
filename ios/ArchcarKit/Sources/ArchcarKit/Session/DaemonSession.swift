@@ -15,6 +15,23 @@ public enum DaemonSessionError: Error, Equatable, Sendable {
     case closedWithoutResponse
 }
 
+/// The sentence a phone shows for each failure. Stores hand errors to the
+/// screens and the stale banner as `String(describing: error)`, and that lands
+/// here, so this is the one place a case becomes words. The daemon's own
+/// message goes through verbatim: when `gh` refuses, it is the only diagnostic
+/// the user gets.
+extension DaemonSessionError: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .daemon(let message): "The daemon said: \(message)"
+        case .authenticationFailed: "Authentication failed."
+        case .disconnected: "Connection to the daemon was lost."
+        case .timedOut: "The request timed out."
+        case .closedWithoutResponse: "The daemon closed the connection before confirming."
+        }
+    }
+}
+
 /// One daemon, as the app talks to it.
 ///
 /// The daemon serves exactly one request per connection: `handle_connection`
