@@ -16,8 +16,8 @@ public enum DaemonSessionError: Error, Equatable, Sendable {
 }
 
 /// The sentence a phone shows for each failure. Stores hand errors to the
-/// screens and the stale banner as `error.localizedDescription`, which lands
-/// here through `LocalizedError`, so this is the one place a case becomes words. The daemon's own
+/// screens and the stale banner through `UserFacingMessage.describing`, which
+/// reads `localizedDescription` and lands here through `LocalizedError`, so this is the one place a case becomes words. The daemon's own
 /// message goes through verbatim: when `gh` refuses, it is the only diagnostic
 /// the user gets.
 extension DaemonSessionError: CustomStringConvertible {
@@ -32,7 +32,7 @@ extension DaemonSessionError: CustomStringConvertible {
     }
 }
 
-/// The screens show `error.localizedDescription`, because they catch
+/// The screens show `localizedDescription`, because they catch
 /// `any Error` and a decoding failure arrives as Foundation's error, not this.
 /// Same sentence as `description`.
 extension DaemonSessionError: LocalizedError {
@@ -220,7 +220,7 @@ public actor DaemonSession {
                 "connected host=\(self.address.host, privacy: .public) port=\(self.address.port, privacy: .public)")
         } catch {
             if lifecycle == self.lifecycle {
-                connectionState = .failed(error.localizedDescription)
+                connectionState = .failed(UserFacingMessage.describing(error))
             }
             ArchcarLog.session.error(
                 "connect failed host=\(self.address.host, privacy: .public) port=\(self.address.port, privacy: .public) error=\(String(describing: error), privacy: .public)")
@@ -318,6 +318,10 @@ public actor DaemonSession {
         try await connection.send(try RequestEnvelope(id: id, body: body).encodedLine())
 
         guard let line = try await firstLine(of: lines) else {
+            // Cancelling the caller ends the read as well as the timeout, and
+            // whichever finishes first wins the race in `firstLine`. Either
+            // way the request was cancelled, not closed by the daemon.
+            try Task.checkCancellation()
             // Closed without answering. A rejected token is reported as an
             // `auth` error line, so it is not this; this is the daemon dying,
             // restarting, or the link dropping mid-request.

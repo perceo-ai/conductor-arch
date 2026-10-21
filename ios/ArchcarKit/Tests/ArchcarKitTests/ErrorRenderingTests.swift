@@ -3,7 +3,7 @@ import Testing
 
 @testable import ArchcarKit
 
-// Stores put `String(describing: error)` straight into the fields the screens
+// Stores put `UserFacingMessage.describing(error)` into the fields the screens
 // and the stale banner show, so these sentences are what the user reads. Every
 // case is listed: a new case must get a sentence, not fall back to its name.
 
@@ -71,6 +71,91 @@ private let dumpMarkers = ["CodingKeys", "Swift.", "Context(", "(stringValue:"]
     print("ERRPROBE store.lastError=\(shown)")
     #expect(!shown.isEmpty)
     for marker in dumpMarkers {
+        #expect(!shown.contains(marker), "\(marker) leaked into: \(shown)")
+    }
+    await session.disconnect()
+    await daemon.stop()
+}
+
+/// Answers each request `type` in `replies` with that payload, and nothing
+/// else; the handshake still gets the mock's own answer.
+private func replying(_ replies: [String: String]) -> @Sendable (String) -> String? {
+    { line in
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = object["id"] as? String,
+              let type = MockDaemon.requestType(line),
+              let payload = replies[type] else { return nil }
+        return #"{"id":"\#(id)","payload":\#(payload)}"#
+    }
+}
+
+@MainActor
+@Test func aCancelledRequestReadsAsInterruptedNotFailed() async throws {
+    // Cancelling the store's task cancels `DaemonSession.firstLine`'s timeout
+    // sleep, and Foundation renders the resulting `CancellationError` as "The
+    // operation couldn't be completed. (Swift.CancellationError error 1.)".
+    let daemon = try await MockDaemon()
+    await daemon.hold("get_inventory_snapshot")
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = WorkspacesStore(session: session)
+    let refreshing = Task { await store.refresh() }
+    #expect(await eventually { await daemon.heldCount == 1 })
+    refreshing.cancel()
+    await refreshing.value
+
+    let shown = try #require(store.lastError)
+    #expect(shown == "The request was interrupted before the daemon answered.")
+    #expect(!shown.contains("Swift.CancellationError"))
+    #expect(!shown.localizedCaseInsensitiveContains("fail"))
+    // A resolve sheet must not call an interrupted answer unreachable either.
+    #expect(ChatStore.resolveFailureMessage(for: CancellationError()) == shown)
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func anUnexpectedActionResponseReadsAsASentenceOnTheReviewScreen() async throws {
+    // A newer daemon's reply type decodes as `.unknown`, which the review
+    // screen used to print as `unknown(type: "branch_pushed_v2")`.
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: replying([
+        "push_branch": #"{"type":"branch_pushed_v2","remote":"origin"}"#,
+        "get_checks_summary": #"{"type":"error","message":"not under test"}"#,
+        "list_workflow_runs": #"{"type":"error","message":"not under test"}"#,
+    ]))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = ReviewStore(session: session, workspace: "w")
+    await store.push()
+
+    let shown = try #require(store.actionOutput)
+    print("ERRPROBE store.actionOutput=\(shown)")
+    #expect(shown == "The daemon sent an answer this app could not use.")
+    for marker in dumpMarkers + ["unknown(", "branch_pushed_v2"] {
+        #expect(!shown.contains(marker), "\(marker) leaked into: \(shown)")
+    }
+    await session.disconnect()
+    await daemon.stop()
+}
+
+@MainActor
+@Test func anUnexpectedInventoryResponseReadsAsASentenceInTheStaleBanner() async throws {
+    // `WorkspacesStore.lastError` feeds the stale banner; it used to read
+    // `unexpected response: unknown(type: "inventory_snapshot_v2")`.
+    let daemon = try await MockDaemon()
+    await daemon.respond(to: replying([
+        "get_inventory_snapshot": #"{"type":"inventory_snapshot_v2","repositories":[]}"#,
+    ]))
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = WorkspacesStore(session: session)
+    await store.refresh()
+
+    let shown = try #require(store.lastError)
+    print("ERRPROBE store.lastError=\(shown)")
+    #expect(shown == "The daemon sent an answer this app could not use.")
+    for marker in dumpMarkers + ["unknown(", "inventory_snapshot_v2"] {
         #expect(!shown.contains(marker), "\(marker) leaked into: \(shown)")
     }
     await session.disconnect()

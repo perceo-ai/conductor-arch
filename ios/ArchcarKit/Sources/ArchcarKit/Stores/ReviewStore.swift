@@ -261,7 +261,10 @@ public final class ReviewStore {
         case .ack:
             actionOutput = "Done."
         case .some(let other):
-            actionOutput = String(describing: other)
+            // The dump is for whoever reads the log, not for the screen.
+            ArchcarLog.store.error(
+                "unexpected action response=\(String(describing: other), privacy: .private)")
+            actionOutput = UserFacingMessage.unexpectedResponse
         case .none:
             break
         }
@@ -279,7 +282,7 @@ public final class ReviewStore {
         } catch {
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
             return nil
         }
     }

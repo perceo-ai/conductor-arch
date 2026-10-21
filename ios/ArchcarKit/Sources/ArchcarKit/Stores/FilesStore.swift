@@ -45,7 +45,7 @@ public final class FilesStore {
             paths = files.sorted()
             lastError = nil
         } catch {
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
         }
     }
 
@@ -57,7 +57,7 @@ public final class FilesStore {
             lastError = nil
             return content
         } catch {
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
             return nil
         }
     }
@@ -71,7 +71,7 @@ public final class FilesStore {
             lastError = nil
             return true
         } catch {
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
             return false
         }
     }
