@@ -23,6 +23,25 @@ pub(crate) fn pause_after_provider_handoff() {
 #[inline(always)]
 pub(crate) fn pause_after_provider_handoff() {}
 
+/// Stalls a session loop for `ARCHDUCTOR_TEST_HANDOFF_PICKUP_DELAY_MS`
+/// milliseconds when it takes a `SendInput` off its channel, before it marks
+/// the session busy itself. The queue drain marks the session busy before it
+/// sends; with this stall, the loop's own mark cannot be what closes the gap
+/// behind the drain's send, so a test can pin the drain's mark on its own.
+#[cfg(feature = "test-handoff-delay")]
+pub(crate) fn pause_before_session_takes_input() {
+    let delay = std::env::var("ARCHDUCTOR_TEST_HANDOFF_PICKUP_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    if let Some(delay) = delay {
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+    }
+}
+
+#[cfg(not(feature = "test-handoff-delay"))]
+#[inline(always)]
+pub(crate) fn pause_before_session_takes_input() {}
+
 /// When set, and the path it names exists, `durable_thread_is_first_user_turn`
 /// returns this as an Err instead of reading chat history -- lets a test force
 /// the dropped-`SendInput`-above-the-readiness-write path deterministically,
