@@ -5925,6 +5925,7 @@ fn ensure_default_session(
     let workspace_for_spawn = workspace.clone();
     std::thread::spawn(move || {
         let (event_tx, event_rx) = mpsc::channel();
+        let in_flight = SpawnInFlight::new(&state_for_spawn);
         match spawn_managed_session(
             db_path,
             logs_dir,
@@ -5932,11 +5933,13 @@ fn ensure_default_session(
             kind,
             harness,
             event_tx,
+            &|pid| in_flight.child_spawned(pid),
         ) {
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 if guard.shutting_down {
                     guard
                         .queued_defaults
@@ -5958,6 +5961,7 @@ fn ensure_default_session(
                 let detail = format!("{err:#}");
                 error!(%workspace_for_spawn, ?kind, error = %detail, "archcar failed to spawn managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 guard
                     .queued_defaults
                     .remove(&default_queue_key(&workspace_for_spawn, kind));
@@ -6073,6 +6077,7 @@ fn ensure_chat_thread_session(
     let workspace_for_spawn = workspace.clone();
     std::thread::spawn(move || {
         let (event_tx, event_rx) = mpsc::channel();
+        let in_flight = SpawnInFlight::new(&state_for_spawn);
         match spawn_managed_session_for_thread(
             db_path,
             logs_dir,
@@ -6081,11 +6086,13 @@ fn ensure_chat_thread_session(
             kind,
             harness,
             event_tx,
+            &|pid| in_flight.child_spawned(pid),
         ) {
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, thread_id, session_id, ?kind, "archcar spawned chat-thread managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 if guard.shutting_down {
                     guard.queued_threads.remove(&thread_id);
                     drop(guard);
@@ -6124,6 +6131,7 @@ fn ensure_chat_thread_session(
                 let detail = format!("{err:#}");
                 error!(%workspace_for_spawn, thread_id, ?kind, error = %detail, "archcar failed to spawn chat-thread managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 guard.queued_threads.remove(&thread_id);
                 broadcast(
                     &mut guard,
@@ -6423,6 +6431,7 @@ fn spawn_session(
     let workspace_for_spawn = workspace.clone();
     std::thread::spawn(move || {
         let (event_tx, event_rx) = mpsc::channel();
+        let in_flight = SpawnInFlight::new(&state_for_spawn);
         match spawn_managed_session(
             db_path,
             logs_dir,
@@ -6430,11 +6439,13 @@ fn spawn_session(
             kind,
             harness,
             event_tx,
+            &|pid| in_flight.child_spawned(pid),
         ) {
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned explicit managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 if guard.shutting_down {
                     drop(guard);
                     terminate_managed_handle(&handle);
@@ -6450,6 +6461,7 @@ fn spawn_session(
                 let detail = format!("{err:#}");
                 error!(%workspace_for_spawn, ?kind, error = %detail, "archcar failed to spawn explicit managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 broadcast(
                     &mut guard,
                     ArchcarEvent::SessionError {
@@ -6465,18 +6477,67 @@ fn spawn_session(
     ArchcarResponse::SessionSpawnQueued { workspace, kind }
 }
 
+/// Marks a background spawn's child in `ServerState::spawning_pids` from the
+/// moment it starts until the spawn either registers its handle or gives up.
+/// `clear` must run in the same critical section as the registration, so a
+/// lookup never sees the pid unmarked and the handle unregistered at once.
+struct SpawnInFlight<'a> {
+    state: &'a Arc<Mutex<ServerState>>,
+    pid: std::cell::Cell<Option<u32>>,
+}
+
+impl<'a> SpawnInFlight<'a> {
+    fn new(state: &'a Arc<Mutex<ServerState>>) -> Self {
+        Self {
+            state,
+            pid: std::cell::Cell::new(None),
+        }
+    }
+
+    fn child_spawned(&self, pid: u32) {
+        self.state.lock().unwrap().spawning_pids.insert(pid);
+        self.pid.set(Some(pid));
+    }
+
+    fn clear(&self, state: &mut ServerState) {
+        if let Some(pid) = self.pid.take() {
+            state.spawning_pids.remove(&pid);
+        }
+    }
+}
+
 fn load_or_restore_session_handle(
     state: &Arc<Mutex<ServerState>>,
     session_id: i64,
 ) -> Result<Option<SessionHandle>> {
-    if let Some(handle) = state.lock().unwrap().sessions.get(&session_id).cloned() {
-        return Ok(Some(handle));
-    }
-
     let (db_path, logs_dir) = {
         let guard = state.lock().unwrap();
+        if let Some(handle) = guard.sessions.get(&session_id).cloned() {
+            return Ok(Some(handle));
+        }
         (guard.db_path.clone(), guard.logs_dir.clone())
     };
+
+    // restore_managed_session exists for sessions left behind by a previous
+    // daemon, and it terminates provider-native ones. A spawn in this daemon
+    // writes the process row before it registers the handle, so an unknown id
+    // can also be a session that is still starting. Its pid is marked before
+    // the row is written and unmarked in the same critical section that
+    // registers it, so once the row has been read, one lock tells the two
+    // apart: registered, still spawning, or neither.
+    let pid = WorkspaceStore::open_app(&db_path)
+        .and_then(|store| store.get_process_record(session_id))
+        .map(|process| process.pid);
+    if let Ok(pid) = pid {
+        let guard = state.lock().unwrap();
+        if let Some(handle) = guard.sessions.get(&session_id).cloned() {
+            return Ok(Some(handle));
+        }
+        if guard.spawning_pids.contains(&pid) {
+            return Ok(None);
+        }
+    }
+
     let (event_tx, event_rx) = mpsc::channel();
     let Some(handle) = restore_managed_session(db_path, logs_dir, session_id, event_tx)? else {
         warn!(
