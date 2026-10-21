@@ -673,18 +673,15 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
         .success();
     wait_for_file_lines(&provider_inputs, 1);
 
-    // Busy: the first turn is still open. Status says so.
-    let status = app()
-        .args(["status", "berlin", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let status: serde_json::Value = serde_json::from_slice(&status).unwrap();
+    // Busy: the first turn is still open. Status says so. The daemon writes
+    // the turn to the provider before it records the input and marks the
+    // session working, so the provider can capture the input while status
+    // still reads awaiting_input; wait for the daemon to catch up. The turn
+    // cannot finish meanwhile: it is held until `release` exists, which is
+    // written only further down.
+    let status = wait_for_session_state(&app, "berlin", "working", "awaiting_input");
     let session = &status["workspaces"][0]["sessions"][0];
     assert_eq!(session["alive"], true, "{status}");
-    assert_eq!(session["state"], "working", "{status}");
     assert_eq!(session["liveness_source"], "daemon", "{status}");
 
     // No --kind: the workspace's chat is a codex chat. A short timeout proves
@@ -1723,6 +1720,38 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
         "timed out waiting for {expected} line(s) in {}",
         path.display()
     );
+}
+
+/// Polls `status <workspace> --json` until the first session reports `want`,
+/// and returns that report. Any state other than `want` or `pending` fails at
+/// once, and so does still reading `pending` after 5s.
+fn wait_for_session_state(
+    app: &dyn Fn() -> AssertCommand,
+    workspace: &str,
+    want: &str,
+    pending: &str,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_millis(5000);
+    loop {
+        let output = app()
+            .args(["status", workspace, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let state = &status["workspaces"][0]["sessions"][0]["state"];
+        if state == want {
+            return status;
+        }
+        assert_eq!(state, pending, "unexpected session state: {status}");
+        assert!(
+            Instant::now() < deadline,
+            "session never reported {want}, still {pending}: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn wait_for_running_session(root: &Path, workspace: &str) -> i64 {
