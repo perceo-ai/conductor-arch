@@ -77,7 +77,7 @@ public final class TerminalStore {
                 return
             }
         } catch {
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
             return
         }
 
@@ -182,7 +182,7 @@ public final class TerminalStore {
         } catch {
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
         }
     }
 

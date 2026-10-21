@@ -238,7 +238,9 @@ public final class ChatStore {
                 composerError = composerError ?? "Could not start a \(thread.provider) session."
                 return
             case .some(let other):
-                composerError = "Unexpected answer starting the session: \(other)"
+                ArchcarLog.store.error(
+                    "session start got an unexpected response=\(String(describing: other), privacy: .private)")
+                composerError = "Could not start a \(thread.provider) session. \(UserFacingMessage.unexpectedResponse)"
                 return
             }
         }
@@ -303,12 +305,14 @@ public final class ChatStore {
     }
 
     /// A sentence for a failed resolve. The daemon and transport errors carry
-    /// their own (`LocalizedError`); none of them claim the answer was
+    /// their own (`LocalizedError`), and a cancelled request gets
+    /// `UserFacingMessage`'s; none of them claim the answer was
     /// or was not applied: the daemon applies it before replying, so a dropped
     /// link can lose the reply to an answer that already went through.
     nonisolated static func resolveFailureMessage(for error: any Error) -> String {
         switch error {
-        case is DaemonSessionError, is ArchcarTransportError: error.localizedDescription
+        case is DaemonSessionError, is ArchcarTransportError, is CancellationError:
+            UserFacingMessage.describing(error)
         default: "Couldn't reach the daemon."
         }
     }
@@ -490,7 +494,7 @@ public final class ChatStore {
         } catch {
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
-            composerError = error.localizedDescription
+            composerError = UserFacingMessage.describing(error)
             return nil
         }
     }

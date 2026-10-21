@@ -175,7 +175,9 @@ public final class WorkspacesStore {
             // `send` already recorded why.
             return false
         case .some(let other):
-            lastError = "\(failure) The daemon answered \(other)."
+            ArchcarLog.store.error(
+                "workspace lifecycle got an unexpected response=\(String(describing: other), privacy: .private)")
+            lastError = "\(failure) \(UserFacingMessage.unexpectedResponse)"
             return false
         }
     }
@@ -204,7 +206,7 @@ public final class WorkspacesStore {
             lastError = nil
             return response
         } catch {
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
             return nil
         }
     }
@@ -215,7 +217,9 @@ public final class WorkspacesStore {
             let response = try await session.request(GetInventorySnapshotRequest())
             guard case .inventorySnapshot(let repositories, let workspaces, let chatThreads) = response
             else {
-                lastError = "unexpected response: \(response)"
+                ArchcarLog.store.error(
+                    "inventory refresh got an unexpected response=\(String(describing: response), privacy: .private)")
+                lastError = UserFacingMessage.unexpectedResponse
                 let connected = await session.connectionState == .connected
                 markStale(disconnected: !connected)
                 return
@@ -229,7 +233,7 @@ public final class WorkspacesStore {
             lastError = nil
             onRefreshed?()
         } catch {
-            lastError = error.localizedDescription
+            lastError = UserFacingMessage.describing(error)
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
             ArchcarLog.store.error(

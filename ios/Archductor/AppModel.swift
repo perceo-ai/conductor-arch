@@ -111,7 +111,7 @@ final class AppModel {
             return
         } catch {
             connectionError =
-                "Could not reach \(daemon.address.host):\(daemon.address.port) — \(error.localizedDescription)"
+                "Could not reach \(daemon.address.host):\(daemon.address.port) — \(UserFacingMessage.describing(error))"
             return
         }
         connectionError = nil
