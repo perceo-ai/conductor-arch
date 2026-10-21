@@ -63,3 +63,26 @@ pub(crate) fn forced_first_turn_check_failure() -> Option<String> {
 pub(crate) fn forced_first_turn_check_failure() -> Option<String> {
     None
 }
+
+/// When `ARCHDUCTOR_TEST_HOLD_CLAUDE_READY_PATH` is set, holds a new Claude
+/// session loop just before it reports the transport ready, until the file it
+/// names exists. The session stays registered and `starting` meanwhile, so a
+/// test can land a `session send` in the window between the daemon handing out
+/// the session id and the transport coming up -- or never create the file and
+/// watch the send time out. Gives up after 30s so a forgotten hold cannot wedge
+/// a test daemon's session forever.
+#[cfg(feature = "test-handoff-delay")]
+pub(crate) fn hold_before_claude_transport_ready() {
+    let Some(path) = std::env::var_os("ARCHDUCTOR_TEST_HOLD_CLAUDE_READY_PATH") else {
+        return;
+    };
+    let path = std::path::Path::new(&path);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !path.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(feature = "test-handoff-delay"))]
+#[inline(always)]
+pub(crate) fn hold_before_claude_transport_ready() {}
