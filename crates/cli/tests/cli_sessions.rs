@@ -1,5 +1,9 @@
+#[cfg(unix)]
+use archductor_core::archcar::handoff;
 use archductor_core::archcar::harness::managed_harness_for_kind;
 use archductor_core::archcar::harness_contract::{HarnessCapability, HarnessFeature, SupportMode};
+use archductor_core::archcar::remote;
+use archductor_core::paths::AppPaths;
 use archductor_core::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
 };
@@ -10,7 +14,8 @@ use predicates::str::contains;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[test]
 fn cli_starts_and_logs_real_shell_session() {
@@ -84,6 +89,7 @@ fn cli_archcar_shell_accepts_raw_terminal_pwd_and_stops() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
+    let _archcar = ArchcarDaemon::start(temp.path(), &[("SHELL", Path::new("/bin/sh"))]);
 
     app(temp.path())
         .args([
@@ -428,6 +434,14 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
     let provider_inputs = temp.path().join("provider-inputs.txt");
     let fake_home = temp.path().join("home");
     write_fake_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+        ],
+    );
 
     app_with_home(temp.path(), &fake_home)
         .args([
@@ -561,6 +575,15 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
     let release = temp.path().join("release-first-turn");
     let fake_home = temp.path().join("home");
     write_fake_busy_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+        ],
+    );
     let app = || {
         let mut command = app_with_home(temp.path(), &fake_home);
         command
@@ -861,6 +884,7 @@ fn cli_archcar_messages_renders_projected_provider_events() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
+    let _archcar = ArchcarDaemon::start(temp.path(), &[]);
 
     app(temp.path())
         .args([
@@ -951,6 +975,7 @@ fn cli_archcar_messages_hides_mcp_startup_status_provider_event() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
+    let _archcar = ArchcarDaemon::start(temp.path(), &[]);
 
     app(temp.path())
         .args([
@@ -1025,6 +1050,7 @@ fn cli_archcar_messages_renders_claude_projected_provider_events() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
+    let _archcar = ArchcarDaemon::start(temp.path(), &[]);
 
     app(temp.path())
         .args([
@@ -1165,16 +1191,165 @@ fn harness_capabilities_gate_goals_to_codex_descriptor() {
     }
 }
 
+#[test]
+fn archcar_daemon_guard_stops_its_daemon_when_a_test_panics() {
+    let temp = tempfile::tempdir().unwrap();
+    let daemon = ArchcarDaemon::start(temp.path(), &[]);
+    let endpoint = archcar_endpoint_path(temp.path());
+    assert!(archcar_endpoint_accepts(&endpoint));
+
+    let started = Instant::now();
+    let failed_test = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _daemon = daemon;
+        panic!("simulated failing assertion");
+    }));
+
+    assert!(failed_test.is_err());
+    assert!(
+        started.elapsed() < ARCHCAR_DAEMON_STOP_GRACE + Duration::from_secs(5),
+        "stopping the daemon took {:?}",
+        started.elapsed()
+    );
+    assert!(!archcar_endpoint_accepts(&endpoint));
+}
+
 fn app(root: &Path) -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("archductor").unwrap();
+    for name in developer_archcar_env() {
+        command.env_remove(name);
+    }
+    command.envs(app_env(root)).env(
+        // A CLI that finds no daemon spawns one and abandons it, leaking a
+        // `--archcar-serve` process per test run. Point that fallback at a
+        // binary that exits at once, so a test that needs the daemon fails
+        // loudly unless it starts one through `ArchcarDaemon`.
+        "ARCHDUCTOR_ARCHCAR_BIN",
+        "/bin/false",
+    );
     command
-        .env("XDG_CONFIG_HOME", root.join("xdg/config"))
-        .env("XDG_DATA_HOME", root.join("xdg/data"))
-        .env("XDG_STATE_HOME", root.join("xdg/state"))
-        .env("XDG_CACHE_HOME", root.join("xdg/cache"))
-        .env("APPDATA", root.join("xdg/config"))
-        .env("LOCALAPPDATA", root.join("xdg/data"));
-    command
+}
+
+/// Set inside a developer's own Archductor session; a test must never reach
+/// that session's daemon or bind its remote listener.
+fn developer_archcar_env() -> Vec<&'static str> {
+    let mut names = vec![remote::LISTEN_ENV, remote::REMOTE_ENV, remote::TOKEN_ENV];
+    #[cfg(unix)]
+    names.extend([handoff::LOCAL_FD_ENV, handoff::REMOTE_FD_ENV]);
+    names
+}
+
+fn app_env(root: &Path) -> [(&'static str, PathBuf); 6] {
+    [
+        ("XDG_CONFIG_HOME", root.join("xdg/config")),
+        ("XDG_DATA_HOME", root.join("xdg/data")),
+        ("XDG_STATE_HOME", root.join("xdg/state")),
+        ("XDG_CACHE_HOME", root.join("xdg/cache")),
+        ("APPDATA", root.join("xdg/config")),
+        ("LOCALAPPDATA", root.join("xdg/data")),
+    ]
+}
+
+/// The archcar daemon a test talks to, owned by the test so it cannot outlive
+/// it. Dropping the guard (also while a failed assertion unwinds) stops the
+/// exact child this guard spawned; it never looks processes up by name or
+/// argv, so no other daemon on the machine can be touched.
+struct ArchcarDaemon {
+    child: Child,
+}
+
+const ARCHCAR_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const ARCHCAR_DAEMON_STOP_GRACE: Duration = Duration::from_secs(5);
+
+impl ArchcarDaemon {
+    /// Starts `archductor --archcar-serve` on the test's own state dir, with
+    /// the same environment `app(root)` gives the CLI plus `extra_env` (which
+    /// providers the daemon launches inherit), and waits until it accepts
+    /// connections.
+    fn start(root: &Path, extra_env: &[(&str, &Path)]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_archductor"));
+        for name in developer_archcar_env() {
+            command.env_remove(name);
+        }
+        let child = command
+            .arg("--archcar-serve")
+            .envs(app_env(root))
+            .envs(extra_env.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn archcar daemon");
+        // Guard first: a readiness panic below must still stop the child.
+        let mut daemon = Self { child };
+        let endpoint = archcar_endpoint_path(root);
+        let deadline = Instant::now() + ARCHCAR_DAEMON_READY_TIMEOUT;
+        while !archcar_endpoint_accepts(&endpoint) {
+            if let Some(status) = daemon.child.try_wait().expect("poll archcar daemon") {
+                panic!("archcar daemon exited before it was ready: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for archcar daemon at {}",
+                endpoint.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        daemon
+    }
+}
+
+impl Drop for ArchcarDaemon {
+    fn drop(&mut self) {
+        // Once `try_wait` has reaped the child (here, or in `start` before a
+        // readiness panic) its pid may already belong to another process, so
+        // signal nothing. While it reports the child still running, only this
+        // process can reap it, so the pid stays ours until the signal lands.
+        match self.child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => return,
+        }
+        #[cfg(unix)]
+        {
+            let _ = Command::new("kill")
+                .args(["-TERM", &self.child.id().to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            // Bounded: a daemon stuck in shutdown is killed, never waited on.
+            let deadline = Instant::now() + ARCHCAR_DAEMON_STOP_GRACE;
+            while Instant::now() < deadline {
+                match self.child.try_wait() {
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                    Ok(Some(_)) | Err(_) => return,
+                }
+            }
+        }
+        // `Child::kill` is a no-op on a child std has already reaped.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn archcar_endpoint_path(root: &Path) -> PathBuf {
+    let paths = AppPaths {
+        config_dir: root.join("xdg/config/archductor"),
+        data_dir: root.join("xdg/data/archductor"),
+        state_dir: root.join("xdg/state/archductor"),
+        cache_dir: root.join("xdg/cache/archductor"),
+        database_path: app_database_path(root),
+        logs_dir: root.join("xdg/state/archductor/logs"),
+    };
+    paths.archcar_endpoint_path()
+}
+
+#[cfg(unix)]
+fn archcar_endpoint_accepts(endpoint: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(endpoint).is_ok()
+}
+
+#[cfg(not(unix))]
+fn archcar_endpoint_accepts(endpoint: &Path) -> bool {
+    endpoint.exists()
 }
 
 fn app_with_home(root: &Path, home: &Path) -> AssertCommand {
