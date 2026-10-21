@@ -162,6 +162,31 @@ private let quickBackoff = Backoff(base: .milliseconds(20), cap: .milliseconds(2
     await daemon.stop()
 }
 
+/// `AppModel` re-reads the learned self-id on every connect, so the session
+/// must report the current daemon's id after its own reconnect, not the
+/// first connect's.
+@Test func remoteDaemonSelfIDReflectsTheCurrentConnectNotTheFirstOne() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.stampHandshake(daemonSelfID: "self-v1")
+    let session = DaemonSession(address: await daemon.address, token: "t", backoff: quickBackoff)
+    try await session.connect()
+    #expect(await session.remoteDaemonSelfID == "self-v1")
+
+    let events = await session.events
+    let drained = Task { for await _ in events {} }
+    // The data directory changed underneath the same address — the
+    // handshake now reports a different self-id.
+    await daemon.stampHandshake(daemonSelfID: "self-v2")
+    await daemon.endEventConnection()
+    #expect(await finishes(drained))
+
+    #expect(await eventually { await session.connectionState == .connected })
+    #expect(await eventually { await session.remoteDaemonSelfID == "self-v2" })
+
+    await session.disconnect()
+    await daemon.stop()
+}
+
 @Test func reconnectsOnItsOwnAfterTheEventStreamDrops() async throws {
     let daemon = try await MockDaemon()
     await daemon.respond { _ in nil }
