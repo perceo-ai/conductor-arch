@@ -81,6 +81,9 @@ fn resolved_general_prompt(db_path: &std::path::Path, workspace: &str) -> Result
 }
 
 fn durable_thread_is_first_user_turn(db_path: &std::path::Path, thread_id: i64) -> Result<bool> {
+    if let Some(message) = crate::archcar::test_hooks::forced_first_turn_check_failure() {
+        anyhow::bail!(message);
+    }
     Ok(!WorkspaceStore::open(db_path)?
         .list_chat_messages(thread_id)?
         .iter()

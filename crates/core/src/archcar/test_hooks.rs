@@ -22,3 +22,25 @@ pub(crate) fn pause_after_provider_handoff() {
 #[cfg(not(feature = "test-handoff-delay"))]
 #[inline(always)]
 pub(crate) fn pause_after_provider_handoff() {}
+
+/// When set, and the path it names exists, `durable_thread_is_first_user_turn`
+/// returns this as an Err instead of reading chat history -- lets a test force
+/// the dropped-`SendInput`-above-the-readiness-write path deterministically,
+/// for one specific send, by creating the marker file only once earlier sends
+/// (e.g. the one that starts the session) must still succeed.
+#[cfg(feature = "test-handoff-delay")]
+pub(crate) fn forced_first_turn_check_failure() -> Option<String> {
+    let path = std::env::var_os("ARCHDUCTOR_TEST_FORCE_FIRST_TURN_CHECK_ERROR_PATH")?;
+    std::path::Path::new(&path).exists().then(|| {
+        format!(
+            "forced failure via test seam: {}",
+            std::path::Path::new(&path).display()
+        )
+    })
+}
+
+#[cfg(not(feature = "test-handoff-delay"))]
+#[inline(always)]
+pub(crate) fn forced_first_turn_check_failure() -> Option<String> {
+    None
+}
