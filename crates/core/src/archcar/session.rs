@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -128,16 +128,75 @@ pub struct SessionSnapshot {
 /// `TurnCompleted`, on its own thread and later than the loop does; by then a
 /// send may have opened the next turn, and readiness alone cannot tell "busy
 /// with the turn that just ended" from "busy with the one after it".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// A finished turn does not always finish every input started before it. An
+/// immediate message sent to a busy claude session is either taken in at the
+/// open turn's next tool boundary, and answered by that turn's `result`, or,
+/// with no boundary left, run as a turn of its own after it. So for claude
+/// each input keeps the generation it started, and a completion catches
+/// `completed` up only to the inputs claude had taken in by then. A codex
+/// steer always joins the open turn, so a codex completion finishes every
+/// generation started so far.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnGenerations {
     pub started: u64,
     pub completed: u64,
+    /// The generation each claude input started, oldest first, until a
+    /// completion finishes it.
+    inputs: VecDeque<(String, u64)>,
+    /// The newest of those generations claude has taken in.
+    taken: u64,
 }
 
 impl TurnGenerations {
     /// The latest turn the session started has been reported finished.
     pub fn latest_turn_completed(&self) -> bool {
         self.completed == self.started
+    }
+
+    /// Ties the generation the latest busy mark started to the input it was
+    /// for.
+    pub(crate) fn note_input(&mut self, local_input_id: String) {
+        self.inputs.push_back((local_input_id, self.started));
+    }
+
+    /// The provider has taken the input in: a turn is answering it now.
+    pub(crate) fn note_input_taken(&mut self, local_input_id: &str) {
+        if let Some((_, generation)) = self.inputs.iter().find(|(id, _)| id == local_input_id) {
+            self.taken = self.taken.max(*generation);
+        }
+    }
+
+    fn finish(&mut self, turn: FinishedTurn<'_>) {
+        let finished = match turn {
+            FinishedTurn::Latest => self.started,
+            // An input the session never recorded is one this ledger cannot
+            // place; finishing everything keeps the daemon's ready mark, the
+            // safety net for a lost `Ready`, from being disabled by it.
+            FinishedTurn::Input(local_input_id) => self
+                .inputs
+                .iter()
+                .find(|(id, _)| id == local_input_id)
+                .map_or(self.started, |(_, generation)| self.taken.max(*generation)),
+        };
+        self.completed = self.completed.max(finished);
+        self.taken = self.taken.max(finished);
+        self.inputs.retain(|(_, generation)| *generation > finished);
+    }
+}
+
+/// What a `TurnCompleted` finishes.
+pub(crate) enum FinishedTurn<'a> {
+    /// Every input started so far.
+    Latest,
+    /// The turn this input ran in: it, and any later input the provider took
+    /// into the same turn.
+    Input(&'a str),
+}
+
+fn note_input_taken(snapshot: &Arc<Mutex<SessionSnapshot>>, local_input_id: &str) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.turns.note_input_taken(local_input_id);
     }
 }
 
@@ -149,19 +208,20 @@ pub(crate) fn mark_session_busy_for_input(state: &mut SessionSnapshot) {
     state.turns.started += 1;
 }
 
-/// Sends `TurnCompleted`, first recording the session's latest turn as
-/// finished so the daemon's mark for this event sees it. Every completion goes
-/// through here: one sent without the record would leave `started` ahead of
-/// `completed`, and the daemon's ready mark -- the safety net for a lost
-/// `Ready` -- would never fire for that session again.
+/// Sends `TurnCompleted`, first recording what it finished so the daemon's
+/// mark for this event sees it. Every completion goes through here: one sent
+/// without the record would leave `started` ahead of `completed`, and the
+/// daemon's ready mark -- the safety net for a lost `Ready` -- would never
+/// fire for that session again.
 pub(crate) fn send_turn_completed(
     snapshot: &Arc<Mutex<SessionSnapshot>>,
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
+    turn: FinishedTurn<'_>,
     status: Option<String>,
 ) {
     if let Ok(mut state) = snapshot.lock() {
-        state.turns.completed = state.turns.started;
+        state.turns.finish(turn);
     }
     let _ = event_tx.send(ArchcarEvent::TurnCompleted {
         session_id: started.session_id,
@@ -744,6 +804,7 @@ fn apply_harness_effect(
                 local_input_id = %local_input_id,
                 "managed harness input acknowledged"
             );
+            note_input_taken(snapshot, &local_input_id);
             if let Err(err) = runtime_store.mark_provider_input_acknowledged(&local_input_id, None)
             {
                 let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -777,6 +838,7 @@ fn apply_harness_effect(
                 snapshot,
                 event_tx,
                 started,
+                FinishedTurn::Input(&local_input_id),
                 Some(harness_turn_status_label(status).to_owned()),
             );
         }
@@ -792,6 +854,7 @@ fn apply_harness_effect(
                 snapshot,
                 event_tx,
                 started,
+                FinishedTurn::Latest,
                 Some(harness_turn_status_label(status).to_owned()),
             );
         }
@@ -868,6 +931,7 @@ fn apply_harness_effect(
                 local_input_id = %local_input_id,
                 "managed harness turn started"
             );
+            note_input_taken(snapshot, &local_input_id);
         }
         HarnessEffect::Retry { message, delay_ms } => {
             let provider_message = bounded_redacted_provider_message(&message);
@@ -2508,6 +2572,15 @@ fn run_codex_app_server_session_loop(
                                         fallback_request_sequence.saturating_add(1);
                                     let fallback_request_id =
                                         next_fallback_request_id(fallback_request_sequence);
+                                    // Codex refuses a steer once the turn it
+                                    // named has ended, so the input joined no
+                                    // turn: that turn's completion, and the
+                                    // `Ready` after it, did not finish it. It
+                                    // starts a turn of its own now, which the
+                                    // session is busy with like any other.
+                                    if let Ok(mut state) = snapshot.lock() {
+                                        mark_session_busy_for_input(&mut state);
+                                    }
                                     let params = codex_turn_start_params(
                                         &connection,
                                         thread_id,
@@ -2579,10 +2652,12 @@ fn run_codex_app_server_session_loop(
                                 return;
                             }
                         }
+                        // Steers joined this turn, so it finishes them too.
                         send_turn_completed(
                             &snapshot,
                             &event_tx,
                             &started,
+                            FinishedTurn::Latest,
                             codex_turn_completed_status(&message),
                         );
                         apply_harness_effect(
@@ -2969,6 +3044,7 @@ fn run_claude_stream_session_loop(
                     // provider did not get.
                     if let Ok(mut state) = snapshot.lock() {
                         mark_session_busy_for_input(&mut state);
+                        state.turns.note_input(local_input_id.clone());
                     }
                     let native_write = adapter.encode_input(HarnessInput {
                         local_input_id: local_input_id.clone(),
@@ -3810,6 +3886,52 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Two claude inputs in flight: the one that opened the turn, taken in,
+    /// and an immediate message sent during it.
+    fn turns_with_an_immediate_input() -> TurnGenerations {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_input("turn-input".to_owned());
+        turns.note_input_taken("turn-input");
+        turns.started += 1;
+        turns.note_input("immediate-input".to_owned());
+        turns
+    }
+
+    #[test]
+    fn a_turn_completion_finishes_only_the_inputs_claude_took_in() {
+        let mut turns = turns_with_an_immediate_input();
+        turns.finish(FinishedTurn::Input("turn-input"));
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
+
+        turns.note_input_taken("immediate-input");
+        turns.finish(FinishedTurn::Input("immediate-input"));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.inputs.is_empty(), "{turns:?}");
+    }
+
+    #[test]
+    fn a_turn_completion_finishes_an_input_claude_took_into_the_same_turn() {
+        let mut turns = turns_with_an_immediate_input();
+        turns.note_input_taken("immediate-input");
+        turns.finish(FinishedTurn::Input("turn-input"));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.inputs.is_empty(), "{turns:?}");
+    }
+
+    /// The daemon's ready mark is the safety net for a lost `Ready`; a
+    /// completion this ledger cannot place must not disable it.
+    #[test]
+    fn a_completion_for_an_unrecorded_input_finishes_every_turn() {
+        let mut turns = turns_with_an_immediate_input();
+        turns.finish(FinishedTurn::Input("never-recorded"));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+
+        let mut turns = turns_with_an_immediate_input();
+        turns.finish(FinishedTurn::Latest);
+        assert!(turns.latest_turn_completed(), "{turns:?}");
     }
 
     #[test]

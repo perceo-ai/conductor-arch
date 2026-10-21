@@ -7166,6 +7166,7 @@ mod tests {
             .expect("spawn a process that exits non-zero")
     }
     use super::*;
+    use crate::archcar::session::FinishedTurn;
 
     fn pr_row(number: i64, state: &str) -> crate::workspace::PullRequest {
         crate::workspace::PullRequest {
@@ -8642,7 +8643,7 @@ exit 1
 
     /// A codex session busy for one input, with a follow-up waiting in its
     /// chat queue: shared setup for the two turn-generation tests below.
-    struct BusyCodexSession {
+    struct BusySession {
         state: Arc<Mutex<ServerState>>,
         snapshot: Arc<Mutex<crate::archcar::session::SessionSnapshot>>,
         command_rx: mpsc::Receiver<SessionCommand>,
@@ -8650,27 +8651,21 @@ exit 1
         thread_id: i64,
     }
 
-    fn busy_codex_session_with_a_queued_follow_up(temp: &Path) -> BusyCodexSession {
+    fn busy_session_with_a_queued_follow_up(temp: &Path, kind: SessionKind) -> BusySession {
         let db_path = temp.join("state.db");
         let logs_dir = temp.join("logs");
         let store = seeded_workspace_store(&db_path, &logs_dir, temp);
         let thread = store
-            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .create_chat_thread("berlin", provider_name(kind), "New Chat", None)
             .unwrap();
         store
-            .enqueue_chat_input(
-                thread.id,
-                "follow up",
-                None,
-                ArchcarInputKind::User,
-                SessionKind::CODEX,
-            )
+            .enqueue_chat_input(thread.id, "follow up", None, ArchcarInputKind::User, kind)
             .unwrap();
         let snapshot = Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
             session_id: 9,
             thread_id: thread.id,
             workspace: "berlin".to_owned(),
-            kind: SessionKind::CODEX,
+            kind,
             pid: 12345,
             status: ProcessStatus::Running,
             runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
@@ -8703,7 +8698,7 @@ exit 1
             subscribers: Vec::new(),
             remote_listen: None,
         }));
-        BusyCodexSession {
+        BusySession {
             state,
             snapshot,
             command_rx,
@@ -8712,10 +8707,11 @@ exit 1
         }
     }
 
-    /// The loop's completion path for the session's current turn: the
-    /// `TurnCompleted` it sends, taken off its channel.
+    /// The loop's completion path for `turn`: the `TurnCompleted` it sends,
+    /// taken off its channel.
     fn loop_turn_completed(
         snapshot: &Arc<Mutex<crate::archcar::session::SessionSnapshot>>,
+        turn: FinishedTurn<'_>,
     ) -> ArchcarEvent {
         let started = snapshot.lock().unwrap().clone();
         let (event_tx, event_rx) = mpsc::channel();
@@ -8723,6 +8719,7 @@ exit 1
             snapshot,
             &event_tx,
             &started,
+            turn,
             Some("completed".to_owned()),
         );
         let event = event_rx.try_recv().unwrap();
@@ -8742,15 +8739,15 @@ exit 1
     #[test]
     fn turn_completion_without_ready_still_delivers_the_queued_follow_up() {
         let temp = tempfile::tempdir().unwrap();
-        let BusyCodexSession {
+        let BusySession {
             state,
             snapshot,
             command_rx,
             store,
             thread_id,
-        } = busy_codex_session_with_a_queued_follow_up(temp.path());
+        } = busy_session_with_a_queued_follow_up(temp.path(), SessionKind::CODEX);
 
-        let completed = loop_turn_completed(&snapshot);
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Latest);
         // No `Ready` follows: the session is still marked busy here.
         assert!(!snapshot.lock().unwrap().ready);
         handle_session_event(&state, completed);
@@ -8771,15 +8768,15 @@ exit 1
     #[test]
     fn a_late_turn_completion_leaves_a_newer_turn_busy() {
         let temp = tempfile::tempdir().unwrap();
-        let BusyCodexSession {
+        let BusySession {
             state,
             snapshot,
             command_rx,
             store,
             thread_id,
-        } = busy_codex_session_with_a_queued_follow_up(temp.path());
+        } = busy_session_with_a_queued_follow_up(temp.path(), SessionKind::CODEX);
 
-        let completed = loop_turn_completed(&snapshot);
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Latest);
         // The loop's own `Ready`, then a send opens the next turn -- all
         // before the daemon gets to the first turn's `TurnCompleted`.
         {
@@ -8798,6 +8795,86 @@ exit 1
         );
         assert!(command_rx.try_recv().is_err());
         assert_eq!(store.list_queued_chat_inputs(thread_id).unwrap().len(), 1);
+    }
+
+    /// A claude session busy with the input that opened its turn, which
+    /// claude has taken in, and then with an immediate message sent into
+    /// that turn.
+    fn claude_session_with_an_immediate_input(temp: &Path) -> BusySession {
+        let busy = busy_session_with_a_queued_follow_up(temp, SessionKind::CLAUDE);
+        {
+            let mut current = busy.snapshot.lock().unwrap();
+            current.turns.note_input("input-1".to_owned());
+            current.turns.note_input_taken("input-1");
+            crate::archcar::session::mark_session_busy_for_input(&mut current);
+            current.turns.note_input("input-2".to_owned());
+        }
+        busy
+    }
+
+    /// Failure this guards: claude had no tool boundary left to take an
+    /// immediate message in at, so it runs it as a turn of its own once the
+    /// open one ends. That turn's completion used to finish the message's
+    /// generation too, and the daemon's mark for it reopened the session
+    /// over the message's live turn. The mark must leave it busy.
+    #[test]
+    fn a_turn_completion_leaves_an_immediate_input_claude_has_not_taken_in_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusySession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = claude_session_with_an_immediate_input(temp.path());
+
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Input("input-1"));
+        handle_session_event(&state, completed);
+
+        let current = snapshot.lock().unwrap().clone();
+        assert!(!current.ready, "{current:?}");
+        assert_eq!(
+            current.runtime_state,
+            crate::session_state::AgentSessionState::Running
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert_eq!(store.list_queued_chat_inputs(thread_id).unwrap().len(), 1);
+
+        // The message's own turn ends: that completion is the boundary.
+        snapshot.lock().unwrap().turns.note_input_taken("input-2");
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Input("input-2"));
+        handle_session_event(&state, completed);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::SendInput { input, .. }) if input == "follow up"
+        ));
+    }
+
+    /// The other way claude takes an immediate message: into the open turn,
+    /// whose one completion answers both. Claude skips its own `Ready` when
+    /// it has a message it never ran a turn for, so the daemon's mark is what
+    /// frees the session here, and the queued follow-up must be delivered.
+    #[test]
+    fn a_turn_completion_finishes_an_immediate_input_claude_took_into_the_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusySession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = claude_session_with_an_immediate_input(temp.path());
+
+        snapshot.lock().unwrap().turns.note_input_taken("input-2");
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Input("input-1"));
+        handle_session_event(&state, completed);
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::SendInput { input, delivery: ArchcarInputDelivery::Auto, .. })
+                if input == "follow up"
+        ));
+        assert!(store.list_queued_chat_inputs(thread_id).unwrap().is_empty());
     }
 
     fn interaction_draft_for(
