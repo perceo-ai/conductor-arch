@@ -726,6 +726,150 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
     wait_for_session_exit(temp.path(), session_id);
 }
 
+/// Failure this guards: a provider that dies mid-handshake leaves the session
+/// with `runtime_state = failed` while its process `status` still reads
+/// `running`, and `session send` printed both side by side, e.g. "session 1 is
+/// not running (status=running state=failed)" -- a message that contradicts
+/// itself. The send must fail with a message that names the failed state and
+/// does not also call the session running.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_to_a_provider_that_fails_its_handshake_reports_one_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_codex = temp.path().join("fake-failing-codex");
+    let fake_home = temp.path().join("home");
+    write_fake_failing_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[("HOME", &fake_home), ("USERPROFILE", &fake_home)],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    app()
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app()
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "codex_executable_path = {:?}\n",
+            fake_codex.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    // The first send spawns the session; its readiness check runs while the
+    // handshake is still in flight, so it is not the call under test.
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let record = store.list_sessions("berlin").unwrap()[0].clone();
+    let session_id = record.id.to_string();
+    let thread_id = record.chat_thread_id.unwrap().to_string();
+
+    // Wait for the handshake failure to land: the daemon still reports the
+    // process as running, but the provider state is failed.
+    let mut status = String::new();
+    for _ in 0..100 {
+        let output = app()
+            .args(["archcar", "status", &session_id])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        status = String::from_utf8(output).unwrap();
+        if status.contains("state=failed") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(status.contains("status=running"), "{status}");
+    assert!(status.contains("state=failed"), "{status}");
+
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--thread-id",
+            &thread_id,
+            "--timeout-ms",
+            "5000",
+            "hello again",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("state=failed"), "{stderr}");
+    assert!(
+        !(stderr.contains("status=running") && stderr.contains("state=failed")),
+        "the message must not call the failed session running: {stderr}"
+    );
+}
+
+/// A codex app-server stand-in that answers `initialize` with an error, the
+/// way a crashed or misconfigured provider fails its handshake.
+#[cfg(unix)]
+fn write_fake_failing_codex(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if message.get("method") == "initialize":
+        print(json.dumps({"id": message["id"], "error": {"message": "codex failed to start: port already in use"}}), flush=True)
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
 /// A codex app-server stand-in whose first turn stays open until
 /// `$ARCHDUCTOR_RELEASE_PATH` exists; later turns complete at once.
 #[cfg(unix)]
