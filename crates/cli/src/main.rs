@@ -6742,9 +6742,9 @@ fn archcar_session_readiness(
             } => {
                 anyhow::ensure!(
                     !archcar_status_is_terminal(&status, runtime_state),
-                    "session {session_id} is not running (status={status} state={}); \
+                    "session {session_id} is not running ({}); \
                      send again without --thread-id to start a new one",
-                    runtime_state.as_str()
+                    archcar_terminal_reason(&status, runtime_state)
                 );
                 return Ok(SessionReadiness {
                     ready,
@@ -6831,9 +6831,8 @@ fn wait_for_archcar_session_ready(
                 ..
             } if archcar_status_is_terminal(&status, runtime_state) => {
                 anyhow::bail!(
-                    "session {session_id} exited before becoming ready: status={} state={}",
-                    status,
-                    runtime_state.as_str()
+                    "session {session_id} exited before becoming ready: {}",
+                    archcar_terminal_reason(&status, runtime_state)
                 );
             }
             ArchcarResponse::SessionStatus { .. } => {}
@@ -6869,6 +6868,21 @@ fn archcar_status_is_terminal(
                 | archductor_core::session_state::AgentSessionState::Exited
                 | archductor_core::session_state::AgentSessionState::Archived
         )
+}
+
+/// Why `archcar_status_is_terminal` said so, as one field. A provider that
+/// fails its handshake leaves `status` at "running" while `runtime_state` is
+/// failed, so printing both would call the session running and not running at
+/// once. Name the provider state when it is terminal, else the process status.
+fn archcar_terminal_reason(
+    status: &str,
+    runtime_state: archductor_core::session_state::AgentSessionState,
+) -> String {
+    if archcar_status_is_terminal("running", runtime_state) {
+        format!("state={}", runtime_state.as_str())
+    } else {
+        format!("status={status}")
+    }
 }
 
 fn message_text_or_stdin(message: Vec<String>) -> Result<String> {
@@ -8051,6 +8065,21 @@ mod tests {
         assert_eq!(
             session_send_thread_target(second),
             Some((202, "second".to_owned()))
+        );
+    }
+
+    #[test]
+    fn archcar_terminal_reason_names_the_one_field_that_is_terminal() {
+        use archductor_core::session_state::AgentSessionState;
+        // Handshake failure: the process status is stale, the state is not.
+        assert_eq!(
+            archcar_terminal_reason("running", AgentSessionState::Failed),
+            "state=failed"
+        );
+        // The process is gone but the provider state never caught up.
+        assert_eq!(
+            archcar_terminal_reason("exited", AgentSessionState::Running),
+            "status=exited"
         );
     }
 
