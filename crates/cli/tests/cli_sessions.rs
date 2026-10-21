@@ -1143,8 +1143,8 @@ fn cli_session_queued_send_dropped_before_the_turn_starts_resolves_to_failed() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-    // A failed session is no longer live, so `status` stops reporting it as
-    // working; its state then comes from the last turn that actually ran.
+    // A failed session is no longer live, but `status` reports it as failed
+    // even though the last turn that actually ran succeeded.
     let output = app()
         .args(["status", "berlin", "--json"])
         .assert()
@@ -1155,7 +1155,7 @@ fn cli_session_queued_send_dropped_before_the_turn_starts_resolves_to_failed() {
     let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let session = &status["workspaces"][0]["sessions"][0];
     assert_eq!(session["alive"], false, "{status}");
-    assert_ne!(session["state"], "working", "{status}");
+    assert_eq!(session["state"], "failed", "{status}");
     assert_eq!(
         fs::read_to_string(&provider_inputs)
             .unwrap()
