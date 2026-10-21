@@ -71,6 +71,11 @@ struct ServerState {
     /// queue until some later event happens to trigger another drain.
     drain_reruns: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
+    /// Pids of children a background spawn in this daemon has started but not
+    /// yet registered in `sessions`. The process row appears in the store
+    /// before registration, so without this a status lookup in that window
+    /// takes the session for an orphan of a previous daemon and kills it.
+    spawning_pids: HashSet<u32>,
     subscribers: Vec<Sender<ArchcarEvent>>,
     /// The TCP address this daemon actually bound, if any. Reported as-is
     /// rather than re-read from configuration: a client asking how to reach
@@ -218,6 +223,7 @@ impl ArchcarServer {
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -6812,6 +6818,7 @@ mod tests {
             db_path: temp.path().join("state.db"),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -6901,6 +6908,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7114,6 +7122,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7207,6 +7216,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7295,6 +7305,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7384,6 +7395,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7484,6 +7496,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7572,6 +7585,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7656,6 +7670,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7743,6 +7758,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7795,6 +7811,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7859,6 +7876,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8017,6 +8035,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8128,6 +8147,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8221,6 +8241,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8311,6 +8332,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8398,6 +8420,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8472,6 +8495,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8524,6 +8548,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8594,6 +8619,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8648,6 +8674,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8710,6 +8737,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8762,6 +8790,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8790,6 +8819,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8877,6 +8907,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8928,6 +8959,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8971,6 +9003,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::CODEX)]),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9012,6 +9045,7 @@ exit 1
             db_path,
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9232,6 +9266,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9293,6 +9328,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9359,6 +9395,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9422,6 +9459,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9508,6 +9546,7 @@ exit 1
             db_path,
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9561,6 +9600,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9616,6 +9656,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9687,6 +9728,7 @@ exit 1
             db_path,
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::from([requested_thread.id]),
             draining_threads: HashSet::new(),
@@ -10099,6 +10141,7 @@ icon = "cloud"
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10186,6 +10229,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10280,6 +10324,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10383,6 +10428,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10592,6 +10638,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10725,6 +10772,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10797,6 +10845,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10891,6 +10940,97 @@ default = true
         assert!(reconciled.log_path.starts_with(&paths.logs_dir));
 
         terminate_test_child(&mut child);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_or_restore_session_handle_leaves_a_session_still_being_spawned_alive() {
+        // The window between a background spawn writing the process row and
+        // registering the handle: the row and the live child both exist, the
+        // handle is not in `sessions` yet. A status lookup here must not take
+        // the session for an orphan of a previous daemon and kill it.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let mut launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        launch.harness_metadata = Some("harness=codex-app-server;port=43000".to_owned());
+        let mut child = spawn_fake_managed_codex_process();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        assert!(
+            wait_for_fake_codex_child_alive(child.id()),
+            "fake codex child should be alive before the lookup"
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: paths.database_path.clone(),
+            logs_dir: paths.logs_dir.clone(),
+            shutting_down: false,
+            spawning_pids: HashSet::from([child.id()]),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        let restored = load_or_restore_session_handle(&state, process.id).unwrap();
+
+        assert!(restored.is_none(), "the spawn has not registered it yet");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a session mid-spawn in this daemon must not be killed as an orphan"
+        );
+        let unchanged = store.get_process_record(process.id).unwrap();
+        assert_eq!(unchanged.status, ProcessStatus::Running);
+        assert!(unchanged.ended_at.is_none());
+
+        terminate_test_child(&mut child);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_or_restore_session_handle_still_terminates_provider_native_orphans() {
+        // The same row with no spawn in flight is a leftover from a previous
+        // daemon run: its stdio cannot be reattached, so it is terminated.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let mut launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        launch.harness_metadata = Some("harness=codex-app-server;port=43000".to_owned());
+        let mut child = spawn_fake_managed_codex_process();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        assert!(wait_for_fake_codex_child_alive(child.id()));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: paths.database_path.clone(),
+            logs_dir: paths.logs_dir.clone(),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        let restored = load_or_restore_session_handle(&state, process.id).unwrap();
+
+        assert!(restored.is_none());
+        let exited = store.get_process_record(process.id).unwrap();
+        assert_eq!(exited.status, ProcessStatus::Exited);
+        let _ = child.wait();
     }
 
     #[test]
