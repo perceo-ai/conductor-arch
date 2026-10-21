@@ -380,4 +380,75 @@ mod tests {
 
         assert!(bind(&endpoint).is_ok());
     }
+
+    /// Stands in for a daemon built before the singleton lock: it records its
+    /// endpoint the way that build did, holds no lock file, and serves one
+    /// connection through the real token handshake (`accept`) and RPC framing.
+    /// The returned handle yields whether it answered a request.
+    #[cfg(windows)]
+    fn spawn_pre_lock_daemon(endpoint: &Path) -> std::thread::JoinHandle<bool> {
+        use crate::archcar::protocol::{ArchcarRequest, ArchcarResponse, RpcEnvelope};
+        use std::io::BufRead;
+
+        let listener = LocalListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        std::fs::write(endpoint, format!("{address}\nprelocktoken\n")).unwrap();
+        let endpoint = endpoint.to_path_buf();
+        std::thread::spawn(move || {
+            let (stream, _) = accept(&listener, &endpoint).unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let mut line = String::new();
+            io::BufReader::new(stream).read_line(&mut line).unwrap();
+            let Ok(request) = serde_json::from_str::<RpcEnvelope<ArchcarRequest>>(&line) else {
+                return false;
+            };
+            let reply = RpcEnvelope {
+                id: request.id,
+                payload: ArchcarResponse::LayoutPresets {
+                    presets: Vec::new(),
+                },
+            };
+            writeln!(writer, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+            true
+        })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_refuses_a_live_pre_lock_windows_daemon() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-pre-lock.endpoint");
+        let daemon = spawn_pre_lock_daemon(&endpoint);
+        let recorded = std::fs::read_to_string(&endpoint).unwrap();
+
+        let err = bind(&endpoint).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(
+            daemon.join().unwrap(),
+            "the probe never completed a handshake"
+        );
+        assert_eq!(std::fs::read_to_string(&endpoint).unwrap(), recorded);
+        // No lock left behind, so the next start probes this daemon again
+        // rather than trusting an unheld lock.
+        assert!(!singleton_lock_path(&endpoint).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_reclaims_a_lockless_endpoint_whose_port_never_handshakes() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-recycled.endpoint");
+        // An unrelated listener on the recorded port: it accepts connections
+        // but never answers, as a recycled port would.
+        let unrelated = LocalListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let recorded = format!("{}\nstaletoken\n", unrelated.local_addr().unwrap());
+        std::fs::write(&endpoint, &recorded).unwrap();
+
+        let started = std::time::Instant::now();
+        let _listener = bind(&endpoint).unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_ne!(std::fs::read_to_string(&endpoint).unwrap(), recorded);
+    }
 }
