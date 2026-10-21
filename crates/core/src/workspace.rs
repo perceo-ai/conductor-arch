@@ -8197,10 +8197,14 @@ mutation($threadId: ID!) {{
         let input = input.trim();
         anyhow::ensure!(!input.is_empty(), "queued chat input cannot be empty");
         let now = timestamp();
-        self.conn.execute(
+        // Return the row from the INSERT itself. Once it commits, a queue drain
+        // on another connection can claim (delete) it at any moment, so reading
+        // it back by id afterwards can fail for an input that was delivered.
+        let queued = self.conn.query_row(
             "INSERT INTO chat_queued_inputs (
                 thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             RETURNING id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at",
             params![
                 thread_id,
                 input,
@@ -8209,11 +8213,11 @@ mutation($threadId: ID!) {{
                 session_kind_as_str(session_kind),
                 now
             ],
+            row_to_queued_chat_input,
         )?;
-        let id = self.conn.last_insert_rowid();
-        after_queued_chat_input_insert(id);
+        after_queued_chat_input_insert(queued.id);
         self.touch_chat_thread(thread_id, &now)?;
-        self.get_queued_chat_input(id)
+        Ok(queued)
     }
 
     pub fn list_queued_chat_inputs(&self, thread_id: i64) -> Result<Vec<QueuedChatInputRecord>> {
@@ -9935,11 +9939,6 @@ mutation($threadId: ID!) {{
                 row_to_chat_thread,
             )
             .with_context(|| format!("load chat thread {id}"))
-    }
-
-    fn get_queued_chat_input(&self, id: i64) -> Result<QueuedChatInputRecord> {
-        self.get_queued_chat_input_optional(id)?
-            .with_context(|| format!("load queued chat input {id}"))
     }
 
     fn get_queued_chat_input_optional(&self, id: i64) -> Result<Option<QueuedChatInputRecord>> {
