@@ -9,8 +9,7 @@ public enum ArchcarTransportError: Error, Equatable, Sendable {
     case closed
 }
 
-/// Same contract as `DaemonSessionError`'s: `String(describing:)` is what the
-/// user reads, and a `connectionFailed` reason goes through verbatim.
+/// Same contract as `DaemonSessionError`'s: this is what the user reads, and a `connectionFailed` reason goes through verbatim.
 extension ArchcarTransportError: CustomStringConvertible {
     public var description: String {
         switch self {
@@ -20,6 +19,10 @@ extension ArchcarTransportError: CustomStringConvertible {
         case .closed: "The daemon closed the connection."
         }
     }
+}
+
+extension ArchcarTransportError: LocalizedError {
+    public var errorDescription: String? { description }
 }
 
 /// Turns an `NWError` into the sentence a phone can act on.

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import ArchcarKit
@@ -29,4 +30,49 @@ import Testing
     let errors: [any Error] = [DaemonSessionError.timedOut, ArchcarTransportError.closed]
     #expect(errors.map { String(describing: $0) }
         == ["The request timed out.", "The daemon closed the connection."])
+}
+
+@Test func localizedDescriptionIsTheSameSentence() {
+    // Foundation's default for a Swift enum is "The operation couldn't be
+    // completed. (ArchcarKit.… error N.)"; the screens read localizedDescription.
+    let errors: [any Error] = [
+        DaemonSessionError.daemon("gh is not authenticated"), DaemonSessionError.authenticationFailed,
+        DaemonSessionError.disconnected, DaemonSessionError.timedOut, DaemonSessionError.closedWithoutResponse,
+        ArchcarTransportError.notConnected, ArchcarTransportError.connectionFailed("Socket is not connected"),
+        ArchcarTransportError.authenticationFailed, ArchcarTransportError.closed,
+    ]
+    for error in errors {
+        #expect(error.localizedDescription == String(describing: error))
+    }
+}
+
+/// Swift value syntax that must never reach a screen.
+private let dumpMarkers = ["CodingKeys", "Swift.", "Context(", "(stringValue:"]
+
+@MainActor
+@Test func aMalformedResponseDoesNotDumpTheDecodingError() async throws {
+    // `DaemonSession.request` decodes the reply with a bare `try`, so a reply
+    // the app cannot read reaches the store as a `DecodingError`, not one of
+    // ArchcarKit's own errors.
+    let daemon = try await MockDaemon()
+    await daemon.respond { line in
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = object["id"] as? String,
+              let payload = object["payload"] as? [String: Any],
+              payload["type"] as? String == "get_inventory_snapshot" else { return nil }
+        return #"{"id":"\#(id)","payload":{"type":"inventory_snapshot","repositories":"not a list","workspaces":[],"chat_threads":{}}}"#
+    }
+    let session = DaemonSession(address: await daemon.address, token: "t")
+    try await session.connect()
+    let store = WorkspacesStore(session: session)
+    await store.refresh()
+
+    let shown = try #require(store.lastError)
+    print("ERRPROBE store.lastError=\(shown)")
+    #expect(!shown.isEmpty)
+    for marker in dumpMarkers {
+        #expect(!shown.contains(marker), "\(marker) leaked into: \(shown)")
+    }
+    await session.disconnect()
+    await daemon.stop()
 }

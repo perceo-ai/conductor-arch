@@ -303,12 +303,12 @@ public final class ChatStore {
     }
 
     /// A sentence for a failed resolve. The daemon and transport errors carry
-    /// their own (`CustomStringConvertible`); none of them claim the answer was
+    /// their own (`LocalizedError`); none of them claim the answer was
     /// or was not applied: the daemon applies it before replying, so a dropped
     /// link can lose the reply to an answer that already went through.
     nonisolated static func resolveFailureMessage(for error: any Error) -> String {
         switch error {
-        case is DaemonSessionError, is ArchcarTransportError: String(describing: error)
+        case is DaemonSessionError, is ArchcarTransportError: error.localizedDescription
         default: "Couldn't reach the daemon."
         }
     }
@@ -490,7 +490,7 @@ public final class ChatStore {
         } catch {
             let connected = await session.connectionState == .connected
             markStale(disconnected: !connected)
-            composerError = String(describing: error)
+            composerError = error.localizedDescription
             return nil
         }
     }
