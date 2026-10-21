@@ -40,6 +40,7 @@ final class AppModel {
         }
         notificationTaps.inventory = { [weak self] in self?.workspaces }
         notificationTaps.activeDaemonID = { [weak self] in self?.activeDaemon?.id }
+        notificationTaps.activeDaemonSelfID = { [weak self] in self?.activeDaemon?.remoteSelfID }
     }
 
     func load() async {
@@ -115,6 +116,11 @@ final class AppModel {
         }
         connectionError = nil
         self.session = session
+        // Persisted, so a push tapped before the next connect still matches.
+        if let remoteSelfID = await session.remoteDaemonSelfID {
+            await directory.setRemoteSelfID(remoteSelfID, for: daemon.id)
+            if activeDaemon?.id == daemon.id { activeDaemon?.remoteSelfID = remoteSelfID }
+        }
         let store = WorkspacesStore(session: session)
         workspaces = store
         // Every successful refresh from here on — this first load, a

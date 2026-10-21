@@ -1246,7 +1246,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::ListRepositories => {
             let db_path = state.lock().unwrap().db_path.clone();
             match repository_summaries(&db_path) {
-                Ok(repositories) => ArchcarResponse::Repositories { repositories },
+                // `.ok()`: this is also the token-validation round trip every
+                // connect makes, so a self-id failure must not break it.
+                Ok(repositories) => ArchcarResponse::Repositories {
+                    repositories,
+                    daemon_self_id: crate::notifications::daemon_self_id(&db_path).ok(),
+                },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },

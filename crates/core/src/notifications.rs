@@ -133,6 +133,32 @@ impl NotificationDeviceStore {
     }
 }
 
+/// The daemon's stable self-id: minted once on first use and persisted in
+/// `state.db`, then returned unchanged for the life of that data directory.
+/// Used to stamp outgoing APNs pushes so a tap can tell which daemon it came
+/// from, and reported to clients over the `list_repositories` handshake so
+/// they can learn it.
+pub fn daemon_self_id(db_path: &Path) -> Result<String> {
+    let conn = NotificationDeviceStore::new(db_path).open()?;
+    let select = |conn: &Connection| {
+        conn.query_row(
+            "SELECT self_id FROM daemon_identity WHERE id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+    };
+    if let Some(existing) = select(&conn).optional()? {
+        return Ok(existing);
+    }
+    // INSERT OR IGNORE: two racing first boots must not error and must agree
+    // on one winner, so re-select rather than trusting the id minted here.
+    conn.execute(
+        "INSERT OR IGNORE INTO daemon_identity (id, self_id, created_at) VALUES (1, ?1, ?2)",
+        params![uuid::Uuid::new_v4().to_string(), timestamp()],
+    )?;
+    Ok(select(&conn)?)
+}
+
 pub fn event_notification(event: &ArchcarEvent) -> Option<EventNotification> {
     event_notification_in(event, None)
 }
@@ -247,7 +273,16 @@ pub fn send_apns_notification(
 ) -> Result<usize> {
     let devices = NotificationDeviceStore::new(db_path).list()?;
     let jwt = apns_jwt(config)?;
-    let payload = notification_payload(notification);
+    // Never block the push on the id: an unstamped push routes the way it
+    // did before stamping existed.
+    let daemon_self_id = match daemon_self_id(db_path) {
+        Ok(id) => Some(id),
+        Err(err) => {
+            warn!("daemon self id unavailable, sending push without it: {err:#}");
+            None
+        }
+    };
+    let payload = notification_payload(notification, daemon_self_id.as_deref());
     let mut sent = 0usize;
     for device in devices
         .iter()
@@ -348,7 +383,7 @@ fn background_task_notification(task: &BackgroundTask) -> Option<EventNotificati
     })
 }
 
-fn notification_payload(notification: &EventNotification) -> String {
+fn notification_payload(notification: &EventNotification, daemon_self_id: Option<&str>) -> String {
     let mut payload = json!({
         "aps": {
             "alert": {
@@ -361,6 +396,12 @@ fn notification_payload(notification: &EventNotification) -> String {
     });
     if let Some(thread_id) = notification.thread_id {
         payload["thread_id"] = json!(thread_id);
+    }
+    // `thread_id` is a per-daemon rowid; this says which daemon it belongs
+    // to. Omitted rather than null when unknown, so older clients see the
+    // payload they always did.
+    if let Some(daemon_self_id) = daemon_self_id {
+        payload["daemon_self_id"] = json!(daemon_self_id);
     }
     payload.to_string()
 }

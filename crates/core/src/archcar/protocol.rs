@@ -1048,6 +1048,12 @@ pub enum ArchcarResponse {
     },
     Repositories {
         repositories: Vec<ArchcarRepositorySummary>,
+        /// The daemon's stable self-id (see `notifications::daemon_self_id`),
+        /// so the client can learn it and later match it against a stamped
+        /// APNs push. Additive and optional: an older daemon's reply decodes
+        /// to `None`, and older clients ignore the extra field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_self_id: Option<String>,
     },
     Skills {
         skills: Vec<crate::skills::Skill>,
@@ -2660,7 +2666,7 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::Workspaces { workspaces } => {
             format!("workspaces count={}", workspaces.len())
         }
-        ArchcarResponse::Repositories { repositories } => {
+        ArchcarResponse::Repositories { repositories, .. } => {
             format!("repositories count={}", repositories.len())
         }
         ArchcarResponse::Skills { skills } => format!("skills count={}", skills.len()),

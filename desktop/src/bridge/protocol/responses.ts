@@ -27,7 +27,12 @@ export type ArchcarResponse =
       chat_threads: Record<string, ArchcarChatThread[]>;
     }
   | { type: "workspaces"; workspaces: ArchcarWorkspaceSummary[] }
-  | { type: "repositories"; repositories: ArchcarRepositorySummary[] }
+  | {
+      type: "repositories";
+      repositories: ArchcarRepositorySummary[];
+      /** The daemon's stable self-id, stamped on its APNs pushes. Absent from older daemons. */
+      daemon_self_id?: string;
+    }
   | { type: "skills"; skills: AgentSkill[] }
   | { type: "workflow_runs"; workspace: string; summary: WorkflowRunSummary }
   | { type: "sync_plan"; plan: SyncPlan }

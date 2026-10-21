@@ -168,7 +168,7 @@ struct LiveDaemonTests {
             Issue.record("list_repositories failed: \(error)\n\(daemon.diagnostics())")
             return
         }
-        guard case .repositories(let repos) = repositories else {
+        guard case .repositories(let repos, _) = repositories else {
             Issue.record("expected repositories, got \(repositories)")
             return
         }

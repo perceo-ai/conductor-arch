@@ -69,6 +69,11 @@ public actor DaemonSession {
 
     public private(set) var connectionState: ConnectionState = .disconnected
 
+    /// The daemon's stable self-id, learned from the connect handshake. Nil
+    /// until connected, or when the daemon predates it. Matched against the
+    /// `daemon_self_id` a fresh APNs push carries.
+    public private(set) var remoteDaemonSelfID: String?
+
     public init(
         address: DaemonAddress, token: String, requestTimeout: Duration = .seconds(20),
         backoff: Backoff = Backoff()
@@ -155,7 +160,10 @@ public actor DaemonSession {
     private func performConnect(lifecycle: Int) async throws {
         connectionState = .connecting
         do {
-            _ = try await request(ListRepositoriesRequest())
+            let handshake = try await request(ListRepositoriesRequest())
+            if case let .repositories(_, daemonSelfID) = handshake {
+                remoteDaemonSelfID = daemonSelfID
+            }
 
             let events = ArchcarConnection(address: address, token: token)
             let lines: AsyncStream<Data>
