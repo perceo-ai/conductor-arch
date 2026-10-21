@@ -86,3 +86,22 @@ pub(crate) fn hold_before_claude_transport_ready() {
 #[cfg(not(feature = "test-handoff-delay"))]
 #[inline(always)]
 pub(crate) fn hold_before_claude_transport_ready() {}
+
+/// When `ARCHDUCTOR_TEST_NOT_READY_STATUS_SEEN_PATH` is set, creates that file
+/// the first time the daemon answers a status request with `ready=false`. A
+/// test that releases a held session only once this file exists knows the
+/// `session send` under test has already seen the session not ready, so it
+/// cannot slip past the wait by checking after the release.
+#[cfg(feature = "test-handoff-delay")]
+pub(crate) fn note_not_ready_status_served() {
+    if let Some(path) = std::env::var_os("ARCHDUCTOR_TEST_NOT_READY_STATUS_SEEN_PATH") {
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path);
+    }
+}
+
+#[cfg(not(feature = "test-handoff-delay"))]
+#[inline(always)]
+pub(crate) fn note_not_ready_status_served() {}

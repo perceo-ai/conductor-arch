@@ -1216,9 +1216,9 @@ fn cli_session_send_while_claude_takes_a_direct_send_queues_behind_it() {
         &fake_claude,
     );
 
-    // Claude's first message skips the readiness wait (it has no history to
-    // wait behind), so a send racing the transport start can be refused.
-    // Start the session and let it come up first; that race is not this one.
+    // Start the session and let it come up first, so turn 1 goes straight
+    // in; a first send racing the transport start is covered by
+    // `cli_session_send_first_claude_message_waits_for_the_transport_to_come_up`.
     app()
         .args(["session", "start", "berlin", "--kind", "claude"])
         .assert()
@@ -1603,6 +1603,7 @@ fn cli_session_send_first_claude_message_waits_for_the_transport_to_come_up() {
     let fake_claude = temp.path().join("fake-claude");
     let provider_inputs = temp.path().join("provider-inputs.txt");
     let hold = temp.path().join("release-claude-transport");
+    let not_ready_seen = temp.path().join("not-ready-status-seen");
     let fake_home = temp.path().join("home");
     write_fake_claude_stream(&fake_claude).unwrap();
     let _archcar = ArchcarDaemon::start(
@@ -1612,6 +1613,10 @@ fn cli_session_send_first_claude_message_waits_for_the_transport_to_come_up() {
             ("USERPROFILE", &fake_home),
             ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
             ("ARCHDUCTOR_TEST_HOLD_CLAUDE_READY_PATH", &hold),
+            (
+                "ARCHDUCTOR_TEST_NOT_READY_STATUS_SEEN_PATH",
+                &not_ready_seen,
+            ),
         ],
     );
     let app = || app_with_home(temp.path(), &fake_home);
@@ -1631,10 +1636,18 @@ fn cli_session_send_first_claude_message_waits_for_the_transport_to_come_up() {
         ]);
         move || send.output().unwrap()
     });
-    // Release the transport only once the daemon has the session and reports
-    // it not ready, so the send has met the session before it came up.
+    // Release the transport only once the daemon has told the send the
+    // session is not ready, so the send has met it before it came up. Nothing
+    // else here asks the daemon for status, so the marker is the send's.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !not_ready_seen.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the send never saw the held session not ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let session_id = wait_for_running_session(temp.path(), "berlin");
-    wait_for_archcar_status_contains(&app, session_id, "ready=false");
     fs::write(&hold, "").unwrap();
 
     let output = send.join().unwrap();

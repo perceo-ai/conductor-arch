@@ -1005,6 +1005,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             .map(|pending| pending.len())
                             .unwrap_or(0)
                     };
+                    if !snapshot.ready {
+                        crate::archcar::test_hooks::note_not_ready_status_served();
+                    }
                     ArchcarResponse::SessionStatus {
                         session_id,
                         status: snapshot.status.as_str().to_owned(),
