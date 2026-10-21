@@ -538,12 +538,7 @@ fn run_client(client: McpClientKind, args: &[String]) -> McpRegistrationOutcome 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::EnvGuard;
 
     #[test]
     fn codex_sub_table_sections_name_their_server() {
@@ -602,35 +597,18 @@ mod tests {
 
     #[test]
     fn auth_detection_uses_api_keys_without_home_directory() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        let previous_userprofile = std::env::var_os("USERPROFILE");
-        let previous_openai = std::env::var_os("OPENAI_API_KEY");
-        let previous_anthropic = std::env::var_os("ANTHROPIC_API_KEY");
-
-        std::env::remove_var("HOME");
-        std::env::remove_var("USERPROFILE");
-        std::env::set_var("OPENAI_API_KEY", "test-openai");
-        std::env::set_var("ANTHROPIC_API_KEY", "test-anthropic");
+        env.remove("HOME");
+        env.remove("USERPROFILE");
+        env.set("OPENAI_API_KEY", "test-openai");
+        env.set("ANTHROPIC_API_KEY", "test-anthropic");
 
         let status = workspace_mcp_status_with_settings(temp.path(), None);
-
-        restore_env("HOME", previous_home);
-        restore_env("USERPROFILE", previous_userprofile);
-        restore_env("OPENAI_API_KEY", previous_openai);
-        restore_env("ANTHROPIC_API_KEY", previous_anthropic);
+        drop(env);
 
         assert!(status.codex_authenticated);
         assert!(status.claude_authenticated);
-    }
-
-    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
     }
 
     #[test]

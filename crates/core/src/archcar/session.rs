@@ -3878,15 +3878,11 @@ fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::repository::{AddRepository, RepositoryStore};
+    use crate::test_support::EnvGuard;
     use crate::workspace::{CreateWorkspace, ProcessRecord};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use std::sync::Mutex;
 
     /// Two claude inputs in flight: the one that opened the turn, taken in,
     /// and an immediate message sent during it.
@@ -5555,7 +5551,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
 
     #[test]
     fn codex_thread_launch_with_native_id_resumes_that_session() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::CODEX);
@@ -5577,8 +5573,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             ),
         )
         .unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &fake_home);
+        env.set("HOME", &fake_home);
 
         let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
             &store,
@@ -5600,24 +5595,17 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             launch.session_resume_id.as_deref(),
             Some("codex-native-thread")
         );
-
-        if let Some(previous) = previous_home {
-            std::env::set_var("HOME", previous);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
     fn codex_thread_launch_clears_native_id_when_rollout_is_missing() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::CODEX);
         let fake_home = temp.path().join("home");
         fs::create_dir_all(fake_home.join(".codex/sessions")).unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &fake_home);
+        env.set("HOME", &fake_home);
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .and_then(|thread| store.update_chat_thread_native_id(thread.id, "missing-rollout"))
@@ -5650,17 +5638,11 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             .unwrap()
             .native_thread_id
             .is_none());
-
-        if let Some(previous) = previous_home {
-            std::env::set_var("HOME", previous);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
     fn managed_session_store_uses_app_shared_provider_settings() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
         drop(seeded_workspace_store(temp.path()));
         let config_home = temp.path().join("xdg/config");
@@ -5671,18 +5653,12 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             "codex_executable_path = \"/shared/bin/codex\"\n",
         )
         .unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        env.set("XDG_CONFIG_HOME", &config_home);
 
         let store =
             open_managed_session_store(temp.path().join("state.db"), temp.path().join("logs"))
                 .unwrap();
-
-        if let Some(previous) = previous_config_home {
-            std::env::set_var("XDG_CONFIG_HOME", previous);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
+        drop(env);
         assert_eq!(
             store
                 .session_launch("berlin", SessionKind::CODEX)
