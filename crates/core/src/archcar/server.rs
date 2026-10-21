@@ -7634,6 +7634,97 @@ mod tests {
     }
 
     #[test]
+    fn queue_chat_input_reports_an_input_a_drain_claimed_before_the_response() {
+        // A queue drain on `SessionReady` can claim the row `QueueChatInput`
+        // just inserted before the handler has built its response. The input
+        // was delivered, so the send must report it queued, not fail with
+        // "load queued chat input N" and invite a duplicate re-send.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        // Claim the row from a separate connection the moment it is inserted,
+        // exactly as the drain's own store would.
+        let claimed = Arc::new(Mutex::new(None));
+        let hook_claimed = Arc::clone(&claimed);
+        let hook_db_path = db_path.clone();
+        let thread_id = thread.id;
+        crate::workspace::set_after_queued_chat_input_insert_hook(move |inserted_id| {
+            let drained = WorkspaceStore::open_app(&hook_db_path)
+                .unwrap()
+                .claim_next_queued_chat_input(thread_id)
+                .unwrap()
+                .expect("the drain claims the row the handler just inserted");
+            assert_eq!(drained.id, inserted_id);
+            *hook_claimed.lock().unwrap() = Some(drained);
+        });
+
+        let response = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "run tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::CODEX,
+                verbatim: true,
+            },
+            &state,
+        );
+        let claimed = claimed
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the drain ran between the insert and the response");
+        let input = match response {
+            ArchcarResponse::QueuedChatInput { input } => input,
+            ArchcarResponse::Error { message } => {
+                panic!("a send the drain already claimed must not fail: {message}")
+            }
+            other => panic!("expected queued chat input response, got {other:?}"),
+        };
+        assert_eq!(input.id, claimed.id);
+        assert_eq!(input.thread_id, thread.id);
+        assert_eq!(input.input, "run tests");
+        assert_eq!(input.input, claimed.input);
+        assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
+    }
+
+    #[test]
     fn verbatim_queued_input_reaches_the_agent_exactly_as_sent() {
         // `archductor session send` queues behind a busy turn with `verbatim`.
         // The agent must get the operator's words alone, just as it would had

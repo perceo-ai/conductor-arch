@@ -8210,8 +8210,10 @@ mutation($threadId: ID!) {{
                 now
             ],
         )?;
+        let id = self.conn.last_insert_rowid();
+        after_queued_chat_input_insert(id);
         self.touch_chat_thread(thread_id, &now)?;
-        self.get_queued_chat_input(self.conn.last_insert_rowid())
+        self.get_queued_chat_input(id)
     }
 
     pub fn list_queued_chat_inputs(&self, thread_id: i64) -> Result<Vec<QueuedChatInputRecord>> {
@@ -11099,6 +11101,32 @@ fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessageR
         updated_at: row.get(7)?,
     })
 }
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_QUEUED_CHAT_INPUT_INSERT: std::cell::RefCell<Option<Box<dyn FnOnce(i64)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: runs `hook` once, on this thread, right after the next
+/// `enqueue_chat_input` has committed its row and before it returns. A test
+/// claims the row from another connection here, as a queue drain on
+/// `SessionReady` can in the daemon, to land in that gap deterministically.
+#[cfg(test)]
+pub(crate) fn set_after_queued_chat_input_insert_hook(hook: impl FnOnce(i64) + 'static) {
+    AFTER_QUEUED_CHAT_INPUT_INSERT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn after_queued_chat_input_insert(id: i64) {
+    if let Some(hook) = AFTER_QUEUED_CHAT_INPUT_INSERT.with(|slot| slot.borrow_mut().take()) {
+        hook(id);
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn after_queued_chat_input_insert(_id: i64) {}
 
 fn row_to_queued_chat_input(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedChatInputRecord> {
     let input_kind: String = row.get(4)?;
