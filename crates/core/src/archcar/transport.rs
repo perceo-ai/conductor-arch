@@ -144,21 +144,33 @@ fn acquire_singleton_lock(endpoint: &Path) -> io::Result<std::fs::File> {
 /// with `AddrInUse`, as on Unix. Probing the recorded TCP address instead was
 /// rejected because the OS can recycle a dead daemon's port to an unrelated
 /// process, which would read as a live listener and wedge every later start.
+///
+/// The one exception is an endpoint with no lock file beside it, which a
+/// daemon built before the lock may still be serving. Only there does `bind`
+/// probe, and it counts the daemon live only if it completes the token
+/// handshake and answers an RPC (`pre_lock_daemon_answers`), which a recycled
+/// port cannot do.
 #[cfg(windows)]
 pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another process holds it.
     const SHARING_VIOLATION: i32 = 32;
     const LOCK_VIOLATION: i32 = 33;
+    let lock_path = singleton_lock_path(endpoint);
+    let lock_existed = lock_path.exists();
     let lock = match acquire_singleton_lock(endpoint) {
         Ok(lock) => lock,
         Err(err) if matches!(err.raw_os_error(), Some(SHARING_VIOLATION | LOCK_VIOLATION)) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                "archcar endpoint already has a live listener",
-            ));
+            return Err(live_listener_error());
         }
         Err(err) => return Err(err),
     };
+    if !lock_existed && endpoint.exists() && pre_lock_daemon_answers(endpoint) {
+        // Leave no lock file behind: the next start must probe this daemon
+        // again, not trust a lock nobody holds.
+        drop(lock);
+        let _ = std::fs::remove_file(&lock_path);
+        return Err(live_listener_error());
+    }
     // Held until this process exits, crash included; the OS release is what
     // lets the next daemon in.
     std::mem::forget(lock);
@@ -176,6 +188,60 @@ pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     }
     std::fs::rename(temporary, endpoint)?;
     Ok(listener)
+}
+
+#[cfg(windows)]
+fn live_listener_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::AddrInUse,
+        "archcar endpoint already has a live listener",
+    )
+}
+
+/// How long the pre-lock probe waits on each connect, write and read, so a
+/// listener that accepts but never answers cannot hold up startup.
+#[cfg(windows)]
+const PRE_LOCK_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Whether a daemon still serves `endpoint`: it accepts the recorded token and
+/// answers an RPC with the same envelope id. A successful `connect` alone
+/// proves nothing, since writing the token succeeds against any listener and
+/// the server drops a connection with a wrong token without a word.
+#[cfg(windows)]
+fn pre_lock_daemon_answers(endpoint: &Path) -> bool {
+    probe_pre_lock_daemon(endpoint).unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn probe_pre_lock_daemon(endpoint: &Path) -> io::Result<bool> {
+    use crate::archcar::protocol::{ArchcarRequest, RpcEnvelope};
+    use std::io::BufRead;
+
+    let contents = std::fs::read_to_string(endpoint)?;
+    let mut lines = contents.lines();
+    let (Some(address), Some(token)) = (lines.next(), lines.next()) else {
+        return Ok(false);
+    };
+    let Ok(address) = address.trim().parse::<std::net::SocketAddr>() else {
+        return Ok(false);
+    };
+    let mut stream = LocalStream::connect_timeout(&address, PRE_LOCK_PROBE_TIMEOUT)?;
+    stream.set_read_timeout(Some(PRE_LOCK_PROBE_TIMEOUT))?;
+    stream.set_write_timeout(Some(PRE_LOCK_PROBE_TIMEOUT))?;
+    // A read-only request every daemon build with Windows support answers.
+    let request = RpcEnvelope {
+        id: uuid::Uuid::new_v4().to_string(),
+        payload: ArchcarRequest::ListLayoutPresets,
+    };
+    let line = serde_json::to_string(&request).map_err(io::Error::other)?;
+    stream.write_all(format!("{}\n{line}\n", token.trim_end()).as_bytes())?;
+    stream.flush()?;
+    let mut reply = String::new();
+    io::BufReader::new(stream).read_line(&mut reply)?;
+    Ok(
+        serde_json::from_str::<RpcEnvelope<serde_json::Value>>(&reply)
+            .is_ok_and(|reply| reply.id == request.id),
+    )
 }
 
 #[cfg(windows)]

@@ -354,12 +354,13 @@ impl ArchcarServer {
 /// in-place restart attempt: a successful restart execs into the new binary,
 /// which keeps serving on this same path.
 ///
-/// Unix only. Windows `transport::bind` (the `#[cfg(windows)]` one in
-/// `transport.rs`) has no liveness probe: it removes and renames over an
-/// existing endpoint file unconditionally, so a newer daemon may own the file
-/// by the time this one exits, and removing it would shut that daemon down on
-/// its next accept. Windows must not share this cleanup until it can check the
-/// file still belongs to this listener.
+/// Unix only, for now. Windows `transport::bind` (the `#[cfg(windows)]` one in
+/// `transport.rs`) also refuses with `AddrInUse` while a daemon owns the
+/// endpoint: ownership is an exclusive `.endpoint.lock` file held for the
+/// daemon's life, plus a token-handshake probe for an endpoint with no lock
+/// file, which a daemon built before the lock may still serve. Sharing this
+/// cleanup on Windows is a separate change; it should remove that lock file
+/// too.
 #[cfg(unix)]
 fn unlink_own_endpoint(endpoint_path: &Path) {
     match fs::remove_file(endpoint_path) {
