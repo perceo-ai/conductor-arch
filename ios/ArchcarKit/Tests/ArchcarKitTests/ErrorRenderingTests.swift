@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import Testing
 
 @testable import ArchcarKit
@@ -160,4 +161,53 @@ private func replying(_ replies: [String: String]) -> @Sendable (String) -> Stri
     }
     await session.disconnect()
     await daemon.stop()
+}
+
+/// Always fails `setToken`, as a device locked under
+/// `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` does.
+private struct FailingTokenStore: TokenStore {
+    func token(for id: String) throws -> String? { nil }
+    func setToken(_ token: String, for id: String) throws {
+        throw KeychainTokenStore.KeychainError.status(errSecInteractionNotAllowed)
+    }
+    func removeToken(for id: String) throws {}
+}
+
+@Test func keychainErrorsRenderAsSentences() {
+    #expect(String(describing: KeychainTokenStore.KeychainError.status(errSecInteractionNotAllowed))
+        == "Unlock this device and try again.")
+    #expect(String(describing: KeychainTokenStore.KeychainError.status(errSecDuplicateItem))
+        == "A token for this daemon is already saved.")
+    #expect(String(describing: KeychainTokenStore.KeychainError.status(-1))
+        == "Could not reach the keychain.")
+    let errors: [any Error] = [
+        KeychainTokenStore.KeychainError.status(errSecInteractionNotAllowed),
+        KeychainTokenStore.KeychainError.status(errSecDuplicateItem),
+    ]
+    for error in errors {
+        #expect(error.localizedDescription == String(describing: error))
+    }
+}
+
+@Test func aLockedKeychainFailureReadsAsASentenceOnThePairingSheet() async throws {
+    // PairDaemonView.save() renders DaemonDirectory.add's thrown error through
+    // `UserFacingMessage.pairingSaveFailureMessage(for:)`. A real
+    // Keychain write cannot be forced to fail from a test, so this drives the
+    // same throw through a TokenStore double for a locked device.
+    let directory = DaemonDirectory(
+        records: UserDefaultsRecordStore(suiteName: "test-\(UUID().uuidString)"),
+        tokens: FailingTokenStore())
+
+    do {
+        _ = try await directory.add(label: "s", address: DaemonAddress(host: "h"), token: "t")
+        Issue.record("DaemonDirectory.add did not throw")
+        return
+    } catch let failure {
+        let shown = UserFacingMessage.pairingSaveFailureMessage(for: failure)
+        print("ERRPROBE PairDaemonView.error=\(shown)")
+        #expect(shown == "Could not save: Unlock this device and try again.")
+        for marker in dumpMarkers + ["status(", "errSecInteractionNotAllowed", "-25308"] {
+            #expect(!shown.contains(marker), "\(marker) leaked into: \(shown)")
+        }
+    }
 }

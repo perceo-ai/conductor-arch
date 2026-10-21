@@ -24,4 +24,10 @@ public enum UserFacingMessage {
         default: error.localizedDescription
         }
     }
+
+    /// What the pairing sheet shows when saving a scanned daemon throws,
+    /// typically a Keychain refusal on a locked device.
+    public static func pairingSaveFailureMessage(for error: any Error) -> String {
+        "Could not save: \(describing(error))"
+    }
 }
