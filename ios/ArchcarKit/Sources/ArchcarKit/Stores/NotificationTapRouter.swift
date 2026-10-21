@@ -35,7 +35,7 @@ public final class NotificationTapRouter {
     @ObservationIgnored public var activeDaemonID: @MainActor () -> String? = { nil }
     /// The active daemon's learned self-id, matched against the one a fresh
     /// APNs push is stamped with. Nil until learned.
-    @ObservationIgnored public var activeDaemonSelfID: @MainActor () -> String? = { nil }
+    @ObservationIgnored public var activeDaemonSelfID: @MainActor () async -> String? = { nil }
 
     @ObservationIgnored private var pending: NotificationTap?
     @ObservationIgnored private var isResolving = false
@@ -86,14 +86,16 @@ public final class NotificationTapRouter {
     private func resolvePass() async {
         while let tap = pending, let store = inventory() {
             if store.lastError != nil { await store.refresh() }
-            var answer = resolution(of: tap, in: store)
+            var selfID = await activeDaemonSelfID()
+            var answer = resolution(of: tap, in: store, selfID: selfID)
             // A miss refetches once before concluding the chat is gone: the
             // snapshot may predate the chat. A wrong-daemon tap needs no fetch.
             let isActiveDaemons = !ChatThreadLookup.isFromAnotherDaemon(
-                tap, activeDaemonID: activeDaemonID(), activeDaemonSelfID: activeDaemonSelfID())
+                tap, activeDaemonID: activeDaemonID(), activeDaemonSelfID: selfID)
             if store.lastError == nil, isActiveDaemons, case .notFound = answer {
                 await store.refresh()
-                answer = resolution(of: tap, in: store)
+                selfID = await activeDaemonSelfID()
+                answer = resolution(of: tap, in: store, selfID: selfID)
             }
             // A reconnect or a newer tap during a fetch makes this answer
             // stale: go round again against the current list and tap.
@@ -104,9 +106,9 @@ public final class NotificationTapRouter {
         }
     }
 
-    private func resolution(of tap: NotificationTap, in store: any ChatInventory) -> ChatThreadLookup.Resolution {
+    private func resolution(of tap: NotificationTap, in store: any ChatInventory, selfID: String?) -> ChatThreadLookup.Resolution {
         ChatThreadLookup.resolve(
-            tap, activeDaemonID: activeDaemonID(), activeDaemonSelfID: activeDaemonSelfID(),
+            tap, activeDaemonID: activeDaemonID(), activeDaemonSelfID: selfID,
             workspaces: store.workspaces, chatThreads: store.chatThreads)
     }
 }

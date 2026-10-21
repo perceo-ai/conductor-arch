@@ -40,7 +40,7 @@ final class AppModel {
         }
         notificationTaps.inventory = { [weak self] in self?.workspaces }
         notificationTaps.activeDaemonID = { [weak self] in self?.activeDaemon?.id }
-        notificationTaps.activeDaemonSelfID = { [weak self] in self?.activeDaemon?.remoteSelfID }
+        notificationTaps.activeDaemonSelfID = { [weak self] in await self?.session?.remoteDaemonSelfID }
     }
 
     func load() async {
