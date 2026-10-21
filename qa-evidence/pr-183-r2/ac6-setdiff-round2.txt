@@ -1,0 +1,48 @@
+AC6 — passing-test-name set diff, PR #183, re-derived by qa in round 2
+=======================================================================
+
+Reference points (iOS job "iOS: build ArchcarKit and run Swift tests"):
+
+  label  commit            run           job            checked-out tree  summary line
+  -----  ----------------  ------------  -------------  ----------------  ------------------------------
+  mb     e7bc715 (merge base, push)   39567303112  119112628398   e7bc715           Test run with 216 tests passed
+  mid    16d35c7a (round-2 fix)       39570742983  119124070442   3f12276 (pr/merge) Test run with 220 tests passed
+  r1     11b90cbc (round-1 head)      39567641649  119114009085   6db38bb (pr/merge) Test run with 219 tests passed
+  r2     103960e5 (final head)        39571089867  119125416772   bdc4f3c (pr/merge) Test run with 220 tests passed
+
+  pull_request runs build refs/pull/183/merge:
+    6db38bb parents = e7bc715e (main at run time), 11b90cbc
+    bdc4f3c parents = c810b589 (main at run time), 103960e5
+  Current main is 4dbe1175 (PR #181, no ios/ paths) -> PR reads BEHIND; qa re-ran
+  every tree-wide grep on `git merge base2(4dbe1175) <- head`, merge_exit=0.
+
+Unique passing test names extracted with:
+  grep -aoE "PASS Test [A-Za-z0-9_]+\(\) passed" <job.log> | sed 's/PASS Test //; s/() passed//' | sort -u
+(PASS = the U+2714 mark the runner emits.)
+
+  mb  = 216 names
+  mid = 220 names
+  r1  = 219 names
+  r2  = 220 names
+
+comm -23 mb r2   (merge-base names MISSING on the final head) -> EMPTY
+comm -13 mb r2   (new since the merge base) -> 4:
+    aFailedFetchOnALiveConnectionShowsItsCauseNotADisconnect
+    aFailedFetchWithNoCauseStillDoesNotClaimADisconnect
+    aRealDisconnectStillSaysNotConnectedWhateverTheCause
+    aTodosFailureKeepsItsCauseThroughAnEventDrivenRefresh
+
+comm -23 r1 r2   (round-1 names MISSING on the round-2 head) -> EMPTY
+comm -13 r1 r2   (added in round 2) -> 1:
+    aTodosFailureKeepsItsCauseThroughAnEventDrivenRefresh
+
+comm -23 mid r2  -> EMPTY
+comm -13 mid r2  -> EMPTY
+  => the final commit 103960e5 ("test(ios): assert isDisconnected on the chat,
+     terminal and workspaces stores") added NO new test names; it only appended
+     assertions to four existing tests, which is what the diff shows.
+
+Conclusion: the merge-base set is a strict subset of the final head's set, and
+the round-1 set is a strict subset of the round-2 set. No pre-existing test was
+deleted, renamed or silently skipped across either round. Deltas: +4 vs the
+merge base, +1 vs the previously-reviewed head.
