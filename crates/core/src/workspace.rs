@@ -13564,11 +13564,21 @@ fn recorded_process_alive(pid: u32, recorded_start_time: Option<i64>) -> bool {
     if !process_alive(pid) {
         return false;
     }
+    start_times_agree(recorded_start_time, || pid_start_time(pid))
+}
+
+/// Whether a live pid's current start time is consistent with the recorded
+/// one. `current` is only called when a start time was recorded, so the
+/// `/proc` read is skipped when there is nothing to compare against.
+fn start_times_agree(
+    recorded_start_time: Option<i64>,
+    current: impl FnOnce() -> Option<i64>,
+) -> bool {
     // Only a start time read back and found different proves the pid was
     // reused. One that cannot be read proves nothing, and treating it as dead
     // would report a live session as exited.
     match recorded_start_time {
-        Some(recorded) => pid_start_time(pid).is_none_or(|now| now == recorded),
+        Some(recorded) => current().is_none_or(|now| now == recorded),
         None => true,
     }
 }
@@ -14024,6 +14034,33 @@ pub(crate) mod tests {
     pub(crate) fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn start_times_agree_only_a_different_start_time_proves_pid_reuse() {
+        // (recorded, current, expected alive)
+        let cases = [
+            (None, None, true),
+            (None, Some(100), true),
+            // An unreadable current start time proves nothing: a live
+            // session must not be reported exited because of it.
+            (Some(100), None, true),
+            (Some(100), Some(100), true),
+            (Some(100), Some(101), false),
+        ];
+        for (recorded, current, expected) in cases {
+            assert_eq!(
+                start_times_agree(recorded, || current),
+                expected,
+                "recorded={recorded:?} current={current:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn start_times_agree_skips_the_current_read_without_a_recorded_start_time() {
+        let unread = || -> Option<i64> { panic!("current start time read") };
+        assert!(start_times_agree(None, unread));
     }
 
     fn exited_child_pid() -> u32 {
