@@ -10836,6 +10836,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -11130,7 +11131,197 @@ default = true
         assert!(restored.is_none());
         let exited = store.get_process_record(process.id).unwrap();
         assert_eq!(exited.status, ProcessStatus::Exited);
-        let _ = child.wait();
+        assert!(
+            wait_for_test_child_exit(&mut child, Duration::from_secs(10)),
+            "the orphan's row was marked exited but the process was left running"
+        );
+    }
+
+    /// Spawns a real managed codex session in `start` and checks the wiring the
+    /// lookup relies on. The spawn is paused inside the race window by holding
+    /// the state lock as soon as its child is marked: registration needs that
+    /// lock, the process row does not, so the row lands while the handle
+    /// cannot. A lookup made from there must leave the child alive, and
+    /// registration must clear the mark.
+    #[cfg(unix)]
+    fn assert_background_spawn_marks_child_until_registered(
+        start: impl FnOnce(&Arc<Mutex<ServerState>>, &WorkspaceStore) -> ArchcarResponse,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        install_silent_fake_codex(temp.path());
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: paths.database_path.clone(),
+            logs_dir: paths.logs_dir.clone(),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        let response = start(&state, &store);
+        assert!(
+            matches!(response, ArchcarResponse::SessionSpawnQueued { .. }),
+            "{response:?}"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let (guard, pid) = loop {
+            let guard = state.lock().unwrap();
+            if let Some(&pid) = guard.spawning_pids.iter().next() {
+                break (guard, pid);
+            }
+            assert!(
+                guard.sessions.is_empty(),
+                "the spawn registered a session without ever marking its child"
+            );
+            drop(guard);
+            assert!(Instant::now() < deadline, "the spawn never started a child");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let process = loop {
+            let row = store
+                .list_sessions("berlin")
+                .unwrap()
+                .into_iter()
+                .find(|record| record.pid == pid);
+            if let Some(row) = row {
+                break row;
+            }
+            assert!(Instant::now() < deadline, "the spawn never wrote its row");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            guard.sessions.is_empty(),
+            "the handle registered while the state lock was held"
+        );
+        assert!(guard.spawning_pids.contains(&pid));
+        drop(guard);
+
+        let looked_up = load_or_restore_session_handle(&state, process.id).unwrap();
+        if let Some(handle) = &looked_up {
+            assert_eq!(handle.snapshot.lock().unwrap().pid, pid);
+        }
+        assert!(
+            wait_for_fake_codex_child_alive(pid),
+            "a lookup during the spawn killed the child"
+        );
+        assert_eq!(
+            store.get_process_record(process.id).unwrap().status,
+            ProcessStatus::Running
+        );
+
+        let handle = loop {
+            let guard = state.lock().unwrap();
+            if let Some(handle) = guard.sessions.get(&process.id).cloned() {
+                assert!(
+                    guard.spawning_pids.is_empty(),
+                    "registration left the child marked as spawning"
+                );
+                break handle;
+            }
+            drop(guard);
+            assert!(Instant::now() < deadline, "the spawn never registered");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(wait_for_fake_codex_child_alive(pid));
+        terminate_managed_handle(&handle);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_default_session_marks_its_child_until_the_handle_is_registered() {
+        assert_background_spawn_marks_child_until_registered(|state, _| {
+            ensure_default_session(
+                state,
+                "berlin".to_owned(),
+                SessionKind::CODEX,
+                crate::workspace::SessionHarnessOptions::default(),
+            )
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_chat_thread_session_marks_its_child_until_the_handle_is_registered() {
+        assert_background_spawn_marks_child_until_registered(|state, store| {
+            let thread = store
+                .create_chat_thread("berlin", "codex", "Codex", None)
+                .unwrap();
+            ensure_chat_thread_session(
+                state,
+                "berlin".to_owned(),
+                thread.id,
+                SessionKind::CODEX,
+                crate::workspace::SessionHarnessOptions::default(),
+            )
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_session_marks_its_child_until_the_handle_is_registered() {
+        assert_background_spawn_marks_child_until_registered(|state, _| {
+            spawn_session(
+                state,
+                "berlin".to_owned(),
+                SessionKind::CODEX,
+                crate::workspace::SessionHarnessOptions::default(),
+            )
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_hook_runs_before_the_process_row_is_written() {
+        // The marker only covers the race if it exists before the row does:
+        // the CLI acts on the row the moment it appears.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        install_silent_fake_codex(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let hooked = std::cell::RefCell::new(Vec::new());
+        let (event_tx, _event_rx) = mpsc::channel();
+
+        let handle = spawn_managed_session_for_thread(
+            paths.database_path.clone(),
+            paths.logs_dir.clone(),
+            "berlin".to_owned(),
+            thread.id,
+            SessionKind::CODEX,
+            crate::workspace::SessionHarnessOptions::default(),
+            event_tx,
+            &|pid| {
+                let row_exists = store
+                    .list_thread_processes(thread.id)
+                    .unwrap()
+                    .iter()
+                    .any(|record| record.pid == pid);
+                hooked.borrow_mut().push((pid, row_exists));
+            },
+        )
+        .unwrap();
+
+        let pid = handle.snapshot.lock().unwrap().pid;
+        assert_eq!(hooked.into_inner(), vec![(pid, false)]);
+        assert!(
+            store
+                .list_thread_processes(thread.id)
+                .unwrap()
+                .iter()
+                .any(|record| record.pid == pid),
+            "the row is written after the hook"
+        );
+        terminate_managed_handle(&handle);
     }
 
     #[test]
@@ -11435,6 +11626,43 @@ default = true
             .stderr(Stdio::null())
             .status();
         let _ = child.wait();
+    }
+
+    /// Waits for `child` to exit. On timeout it is killed and reaped, so a
+    /// regression that leaves it running fails the test instead of hanging it.
+    #[cfg(unix)]
+    fn wait_for_test_child_exit(child: &mut std::process::Child, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        terminate_test_child(child);
+        false
+    }
+
+    /// Points the seeded repository's codex at a stand-in that reads its
+    /// stdin and never answers, so a managed codex session starts and stays
+    /// alive without a real provider.
+    #[cfg(unix)]
+    fn install_silent_fake_codex(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake_codex = root.join("fake-silent-codex");
+        fs::write(&fake_codex, "#!/bin/sh\nexec cat > /dev/null\n").unwrap();
+        fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
+        let settings_dir = root.join("demo/.archductor");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::write(
+            settings_dir.join("settings.local.toml"),
+            format!(
+                "codex_executable_path = {:?}\n",
+                fake_codex.to_string_lossy()
+            ),
+        )
+        .unwrap();
     }
 
     #[cfg(unix)]
