@@ -3,7 +3,6 @@ use archductor_core::archcar::handoff;
 use archductor_core::archcar::harness::managed_harness_for_kind;
 use archductor_core::archcar::harness_contract::{HarnessCapability, HarnessFeature, SupportMode};
 use archductor_core::archcar::remote;
-use archductor_core::paths::AppPaths;
 use archductor_core::provider_events::{
     ProviderEventDraft, ProviderEventKind, ProviderEventPhase, ProviderEventStore,
 };
@@ -1299,6 +1298,32 @@ fn claude_hook_hidden_command_prints_single_json_object() {
     assert_eq!(stdout.trim_end_matches('\n').lines().count(), 1);
 }
 
+// A root this long pushes `<root>/xdg/state/archductor/archcar.sock` past the
+// unix socket path limit, so the endpoint falls back to `$XDG_RUNTIME_DIR`.
+// That fallback must never be the operator's own runtime dir. It cannot be
+// asserted to land inside the root: `xdg/runtime/archcar-<hash>.sock` is a
+// longer suffix than `xdg/state/archductor/archcar.sock`, so any root that
+// overflows the direct path overflows the runtime candidate too, and the
+// endpoint falls through to a hashed temp-dir path instead.
+#[cfg(unix)]
+#[test]
+fn archcar_endpoint_stays_out_of_operator_runtime_dir_for_a_long_test_root() {
+    let operator_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("x".repeat(120));
+    fs::create_dir_all(&root).unwrap();
+    let endpoint = archcar_endpoint_path(&root);
+
+    if let Some(operator_dir) = &operator_runtime_dir {
+        assert!(
+            !endpoint.starts_with(operator_dir),
+            "archcar endpoint {} leaked into the operator's real XDG_RUNTIME_DIR {}",
+            endpoint.display(),
+            operator_dir.display()
+        );
+    }
+}
+
 #[test]
 fn provider_interactions_help_lists_cli_actions() {
     let temp = tempfile::tempdir().unwrap();
@@ -1382,12 +1407,15 @@ fn developer_archcar_env() -> Vec<&'static str> {
     names
 }
 
-fn app_env(root: &Path) -> [(&'static str, PathBuf); 6] {
+fn app_env(root: &Path) -> [(&'static str, PathBuf); 8] {
     [
         ("XDG_CONFIG_HOME", root.join("xdg/config")),
         ("XDG_DATA_HOME", root.join("xdg/data")),
         ("XDG_STATE_HOME", root.join("xdg/state")),
         ("XDG_CACHE_HOME", root.join("xdg/cache")),
+        ("XDG_RUNTIME_DIR", root.join("xdg/runtime")),
+        // The endpoint's next fallback is `env::temp_dir()`, i.e. `$TMPDIR`.
+        ("TMPDIR", root.join("xdg/tmp")),
         ("APPDATA", root.join("xdg/config")),
         ("LOCALAPPDATA", root.join("xdg/data")),
     ]
@@ -1474,16 +1502,30 @@ impl Drop for ArchcarDaemon {
     }
 }
 
+/// The endpoint a daemon started with `app_env(root)` binds. Resolved by the
+/// CLI under that same environment: under a long root the endpoint falls back
+/// to `$XDG_RUNTIME_DIR`/`$TMPDIR`, which this test process does not share.
 fn archcar_endpoint_path(root: &Path) -> PathBuf {
-    let paths = AppPaths {
-        config_dir: root.join("xdg/config/archductor"),
-        data_dir: root.join("xdg/data/archductor"),
-        state_dir: root.join("xdg/state/archductor"),
-        cache_dir: root.join("xdg/cache/archductor"),
-        database_path: app_database_path(root),
-        logs_dir: root.join("xdg/state/archductor/logs"),
-    };
-    paths.archcar_endpoint_path()
+    let output = app(root)
+        .args(["remote", "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    local_daemon_endpoint(&String::from_utf8(output).unwrap())
+}
+
+/// Parses the `local daemon (<endpoint>)` line `remote status` prints.
+fn local_daemon_endpoint(stdout: &str) -> PathBuf {
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("local daemon ("))
+        .unwrap_or_else(|| panic!("no local daemon line in:\n{stdout}"));
+    line.split_once('(')
+        .and_then(|(_, rest)| rest.rsplit_once(')'))
+        .map(|(path, _)| PathBuf::from(path))
+        .unwrap()
 }
 
 #[cfg(unix)]
