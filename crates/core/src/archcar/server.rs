@@ -5943,6 +5943,7 @@ fn ensure_default_session(
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned managed session");
+                in_flight.before_registration();
                 let mut guard = state_for_spawn.lock().unwrap();
                 in_flight.clear(&mut guard);
                 if guard.shutting_down {
@@ -6096,6 +6097,7 @@ fn ensure_chat_thread_session(
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, thread_id, session_id, ?kind, "archcar spawned chat-thread managed session");
+                in_flight.before_registration();
                 let mut guard = state_for_spawn.lock().unwrap();
                 in_flight.clear(&mut guard);
                 if guard.shutting_down {
@@ -6449,6 +6451,7 @@ fn spawn_session(
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned explicit managed session");
+                in_flight.before_registration();
                 let mut guard = state_for_spawn.lock().unwrap();
                 in_flight.clear(&mut guard);
                 if guard.shutting_down {
@@ -6507,6 +6510,53 @@ impl<'a> SpawnInFlight<'a> {
     fn clear(&self, state: &mut ServerState) {
         if let Some(pid) = self.pid.take() {
             state.spawning_pids.remove(&pid);
+        }
+    }
+
+    /// The race window at its widest: the spawn has returned, so its row is
+    /// written and its child marked, but it has not yet taken the lock to
+    /// register. Tests park the spawn here; otherwise this does nothing.
+    fn before_registration(&self) {
+        #[cfg(test)]
+        {
+            let db_path = self.state.lock().unwrap().db_path.clone();
+            spawn_registration_gate::pass(&db_path, self.pid.get());
+        }
+    }
+}
+
+/// Lets a test hold a background spawn inside the race window instead of
+/// trying to catch the window by polling, which only works when the machine
+/// is slow enough to keep it open. Gates are keyed by database path, so tests
+/// running in parallel, each with its own temp database, never meet.
+#[cfg(test)]
+mod spawn_registration_gate {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    type Gate = Box<dyn FnOnce(Option<u32>) + Send>;
+
+    fn gates() -> &'static Mutex<HashMap<PathBuf, Gate>> {
+        static GATES: OnceLock<Mutex<HashMap<PathBuf, Gate>>> = OnceLock::new();
+        GATES.get_or_init(Default::default)
+    }
+
+    /// Runs `gate` once, on the spawn thread, when the next spawn against
+    /// `db_path` reaches registration. It receives the marked pid, or `None`
+    /// if the spawn never marked a child.
+    pub(super) fn install(db_path: &Path, gate: impl FnOnce(Option<u32>) + Send + 'static) {
+        gates()
+            .lock()
+            .unwrap()
+            .insert(db_path.to_path_buf(), Box::new(gate));
+    }
+
+    pub(super) fn pass(db_path: &Path, pid: Option<u32>) {
+        // Taken out first so the map is not locked while the gate blocks.
+        let gate = gates().lock().unwrap().remove(db_path);
+        if let Some(gate) = gate {
+            gate(pid);
         }
     }
 }
@@ -11138,11 +11188,9 @@ default = true
     }
 
     /// Spawns a real managed codex session in `start` and checks the wiring the
-    /// lookup relies on. The spawn is paused inside the race window by holding
-    /// the state lock as soon as its child is marked: registration needs that
-    /// lock, the process row does not, so the row lands while the handle
-    /// cannot. A lookup made from there must leave the child alive, and
-    /// registration must clear the mark.
+    /// lookup relies on. A registration gate parks the spawn thread inside the
+    /// race window (row written, child marked, handle not registered) until
+    /// the test releases it, so the window is held open rather than caught.
     #[cfg(unix)]
     fn assert_background_spawn_marks_child_until_registered(
         start: impl FnOnce(&Arc<Mutex<ServerState>>, &WorkspaceStore) -> ArchcarResponse,
@@ -11164,6 +11212,14 @@ default = true
             subscribers: Vec::new(),
             remote_listen: None,
         }));
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        spawn_registration_gate::install(&paths.database_path, move |pid| {
+            let _ = inside_tx.send(pid);
+            // Returns when released, or when the test drops the sender by
+            // failing, so a failed test never strands the spawn thread.
+            let _ = release_rx.recv();
+        });
 
         let response = start(&state, &store);
         assert!(
@@ -11171,43 +11227,31 @@ default = true
             "{response:?}"
         );
 
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let (guard, pid) = loop {
+        let pid = inside_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the spawn never reached registration")
+            .expect("the spawn reached registration without ever marking its child");
+        let process = store
+            .list_sessions("berlin")
+            .unwrap()
+            .into_iter()
+            .find(|record| record.pid == pid)
+            .expect("the spawn returned before writing its row");
+        let (registered, marked) = {
             let guard = state.lock().unwrap();
-            if let Some(&pid) = guard.spawning_pids.iter().next() {
-                break (guard, pid);
-            }
-            assert!(
-                guard.sessions.is_empty(),
-                "the spawn registered a session without ever marking its child"
-            );
-            drop(guard);
-            assert!(Instant::now() < deadline, "the spawn never started a child");
-            std::thread::sleep(Duration::from_millis(5));
+            (
+                guard.sessions.contains_key(&process.id),
+                guard.spawning_pids.contains(&pid),
+            )
         };
-        let process = loop {
-            let row = store
-                .list_sessions("berlin")
-                .unwrap()
-                .into_iter()
-                .find(|record| record.pid == pid);
-            if let Some(row) = row {
-                break row;
-            }
-            assert!(Instant::now() < deadline, "the spawn never wrote its row");
-            std::thread::sleep(Duration::from_millis(5));
-        };
-        assert!(
-            guard.sessions.is_empty(),
-            "the handle registered while the state lock was held"
-        );
-        assert!(guard.spawning_pids.contains(&pid));
-        drop(guard);
+        assert!(!registered, "the handle registered before the gate opened");
+        assert!(marked, "the child is not marked while its row is visible");
 
         let looked_up = load_or_restore_session_handle(&state, process.id).unwrap();
-        if let Some(handle) = &looked_up {
-            assert_eq!(handle.snapshot.lock().unwrap().pid, pid);
-        }
+        assert!(
+            looked_up.is_none(),
+            "a session still spawning has no handle to return"
+        );
         assert!(
             wait_for_fake_codex_child_alive(pid),
             "a lookup during the spawn killed the child"
@@ -11217,19 +11261,31 @@ default = true
             ProcessStatus::Running
         );
 
-        let handle = loop {
-            let guard = state.lock().unwrap();
-            if let Some(handle) = guard.sessions.get(&process.id).cloned() {
-                assert!(
-                    guard.spawning_pids.is_empty(),
-                    "registration left the child marked as spawning"
-                );
-                break handle;
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (handle, still_marked) = loop {
+            let registered = {
+                let guard = state.lock().unwrap();
+                guard
+                    .sessions
+                    .get(&process.id)
+                    .cloned()
+                    .map(|handle| (handle, guard.spawning_pids.contains(&pid)))
+            };
+            if let Some(registered) = registered {
+                break registered;
             }
-            drop(guard);
-            assert!(Instant::now() < deadline, "the spawn never registered");
+            assert!(
+                Instant::now() < deadline,
+                "the released spawn never registered"
+            );
             std::thread::sleep(Duration::from_millis(5));
         };
+        assert!(
+            !still_marked,
+            "registration left the child marked as spawning"
+        );
+        assert_eq!(handle.snapshot.lock().unwrap().pid, pid);
         assert!(wait_for_fake_codex_child_alive(pid));
         terminate_managed_handle(&handle);
     }
