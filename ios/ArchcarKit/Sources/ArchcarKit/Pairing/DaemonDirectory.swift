@@ -7,19 +7,11 @@ public struct SavedDaemon: Codable, Sendable, Identifiable, Hashable {
     public let id: String
     public var label: String
     public var address: DaemonAddress
-    /// The daemon's own stable self-id, learned on connect. Not `id`, which
-    /// is this client's pairing record. Nil until learned; a record saved
-    /// before this field existed decodes to nil.
-    public var remoteSelfID: String?
 
-    public init(
-        id: String = UUID().uuidString, label: String, address: DaemonAddress,
-        remoteSelfID: String? = nil
-    ) {
+    public init(id: String = UUID().uuidString, label: String, address: DaemonAddress) {
         self.id = id
         self.label = label
         self.address = address
-        self.remoteSelfID = remoteSelfID
     }
 }
 
@@ -104,13 +96,6 @@ public actor DaemonDirectory {
     public func rename(id: String, to label: String) {
         guard let index = daemons.firstIndex(where: { $0.id == id }) else { return }
         daemons[index].label = label
-        persist()
-    }
-
-    public func setRemoteSelfID(_ selfID: String, for id: String) {
-        guard let index = daemons.firstIndex(where: { $0.id == id }) else { return }
-        guard daemons[index].remoteSelfID != selfID else { return }
-        daemons[index].remoteSelfID = selfID
         persist()
     }
 

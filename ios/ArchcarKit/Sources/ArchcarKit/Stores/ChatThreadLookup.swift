@@ -9,9 +9,9 @@ import Foundation
 ///
 /// `daemonSelfID` is the daemon's own stable self-id, stamped on a fresh APNs
 /// push. Nil for local notifications and for pushes from an older daemon. It
-/// is matched against the active daemon's learned self-id
-/// (`SavedDaemon.remoteSelfID`), never against `SavedDaemon.id` — the two are
-/// separate identity spaces.
+/// is matched against the active session's learned self-id
+/// (`DaemonSession.remoteDaemonSelfID`), never against `SavedDaemon.id` — the
+/// two are separate identity spaces.
 public struct NotificationTap: Sendable, Equatable {
     public let threadID: Int64
     public let daemonID: String?

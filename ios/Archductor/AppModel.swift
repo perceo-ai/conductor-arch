@@ -116,7 +116,6 @@ final class AppModel {
         }
         connectionError = nil
         self.session = session
-        await syncRemoteSelfID(session: session, daemonID: daemon.id)
         let store = WorkspacesStore(session: session)
         workspaces = store
         // Every successful refresh from here on — this first load, a
@@ -170,24 +169,9 @@ final class AppModel {
         }
     }
 
-    /// Copies the self-id the session's latest handshake learned onto the
-    /// saved daemon. Persisted, so a push tapped before the next connect
-    /// still matches.
-    private func syncRemoteSelfID(session: DaemonSession, daemonID: String) async {
-        guard let remoteSelfID = await session.remoteDaemonSelfID else { return }
-        await directory.setRemoteSelfID(remoteSelfID, for: daemonID)
-        if activeDaemon?.id == daemonID {
-            activeDaemon?.remoteSelfID = remoteSelfID
-        }
-    }
-
     private func observeNotifications(session: DaemonSession, daemonID: String) async {
         while !Task.isCancelled {
             guard let subscription = await session.connectedEvents() else { return }
-            // Every connect, not just the first: the session's own retry loop
-            // reconnects without coming back through `activate`, and each
-            // handshake can report a different self-id.
-            await syncRemoteSelfID(session: session, daemonID: daemonID)
             for await event in subscription.events {
                 // Name the workspace rather than "Thread 42" when the list
                 // already knows the thread; otherwise fall back to the number.
