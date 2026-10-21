@@ -1299,6 +1299,49 @@ fn claude_hook_hidden_command_prints_single_json_object() {
     assert_eq!(stdout.trim_end_matches('\n').lines().count(), 1);
 }
 
+// A root this long pushes `<root>/xdg/state/archductor/archcar.sock` past the
+// unix socket path limit, so the endpoint falls back to `$XDG_RUNTIME_DIR`.
+// That fallback must never be the operator's own runtime dir. It cannot be
+// asserted to land inside the root: `xdg/runtime/archcar-<hash>.sock` is a
+// longer suffix than `xdg/state/archductor/archcar.sock`, so any root that
+// overflows the direct path overflows the runtime candidate too, and the
+// endpoint falls through to a hashed temp-dir path instead.
+#[cfg(unix)]
+#[test]
+fn archcar_endpoint_stays_out_of_operator_runtime_dir_for_a_long_test_root() {
+    let operator_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("x".repeat(120));
+    fs::create_dir_all(&root).unwrap();
+    let output = app(&root)
+        .args(["remote", "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("local daemon ("))
+        .unwrap_or_else(|| panic!("no local daemon line in:\n{stdout}"));
+    let endpoint = Path::new(
+        line.split_once('(')
+            .and_then(|(_, rest)| rest.rsplit_once(')'))
+            .map(|(path, _)| path)
+            .unwrap(),
+    );
+
+    if let Some(operator_dir) = &operator_runtime_dir {
+        assert!(
+            !endpoint.starts_with(operator_dir),
+            "archcar endpoint {} leaked into the operator's real XDG_RUNTIME_DIR {}",
+            endpoint.display(),
+            operator_dir.display()
+        );
+    }
+}
+
 #[test]
 fn provider_interactions_help_lists_cli_actions() {
     let temp = tempfile::tempdir().unwrap();
@@ -1382,12 +1425,13 @@ fn developer_archcar_env() -> Vec<&'static str> {
     names
 }
 
-fn app_env(root: &Path) -> [(&'static str, PathBuf); 6] {
+fn app_env(root: &Path) -> [(&'static str, PathBuf); 7] {
     [
         ("XDG_CONFIG_HOME", root.join("xdg/config")),
         ("XDG_DATA_HOME", root.join("xdg/data")),
         ("XDG_STATE_HOME", root.join("xdg/state")),
         ("XDG_CACHE_HOME", root.join("xdg/cache")),
+        ("XDG_RUNTIME_DIR", root.join("xdg/runtime")),
         ("APPDATA", root.join("xdg/config")),
         ("LOCALAPPDATA", root.join("xdg/data")),
     ]
