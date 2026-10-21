@@ -393,6 +393,20 @@ jobs:
       - name: Run ${{ matrix.suite }} tests
         run: ${{ matrix.command }}
 
+      # The runner's `/tmp` is short, so the step above never makes the archcar
+      # endpoint fall back past the test root. Under a TMPDIR of 66+ bytes it
+      # does, and `cli_sessions` only finds the daemon if it resolves that
+      # endpoint through the CLI's own environment (PR #181), not the test
+      # process's.
+      - name: Adverse TMPDIR lane (cli_sessions endpoint resolution)
+        if: matrix.suite == 'core-cli-archcar'
+        run: |
+          set -euo pipefail
+          long_tmpdir="$RUNNER_TEMP/adverse-tmpdir-$(printf 'x%.0s' $(seq 1 70))"
+          mkdir -p "$long_tmpdir"
+          echo "TMPDIR is ${#long_tmpdir} bytes: $long_tmpdir"
+          TMPDIR="$long_tmpdir" cargo test -p archductor --test cli_sessions --locked -- --test-threads=1
+
   linux-smoke:
     name: Linux build and smoke
     needs: [preflight]

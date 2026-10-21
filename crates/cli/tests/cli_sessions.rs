@@ -1456,6 +1456,28 @@ fn app_env(root: &Path) -> [(&'static str, PathBuf); 8] {
     ]
 }
 
+/// The endpoint falls back to `$XDG_RUNTIME_DIR`, then `$TMPDIR`; whichever of
+/// them `app_env` stops pinning is inherited from the operator, so a daemon a
+/// test starts can land in (or collide with) the operator's own runtime dir.
+/// Checked on the array itself, so it fails on any host, whatever its env.
+#[test]
+fn app_env_pins_xdg_runtime_dir_and_tmpdir_under_the_test_root() {
+    let root = Path::new("/archductor-test-root");
+    let env = app_env(root);
+    for key in ["XDG_RUNTIME_DIR", "TMPDIR"] {
+        let (_, value) = env
+            .iter()
+            .find(|(name, _)| *name == key)
+            .unwrap_or_else(|| panic!("app_env no longer pins {key}; tests inherit the host's"));
+        assert!(
+            value.starts_with(root),
+            "app_env pins {key} to {}, outside the test root {}",
+            value.display(),
+            root.display()
+        );
+    }
+}
+
 /// The archcar daemon a test talks to, owned by the test so it cannot outlive
 /// it. Dropping the guard (also while a failed assertion unwinds) stops the
 /// exact child this guard spawned; it never looks processes up by name or
