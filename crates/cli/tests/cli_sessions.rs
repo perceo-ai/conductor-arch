@@ -1380,6 +1380,11 @@ fn archcar_daemon_guard_stops_its_daemon_when_a_test_panics() {
         started.elapsed()
     );
     assert!(!archcar_endpoint_accepts(&endpoint));
+    assert!(
+        !endpoint.exists(),
+        "socket file {} was not unlinked after a panic killed its daemon",
+        endpoint.display()
+    );
 }
 
 fn app(root: &Path) -> AssertCommand {
@@ -1424,9 +1429,13 @@ fn app_env(root: &Path) -> [(&'static str, PathBuf); 8] {
 /// The archcar daemon a test talks to, owned by the test so it cannot outlive
 /// it. Dropping the guard (also while a failed assertion unwinds) stops the
 /// exact child this guard spawned; it never looks processes up by name or
-/// argv, so no other daemon on the machine can be touched.
+/// argv, so no other daemon on the machine can be touched. It then removes
+/// the socket file at the endpoint it waited on: under a long test root that
+/// endpoint lands in a `/tmp/archductor` shared by every run on the box, and
+/// a daemon killed before its own exit cleanup would leave the file there.
 struct ArchcarDaemon {
     child: Child,
+    endpoint: PathBuf,
 }
 
 const ARCHCAR_DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1438,6 +1447,9 @@ impl ArchcarDaemon {
     /// providers the daemon launches inherit), and waits until it accepts
     /// connections.
     fn start(root: &Path, extra_env: &[(&str, &Path)]) -> Self {
+        // Resolved before the spawn: it runs the CLI, and a panic there must
+        // not leave a child no guard owns yet.
+        let endpoint = archcar_endpoint_path(root);
         let mut command = Command::new(env!("CARGO_BIN_EXE_archductor"));
         for name in developer_archcar_env() {
             command.env_remove(name);
@@ -1452,26 +1464,23 @@ impl ArchcarDaemon {
             .spawn()
             .expect("spawn archcar daemon");
         // Guard first: a readiness panic below must still stop the child.
-        let mut daemon = Self { child };
-        let endpoint = archcar_endpoint_path(root);
+        let mut daemon = Self { child, endpoint };
         let deadline = Instant::now() + ARCHCAR_DAEMON_READY_TIMEOUT;
-        while !archcar_endpoint_accepts(&endpoint) {
+        while !archcar_endpoint_accepts(&daemon.endpoint) {
             if let Some(status) = daemon.child.try_wait().expect("poll archcar daemon") {
                 panic!("archcar daemon exited before it was ready: {status}");
             }
             assert!(
                 Instant::now() < deadline,
                 "timed out waiting for archcar daemon at {}",
-                endpoint.display()
+                daemon.endpoint.display()
             );
             std::thread::sleep(Duration::from_millis(20));
         }
         daemon
     }
-}
 
-impl Drop for ArchcarDaemon {
-    fn drop(&mut self) {
+    fn stop_child(&mut self) {
         // Once `try_wait` has reaped the child (here, or in `start` before a
         // readiness panic) its pid may already belong to another process, so
         // signal nothing. While it reports the child still running, only this
@@ -1499,6 +1508,17 @@ impl Drop for ArchcarDaemon {
         // `Child::kill` is a no-op on a child std has already reaped.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl Drop for ArchcarDaemon {
+    fn drop(&mut self) {
+        self.stop_child();
+        // Whichever way the child stopped. A daemon that exits cleanly already
+        // removed this file; one that was killed, or never got as far as
+        // binding, did not. Only ever this guard's own path, so no other
+        // daemon's socket (the operator's included) can be touched.
+        let _ = std::fs::remove_file(&self.endpoint);
     }
 }
 
