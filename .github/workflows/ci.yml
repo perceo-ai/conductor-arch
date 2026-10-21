@@ -408,7 +408,8 @@ jobs:
           long_tmpdir="$RUNNER_TEMP/adverse-tmpdir-$(printf 'x%.0s' $(seq 1 70))"
           runtime_dir="$RUNNER_TEMP/xdg-runtime"
           mkdir -p "$long_tmpdir"
-          mkdir -p -m 700 "$runtime_dir"
+          mkdir -p "$runtime_dir"
+          chmod 700 "$runtime_dir"
           echo "TMPDIR is ${#long_tmpdir} bytes: $long_tmpdir"
           echo "XDG_RUNTIME_DIR is $runtime_dir"
           TMPDIR="$long_tmpdir" XDG_RUNTIME_DIR="$runtime_dir" \
