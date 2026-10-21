@@ -115,12 +115,12 @@ fn cli_session_attach_names_the_dead_pid_when_the_shell_exits_after_start_return
     // no monitor thread left to record the exit: the row still says running
     // until `attach` reads it. The wait is bounded (600 x 0.05s, ~30s) so a
     // test that panics before releasing never leaks the shell indefinitely.
+    // The script finds `release` next to itself via `$0` rather than having
+    // the path pasted into its text, so a temp dir containing `$`, quotes or
+    // spaces is never re-parsed as shell syntax.
     fs::write(
         &fake_shell,
-        format!(
-            "#!/bin/sh\nprintf 'cli-session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nfor i in $(seq 1 600); do [ -f \"{}\" ] && break; sleep 0.05; done\n",
-            release.display()
-        ),
+        "#!/bin/sh\nprintf 'cli-session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nrelease=\"$(dirname \"$0\")/release-start-outlive\"\nfor i in $(seq 1 600); do [ -f \"$release\" ] && break; sleep 0.05; done\n",
     )
     .unwrap();
     Command::new("chmod")
