@@ -42,6 +42,25 @@ pub(crate) fn pause_before_session_takes_input() {
 #[inline(always)]
 pub(crate) fn pause_before_session_takes_input() {}
 
+/// Stalls the daemon's event pump for
+/// `ARCHDUCTOR_TEST_TURN_BOUNDARY_MARK_DELAY_MS` milliseconds when it handles a
+/// `TurnCompleted`, before it marks the session ready for it. The session loop
+/// has marked the session ready itself by then, so a test can open the next
+/// turn with a `session send` before this late mark lands.
+#[cfg(feature = "test-handoff-delay")]
+pub(crate) fn pause_before_turn_boundary_ready_mark() {
+    let delay = std::env::var("ARCHDUCTOR_TEST_TURN_BOUNDARY_MARK_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok());
+    if let Some(delay) = delay {
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+    }
+}
+
+#[cfg(not(feature = "test-handoff-delay"))]
+#[inline(always)]
+pub(crate) fn pause_before_turn_boundary_ready_mark() {}
+
 /// When set, and the path it names exists, `durable_thread_is_first_user_turn`
 /// returns this as an Err instead of reading chat history -- lets a test force
 /// the dropped-`SendInput`-above-the-readiness-write path deterministically,

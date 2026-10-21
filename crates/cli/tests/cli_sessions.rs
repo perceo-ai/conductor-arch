@@ -1301,6 +1301,143 @@ fn cli_session_send_while_claude_takes_a_direct_send_queues_behind_it() {
     kill_berlin_session(&app, temp.path());
 }
 
+/// Failure this guards: the daemon marks a session ready on `TurnCompleted`
+/// as a safety net for a provider `Ready` that is delayed or lost. It does so
+/// on its event pump, after the session loop has already marked the session
+/// ready itself. A `session send` landing between the two opened the next
+/// turn and marked the session busy for it; the daemon's late mark for the
+/// turn before then set `ready = true` again while that turn was live, and
+/// the send after it was steered into the live turn instead of queueing. The
+/// late mark now checks the session's turn generation and leaves a newer
+/// turn's busy mark alone.
+///
+/// The gap is the pump's latency in a real daemon. The test daemon is built
+/// with the `test-handoff-delay` seams; one stalls the pump just before the
+/// late mark, so the second send lands in the gap every time.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_after_a_late_turn_boundary_mark_queues_behind_the_live_turn() {
+    let temp = tempfile::tempdir().unwrap();
+    init_repo(temp.path().join("demo"));
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            (
+                "ARCHDUCTOR_TEST_TURN_BOUNDARY_MARK_DELAY_MS",
+                Path::new("3000"),
+            ),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    create_berlin_workspace(&app, temp.path(), "codex_executable_path", &fake_codex);
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+
+    // End turn 1. The loop marks the session ready at once; the daemon's own
+    // mark for the same `TurnCompleted` is held back by the stall.
+    let events = subscribe_to_archcar_events(temp.path());
+    fs::write(release.with_extension("1"), "").unwrap();
+    wait_for_session_state(&app, "berlin", "finished", "working");
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the second task",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent codex message"));
+    // Turn 2 is open and held. Only once the provider has it is the session
+    // marked busy for it -- the loop marks busy before it writes the turn.
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
+    // The race needs turn 2 open before the late mark; if the stall ever ran
+    // out first, this test would pass without exercising it.
+    assert!(
+        !events
+            .try_iter()
+            .any(|event| event["type"] == "turn_completed"),
+        "turn 1's late ready mark landed before turn 2 started; lengthen the stall"
+    );
+    // Let the late mark for turn 1 land. The daemon broadcasts the event
+    // only after it has handled it.
+    wait_for_archcar_event(&events, "turn_completed");
+
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the third task",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("queued codex message"),
+        "a send after turn 1's late ready mark must queue behind turn 2, not join it: {stdout}"
+    );
+
+    // Turn 2 is still held: the third message waits, then opens turn 3.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "the third message must wait for turn 2 to end"
+    );
+    fs::write(release.with_extension("2"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured[1..],
+        [
+            ("turn/start".to_owned(), "Then the second task".to_owned()),
+            ("turn/start".to_owned(), "Then the third task".to_owned()),
+        ],
+        "{captured:?}"
+    );
+
+    kill_berlin_session(&app, temp.path());
+}
+
 /// Failure this guards: the daemon marks a session busy before it hands a
 /// queued message to the session loop, trusting the loop to either start the
 /// turn or mark the session failed. Two `continue` paths in the loop's
