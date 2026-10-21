@@ -81,6 +81,9 @@ fn resolved_general_prompt(db_path: &std::path::Path, workspace: &str) -> Result
 }
 
 fn durable_thread_is_first_user_turn(db_path: &std::path::Path, thread_id: i64) -> Result<bool> {
+    if let Some(message) = crate::archcar::test_hooks::forced_first_turn_check_failure() {
+        anyhow::bail!(message);
+    }
     Ok(!WorkspaceStore::open(db_path)?
         .list_chat_messages(thread_id)?
         .iter()
@@ -2557,13 +2560,13 @@ fn run_codex_app_server_session_loop(
                         match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
                             Ok(first_turn) => first_turn,
                             Err(err) => {
-                                let _ = event_tx.send(ArchcarEvent::SessionError {
-                                    session_id: Some(started.session_id),
-                                    thread_id: Some(started.thread_id),
-                                    message: format!(
-                                        "Could not prepare Codex input history: {err:#}"
-                                    ),
-                                });
+                                mark_provider_session_failed(
+                                    &runtime_store,
+                                    &snapshot,
+                                    &event_tx,
+                                    &started,
+                                    format!("Could not prepare Codex input history: {err:#}"),
+                                );
                                 continue;
                             }
                         }
@@ -2572,11 +2575,13 @@ fn run_codex_app_server_session_loop(
                         compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
                     let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
                     let Some(thread_id) = provider_thread_id.as_deref() else {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: "Codex app-server thread is not initialized yet".to_owned(),
-                        });
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            "Codex app-server thread is not initialized yet",
+                        );
                         continue;
                     };
                     let next_input_sequence = user_input_sequence + 1;
@@ -2859,13 +2864,13 @@ fn run_claude_stream_session_loop(
                         match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
                             Ok(first_turn) => first_turn,
                             Err(err) => {
-                                let _ = event_tx.send(ArchcarEvent::SessionError {
-                                    session_id: Some(started.session_id),
-                                    thread_id: Some(started.thread_id),
-                                    message: format!(
-                                        "Could not prepare Claude input history: {err:#}"
-                                    ),
-                                });
+                                mark_provider_session_failed(
+                                    &runtime_store,
+                                    &snapshot,
+                                    &event_tx,
+                                    &started,
+                                    format!("Could not prepare Claude input history: {err:#}"),
+                                );
                                 continue;
                             }
                         }
