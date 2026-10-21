@@ -179,9 +179,13 @@ fn cli_session_attach_names_the_dead_pid_when_the_shell_exits_after_start_return
         .assert()
         .failure()
         .stderr(
-            contains(format!("is no longer running (pid {pid} has exited)"))
-                .and(contains("is not attached to a PTY slave").not())
-                .and(contains("no running session found for workspace berlin").not()),
+            // The only session in a fresh store is #1; naming it is the
+            // point, so pin the whole message, not just the pid suffix.
+            contains(format!(
+                "session #1 for workspace berlin is no longer running (pid {pid} has exited)"
+            ))
+            .and(contains("is not attached to a PTY slave").not())
+            .and(contains("no running session found for workspace berlin").not()),
         );
 }
 
