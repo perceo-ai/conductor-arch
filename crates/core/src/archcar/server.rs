@@ -71,6 +71,11 @@ struct ServerState {
     /// queue until some later event happens to trigger another drain.
     drain_reruns: HashSet<i64>,
     sessions: HashMap<i64, SessionHandle>,
+    /// Pids of children a background spawn in this daemon has started but not
+    /// yet registered in `sessions`. The process row appears in the store
+    /// before registration, so without this a status lookup in that window
+    /// takes the session for an orphan of a previous daemon and kills it.
+    spawning_pids: HashSet<u32>,
     subscribers: Vec<Sender<ArchcarEvent>>,
     /// The TCP address this daemon actually bound, if any. Reported as-is
     /// rather than re-read from configuration: a client asking how to reach
@@ -218,6 +223,7 @@ impl ArchcarServer {
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -5924,6 +5930,7 @@ fn ensure_default_session(
     let workspace_for_spawn = workspace.clone();
     std::thread::spawn(move || {
         let (event_tx, event_rx) = mpsc::channel();
+        let in_flight = SpawnInFlight::new(&state_for_spawn);
         match spawn_managed_session(
             db_path,
             logs_dir,
@@ -5931,11 +5938,14 @@ fn ensure_default_session(
             kind,
             harness,
             event_tx,
+            &|pid| in_flight.child_spawned(pid),
         ) {
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned managed session");
+                in_flight.before_registration();
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 if guard.shutting_down {
                     guard
                         .queued_defaults
@@ -5957,6 +5967,7 @@ fn ensure_default_session(
                 let detail = format!("{err:#}");
                 error!(%workspace_for_spawn, ?kind, error = %detail, "archcar failed to spawn managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 guard
                     .queued_defaults
                     .remove(&default_queue_key(&workspace_for_spawn, kind));
@@ -6072,6 +6083,7 @@ fn ensure_chat_thread_session(
     let workspace_for_spawn = workspace.clone();
     std::thread::spawn(move || {
         let (event_tx, event_rx) = mpsc::channel();
+        let in_flight = SpawnInFlight::new(&state_for_spawn);
         match spawn_managed_session_for_thread(
             db_path,
             logs_dir,
@@ -6080,11 +6092,14 @@ fn ensure_chat_thread_session(
             kind,
             harness,
             event_tx,
+            &|pid| in_flight.child_spawned(pid),
         ) {
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, thread_id, session_id, ?kind, "archcar spawned chat-thread managed session");
+                in_flight.before_registration();
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 if guard.shutting_down {
                     guard.queued_threads.remove(&thread_id);
                     drop(guard);
@@ -6123,6 +6138,7 @@ fn ensure_chat_thread_session(
                 let detail = format!("{err:#}");
                 error!(%workspace_for_spawn, thread_id, ?kind, error = %detail, "archcar failed to spawn chat-thread managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 guard.queued_threads.remove(&thread_id);
                 broadcast(
                     &mut guard,
@@ -6422,6 +6438,7 @@ fn spawn_session(
     let workspace_for_spawn = workspace.clone();
     std::thread::spawn(move || {
         let (event_tx, event_rx) = mpsc::channel();
+        let in_flight = SpawnInFlight::new(&state_for_spawn);
         match spawn_managed_session(
             db_path,
             logs_dir,
@@ -6429,11 +6446,14 @@ fn spawn_session(
             kind,
             harness,
             event_tx,
+            &|pid| in_flight.child_spawned(pid),
         ) {
             Ok(handle) => {
                 let session_id = handle.snapshot.lock().unwrap().session_id;
                 info!(%workspace_for_spawn, session_id, ?kind, "archcar spawned explicit managed session");
+                in_flight.before_registration();
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 if guard.shutting_down {
                     drop(guard);
                     terminate_managed_handle(&handle);
@@ -6449,6 +6469,7 @@ fn spawn_session(
                 let detail = format!("{err:#}");
                 error!(%workspace_for_spawn, ?kind, error = %detail, "archcar failed to spawn explicit managed session");
                 let mut guard = state_for_spawn.lock().unwrap();
+                in_flight.clear(&mut guard);
                 broadcast(
                     &mut guard,
                     ArchcarEvent::SessionError {
@@ -6464,18 +6485,114 @@ fn spawn_session(
     ArchcarResponse::SessionSpawnQueued { workspace, kind }
 }
 
+/// Marks a background spawn's child in `ServerState::spawning_pids` from the
+/// moment it starts until the spawn either registers its handle or gives up.
+/// `clear` must run in the same critical section as the registration, so a
+/// lookup never sees the pid unmarked and the handle unregistered at once.
+struct SpawnInFlight<'a> {
+    state: &'a Arc<Mutex<ServerState>>,
+    pid: std::cell::Cell<Option<u32>>,
+}
+
+impl<'a> SpawnInFlight<'a> {
+    fn new(state: &'a Arc<Mutex<ServerState>>) -> Self {
+        Self {
+            state,
+            pid: std::cell::Cell::new(None),
+        }
+    }
+
+    fn child_spawned(&self, pid: u32) {
+        self.state.lock().unwrap().spawning_pids.insert(pid);
+        self.pid.set(Some(pid));
+    }
+
+    fn clear(&self, state: &mut ServerState) {
+        if let Some(pid) = self.pid.take() {
+            state.spawning_pids.remove(&pid);
+        }
+    }
+
+    /// The race window at its widest: the spawn has returned, so its row is
+    /// written and its child marked, but it has not yet taken the lock to
+    /// register. Tests park the spawn here; otherwise this does nothing.
+    fn before_registration(&self) {
+        #[cfg(test)]
+        {
+            let db_path = self.state.lock().unwrap().db_path.clone();
+            spawn_registration_gate::pass(&db_path, self.pid.get());
+        }
+    }
+}
+
+/// Lets a test hold a background spawn inside the race window instead of
+/// trying to catch the window by polling, which only works when the machine
+/// is slow enough to keep it open. Gates are keyed by database path, so tests
+/// running in parallel, each with its own temp database, never meet.
+#[cfg(test)]
+mod spawn_registration_gate {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    type Gate = Box<dyn FnOnce(Option<u32>) + Send>;
+
+    fn gates() -> &'static Mutex<HashMap<PathBuf, Gate>> {
+        static GATES: OnceLock<Mutex<HashMap<PathBuf, Gate>>> = OnceLock::new();
+        GATES.get_or_init(Default::default)
+    }
+
+    /// Runs `gate` once, on the spawn thread, when the next spawn against
+    /// `db_path` reaches registration. It receives the marked pid, or `None`
+    /// if the spawn never marked a child.
+    pub(super) fn install(db_path: &Path, gate: impl FnOnce(Option<u32>) + Send + 'static) {
+        gates()
+            .lock()
+            .unwrap()
+            .insert(db_path.to_path_buf(), Box::new(gate));
+    }
+
+    pub(super) fn pass(db_path: &Path, pid: Option<u32>) {
+        // Taken out first so the map is not locked while the gate blocks.
+        let gate = gates().lock().unwrap().remove(db_path);
+        if let Some(gate) = gate {
+            gate(pid);
+        }
+    }
+}
+
 fn load_or_restore_session_handle(
     state: &Arc<Mutex<ServerState>>,
     session_id: i64,
 ) -> Result<Option<SessionHandle>> {
-    if let Some(handle) = state.lock().unwrap().sessions.get(&session_id).cloned() {
-        return Ok(Some(handle));
-    }
-
     let (db_path, logs_dir) = {
         let guard = state.lock().unwrap();
+        if let Some(handle) = guard.sessions.get(&session_id).cloned() {
+            return Ok(Some(handle));
+        }
         (guard.db_path.clone(), guard.logs_dir.clone())
     };
+
+    // restore_managed_session exists for sessions left behind by a previous
+    // daemon, and it terminates provider-native ones. A spawn in this daemon
+    // writes the process row before it registers the handle, so an unknown id
+    // can also be a session that is still starting. Its pid is marked before
+    // the row is written and unmarked in the same critical section that
+    // registers it, so once the row has been read, one lock tells the two
+    // apart: registered, still spawning, or neither.
+    let pid = WorkspaceStore::open_app(&db_path)
+        .and_then(|store| store.get_process_record(session_id))
+        .map(|process| process.pid);
+    if let Ok(pid) = pid {
+        let guard = state.lock().unwrap();
+        if let Some(handle) = guard.sessions.get(&session_id).cloned() {
+            return Ok(Some(handle));
+        }
+        if guard.spawning_pids.contains(&pid) {
+            return Ok(None);
+        }
+    }
+
     let (event_tx, event_rx) = mpsc::channel();
     let Some(handle) = restore_managed_session(db_path, logs_dir, session_id, event_tx)? else {
         warn!(
@@ -6817,6 +6934,7 @@ mod tests {
             db_path: temp.path().join("state.db"),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -6906,6 +7024,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7119,6 +7238,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7212,6 +7332,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7300,6 +7421,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7389,6 +7511,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7489,6 +7612,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7577,6 +7701,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7661,6 +7786,7 @@ mod tests {
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7748,6 +7874,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7800,6 +7927,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -7864,6 +7992,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8022,6 +8151,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8133,6 +8263,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8226,6 +8357,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8316,6 +8448,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8403,6 +8536,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8477,6 +8611,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8529,6 +8664,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8599,6 +8735,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8653,6 +8790,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8715,6 +8853,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8767,6 +8906,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8795,6 +8935,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8882,6 +9023,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8933,6 +9075,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -8976,6 +9119,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::from([default_queue_key("berlin", SessionKind::CODEX)]),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9017,6 +9161,7 @@ exit 1
             db_path,
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9237,6 +9382,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9298,6 +9444,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9364,6 +9511,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9427,6 +9575,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9513,6 +9662,7 @@ exit 1
             db_path,
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9566,6 +9716,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9621,6 +9772,7 @@ exit 1
             db_path: PathBuf::from("/tmp/does-not-matter.db"),
             logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -9692,6 +9844,7 @@ exit 1
             db_path,
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::from([requested_thread.id]),
             draining_threads: HashSet::new(),
@@ -10104,6 +10257,7 @@ icon = "cloud"
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10191,6 +10345,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10285,6 +10440,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10388,6 +10544,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10597,6 +10754,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10728,6 +10886,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10764,6 +10923,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10836,6 +10996,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir: temp.path().join("logs"),
             shutting_down: false,
+            spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
             draining_threads: HashSet::new(),
@@ -10930,6 +11091,293 @@ default = true
         assert!(reconciled.log_path.starts_with(&paths.logs_dir));
 
         terminate_test_child(&mut child);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_or_restore_session_handle_leaves_a_session_still_being_spawned_alive() {
+        // The window between a background spawn writing the process row and
+        // registering the handle: the row and the live child both exist, the
+        // handle is not in `sessions` yet. A status lookup here must not take
+        // the session for an orphan of a previous daemon and kill it.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let mut launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        launch.harness_metadata = Some("harness=codex-app-server;port=43000".to_owned());
+        let mut child = spawn_fake_managed_codex_process();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        assert!(
+            wait_for_fake_codex_child_alive(child.id()),
+            "fake codex child should be alive before the lookup"
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: paths.database_path.clone(),
+            logs_dir: paths.logs_dir.clone(),
+            shutting_down: false,
+            spawning_pids: HashSet::from([child.id()]),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        let restored = load_or_restore_session_handle(&state, process.id).unwrap();
+
+        assert!(restored.is_none(), "the spawn has not registered it yet");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "a session mid-spawn in this daemon must not be killed as an orphan"
+        );
+        let unchanged = store.get_process_record(process.id).unwrap();
+        assert_eq!(unchanged.status, ProcessStatus::Running);
+        assert!(unchanged.ended_at.is_none());
+
+        terminate_test_child(&mut child);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_or_restore_session_handle_still_terminates_provider_native_orphans() {
+        // The same row with no spawn in flight is a leftover from a previous
+        // daemon run: its stdio cannot be reattached, so it is terminated.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let mut launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        launch.harness_metadata = Some("harness=codex-app-server;port=43000".to_owned());
+        let mut child = spawn_fake_managed_codex_process();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        assert!(wait_for_fake_codex_child_alive(child.id()));
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: paths.database_path.clone(),
+            logs_dir: paths.logs_dir.clone(),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        let restored = load_or_restore_session_handle(&state, process.id).unwrap();
+
+        assert!(restored.is_none());
+        let exited = store.get_process_record(process.id).unwrap();
+        assert_eq!(exited.status, ProcessStatus::Exited);
+        assert!(
+            wait_for_test_child_exit(&mut child, Duration::from_secs(10)),
+            "the orphan's row was marked exited but the process was left running"
+        );
+    }
+
+    /// Spawns a real managed codex session in `start` and checks the wiring the
+    /// lookup relies on. A registration gate parks the spawn thread inside the
+    /// race window (row written, child marked, handle not registered) until
+    /// the test releases it, so the window is held open rather than caught.
+    #[cfg(unix)]
+    fn assert_background_spawn_marks_child_until_registered(
+        start: impl FnOnce(&Arc<Mutex<ServerState>>, &WorkspaceStore) -> ArchcarResponse,
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        install_silent_fake_codex(temp.path());
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: paths.database_path.clone(),
+            logs_dir: paths.logs_dir.clone(),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+        let (inside_tx, inside_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        spawn_registration_gate::install(&paths.database_path, move |pid| {
+            let _ = inside_tx.send(pid);
+            // Returns when released, or when the test drops the sender by
+            // failing, so a failed test never strands the spawn thread.
+            let _ = release_rx.recv();
+        });
+
+        let response = start(&state, &store);
+        assert!(
+            matches!(response, ArchcarResponse::SessionSpawnQueued { .. }),
+            "{response:?}"
+        );
+
+        let pid = inside_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the spawn never reached registration")
+            .expect("the spawn reached registration without ever marking its child");
+        let process = store
+            .list_sessions("berlin")
+            .unwrap()
+            .into_iter()
+            .find(|record| record.pid == pid)
+            .expect("the spawn returned before writing its row");
+        let (registered, marked) = {
+            let guard = state.lock().unwrap();
+            (
+                guard.sessions.contains_key(&process.id),
+                guard.spawning_pids.contains(&pid),
+            )
+        };
+        assert!(!registered, "the handle registered before the gate opened");
+        assert!(marked, "the child is not marked while its row is visible");
+
+        let looked_up = load_or_restore_session_handle(&state, process.id).unwrap();
+        assert!(
+            looked_up.is_none(),
+            "a session still spawning has no handle to return"
+        );
+        assert!(
+            wait_for_fake_codex_child_alive(pid),
+            "a lookup during the spawn killed the child"
+        );
+        assert_eq!(
+            store.get_process_record(process.id).unwrap().status,
+            ProcessStatus::Running
+        );
+
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (handle, still_marked) = loop {
+            let registered = {
+                let guard = state.lock().unwrap();
+                guard
+                    .sessions
+                    .get(&process.id)
+                    .cloned()
+                    .map(|handle| (handle, guard.spawning_pids.contains(&pid)))
+            };
+            if let Some(registered) = registered {
+                break registered;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the released spawn never registered"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(
+            !still_marked,
+            "registration left the child marked as spawning"
+        );
+        assert_eq!(handle.snapshot.lock().unwrap().pid, pid);
+        assert!(wait_for_fake_codex_child_alive(pid));
+        terminate_managed_handle(&handle);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_default_session_marks_its_child_until_the_handle_is_registered() {
+        assert_background_spawn_marks_child_until_registered(|state, _| {
+            ensure_default_session(
+                state,
+                "berlin".to_owned(),
+                SessionKind::CODEX,
+                crate::workspace::SessionHarnessOptions::default(),
+            )
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_chat_thread_session_marks_its_child_until_the_handle_is_registered() {
+        assert_background_spawn_marks_child_until_registered(|state, store| {
+            let thread = store
+                .create_chat_thread("berlin", "codex", "Codex", None)
+                .unwrap();
+            ensure_chat_thread_session(
+                state,
+                "berlin".to_owned(),
+                thread.id,
+                SessionKind::CODEX,
+                crate::workspace::SessionHarnessOptions::default(),
+            )
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_session_marks_its_child_until_the_handle_is_registered() {
+        assert_background_spawn_marks_child_until_registered(|state, _| {
+            spawn_session(
+                state,
+                "berlin".to_owned(),
+                SessionKind::CODEX,
+                crate::workspace::SessionHarnessOptions::default(),
+            )
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_hook_runs_before_the_process_row_is_written() {
+        // The marker only covers the race if it exists before the row does:
+        // the CLI acts on the row the moment it appears.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        install_silent_fake_codex(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let hooked = std::cell::RefCell::new(Vec::new());
+        let (event_tx, _event_rx) = mpsc::channel();
+
+        let handle = spawn_managed_session_for_thread(
+            paths.database_path.clone(),
+            paths.logs_dir.clone(),
+            "berlin".to_owned(),
+            thread.id,
+            SessionKind::CODEX,
+            crate::workspace::SessionHarnessOptions::default(),
+            event_tx,
+            &|pid| {
+                let row_exists = store
+                    .list_thread_processes(thread.id)
+                    .unwrap()
+                    .iter()
+                    .any(|record| record.pid == pid);
+                hooked.borrow_mut().push((pid, row_exists));
+            },
+        )
+        .unwrap();
+
+        let pid = handle.snapshot.lock().unwrap().pid;
+        assert_eq!(hooked.into_inner(), vec![(pid, false)]);
+        assert!(
+            store
+                .list_thread_processes(thread.id)
+                .unwrap()
+                .iter()
+                .any(|record| record.pid == pid),
+            "the row is written after the hook"
+        );
+        terminate_managed_handle(&handle);
     }
 
     #[test]
@@ -11234,6 +11682,43 @@ default = true
             .stderr(Stdio::null())
             .status();
         let _ = child.wait();
+    }
+
+    /// Waits for `child` to exit. On timeout it is killed and reaped, so a
+    /// regression that leaves it running fails the test instead of hanging it.
+    #[cfg(unix)]
+    fn wait_for_test_child_exit(child: &mut std::process::Child, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if child.try_wait().unwrap().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        terminate_test_child(child);
+        false
+    }
+
+    /// Points the seeded repository's codex at a stand-in that reads its
+    /// stdin and never answers, so a managed codex session starts and stays
+    /// alive without a real provider.
+    #[cfg(unix)]
+    fn install_silent_fake_codex(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake_codex = root.join("fake-silent-codex");
+        fs::write(&fake_codex, "#!/bin/sh\nexec cat > /dev/null\n").unwrap();
+        fs::set_permissions(&fake_codex, fs::Permissions::from_mode(0o755)).unwrap();
+        let settings_dir = root.join("demo/.archductor");
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::write(
+            settings_dir.join("settings.local.toml"),
+            format!(
+                "codex_executable_path = {:?}\n",
+                fake_codex.to_string_lossy()
+            ),
+        )
+        .unwrap();
     }
 
     #[cfg(unix)]

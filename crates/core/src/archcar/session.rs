@@ -296,6 +296,7 @@ pub fn spawn_managed_session(
     kind: SessionKind,
     harness: SessionHarnessOptions,
     event_tx: Sender<ArchcarEvent>,
+    on_child_spawned: &dyn Fn(u32),
 ) -> Result<SessionHandle> {
     let _provider_native_launch_guard = provider_native_session_launch_guard(kind);
     let store = open_managed_session_store(db_path.clone(), logs_dir.clone())?;
@@ -335,6 +336,7 @@ pub fn spawn_managed_session(
         provider_port_reservation,
         controller,
         event_tx,
+        on_child_spawned,
     })
 }
 
@@ -350,6 +352,10 @@ struct LiveSessionStart<'a> {
     provider_port_reservation: Option<TcpListener>,
     controller: Box<dyn HarnessController>,
     event_tx: Sender<ArchcarEvent>,
+    /// Called with the child's pid after it starts and before its process row
+    /// is written, so the caller can mark it as still spawning for as long as
+    /// the row is visible but the handle is not yet registered.
+    on_child_spawned: &'a dyn Fn(u32),
 }
 
 fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHandle> {
@@ -367,6 +373,7 @@ fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHand
     )
     .with_context(|| format!("spawn managed {:?} pty", start.kind))?;
     let pid = pty.process_id().context("pty has no process id")?;
+    (start.on_child_spawned)(pid);
     let process = start.store.record_session_process_for_thread(
         &start.workspace,
         start.thread_id,
@@ -416,6 +423,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         .spawn()
         .with_context(|| format!("spawn managed {:?} provider process", start.kind))?;
     let pid = child.id();
+    (start.on_child_spawned)(pid);
     // Held until the process row exists below, which is what gives the session
     // id the drained lines are filed under.
     let child_stderr = child.stderr.take();
@@ -905,6 +913,7 @@ fn capabilities_for_kind(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_managed_session_for_thread(
     db_path: std::path::PathBuf,
     logs_dir: std::path::PathBuf,
@@ -913,6 +922,7 @@ pub fn spawn_managed_session_for_thread(
     kind: SessionKind,
     harness: SessionHarnessOptions,
     event_tx: Sender<ArchcarEvent>,
+    on_child_spawned: &dyn Fn(u32),
 ) -> Result<SessionHandle> {
     let _provider_native_launch_guard = provider_native_session_launch_guard(kind);
     let store = open_managed_session_store(db_path.clone(), logs_dir.clone())?;
@@ -952,6 +962,7 @@ pub fn spawn_managed_session_for_thread(
         provider_port_reservation,
         controller,
         event_tx,
+        on_child_spawned,
     })
 }
 
