@@ -103,6 +103,92 @@ fn cli_starts_and_logs_real_shell_session() {
     assert!(!archductor_core::platform::process_alive(pid));
 }
 
+#[test]
+fn cli_session_attach_names_the_dead_pid_when_the_shell_exits_after_start_returns() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_shell = temp.path().join("fake-shell");
+    // Outlives the short-lived `session start` CLI, then exits on its own, so
+    // no monitor thread is left to record the exit: the row still says
+    // running until `attach` reads it.
+    fs::write(
+        &fake_shell,
+        "#!/bin/sh\nprintf 'cli-session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nsleep 2\n",
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&fake_shell)
+        .status()
+        .unwrap();
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    let started = app(temp.path())
+        .env("SHELL", &fake_shell)
+        .args(["session", "start", "berlin", "--kind", "shell"])
+        .assert()
+        .success()
+        .stdout(contains("Started session for berlin"));
+    let pid = started_session_pid(&String::from_utf8_lossy(&started.get_output().stdout));
+
+    wait_for_session_log(temp.path());
+    assert!(
+        archductor_core::platform::process_alive(pid),
+        "session pid {pid} exited before the start CLI returned; this would not exercise the race"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while archductor_core::platform::process_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "session pid {pid} was still alive after 10s"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    app(temp.path())
+        .args(["session", "attach", "berlin", "--print-pty-path"])
+        .assert()
+        .failure()
+        .stderr(
+            // The only session in a fresh store is #1; naming it is the
+            // point, so pin the whole message, not just the pid suffix.
+            contains(format!(
+                "session #1 for workspace berlin is no longer running (pid {pid} has exited)"
+            ))
+            .and(contains("is not attached to a PTY slave").not())
+            .and(contains("no running session found for workspace berlin").not()),
+        );
+}
+
 /// The pid from `session start`'s "Started session for <ws> as pid <pid> (...)".
 fn started_session_pid(stdout: &str) -> u32 {
     stdout
@@ -673,18 +759,15 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
         .success();
     wait_for_file_lines(&provider_inputs, 1);
 
-    // Busy: the first turn is still open. Status says so.
-    let status = app()
-        .args(["status", "berlin", "--json"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let status: serde_json::Value = serde_json::from_slice(&status).unwrap();
+    // Busy: the first turn is still open. Status says so. The daemon writes
+    // the turn to the provider before it records the input and marks the
+    // session working, so the provider can capture the input while status
+    // still reads awaiting_input; wait for the daemon to catch up. The turn
+    // cannot finish meanwhile: it is held until `release` exists, which is
+    // written only further down.
+    let status = wait_for_session_state(&app, "berlin", "working", "awaiting_input");
     let session = &status["workspaces"][0]["sessions"][0];
     assert_eq!(session["alive"], true, "{status}");
-    assert_eq!(session["state"], "working", "{status}");
     assert_eq!(session["liveness_source"], "daemon", "{status}");
 
     // No --kind: the workspace's chat is a codex chat. A short timeout proves
@@ -745,6 +828,169 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
     assert!(chat.starts_with("chat berlin thread "), "{chat}");
     assert!(chat.contains("user: Start the long task"), "{chat}");
     assert!(chat.contains("user: Also run clippy"), "{chat}");
+
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let session_id = store.list_sessions("berlin").unwrap()[0].id;
+    app()
+        .args(["archcar", "kill", &session_id.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), session_id);
+}
+
+/// Failure this guards: when the daemon delivered a queued message at a turn
+/// boundary, it handed the turn to the provider first and only afterwards
+/// marked the session not ready. A `session send` landing in that gap read
+/// `ready = true`, went straight in, and was steered into the turn that had
+/// just started -- two prompts merged into one turn. The daemon now marks the
+/// session busy before the handoff, so the send queues for the next turn.
+///
+/// The gap is a few milliseconds in a real daemon. The test daemon is built
+/// with the `test-handoff-delay` seam, which stalls right after each handoff,
+/// so the send below lands in the gap every time.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_while_a_queued_message_is_handed_off_queues_behind_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            ("ARCHDUCTOR_TEST_HANDOFF_DELAY_MS", Path::new("1500")),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    app()
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app()
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "codex_executable_path = {:?}\n",
+            fake_codex.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the second task",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("queued codex message"));
+
+    // End turn 1. The daemon drains the queue and hands "Then the second
+    // task" to the provider; the moment the provider has it, send again.
+    fs::write(release.with_extension("1"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the third task",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("queued codex message"),
+        "a send during the queued handoff must queue, not join the live turn: {stdout}"
+    );
+
+    // Turn 2 is still held: the third message waits, then opens turn 3.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        2,
+        "the third message must wait for turn 2 to end"
+    );
+    fs::write(release.with_extension("2"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(captured.len(), 3, "{captured:?}");
+    assert_eq!(captured[0].0, "turn/start", "{captured:?}");
+    assert!(
+        captured[0].1.ends_with("Start the long task"),
+        "{captured:?}"
+    );
+    assert_eq!(
+        captured[1],
+        ("turn/start".to_owned(), "Then the second task".to_owned())
+    );
+    assert_eq!(
+        captured[2],
+        ("turn/start".to_owned(), "Then the third task".to_owned())
+    );
 
     let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
     let session_id = store.list_sessions("berlin").unwrap()[0].id;
@@ -949,6 +1195,62 @@ for raw in sys.stdin:
             threading.Thread(target=complete_when_released, args=(turn_id,), daemon=True).start()
         else:
             complete(turn_id)
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+/// A codex app-server stand-in that holds turn N open until
+/// `$ARCHDUCTOR_RELEASE_PATH.N` exists, and records every input it receives
+/// as a `[method, text]` line, so a steer into a live turn shows up as such.
+#[cfg(unix)]
+fn write_fake_held_codex(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import threading
+import time
+
+capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
+release = os.environ["ARCHDUCTOR_RELEASE_PATH"]
+lock = threading.Lock()
+
+def emit(message):
+    with lock:
+        print(json.dumps(message), flush=True)
+
+def record(method, params):
+    with open(capture, "a", encoding="utf-8") as output:
+        output.write(json.dumps([method, params["input"][0]["text"]]) + "\n")
+
+def complete_when_released(turn, turn_id):
+    while not os.path.exists("%s.%d" % (release, turn)):
+        time.sleep(0.05)
+    emit({"method": "turn/completed", "params": {"turn": {"id": turn_id, "status": "completed"}}})
+
+turns = 0
+for raw in sys.stdin:
+    message = json.loads(raw)
+    method = message.get("method")
+    if method == "initialize":
+        emit({"id": message["id"], "result": {}})
+    elif method in ("thread/start", "thread/resume"):
+        emit({"id": message["id"], "result": {"thread": {"id": "thread-held"}}})
+    elif method == "turn/start":
+        turns += 1
+        record(method, message["params"])
+        turn_id = "turn-%d" % turns
+        emit({"id": message["id"], "result": {"turn": {"id": turn_id}}})
+        emit({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
+        threading.Thread(target=complete_when_released, args=(turns, turn_id), daemon=True).start()
+    elif method == "turn/steer":
+        record(method, message["params"])
+        emit({"id": message["id"], "result": {"turnId": "turn-%d" % turns}})
 "#,
     )?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
@@ -1456,6 +1758,28 @@ fn app_env(root: &Path) -> [(&'static str, PathBuf); 8] {
     ]
 }
 
+/// The endpoint falls back to `$XDG_RUNTIME_DIR`, then `$TMPDIR`; whichever of
+/// them `app_env` stops pinning is inherited from the operator, so a daemon a
+/// test starts can land in (or collide with) the operator's own runtime dir.
+/// Checked on the array itself, so it fails on any host, whatever its env.
+#[test]
+fn app_env_pins_xdg_runtime_dir_and_tmpdir_under_the_test_root() {
+    let root = Path::new("/archductor-test-root");
+    let env = app_env(root);
+    for key in ["XDG_RUNTIME_DIR", "TMPDIR"] {
+        let (_, value) = env
+            .iter()
+            .find(|(name, _)| *name == key)
+            .unwrap_or_else(|| panic!("app_env no longer pins {key}; tests inherit the host's"));
+        assert!(
+            value.starts_with(root),
+            "app_env pins {key} to {}, outside the test root {}",
+            value.display(),
+            root.display()
+        );
+    }
+}
+
 /// The archcar daemon a test talks to, owned by the test so it cannot outlive
 /// it. Dropping the guard (also while a failed assertion unwinds) stops the
 /// exact child this guard spawned; it never looks processes up by name or
@@ -1701,6 +2025,57 @@ fn wait_for_file_lines(path: &Path, expected: usize) {
         "timed out waiting for {expected} line(s) in {}",
         path.display()
     );
+}
+
+/// [`wait_for_file_lines`] for a daemon built with `test-handoff-delay`:
+/// every handoff stalls it, so allow several stalls' worth of time.
+fn wait_for_file_lines_through_stalls(path: &Path, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if fs::read_to_string(path)
+            .map(|contents| contents.lines().count() >= expected)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!(
+        "timed out waiting for {expected} line(s) in {}",
+        path.display()
+    );
+}
+
+/// Polls `status <workspace> --json` until the first session reports `want`,
+/// and returns that report. Any state other than `want` or `pending` fails at
+/// once, and so does still reading `pending` after 5s.
+fn wait_for_session_state(
+    app: &dyn Fn() -> AssertCommand,
+    workspace: &str,
+    want: &str,
+    pending: &str,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_millis(5000);
+    loop {
+        let output = app()
+            .args(["status", workspace, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let state = &status["workspaces"][0]["sessions"][0]["state"];
+        if state == want {
+            return status;
+        }
+        assert_eq!(state, pending, "unexpected session state: {status}");
+        assert!(
+            Instant::now() < deadline,
+            "session never reported {want}, still {pending}: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn wait_for_running_session(root: &Path, workspace: &str) -> i64 {
