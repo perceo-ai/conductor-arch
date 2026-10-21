@@ -253,6 +253,7 @@ private final class Flag: @unchecked Sendable {
     await daemon.stop()
 }
 
+@MainActor
 @Test func heldTapIsResolvedAgainstTheReconnectsOwnLearnedSelfIDNotAStaleOne() async throws {
     let online = Flag()
     let daemon = try await MockDaemon()
