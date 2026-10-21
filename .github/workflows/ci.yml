@@ -363,8 +363,13 @@ jobs:
         include:
           - suite: core-cli-archcar
             command: cargo test -p archductor-core -p archductor -p archcar --locked -- --test-threads=1
-          - suite: cli-sessions-default-parallelism
-            command: cargo test -p archductor --test cli_sessions --locked
+          # The exact "Rust tests (core + cli)" command desktop-release.yml
+          # gates on: every test binary of both crates at cargo's default
+          # parallelism, so a race the serial lane above hides (unit tests
+          # swap process-wide HOME/PATH under per-module locks) fails here
+          # instead of first failing in Desktop Release Verify.
+          - suite: core-cli-default-parallelism
+            command: cargo test --locked -p archductor-core -p archductor
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
