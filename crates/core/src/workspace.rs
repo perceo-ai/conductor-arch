@@ -11102,8 +11102,11 @@ fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessageR
 }
 
 #[cfg(test)]
+type QueuedChatInputInsertHook = Box<dyn FnOnce(i64)>;
+
+#[cfg(test)]
 thread_local! {
-    static AFTER_QUEUED_CHAT_INPUT_INSERT: std::cell::RefCell<Option<Box<dyn FnOnce(i64)>>> =
+    static AFTER_QUEUED_CHAT_INPUT_INSERT: std::cell::RefCell<Option<QueuedChatInputInsertHook>> =
         const { std::cell::RefCell::new(None) };
 }
 
