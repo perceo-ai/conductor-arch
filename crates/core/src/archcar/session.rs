@@ -448,7 +448,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
     if let Some(stderr) = child_stderr {
         spawn_provider_stderr_reader(start.db_path.to_path_buf(), process.id, start.kind, stderr);
     }
-    let snapshot = running_session_snapshot(
+    let mut snapshot = running_session_snapshot(
         process.id,
         start.thread_id,
         start.workspace,
@@ -456,6 +456,13 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         pid,
         false,
     );
+    if start.kind == SessionKind::CLAUDE {
+        // Booting, not busy: the session loop reports ready once the
+        // transport is up. `running` here read the same as mid-turn, so a
+        // first `session send` racing the start was queued as if behind a
+        // turn rather than waiting for the transport.
+        snapshot.runtime_state = AgentSessionState::Starting;
+    }
     let connection = ProviderProcessConnection {
         child,
         stdin,
@@ -2821,6 +2828,7 @@ fn run_claude_stream_session_loop(
     // deadlocks the queue: the first message is never delivered. Its stdin
     // accepts input as soon as the transport is up, so that is the moment the
     // session is ready.
+    crate::archcar::test_hooks::hold_before_claude_transport_ready();
     adapter.note_transport_started();
     adapter.note_plan_mode(
         runtime_store

@@ -3347,15 +3347,8 @@ fn run_cli() -> Result<()> {
                         &client, &store, &workspace, kind, thread_id, deadline,
                     )?;
                     let readiness = archcar_session_readiness(&client, session_id, deadline)?;
-                    let thread_has_visible_history =
-                        !store.list_chat_messages(resolved_thread_id)?.is_empty();
                     let input_kind: ArchcarInputKind = input_kind.into();
-                    match session_send_route(
-                        &readiness,
-                        immediate,
-                        &input_kind,
-                        session_send_waits_for_ready(kind, thread_has_visible_history),
-                    ) {
+                    match session_send_route(&readiness, immediate, &input_kind) {
                         SessionSendRoute::Now => {}
                         SessionSendRoute::WaitForReady => {
                             wait_for_archcar_session_ready(&client, session_id, deadline)?
@@ -6713,12 +6706,6 @@ fn ensure_session_send_target(
     Ok(target)
 }
 
-/// A first Claude message on a fresh chat is accepted before the session
-/// reports ready; everything else needs a session between turns.
-fn session_send_waits_for_ready(kind: SessionKind, thread_has_visible_history: bool) -> bool {
-    !matches!(kind, SessionKind::CLAUDE) || thread_has_visible_history
-}
-
 /// The session's state at the moment of sending.
 struct SessionReadiness {
     ready: bool,
@@ -6779,10 +6766,9 @@ fn session_send_route(
     readiness: &SessionReadiness,
     immediate: bool,
     input_kind: &ArchcarInputKind,
-    waits_for_ready: bool,
 ) -> SessionSendRoute {
     use archductor_core::session_state::AgentSessionState;
-    if readiness.ready || immediate || !waits_for_ready {
+    if readiness.ready || immediate {
         SessionSendRoute::Now
     } else if *input_kind == ArchcarInputKind::RawTerminal
         // A booting session has no turn to wait behind. Its first message
@@ -6835,15 +6821,19 @@ fn wait_for_archcar_session_ready(
                     archcar_terminal_reason(&status, runtime_state)
                 );
             }
-            ArchcarResponse::SessionStatus { .. } => {}
+            ArchcarResponse::SessionStatus { runtime_state, .. } => {
+                if Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "timed out waiting for session {session_id} to become ready (still state={})",
+                        runtime_state.as_str()
+                    );
+                }
+            }
             ArchcarResponse::Error { message } if message.contains("unknown session") => {
                 anyhow::bail!("session {session_id} disappeared before becoming ready: {message}");
             }
             ArchcarResponse::Error { message } => anyhow::bail!(message),
             other => anyhow::bail!("unexpected archcar response: {:?}", other),
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for session {session_id} to become ready");
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -8107,44 +8097,33 @@ mod tests {
         let user = ArchcarInputKind::User;
 
         assert_eq!(
-            session_send_route(&busy, false, &user, true),
+            session_send_route(&busy, false, &user),
             SessionSendRoute::Queue
         );
         assert_eq!(
-            session_send_route(&idle, false, &user, true),
+            session_send_route(&idle, false, &user),
             SessionSendRoute::Now
         );
         // Steering writes into the running turn.
         assert_eq!(
-            session_send_route(&busy, true, &user, true),
-            SessionSendRoute::Now
-        );
-        // A fresh Claude chat takes its first message before it reports ready.
-        assert_eq!(
-            session_send_route(&busy, false, &user, false),
+            session_send_route(&busy, true, &user),
             SessionSendRoute::Now
         );
         assert_eq!(
-            session_send_route(&busy, false, &ArchcarInputKind::RawTerminal, true),
+            session_send_route(&busy, false, &ArchcarInputKind::RawTerminal),
             SessionSendRoute::WaitForReady
         );
         // A session still booting is not busy: its first message waits for it
-        // and goes in directly, keeping the first-turn prefix contract.
+        // and goes in directly, keeping the first-turn prefix contract. A new
+        // Claude session reports this until its transport is up.
         let starting = SessionReadiness {
             ready: false,
             state: AgentSessionState::Starting,
         };
         assert_eq!(
-            session_send_route(&starting, false, &user, true),
+            session_send_route(&starting, false, &user),
             SessionSendRoute::WaitForReady
         );
-    }
-
-    #[test]
-    fn cli_claude_session_send_does_not_wait_for_ready_before_first_input() {
-        assert!(!session_send_waits_for_ready(SessionKind::CLAUDE, false));
-        assert!(session_send_waits_for_ready(SessionKind::CLAUDE, true));
-        assert!(session_send_waits_for_ready(SessionKind::CODEX, false));
     }
 
     fn session_send_thread_target(cli: Cli) -> Option<(i64, String)> {
