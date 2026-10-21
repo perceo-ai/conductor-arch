@@ -119,6 +119,55 @@ pub struct SessionSnapshot {
     pub ready: bool,
     pub capabilities: Option<SessionHarnessCapabilities>,
     pub screen: String,
+    pub turns: TurnGenerations,
+}
+
+/// Which turn the session's readiness belongs to. `started` moves on every
+/// busy mark for a new input; `completed` catches up to it when the session
+/// loop reports a turn finished. The daemon marks a session ready again on
+/// `TurnCompleted`, on its own thread and later than the loop does; by then a
+/// send may have opened the next turn, and readiness alone cannot tell "busy
+/// with the turn that just ended" from "busy with the one after it".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TurnGenerations {
+    pub started: u64,
+    pub completed: u64,
+}
+
+impl TurnGenerations {
+    /// The latest turn the session started has been reported finished.
+    pub fn latest_turn_completed(&self) -> bool {
+        self.completed == self.started
+    }
+}
+
+/// Marks a codex/claude session busy for an input that opens (or joins) a
+/// turn, and moves it to a new turn generation.
+pub(crate) fn mark_session_busy_for_input(state: &mut SessionSnapshot) {
+    state.ready = false;
+    state.runtime_state = AgentSessionState::Running;
+    state.turns.started += 1;
+}
+
+/// Sends `TurnCompleted`, first recording the session's latest turn as
+/// finished so the daemon's mark for this event sees it. Every completion goes
+/// through here: one sent without the record would leave `started` ahead of
+/// `completed`, and the daemon's ready mark -- the safety net for a lost
+/// `Ready` -- would never fire for that session again.
+pub(crate) fn send_turn_completed(
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    status: Option<String>,
+) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.turns.completed = state.turns.started;
+    }
+    let _ = event_tx.send(ArchcarEvent::TurnCompleted {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        status,
+    });
 }
 
 #[derive(Clone)]
@@ -724,11 +773,12 @@ fn apply_harness_effect(
                 });
                 return;
             }
-            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                session_id: started.session_id,
-                thread_id: started.thread_id,
-                status: Some(harness_turn_status_label(status).to_owned()),
-            });
+            send_turn_completed(
+                snapshot,
+                event_tx,
+                started,
+                Some(harness_turn_status_label(status).to_owned()),
+            );
         }
         HarnessEffect::TurnSettled { status } => {
             info!(
@@ -738,11 +788,12 @@ fn apply_harness_effect(
                 status = harness_turn_status_label(status),
                 "managed harness turn settled"
             );
-            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                session_id: started.session_id,
-                thread_id: started.thread_id,
-                status: Some(harness_turn_status_label(status).to_owned()),
-            });
+            send_turn_completed(
+                snapshot,
+                event_tx,
+                started,
+                Some(harness_turn_status_label(status).to_owned()),
+            );
         }
         HarnessEffect::ProviderEvent(draft) => {
             append_runtime_provider_event(runtime_store, draft, "provider_native_event");
@@ -911,6 +962,7 @@ fn running_session_snapshot(
         ready,
         capabilities: capabilities_for_kind(kind, Vec::new()),
         screen: String::new(),
+        turns: TurnGenerations::default(),
     }
 }
 
@@ -2527,11 +2579,12 @@ fn run_codex_app_server_session_loop(
                                 return;
                             }
                         }
-                        let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                            session_id: started.session_id,
-                            thread_id: started.thread_id,
-                            status: codex_turn_completed_status(&message),
-                        });
+                        send_turn_completed(
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            codex_turn_completed_status(&message),
+                        );
                         apply_harness_effect(
                             &runtime_store,
                             &snapshot,
@@ -2637,8 +2690,7 @@ fn run_codex_app_server_session_loop(
                     // marked failed below, so this never outlives a turn the
                     // provider did not get.
                     if let Ok(mut state) = snapshot.lock() {
-                        state.ready = false;
-                        state.runtime_state = AgentSessionState::Running;
+                        mark_session_busy_for_input(&mut state);
                     }
                     let write_result = match route {
                         CodexInputRoute::Steer { expected_turn_id } => {
@@ -2916,8 +2968,7 @@ fn run_claude_stream_session_loop(
                     // marked failed below, so this never outlives a turn the
                     // provider did not get.
                     if let Ok(mut state) = snapshot.lock() {
-                        state.ready = false;
-                        state.runtime_state = AgentSessionState::Running;
+                        mark_session_busy_for_input(&mut state);
                     }
                     let native_write = adapter.encode_input(HarnessInput {
                         local_input_id: local_input_id.clone(),
