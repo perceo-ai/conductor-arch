@@ -137,7 +137,7 @@ struct PairDaemonView: View {
             dismiss()
             await model.activate(daemon)
         } catch let failure {
-            error = "Could not save: \(UserFacingMessage.describing(failure))"
+            error = UserFacingMessage.pairingSaveFailureMessage(for: failure)
         }
     }
 }

@@ -190,8 +190,8 @@ private struct FailingTokenStore: TokenStore {
 }
 
 @Test func aLockedKeychainFailureReadsAsASentenceOnThePairingSheet() async throws {
-    // PairDaemonView.save() renders DaemonDirectory.add's thrown error as
-    // "Could not save: \(UserFacingMessage.describing(failure))". A real
+    // PairDaemonView.save() renders DaemonDirectory.add's thrown error through
+    // `UserFacingMessage.pairingSaveFailureMessage(for:)`. A real
     // Keychain write cannot be forced to fail from a test, so this drives the
     // same throw through a TokenStore double for a locked device.
     let directory = DaemonDirectory(
@@ -203,7 +203,7 @@ private struct FailingTokenStore: TokenStore {
         Issue.record("DaemonDirectory.add did not throw")
         return
     } catch let failure {
-        let shown = "Could not save: \(UserFacingMessage.describing(failure))"
+        let shown = UserFacingMessage.pairingSaveFailureMessage(for: failure)
         print("ERRPROBE PairDaemonView.error=\(shown)")
         #expect(shown == "Could not save: Unlock this device and try again.")
         for marker in dumpMarkers + ["status(", "errSecInteractionNotAllowed", "-25308"] {
