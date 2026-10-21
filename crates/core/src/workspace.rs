@@ -8197,10 +8197,14 @@ mutation($threadId: ID!) {{
         let input = input.trim();
         anyhow::ensure!(!input.is_empty(), "queued chat input cannot be empty");
         let now = timestamp();
-        self.conn.execute(
+        // Return the row from the INSERT itself. Once it commits, a queue drain
+        // on another connection can claim (delete) it at any moment, so reading
+        // it back by id afterwards can fail for an input that was delivered.
+        let queued = self.conn.query_row(
             "INSERT INTO chat_queued_inputs (
                 thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+             RETURNING id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at",
             params![
                 thread_id,
                 input,
@@ -8209,9 +8213,11 @@ mutation($threadId: ID!) {{
                 session_kind_as_str(session_kind),
                 now
             ],
+            row_to_queued_chat_input,
         )?;
+        after_queued_chat_input_insert(queued.id);
         self.touch_chat_thread(thread_id, &now)?;
-        self.get_queued_chat_input(self.conn.last_insert_rowid())
+        Ok(queued)
     }
 
     pub fn list_queued_chat_inputs(&self, thread_id: i64) -> Result<Vec<QueuedChatInputRecord>> {
@@ -9935,11 +9941,6 @@ mutation($threadId: ID!) {{
             .with_context(|| format!("load chat thread {id}"))
     }
 
-    fn get_queued_chat_input(&self, id: i64) -> Result<QueuedChatInputRecord> {
-        self.get_queued_chat_input_optional(id)?
-            .with_context(|| format!("load queued chat input {id}"))
-    }
-
     fn get_queued_chat_input_optional(&self, id: i64) -> Result<Option<QueuedChatInputRecord>> {
         self.conn
             .query_row(
@@ -11099,6 +11100,35 @@ fn row_to_chat_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessageR
         updated_at: row.get(7)?,
     })
 }
+
+#[cfg(test)]
+type QueuedChatInputInsertHook = Box<dyn FnOnce(i64)>;
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_QUEUED_CHAT_INPUT_INSERT: std::cell::RefCell<Option<QueuedChatInputInsertHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: runs `hook` once, on this thread, right after the next
+/// `enqueue_chat_input` has committed its row and before it returns. A test
+/// claims the row from another connection here, as a queue drain on
+/// `SessionReady` can in the daemon, to land in that gap deterministically.
+#[cfg(test)]
+pub(crate) fn set_after_queued_chat_input_insert_hook(hook: impl FnOnce(i64) + 'static) {
+    AFTER_QUEUED_CHAT_INPUT_INSERT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn after_queued_chat_input_insert(id: i64) {
+    if let Some(hook) = AFTER_QUEUED_CHAT_INPUT_INSERT.with(|slot| slot.borrow_mut().take()) {
+        hook(id);
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn after_queued_chat_input_insert(_id: i64) {}
 
 fn row_to_queued_chat_input(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedChatInputRecord> {
     let input_kind: String = row.get(4)?;
