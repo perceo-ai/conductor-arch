@@ -3297,7 +3297,7 @@ fn run_cli() -> Result<()> {
                     }
                 }
                 SessionCommand::Stop { workspace } => {
-                    let sessions = store.list_sessions(&workspace)?;
+                    let sessions = store.list_sessions_reconciled(&workspace)?;
                     let record = latest_running_session(&sessions).with_context(|| {
                         format!("no running session found for workspace {workspace}")
                     })?;
@@ -3426,7 +3426,7 @@ fn run_cli() -> Result<()> {
                     }
                 }
                 SessionCommand::List { workspace } => {
-                    for session in store.list_sessions(&workspace)? {
+                    for session in store.list_sessions_reconciled(&workspace)? {
                         println!(
                             "#{}\t{}\t{}\t{}\t{}",
                             session.id,
@@ -6905,7 +6905,7 @@ fn resolve_attachable_session(
     workspace: &str,
     process_id: Option<i64>,
 ) -> Result<ProcessRecord> {
-    let sessions = store.list_sessions(workspace)?;
+    let sessions = store.list_sessions_reconciled(workspace)?;
     let process = if let Some(process_id) = process_id {
         sessions
             .into_iter()
@@ -6914,16 +6914,26 @@ fn resolve_attachable_session(
                 format!("session process {process_id} not found for workspace {workspace}")
             })?
     } else {
+        // Sessions come newest first. With none running, name the latest one
+        // so a session that died says so rather than seeming never to exist.
+        let running = sessions
+            .iter()
+            .position(|session| session.status == ProcessStatus::Running)
+            .unwrap_or(0);
         sessions
             .into_iter()
-            .find(|session| session.status == ProcessStatus::Running)
+            .nth(running)
             .with_context(|| format!("no running session found for workspace {workspace}"))?
     };
+    // A chat-thread row keeps its stored status (archcar restores those), so
+    // check its process here too rather than reading a dead pid's /proc entry
+    // as a PTY problem.
     anyhow::ensure!(
-        process.status == ProcessStatus::Running,
-        "session #{} for workspace {} is not running",
+        process.status == ProcessStatus::Running && store.session_process_alive(&process)?,
+        "session #{} for workspace {} is no longer running (pid {} has exited)",
         process.id,
-        workspace
+        workspace,
+        process.pid
     );
     Ok(process)
 }

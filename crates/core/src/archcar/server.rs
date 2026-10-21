@@ -5571,7 +5571,7 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     section(
         &mut out,
         "Sessions",
-        store.list_sessions(name),
+        store.list_sessions_reconciled(name),
         "No sessions recorded.",
         true,
     );
@@ -11586,6 +11586,41 @@ default = true
         let unchanged = store.get_process_record(process.id).unwrap();
         assert_eq!(unchanged.status, ProcessStatus::Running);
         assert_eq!(unchanged.ended_at, None);
+    }
+
+    #[test]
+    fn processes_tab_shows_a_dead_cli_session_as_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(
+            &paths.database_path,
+            &paths.data_dir.join("logs"),
+            temp.path(),
+        );
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
+        let cli = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let codex = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        let managed = store
+            .record_session_process_for_thread("berlin", thread.id, &codex, exited_child_pid())
+            .unwrap();
+
+        let text = workspace_processes_text(&store, "berlin");
+
+        assert!(
+            text.contains(&format!("#{} {} exited", cli.id, cli.command)),
+            "{text}"
+        );
+        // Startup restore owns chat-thread rows, so the tab leaves them as
+        // stored for it to resume or interrupt.
+        assert_eq!(
+            store.get_process_record(managed.id).unwrap().status,
+            ProcessStatus::Running
+        );
     }
 
     fn app_paths(root: &Path) -> AppPaths {

@@ -163,6 +163,44 @@ pub fn process_alive(pid: u32) -> bool {
     }
 }
 
+/// When `pid`'s current process started, in clock ticks since boot
+/// (`/proc/<pid>/stat` field 22).
+///
+/// The kernel hands a dead process's pid to the next one it starts, but never
+/// its start time, so a recorded (pid, start time) pair names one process: a
+/// live pid whose start time differs is a different process. `None` when the
+/// pid is gone, and always on platforms without procfs (macOS, Windows).
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        stat_start_time(&std::fs::read(format!("/proc/{pid}/stat")).ok()?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Field 22 (starttime) of a `/proc/<pid>/stat` line.
+///
+/// Field 2 is `(comm)`, the process name exactly as the kernel holds it: it can
+/// contain spaces, newlines and `)`, and need not be UTF-8 (a file name that
+/// isn't, or a multibyte name cut at the kernel's 15-byte limit). So the line
+/// is read as bytes, comm is skipped by finding the last `)`, and only the
+/// numeric fields after it are read as text. The first of those is field 3,
+/// so field 22 is the 20th.
+#[cfg(any(target_os = "linux", test))]
+fn stat_start_time(stat: &[u8]) -> Option<u64> {
+    let comm_end = stat.iter().rposition(|&byte| byte == b')')?;
+    std::str::from_utf8(&stat[comm_end + 1..])
+        .ok()?
+        .split_ascii_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
 #[cfg(unix)]
 pub fn configure_new_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
@@ -245,6 +283,53 @@ pub fn terminate_process_tree(pid: u32, force: bool) -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `/proc/<pid>/stat` line for `comm`, whose starttime (field 22) is
+    /// 987654.
+    fn stat_line(comm: &[u8]) -> Vec<u8> {
+        let mut line = b"4242 (".to_vec();
+        line.extend_from_slice(comm);
+        line.extend_from_slice(
+            b") S 1 4242 4242 0 -1 4194560 120 0 0 0 3 1 0 0 20 0 1 0 987654 \
+              2400000 200 18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n",
+        );
+        line
+    }
+
+    #[test]
+    fn stat_start_time_reads_past_a_comm_that_is_not_utf8() {
+        let line = stat_line(b"bad\xff\xfename");
+        assert!(std::str::from_utf8(&line).is_err());
+        assert_eq!(stat_start_time(&line), Some(987654));
+    }
+
+    #[test]
+    fn stat_start_time_reads_past_spaces_and_parens_in_comm() {
+        assert_eq!(stat_start_time(&stat_line(b"my proc)name")), Some(987654));
+        assert_eq!(
+            stat_start_time(&stat_line(
+                b"x) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19"
+            )),
+            Some(987654),
+            "fields spoofed inside comm are skipped"
+        );
+        assert_eq!(stat_start_time(&stat_line(b"two\nlines (")), Some(987654));
+    }
+
+    #[test]
+    fn stat_start_time_rejects_a_line_it_cannot_read() {
+        assert_eq!(stat_start_time(b"4242 (sleep"), None);
+        assert_eq!(stat_start_time(b"4242 (sleep) S 1 4242"), None);
+        assert_eq!(stat_start_time(b""), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_start_time_reads_this_process() {
+        let pid = std::process::id();
+        let start = process_start_time(pid).expect("this process has a start time");
+        assert_eq!(process_start_time(pid), Some(start), "stable across reads");
+    }
 
     #[test]
     fn shell_program_has_a_platform_default() {

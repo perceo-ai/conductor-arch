@@ -72,7 +72,8 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
           started_at TEXT NOT NULL,
           ended_at TEXT,
           session_harness_metadata TEXT,
-          session_resume_id TEXT
+          session_resume_id TEXT,
+          pid_start_time INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS pull_requests (
@@ -526,6 +527,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         "processes",
         "chat_thread_id",
         "ALTER TABLE processes ADD COLUMN chat_thread_id INTEGER REFERENCES chat_threads(id)",
+    )?;
+    ensure_column(
+        conn,
+        "processes",
+        "pid_start_time",
+        "ALTER TABLE processes ADD COLUMN pid_start_time INTEGER",
     )?;
     ensure_column(
         conn,
