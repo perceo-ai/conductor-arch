@@ -42,7 +42,7 @@ pub enum AgentActivity {
     AwaitingInput,
     /// The last turn completed successfully; the agent is idle or has exited.
     Finished,
-    /// The last turn ended in an error.
+    /// The last turn ended in an error, or the daemon marked the session failed.
     Failed,
     /// Not running, and the last turn did not finish (killed, interrupted, or
     /// never started).
@@ -100,6 +100,12 @@ pub fn derive_activity(
         Some(TurnOutcome::Failed) => AgentActivity::Failed,
         _ => unfinished,
     };
+    // A session the daemon marked failed is failed even though it is no longer
+    // alive and its last turn may have succeeded: the session-level failure
+    // outranks the last turn's outcome.
+    if runtime_state == Some(AgentSessionState::Failed) {
+        return AgentActivity::Failed;
+    }
     if !alive {
         return by_outcome(AgentActivity::Stopped);
     }
@@ -113,7 +119,6 @@ pub fn derive_activity(
             | AgentSessionState::Streaming
             | AgentSessionState::ToolRunning,
         ) => AgentActivity::Working,
-        Some(AgentSessionState::Failed) => AgentActivity::Failed,
         // Only the PID was checked: an open turn means work in progress.
         None if last_turn == Some(TurnOutcome::Running) => AgentActivity::Working,
         _ => by_outcome(AgentActivity::AwaitingInput),
@@ -626,6 +631,58 @@ mod tests {
             derive_activity(false, None, 0, None),
             AgentActivity::Stopped
         );
+    }
+
+    #[test]
+    fn a_daemon_failed_session_is_failed_whatever_its_last_turn() {
+        // The daemon reports a failed session as not alive; its failure still
+        // outranks a last turn that succeeded.
+        for alive in [false, true] {
+            for outcome in [
+                None,
+                Some(TurnOutcome::Running),
+                Some(TurnOutcome::Success),
+                Some(TurnOutcome::Failed),
+            ] {
+                assert_eq!(
+                    derive_activity(alive, Some(AgentSessionState::Failed), 0, outcome),
+                    AgentActivity::Failed,
+                    "alive={alive} {outcome:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exited_archived_and_interrupted_sessions_still_report_their_last_turn() {
+        // The daemon reports every one of these as not alive; unlike Failed,
+        // they fall through to how the last turn ended.
+        for state in [
+            AgentSessionState::Exited,
+            AgentSessionState::Archived,
+            AgentSessionState::Interrupted,
+        ] {
+            assert_eq!(
+                derive_activity(false, Some(state), 0, Some(TurnOutcome::Success)),
+                AgentActivity::Finished,
+                "{state:?}"
+            );
+            assert_eq!(
+                derive_activity(false, Some(state), 0, Some(TurnOutcome::Failed)),
+                AgentActivity::Failed,
+                "{state:?}"
+            );
+            assert_eq!(
+                derive_activity(false, Some(state), 1, Some(TurnOutcome::Running)),
+                AgentActivity::Stopped,
+                "{state:?}"
+            );
+            assert_eq!(
+                derive_activity(false, Some(state), 0, None),
+                AgentActivity::Stopped,
+                "{state:?}"
+            );
+        }
     }
 
     #[test]

@@ -1216,9 +1216,9 @@ fn cli_session_send_while_claude_takes_a_direct_send_queues_behind_it() {
         &fake_claude,
     );
 
-    // Claude's first message skips the readiness wait (it has no history to
-    // wait behind), so a send racing the transport start can be refused.
-    // Start the session and let it come up first; that race is not this one.
+    // Start the session and let it come up first, so turn 1 goes straight
+    // in; a first send racing the transport start is covered by
+    // `cli_session_send_first_claude_message_waits_for_the_transport_to_come_up`.
     app()
         .args(["session", "start", "berlin", "--kind", "claude"])
         .assert()
@@ -1571,8 +1571,8 @@ fn cli_session_queued_send_dropped_before_the_turn_starts_resolves_to_failed() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-    // A failed session is no longer live, so `status` stops reporting it as
-    // working; its state then comes from the last turn that actually ran.
+    // A failed session is no longer live, but `status` reports it as failed
+    // even though the last turn that actually ran succeeded.
     let output = app()
         .args(["status", "berlin", "--json"])
         .assert()
@@ -1583,7 +1583,7 @@ fn cli_session_queued_send_dropped_before_the_turn_starts_resolves_to_failed() {
     let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let session = &status["workspaces"][0]["sessions"][0];
     assert_eq!(session["alive"], false, "{status}");
-    assert_ne!(session["state"], "working", "{status}");
+    assert_eq!(session["state"], "failed", "{status}");
     assert_eq!(
         fs::read_to_string(&provider_inputs)
             .unwrap()
@@ -1721,6 +1721,271 @@ fn cli_session_send_to_a_provider_that_fails_its_handshake_reports_one_state() {
         !(stderr.contains("status=running") && stderr.contains("state=failed")),
         "the message must not call the failed session running: {stderr}"
     );
+}
+
+/// Failure this guards: the CLI skipped the readiness wait for a Claude
+/// thread's first message, a leftover from when a fresh Claude session only
+/// reported ready after reading its first input. It now reports ready once its
+/// transport is up, and the daemon refuses non-immediate input before that, so
+/// a first send that beat the transport failed with "claude session N is not
+/// ready for automatic input" instead of waiting the way every later send does.
+///
+/// The test daemon is built with the `test-handoff-delay` seams; one of them
+/// holds the new session just before its transport reports ready until a file
+/// exists, so the send lands in that window every run.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_first_claude_message_waits_for_the_transport_to_come_up() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_claude = temp.path().join("fake-claude");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let hold = temp.path().join("release-claude-transport");
+    let not_ready_seen = temp.path().join("not-ready-status-seen");
+    let fake_home = temp.path().join("home");
+    write_fake_claude_stream(&fake_claude).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_TEST_HOLD_CLAUDE_READY_PATH", &hold),
+            (
+                "ARCHDUCTOR_TEST_NOT_READY_STATUS_SEEN_PATH",
+                &not_ready_seen,
+            ),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+    create_claude_workspace(&app, temp.path(), &fake_claude);
+
+    let send = std::thread::spawn({
+        let mut send = app();
+        send.args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--timeout-ms",
+            "15000",
+            "First message",
+        ]);
+        move || send.output().unwrap()
+    });
+    // Release the transport only once the daemon has told the send the
+    // session is not ready, so the send has met it before it came up. Nothing
+    // else here asks the daemon for status, so the marker is the send's.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !not_ready_seen.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the send never saw the held session not ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let session_id = wait_for_running_session(temp.path(), "berlin");
+    fs::write(&hold, "").unwrap();
+
+    let output = send.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a first claude send racing the transport start must wait, not be refused\n\
+         stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("sent claude message"), "{stdout}");
+    wait_for_file_lines(&provider_inputs, 1);
+    // Delivered as the first turn, so behind the general prompt.
+    let captured = fs::read_to_string(&provider_inputs).unwrap();
+    let captured = serde_json::from_str::<String>(captured.trim_end()).unwrap();
+    assert!(captured.ends_with("\n\nFirst message"), "{captured:?}");
+
+    app()
+        .args(["archcar", "kill", &session_id.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), session_id);
+}
+
+/// The other half of the wait above: a first Claude send to a session whose
+/// transport never comes up fails once `--timeout-ms` runs out, and says it
+/// timed out waiting for the session, not that the daemon refused the input.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_first_claude_message_times_out_when_the_transport_never_comes_up() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake_claude = temp.path().join("fake-claude");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let hold = temp.path().join("never-created");
+    let fake_home = temp.path().join("home");
+    write_fake_claude_stream(&fake_claude).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_TEST_HOLD_CLAUDE_READY_PATH", &hold),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+    create_claude_workspace(&app, temp.path(), &fake_claude);
+    // Spawn the session up front so the send's whole budget goes to waiting
+    // for the transport, not to the daemon spawning the session.
+    app()
+        .args(["session", "start", "berlin", "--kind", "claude"])
+        .assert()
+        .success();
+    let session_id = wait_for_running_session(temp.path(), "berlin");
+    wait_for_archcar_status_contains(&app, session_id, "ready=false");
+
+    let timeout = Duration::from_millis(1500);
+    let started = Instant::now();
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "claude",
+            "--timeout-ms",
+            &timeout.as_millis().to_string(),
+            "First message",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let elapsed = started.elapsed();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&format!(
+            "timed out waiting for session {session_id} to become ready (still state=starting)"
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("not ready for automatic input"),
+        "{stderr}"
+    );
+    assert!(
+        elapsed >= timeout,
+        "the send gave up after {elapsed:?}, before its {timeout:?} timeout"
+    );
+    assert!(
+        elapsed < timeout + Duration::from_secs(10),
+        "the send took {elapsed:?}; --timeout-ms {timeout:?} must bound it"
+    );
+    assert!(
+        !provider_inputs.exists(),
+        "nothing may reach a transport that never came up"
+    );
+}
+
+/// A Claude `--input-format stream-json` stand-in: records each user turn's
+/// text to `ARCHDUCTOR_CAPTURE_PATH` and completes it at once.
+#[cfg(unix)]
+fn write_fake_claude_stream(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+
+capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
+turn = 0
+
+def emit(message):
+    message["session_id"] = "fake-claude-session"
+    print(json.dumps(message), flush=True)
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if message.get("type") != "user":
+        continue
+    turn += 1
+    with open(capture, "a", encoding="utf-8") as output:
+        output.write(json.dumps(message["message"]["content"][0]["text"]) + "\n")
+    if turn == 1:
+        emit({"type": "system", "subtype": "init", "uuid": "init", "model": "claude-fixture"})
+    emit({"type": "assistant", "uuid": "assistant-%d" % turn, "message": {"id": "msg-%d" % turn, "role": "assistant", "content": [{"type": "text", "text": "done %d" % turn}]}})
+    emit({"type": "result", "subtype": "success", "uuid": "result-%d" % turn, "result": "done %d" % turn, "duration_ms": 1})
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+}
+
+/// Adds the `demo` repo with a `berlin` workspace whose Claude is `claude`.
+#[cfg(unix)]
+fn create_claude_workspace(app: &dyn Fn() -> AssertCommand, root: &Path, claude: &Path) {
+    let repo_path = init_repo(root.join("demo"));
+    let workspace_parent = root.join("workspaces/demo");
+    app()
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app()
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "claude_code_executable_path = {:?}\n",
+            claude.to_string_lossy()
+        ),
+    )
+    .unwrap();
+}
+
+/// Polls `archcar status <session>` until it prints `needle`.
+#[cfg(unix)]
+fn wait_for_archcar_status_contains(
+    app: &dyn Fn() -> AssertCommand,
+    session_id: i64,
+    needle: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let output = app()
+            .args(["archcar", "status", &session_id.to_string()])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains(needle) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "session {session_id} never reported {needle}: {stdout}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// A codex app-server stand-in that answers `initialize` with an error, the
