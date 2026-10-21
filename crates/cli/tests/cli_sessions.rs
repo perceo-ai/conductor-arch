@@ -103,6 +103,92 @@ fn cli_starts_and_logs_real_shell_session() {
     assert!(!archductor_core::platform::process_alive(pid));
 }
 
+#[test]
+fn cli_session_attach_names_the_dead_pid_when_the_shell_exits_after_start_returns() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_shell = temp.path().join("fake-shell");
+    // Outlives the short-lived `session start` CLI, then exits on its own, so
+    // no monitor thread is left to record the exit: the row still says
+    // running until `attach` reads it.
+    fs::write(
+        &fake_shell,
+        "#!/bin/sh\nprintf 'cli-session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nsleep 2\n",
+    )
+    .unwrap();
+    Command::new("chmod")
+        .arg("+x")
+        .arg(&fake_shell)
+        .status()
+        .unwrap();
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    let started = app(temp.path())
+        .env("SHELL", &fake_shell)
+        .args(["session", "start", "berlin", "--kind", "shell"])
+        .assert()
+        .success()
+        .stdout(contains("Started session for berlin"));
+    let pid = started_session_pid(&String::from_utf8_lossy(&started.get_output().stdout));
+
+    wait_for_session_log(temp.path());
+    assert!(
+        archductor_core::platform::process_alive(pid),
+        "session pid {pid} exited before the start CLI returned; this would not exercise the race"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while archductor_core::platform::process_alive(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "session pid {pid} was still alive after 10s"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    app(temp.path())
+        .args(["session", "attach", "berlin", "--print-pty-path"])
+        .assert()
+        .failure()
+        .stderr(
+            // The only session in a fresh store is #1; naming it is the
+            // point, so pin the whole message, not just the pid suffix.
+            contains(format!(
+                "session #1 for workspace berlin is no longer running (pid {pid} has exited)"
+            ))
+            .and(contains("is not attached to a PTY slave").not())
+            .and(contains("no running session found for workspace berlin").not()),
+        );
+}
+
 /// The pid from `session start`'s "Started session for <ws> as pid <pid> (...)".
 fn started_session_pid(stdout: &str) -> u32 {
     stdout
