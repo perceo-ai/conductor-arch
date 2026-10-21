@@ -307,6 +307,7 @@ impl ArchcarServer {
         }
         // Past here the process is going away for good: a successful restart
         // never returns from `restart_in_place`.
+        #[cfg(unix)]
         unlink_own_endpoint(&self.endpoint_path);
         match (serve_error, shutdown_result) {
             (Some(err), Ok(())) => Err(err),
@@ -346,10 +347,20 @@ impl ArchcarServer {
 ///
 /// Safe because no client reads the file's presence as a live daemon: the
 /// client treats `NotFound` exactly like `ConnectionRefused`
-/// (`endpoint_has_no_listener` in `client.rs`), and `transport::bind` probes
-/// before reusing a path. The caller must run this only after the in-place
-/// restart attempt: a successful restart execs into the new binary, which
-/// keeps serving on this same path.
+/// (`endpoint_has_no_listener` in `client.rs`). And the file is still this
+/// daemon's: it holds the listener while unlinking, and unix `transport::bind`
+/// refuses with `AddrInUse` while a live listener answers, so no newer daemon
+/// can have taken the path over. The caller must run this only after the
+/// in-place restart attempt: a successful restart execs into the new binary,
+/// which keeps serving on this same path.
+///
+/// Unix only. Windows `transport::bind` (the `#[cfg(windows)]` one in
+/// `transport.rs`) has no liveness probe: it removes and renames over an
+/// existing endpoint file unconditionally, so a newer daemon may own the file
+/// by the time this one exits, and removing it would shut that daemon down on
+/// its next accept. Windows must not share this cleanup until it can check the
+/// file still belongs to this listener.
+#[cfg(unix)]
 fn unlink_own_endpoint(endpoint_path: &Path) {
     match fs::remove_file(endpoint_path) {
         Ok(()) => {}
