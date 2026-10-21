@@ -2594,6 +2594,7 @@ fn run_codex_app_server_session_loop(
                     kind,
                     delivery,
                 } => {
+                    crate::archcar::test_hooks::pause_before_session_takes_input();
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
                         false
                     } else {
@@ -2897,6 +2898,7 @@ fn run_claude_stream_session_loop(
                     kind,
                     delivery,
                 } => {
+                    crate::archcar::test_hooks::pause_before_session_takes_input();
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
                         false
                     } else {
