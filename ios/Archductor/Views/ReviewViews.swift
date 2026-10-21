@@ -224,7 +224,7 @@ struct ChecksPanel: View {
     var body: some View {
         List {
             if store.checksStale {
-                Section { StaleBanner(isDisconnected: store.isDisconnected, cause: store.lastError) }
+                Section { StaleBanner(isDisconnected: store.isDisconnected, cause: store.checksError) }
             }
             if let checks = store.checks {
                 Section("Workspace") {
@@ -348,7 +348,7 @@ struct TodosPanel: View {
 
     var body: some View {
         List {
-            if store.todosStale { StaleBanner(isDisconnected: store.isDisconnected, cause: store.lastError) }
+            if store.todosStale { StaleBanner(isDisconnected: store.isDisconnected, cause: store.todosError) }
             ForEach(store.todos) { todo in
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: todo.isOpen ? "circle" : "checkmark.circle.fill")

@@ -19,7 +19,17 @@ public final class ReviewStore {
     public private(set) var scope: WorkspaceChangeScope = .all
     public private(set) var checks: ChecksSummary?
     public private(set) var runs: WorkflowRunSummary?
+    /// Why the last checks fetch failed, if either of its two requests did.
+    ///
+    /// Tracked separately from `lastError` for the stale banner: every
+    /// request that succeeds clears `lastError`, so the runs request after a
+    /// failed summary request would wipe the cause before the panel shows it.
+    public private(set) var checksError: String?
     public private(set) var todos: [Todo] = []
+    /// Why the last todos fetch failed, if it did. Separate from `lastError`
+    /// for the same reason as `checksError`: an event refetches changes and
+    /// checks but not todos, and their success would wipe the todos cause.
+    public private(set) var todosError: String?
     public private(set) var readiness: String?
     public private(set) var lastError: String?
     public private(set) var isBusy = false
@@ -103,25 +113,33 @@ public final class ReviewStore {
     }
 
     private func fetchChecks() async -> Bool {
-        var fetched = true
+        // The cause is read right after the leg that failed: the next
+        // request's success clears `lastError`.
+        var failure: String?
         if case .checksSummary(_, let summary)? = await request(
             GetChecksSummaryRequest(workspace: workspace)) {
             checks = summary
         } else {
-            fetched = false
+            failure = lastError ?? "The daemon did not answer."
         }
         if case .workflowRuns(_, let summary)? = await request(
             ListWorkflowRunsRequest(workspace: workspace)) {
             runs = summary
         } else {
-            fetched = false
+            failure = failure ?? lastError ?? "The daemon did not answer."
         }
-        return fetched
+        checksError = failure
+        return failure == nil
     }
 
     private func fetchTodos() async -> Bool {
         guard case .todos(_, let todos)? = await request(
-            ListTodosRequest(workspace: workspace)) else { return false }
+            ListTodosRequest(workspace: workspace))
+        else {
+            todosError = lastError ?? "The daemon did not answer."
+            return false
+        }
+        todosError = nil
         self.todos = todos
         return true
     }
