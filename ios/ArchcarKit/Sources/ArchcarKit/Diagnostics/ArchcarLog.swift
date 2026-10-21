@@ -13,4 +13,5 @@ public enum ArchcarLog {
     public static let session = Logger(subsystem: subsystem, category: "session")
     public static let store = Logger(subsystem: subsystem, category: "store")
     public static let notifications = Logger(subsystem: subsystem, category: "notifications")
+    public static let keychain = Logger(subsystem: subsystem, category: "keychain")
 }
