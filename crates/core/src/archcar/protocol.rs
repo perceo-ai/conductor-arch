@@ -1048,6 +1048,12 @@ pub enum ArchcarResponse {
     },
     Repositories {
         repositories: Vec<ArchcarRepositorySummary>,
+        /// The daemon's stable self-id (see `notifications::daemon_self_id`),
+        /// so the client can learn it and later match it against a stamped
+        /// APNs push. Additive and optional: an older daemon's reply decodes
+        /// to `None`, and older clients ignore the extra field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_self_id: Option<String>,
     },
     Skills {
         skills: Vec<crate::skills::Skill>,
@@ -2660,7 +2666,7 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::Workspaces { workspaces } => {
             format!("workspaces count={}", workspaces.len())
         }
-        ArchcarResponse::Repositories { repositories } => {
+        ArchcarResponse::Repositories { repositories, .. } => {
             format!("repositories count={}", repositories.len())
         }
         ArchcarResponse::Skills { skills } => format!("skills count={}", skills.len()),
@@ -3304,6 +3310,26 @@ mod tests {
     };
     use crate::codex_tui::{CodexContextUsage, CodexInlineEvent, CodexToolCall};
     use crate::provider_interactions::ProviderInteractionStatus;
+
+    #[test]
+    fn repositories_response_carries_daemon_self_id_additively() {
+        // An older daemon's handshake reply has no self-id: still decodes.
+        let older: ArchcarResponse =
+            serde_json::from_str(r#"{"type":"repositories","repositories":[]}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&older).unwrap(),
+            serde_json::json!({"type": "repositories", "repositories": []})
+        );
+
+        let newer: ArchcarResponse = serde_json::from_str(
+            r#"{"type":"repositories","repositories":[],"daemon_self_id":"abc-123"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&newer).unwrap()["daemon_self_id"],
+            serde_json::json!("abc-123")
+        );
+    }
 
     #[test]
     fn delete_request_only_touches_disk_when_it_says_so() {

@@ -33,6 +33,9 @@ public final class NotificationTapRouter {
     /// The daemon `inventory` belongs to; stamped taps from any other daemon
     /// resolve as not found.
     @ObservationIgnored public var activeDaemonID: @MainActor () -> String? = { nil }
+    /// The active daemon's learned self-id, matched against the one a fresh
+    /// APNs push is stamped with. Nil until learned.
+    @ObservationIgnored public var activeDaemonSelfID: @MainActor () -> String? = { nil }
 
     @ObservationIgnored private var pending: NotificationTap?
     @ObservationIgnored private var isResolving = false
@@ -86,7 +89,8 @@ public final class NotificationTapRouter {
             var answer = resolution(of: tap, in: store)
             // A miss refetches once before concluding the chat is gone: the
             // snapshot may predate the chat. A wrong-daemon tap needs no fetch.
-            let isActiveDaemons = tap.daemonID == nil || tap.daemonID == activeDaemonID()
+            let isActiveDaemons = !ChatThreadLookup.isFromAnotherDaemon(
+                tap, activeDaemonID: activeDaemonID(), activeDaemonSelfID: activeDaemonSelfID())
             if store.lastError == nil, isActiveDaemons, case .notFound = answer {
                 await store.refresh()
                 answer = resolution(of: tap, in: store)
@@ -102,7 +106,7 @@ public final class NotificationTapRouter {
 
     private func resolution(of tap: NotificationTap, in store: any ChatInventory) -> ChatThreadLookup.Resolution {
         ChatThreadLookup.resolve(
-            tap, activeDaemonID: activeDaemonID(),
+            tap, activeDaemonID: activeDaemonID(), activeDaemonSelfID: activeDaemonSelfID(),
             workspaces: store.workspaces, chatThreads: store.chatThreads)
     }
 }

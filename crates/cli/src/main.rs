@@ -4797,7 +4797,7 @@ fn print_archcar_response(response: ArchcarResponse) {
                 );
             }
         }
-        ArchcarResponse::Repositories { repositories } => {
+        ArchcarResponse::Repositories { repositories, .. } => {
             println!("repositories {}", repositories.len());
             for repo in repositories {
                 println!(
@@ -5833,7 +5833,7 @@ fn run_remote_import(
     };
 
     let repository_url = match source.send(ArchcarRequest::ListRepositories)? {
-        ArchcarResponse::Repositories { repositories } => repositories
+        ArchcarResponse::Repositories { repositories, .. } => repositories
             .into_iter()
             .find(|repo| repo.name == remote_workspace.repository_name)
             .and_then(|repo| repo.remote_url)
