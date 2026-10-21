@@ -22,9 +22,15 @@ fn cli_starts_and_logs_real_shell_session() {
     let repo_path = init_repo(temp.path().join("demo"));
     let workspace_parent = temp.path().join("workspaces/demo");
     let fake_shell = temp.path().join("fake-shell");
+    // Stays running after it logs, so `attach` below meets a live session. A
+    // shell that exited at once left the row's status to a race: the
+    // short-lived `session start` CLI records the exit from a monitor thread
+    // only if it is still alive when the shell dies, so a slow CLI exit turned
+    // the attach into "no running session found". The sleep is bounded so a
+    // failed assertion cannot leak it for long; the test stops it at the end.
     fs::write(
         &fake_shell,
-        "#!/bin/sh\nprintf 'cli-session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\n",
+        "#!/bin/sh\nprintf 'cli-session:%s:%s\\n' \"$ARCHDUCTOR_WORKSPACE_NAME\" \"$ARCHDUCTOR_PORT\"\nexec sleep 60\n",
     )
     .unwrap();
     Command::new("chmod")
@@ -62,24 +68,48 @@ fn cli_starts_and_logs_real_shell_session() {
         .assert()
         .success();
 
-    app(temp.path())
+    let started = app(temp.path())
         .env("SHELL", &fake_shell)
         .args(["session", "start", "berlin", "--kind", "shell"])
         .assert()
         .success()
         .stdout(contains("Started session for berlin"));
+    let pid = started_session_pid(&String::from_utf8_lossy(&started.get_output().stdout));
 
     wait_for_session_log(temp.path());
+    // The attach must judge a session that is really running; the PTY check
+    // is what this test is about, not a stale row for a process already gone.
+    assert!(
+        archductor_core::platform::process_alive(pid),
+        "session pid {pid} exited before attach; the attach would race the start CLI's exit"
+    );
     app(temp.path())
         .args(["session", "attach", "berlin", "--print-pty-path"])
         .assert()
         .failure()
-        .stderr(contains("is not attached to a PTY slave"));
+        .stderr(contains(format!(
+            "process {pid} is not attached to a PTY slave"
+        )));
     app(temp.path())
         .args(["logs", "berlin", "--session"])
         .assert()
         .success()
         .stdout(contains("cli-session:berlin:"));
+    app(temp.path())
+        .args(["session", "stop", "berlin"])
+        .assert()
+        .success()
+        .stdout(contains(format!("Stopped session for berlin (pid {pid})")));
+    assert!(!archductor_core::platform::process_alive(pid));
+}
+
+/// The pid from `session start`'s "Started session for <ws> as pid <pid> (...)".
+fn started_session_pid(stdout: &str) -> u32 {
+    stdout
+        .split_once(" as pid ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("no pid in session start output: {stdout:?}"))
 }
 
 #[cfg(unix)]
