@@ -327,6 +327,12 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_notification_devices_platform
           ON notification_devices(platform, updated_at);
 
+        CREATE TABLE IF NOT EXISTS daemon_identity (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          self_id TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS provider_event_raw_payloads (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           identity_key TEXT NOT NULL,

@@ -8,7 +8,9 @@ import Foundation
 public enum ArchcarResponse: Sendable {
     case ack
     case workspaces([WorkspaceSummary])
-    case repositories([RepositorySummary])
+    /// `daemonSelfID` is the daemon's stable self-id, the one it stamps on
+    /// APNs pushes. Nil from a daemon that predates it.
+    case repositories([RepositorySummary], daemonSelfID: String?)
     case inventorySnapshot(
         repositories: [RepositorySummary],
         workspaces: [WorkspaceSummary],
@@ -62,6 +64,7 @@ extension ArchcarResponse: Decodable {
         case input, files, todos, todo, summary, diff, text, title, body, output, name
         case providers, content, screen, path
         case chatThreads = "chat_threads"
+        case daemonSelfID = "daemon_self_id"
     }
 
     public init(from decoder: Decoder) throws {
@@ -73,7 +76,9 @@ extension ArchcarResponse: Decodable {
         case "workspaces":
             self = .workspaces(try container.decode([WorkspaceSummary].self, forKey: .workspaces))
         case "repositories":
-            self = .repositories(try container.decode([RepositorySummary].self, forKey: .repositories))
+            self = .repositories(
+                try container.decode([RepositorySummary].self, forKey: .repositories),
+                daemonSelfID: try container.decodeIfPresent(String.self, forKey: .daemonSelfID))
         case "inventory_snapshot":
             self = .inventorySnapshot(
                 repositories: try container.decode([RepositorySummary].self, forKey: .repositories),

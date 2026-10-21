@@ -5,15 +5,22 @@ import Foundation
 /// `daemonID` is the paired daemon that delivered it. Thread ids are per-daemon
 /// SQLite rowids, so thread 42 on one daemon is an unrelated chat on another;
 /// a tap is only resolved against the daemon it came from. Local notifications
-/// carry it. APNs pushes do not (their payload has only `thread_id`), so for
-/// those it is nil and the active daemon is assumed.
+/// carry it. APNs pushes do not, so for those it is nil.
+///
+/// `daemonSelfID` is the daemon's own stable self-id, stamped on a fresh APNs
+/// push. Nil for local notifications and for pushes from an older daemon. It
+/// is matched against the active daemon's learned self-id
+/// (`SavedDaemon.remoteSelfID`), never against `SavedDaemon.id` — the two are
+/// separate identity spaces.
 public struct NotificationTap: Sendable, Equatable {
     public let threadID: Int64
     public let daemonID: String?
+    public let daemonSelfID: String?
 
-    public init(threadID: Int64, daemonID: String?) {
+    public init(threadID: Int64, daemonID: String?, daemonSelfID: String? = nil) {
         self.threadID = threadID
         self.daemonID = daemonID
+        self.daemonSelfID = daemonSelfID
     }
 }
 
@@ -51,13 +58,31 @@ public enum ChatThreadLookup {
     public static func resolve(
         _ tap: NotificationTap,
         activeDaemonID: String?,
+        activeDaemonSelfID: String? = nil,
         workspaces: [WorkspaceSummary],
         chatThreads: [String: [ChatThread]]
     ) -> Resolution {
-        if let daemonID = tap.daemonID, daemonID != activeDaemonID {
+        if isFromAnotherDaemon(tap, activeDaemonID: activeDaemonID, activeDaemonSelfID: activeDaemonSelfID) {
             return .notFound(threadID: tap.threadID)
         }
         return resolve(threadID: tap.threadID, workspaces: workspaces, chatThreads: chatThreads)
+    }
+
+    /// Whether `tap` is known to come from a daemon other than the active one.
+    ///
+    /// A push's self-id only counts when both sides have one. Unstamped (an
+    /// older daemon) or not learned yet (an upgraded app that has not
+    /// reconnected) routes against the active daemon, as before stamping
+    /// existed: the hole stays open until the next connect learns the id,
+    /// rather than every push breaking after an upgrade.
+    public static func isFromAnotherDaemon(
+        _ tap: NotificationTap, activeDaemonID: String?, activeDaemonSelfID: String?
+    ) -> Bool {
+        if let daemonID = tap.daemonID, daemonID != activeDaemonID { return true }
+        if let selfID = tap.daemonSelfID, let activeSelfID = activeDaemonSelfID, selfID != activeSelfID {
+            return true
+        }
+        return false
     }
 
     public static func resolve(
@@ -78,7 +103,8 @@ public enum ChatThreadLookup {
     public static func tap(fromUserInfo userInfo: [AnyHashable: Any]) -> NotificationTap? {
         guard let threadID = threadID(fromUserInfo: userInfo) else { return nil }
         let daemonID = (userInfo["daemon_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        return NotificationTap(threadID: threadID, daemonID: daemonID)
+        let daemonSelfID = (userInfo["daemon_self_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return NotificationTap(threadID: threadID, daemonID: daemonID, daemonSelfID: daemonSelfID)
     }
 
     /// The `thread_id` a tapped notification carries.

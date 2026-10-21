@@ -1252,7 +1252,12 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::ListRepositories => {
             let db_path = state.lock().unwrap().db_path.clone();
             match repository_summaries(&db_path) {
-                Ok(repositories) => ArchcarResponse::Repositories { repositories },
+                // `.ok()`: this is also the token-validation round trip every
+                // connect makes, so a self-id failure must not break it.
+                Ok(repositories) => ArchcarResponse::Repositories {
+                    repositories,
+                    daemon_self_id: crate::notifications::daemon_self_id(&db_path).ok(),
+                },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -10820,6 +10825,40 @@ default = true
         assert!(
             matches!(listed, ArchcarResponse::Workspaces { ref workspaces } if workspaces.is_empty()),
             "list_workspaces got {listed:?}"
+        );
+    }
+
+    #[test]
+    fn list_repositories_reports_the_daemons_stable_self_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        // Read it off the wire, the way the iOS client's connect handshake does.
+        let self_id = |state: &Arc<Mutex<ServerState>>| {
+            let listed = dispatch_request(ArchcarRequest::ListRepositories, state);
+            serde_json::to_value(&listed).unwrap()["daemon_self_id"]
+                .as_str()
+                .map(str::to_owned)
+        };
+        let first = self_id(&state).expect("list_repositories must carry daemon_self_id");
+        assert!(!first.is_empty());
+        assert_eq!(self_id(&state).as_deref(), Some(first.as_str()));
+        // It is the same id the daemon stamps on outgoing pushes.
+        assert_eq!(
+            crate::notifications::daemon_self_id(&db_path).unwrap(),
+            first
         );
     }
 

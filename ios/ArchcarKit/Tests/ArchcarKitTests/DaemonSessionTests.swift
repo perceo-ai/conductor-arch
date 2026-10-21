@@ -62,6 +62,27 @@ private func requestType(_ line: String) -> String? {
     await daemon.stop()
 }
 
+/// The connect handshake is where the client learns the daemon's self-id —
+/// the one a fresh APNs push is stamped with. An older daemon's reply has
+/// none, and connecting still works.
+@Test func connectLearnsTheDaemonSelfIDFromTheHandshake() async throws {
+    let stamped = try await MockDaemon()
+    await stamped.stampHandshake(daemonSelfID: "self-a")
+    let session = DaemonSession(address: await stamped.address, token: "t")
+    try await session.connect()
+    #expect(await session.remoteDaemonSelfID == "self-a")
+    await session.disconnect()
+    await stamped.stop()
+
+    let older = try await MockDaemon()
+    let olderSession = DaemonSession(address: await older.address, token: "t")
+    try await olderSession.connect()
+    #expect(await olderSession.remoteDaemonSelfID == nil)
+    #expect(await olderSession.connectionState == .connected)
+    await olderSession.disconnect()
+    await older.stop()
+}
+
 @Test func daemonErrorSurfacesAsThrownError() async throws {
     let daemon = try await MockDaemon()
     // Only the real request errors; the handshake probe is answered normally,
@@ -137,6 +158,31 @@ private let quickBackoff = Backoff(base: .milliseconds(20), cap: .milliseconds(2
     // Before the fix this loop waited forever: the connection ended but
     // nothing finished the subscriber's stream.
     #expect(await finishes(drained))
+    await session.disconnect()
+    await daemon.stop()
+}
+
+/// `AppModel` re-reads the learned self-id on every connect, so the session
+/// must report the current daemon's id after its own reconnect, not the
+/// first connect's.
+@Test func remoteDaemonSelfIDReflectsTheCurrentConnectNotTheFirstOne() async throws {
+    let daemon = try await MockDaemon()
+    await daemon.stampHandshake(daemonSelfID: "self-v1")
+    let session = DaemonSession(address: await daemon.address, token: "t", backoff: quickBackoff)
+    try await session.connect()
+    #expect(await session.remoteDaemonSelfID == "self-v1")
+
+    let events = await session.events
+    let drained = Task { for await _ in events {} }
+    // The data directory changed underneath the same address — the
+    // handshake now reports a different self-id.
+    await daemon.stampHandshake(daemonSelfID: "self-v2")
+    await daemon.endEventConnection()
+    #expect(await finishes(drained))
+
+    #expect(await eventually { await session.connectionState == .connected })
+    #expect(await eventually { await session.remoteDaemonSelfID == "self-v2" })
+
     await session.disconnect()
     await daemon.stop()
 }
