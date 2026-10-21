@@ -605,7 +605,7 @@ jobs:
         run: cargo build -p archductor -p archcar --locked
 
       - name: Smoke Windows local transport
-        run: cargo test -p archductor-core --locked archcar::transport::tests::local_transport_round_trips
+        run: cargo test -p archductor-core --locked archcar::transport::tests::
 
       - name: Smoke Windows platform helpers
         run: cargo test -p archductor-core --locked platform::tests

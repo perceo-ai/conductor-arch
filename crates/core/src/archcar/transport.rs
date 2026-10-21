@@ -119,6 +119,27 @@ pub fn wait_for_connection<F>(_listener: &F, timeout: std::time::Duration) -> io
 }
 
 #[cfg(windows)]
+fn singleton_lock_path(endpoint: &Path) -> std::path::PathBuf {
+    endpoint.with_extension("endpoint.lock")
+}
+
+/// Opens (creating if needed) the lock file for `endpoint` with share mode 0:
+/// no other handle may open this path at all while it is held, so whichever
+/// process wins this open owns the endpoint. Windows closes the handle when
+/// the process exits for any reason, including a crash, so a dead daemon
+/// never wedges later starts.
+#[cfg(windows)]
+fn acquire_singleton_lock(endpoint: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .share_mode(0)
+        .open(singleton_lock_path(endpoint))
+}
+
+#[cfg(windows)]
 pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     let listener = LocalListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let address = listener.local_addr()?;
@@ -309,5 +330,33 @@ mod tests {
         let err = bind(&endpoint).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_refuses_live_windows_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-live.endpoint");
+        let _listener = bind(&endpoint).unwrap();
+
+        let err = bind(&endpoint).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bind_reclaims_a_stale_windows_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-stale.endpoint");
+        {
+            // A prior daemon held the lock and left its endpoint file behind;
+            // dropping the handle is what the OS does when that process exits
+            // or crashes.
+            let _lock = acquire_singleton_lock(&endpoint).unwrap();
+            std::fs::write(&endpoint, "127.0.0.1:1\nstaletoken\n").unwrap();
+        }
+
+        assert!(bind(&endpoint).is_ok());
     }
 }
