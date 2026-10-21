@@ -2,7 +2,7 @@ use std::io;
 #[cfg(windows)]
 use std::io::{Read, Write};
 use std::path::Path;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -288,33 +288,80 @@ fn probe_pre_lock_daemon(endpoint: &Path, deadline: std::time::Instant) -> io::R
 
 /// Time left before `deadline`, or `TimedOut` once it has passed. Never zero,
 /// which the socket timeout setters reject.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn time_left(deadline: std::time::Instant) -> io::Result<Duration> {
     deadline
         .checked_duration_since(std::time::Instant::now())
         .filter(|left| !left.is_zero())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "pre-lock probe ran out of time"))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "ran out of time"))
 }
 
+/// The whole token line a client opens with must arrive inside this. `accept`
+/// reads it inline, before the connection gets a handler thread, so a client
+/// that trickles bytes would otherwise hold off every client queued behind it.
+#[cfg(any(windows, test))]
+const ACCEPT_TOKEN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The longest token line `accept` reads. The published token is two simple
+/// UUIDs, 64 bytes; a line past this is wrong already, so it is not drained.
+#[cfg(any(windows, test))]
+const ACCEPT_TOKEN_LINE_LIMIT: usize = 128;
+
+/// Accept the next client that opens with the endpoint's token line. A client
+/// that sends the wrong token, an oversized line, no newline before
+/// `ACCEPT_TOKEN_TIMEOUT`, or fails mid-handshake is dropped and the loop takes
+/// the next connection: one bad client must not stop the daemon serving others.
+/// Only a failure of the listener itself, `WouldBlock` included, returns.
 #[cfg(windows)]
 pub fn accept(listener: &LocalListener, endpoint: &Path) -> io::Result<(LocalStream, ())> {
     let expected = endpoint_token(endpoint)?;
     loop {
         let (mut stream, _) = listener.accept()?;
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-        let mut token = Vec::new();
-        let mut byte = [0_u8; 1];
-        while stream.read_exact(&mut byte).is_ok() {
-            if byte[0] == b'\n' {
-                break;
-            }
-            token.push(byte[0]);
-        }
-        if String::from_utf8_lossy(&token).trim_end_matches('\r') == expected {
-            stream.set_read_timeout(None)?;
+        if matches!(accept_token(&mut stream, &expected), Ok(true)) {
             return Ok((stream, ()));
         }
+    }
+}
+
+/// Whether `stream` opens with the token line `expected`, leaving it blocking
+/// with no timeouts, ready for RPCs, when it does.
+#[cfg(windows)]
+fn accept_token(stream: &mut LocalStream, expected: &str) -> io::Result<bool> {
+    stream.set_nonblocking(false)?;
+    let deadline = std::time::Instant::now() + ACCEPT_TOKEN_TIMEOUT;
+    let line = read_token_line(stream, deadline)?;
+    if String::from_utf8_lossy(&line).trim_end_matches('\r') != expected {
+        return Ok(false);
+    }
+    stream.set_stream_timeouts(None)?;
+    Ok(true)
+}
+
+/// Read a newline-terminated token line, without the newline. One byte at a
+/// time, so nothing past the newline leaves the RPC stream. Fails once
+/// `deadline` passes or the line outgrows `ACCEPT_TOKEN_LINE_LIMIT`: a timeout
+/// per read alone lets a client that sends a byte at a time and never a
+/// newline hold the read forever.
+#[cfg(any(windows, test))]
+fn read_token_line<S: DuplexStream>(
+    stream: &mut S,
+    deadline: std::time::Instant,
+) -> io::Result<Vec<u8>> {
+    let mut line = Vec::new();
+    let mut byte = [0_u8; 1];
+    loop {
+        stream.set_stream_timeouts(Some(time_left(deadline)?))?;
+        stream.read_exact(&mut byte)?;
+        if byte[0] == b'\n' {
+            return Ok(line);
+        }
+        if line.len() == ACCEPT_TOKEN_LINE_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archcar token line too long",
+            ));
+        }
+        line.push(byte[0]);
     }
 }
 
@@ -601,5 +648,192 @@ mod tests {
         );
         assert_ne!(std::fs::read_to_string(&endpoint).unwrap(), recorded);
         trickle.join().unwrap();
+    }
+
+    /// A connected loopback TCP pair, (client, server), which every platform
+    /// has: `read_token_line` is generic, so its bounds are proven here too,
+    /// not only on the Windows runner where `accept` uses it.
+    fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        (client, server)
+    }
+
+    #[test]
+    fn read_token_line_returns_the_line_and_leaves_the_rest_unread() {
+        let (mut client, mut server) = tcp_pair();
+        client.write_all(b"secret\nping").unwrap();
+
+        let deadline = std::time::Instant::now() + ACCEPT_TOKEN_TIMEOUT;
+        assert_eq!(read_token_line(&mut server, deadline).unwrap(), b"secret");
+        let mut rest = [0_u8; 4];
+        server.read_exact(&mut rest).unwrap();
+        assert_eq!(&rest, b"ping");
+    }
+
+    #[test]
+    fn read_token_line_stops_at_its_deadline_against_a_trickle_without_a_newline() {
+        let (mut client, mut server) = tcp_pair();
+        // A byte every 100ms, never a newline: each read succeeds well inside
+        // any per-read timeout, so only the deadline on the whole line stops it.
+        let trickle = std::thread::spawn(move || {
+            let stop = std::time::Instant::now() + ACCEPT_TOKEN_TIMEOUT * 4;
+            while std::time::Instant::now() < stop && client.write_all(b"x").is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let started = std::time::Instant::now();
+        let err = read_token_line(&mut server, started + ACCEPT_TOKEN_TIMEOUT).unwrap_err();
+        let waited = started.elapsed();
+        drop(server);
+
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+            ),
+            "{err:?}"
+        );
+        assert!(
+            waited < ACCEPT_TOKEN_TIMEOUT + Duration::from_secs(1),
+            "read ran {waited:?}, past its {ACCEPT_TOKEN_TIMEOUT:?} deadline"
+        );
+        trickle.join().unwrap();
+    }
+
+    #[test]
+    fn read_token_line_stops_at_its_cap_without_draining_the_line() {
+        let (mut client, mut server) = tcp_pair();
+        let sent = 4096;
+        client.write_all(&vec![b'x'; sent]).unwrap();
+        drop(client);
+
+        let started = std::time::Instant::now();
+        let deadline = started + ACCEPT_TOKEN_TIMEOUT;
+        let err = read_token_line(&mut server, deadline).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{err:?}");
+        // Refused on the byte past the cap, not after a read timeout.
+        assert!(started.elapsed() < Duration::from_secs(1));
+        // Everything past that byte is still unread.
+        server
+            .set_stream_timeouts(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut rest = Vec::new();
+        server.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest.len(), sent - ACCEPT_TOKEN_LINE_LIMIT - 1);
+    }
+
+    /// The loopback address `bind` published at `endpoint`, for a client that
+    /// connects without going through `connect`'s token line.
+    #[cfg(windows)]
+    fn published_address(endpoint: &Path) -> std::net::SocketAddr {
+        std::fs::read_to_string(endpoint)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Serve one connection through `accept`: answer its "ping" with "pong".
+    #[cfg(windows)]
+    fn spawn_ping_server(listener: LocalListener, endpoint: &Path) -> std::thread::JoinHandle<()> {
+        let endpoint = endpoint.to_path_buf();
+        std::thread::spawn(move || {
+            let (mut stream, _) = accept(&listener, &endpoint).unwrap();
+            let mut bytes = [0_u8; 4];
+            stream.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"ping");
+            stream.write_all(b"pong").unwrap();
+        })
+    }
+
+    /// Connect through `connect`, round-trip a ping, and return how long the
+    /// client waited to be served.
+    #[cfg(windows)]
+    fn ping_through_connect(endpoint: &Path) -> Duration {
+        let started = std::time::Instant::now();
+        let mut client = connect(endpoint).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        client.write_all(b"ping").unwrap();
+        let mut bytes = [0_u8; 4];
+        client.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"pong");
+        started.elapsed()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn accept_serves_a_client_queued_behind_one_that_trickles_without_a_newline() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-accept-trickle.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        // Connected first, so `accept` takes it first: it sends a byte every
+        // 100ms and never a newline, so each read succeeds well inside any
+        // per-read timeout and only a deadline on the whole token line stops
+        // it. Accept's token deadline is 2s; this trickles for 10s.
+        let mut trickler = LocalStream::connect(published_address(&endpoint)).unwrap();
+        let trickle = std::thread::spawn(move || {
+            let stop = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < stop && trickler.write_all(b"x").is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let server = spawn_ping_server(listener, &endpoint);
+
+        let waited = ping_through_connect(&endpoint);
+
+        assert!(
+            waited < Duration::from_secs(3),
+            "a well-behaved client waited {waited:?} behind a trickling one"
+        );
+        server.join().unwrap();
+        trickle.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn accept_drops_an_oversized_token_and_serves_the_next_client() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-accept-oversized.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        // Connected first: a token line far past the 64-byte token with no
+        // newline, then the connection is held open. It is wrong long before
+        // its end, so `accept` must drop it at the cap rather than drain it
+        // and then sit out a read timeout before serving the next client.
+        let mut oversized = LocalStream::connect(published_address(&endpoint)).unwrap();
+        oversized.write_all(&[b'x'; 4096]).unwrap();
+        oversized.flush().unwrap();
+        let server = spawn_ping_server(listener, &endpoint);
+
+        let waited = ping_through_connect(&endpoint);
+
+        assert!(
+            waited < Duration::from_secs(1),
+            "a well-behaved client waited {waited:?} behind an oversized token"
+        );
+        server.join().unwrap();
+        // The oversized connection was dropped, not left half-read: its peer
+        // sees the close.
+        oversized
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        match oversized.read(&mut byte) {
+            Ok(0) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) => {}
+            other => panic!("the oversized connection was not dropped: {other:?}"),
+        }
     }
 }
