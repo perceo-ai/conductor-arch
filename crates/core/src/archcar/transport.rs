@@ -602,4 +602,115 @@ mod tests {
         assert_ne!(std::fs::read_to_string(&endpoint).unwrap(), recorded);
         trickle.join().unwrap();
     }
+
+    /// The loopback address `bind` published at `endpoint`, for a client that
+    /// connects without going through `connect`'s token line.
+    #[cfg(windows)]
+    fn published_address(endpoint: &Path) -> std::net::SocketAddr {
+        std::fs::read_to_string(endpoint)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// Serve one connection through `accept`: answer its "ping" with "pong".
+    #[cfg(windows)]
+    fn spawn_ping_server(listener: LocalListener, endpoint: &Path) -> std::thread::JoinHandle<()> {
+        let endpoint = endpoint.to_path_buf();
+        std::thread::spawn(move || {
+            let (mut stream, _) = accept(&listener, &endpoint).unwrap();
+            let mut bytes = [0_u8; 4];
+            stream.read_exact(&mut bytes).unwrap();
+            assert_eq!(&bytes, b"ping");
+            stream.write_all(b"pong").unwrap();
+        })
+    }
+
+    /// Connect through `connect`, round-trip a ping, and return how long the
+    /// client waited to be served.
+    #[cfg(windows)]
+    fn ping_through_connect(endpoint: &Path) -> Duration {
+        let started = std::time::Instant::now();
+        let mut client = connect(endpoint).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        client.write_all(b"ping").unwrap();
+        let mut bytes = [0_u8; 4];
+        client.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"pong");
+        started.elapsed()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn accept_serves_a_client_queued_behind_one_that_trickles_without_a_newline() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-accept-trickle.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        // Connected first, so `accept` takes it first: it sends a byte every
+        // 100ms and never a newline, so each read succeeds well inside any
+        // per-read timeout and only a deadline on the whole token line stops
+        // it. Accept's token deadline is 2s; this trickles for 10s.
+        let mut trickler = LocalStream::connect(published_address(&endpoint)).unwrap();
+        let trickle = std::thread::spawn(move || {
+            let stop = std::time::Instant::now() + Duration::from_secs(10);
+            while std::time::Instant::now() < stop && trickler.write_all(b"x").is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let server = spawn_ping_server(listener, &endpoint);
+
+        let waited = ping_through_connect(&endpoint);
+
+        assert!(
+            waited < Duration::from_secs(3),
+            "a well-behaved client waited {waited:?} behind a trickling one"
+        );
+        server.join().unwrap();
+        trickle.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn accept_drops_an_oversized_token_and_serves_the_next_client() {
+        let temp = tempfile::tempdir().unwrap();
+        let endpoint = temp.path().join("archcar-accept-oversized.endpoint");
+        let listener = bind(&endpoint).unwrap();
+        // Connected first: a token line far past the 64-byte token with no
+        // newline, then the connection is held open. It is wrong long before
+        // its end, so `accept` must drop it at the cap rather than drain it
+        // and then sit out a read timeout before serving the next client.
+        let mut oversized = LocalStream::connect(published_address(&endpoint)).unwrap();
+        oversized.write_all(&[b'x'; 4096]).unwrap();
+        oversized.flush().unwrap();
+        let server = spawn_ping_server(listener, &endpoint);
+
+        let waited = ping_through_connect(&endpoint);
+
+        assert!(
+            waited < Duration::from_secs(1),
+            "a well-behaved client waited {waited:?} behind an oversized token"
+        );
+        server.join().unwrap();
+        // The oversized connection was dropped, not left half-read: its peer
+        // sees the close.
+        oversized
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut byte = [0_u8; 1];
+        match oversized.read(&mut byte) {
+            Ok(0) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+                ) => {}
+            other => panic!("the oversized connection was not dropped: {other:?}"),
+        }
+    }
 }
