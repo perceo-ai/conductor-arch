@@ -252,3 +252,54 @@ private final class Flag: @unchecked Sendable {
     await session.disconnect()
     await daemon.stop()
 }
+
+@MainActor
+@Test func heldTapIsResolvedAgainstTheReconnectsOwnLearnedSelfIDNotAStaleOne() async throws {
+    let online = Flag()
+    let daemon = try await MockDaemon()
+    await daemon.stampHandshake(daemonSelfID: "self-v1")
+    await daemon.respond { line in
+        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let id = object["id"] as? String,
+              let payload = object["payload"] as? [String: Any],
+              payload["type"] as? String == "get_inventory_snapshot" else { return nil }
+        return online.get()
+            ? #"{"id":"\#(id)","payload":\#(checkoutSnapshot)}"#
+            : #"{"id":"\#(id)","payload":{"type":"error","message":"daemon unreachable"}}"#
+    }
+    let session = DaemonSession(
+        address: await daemon.address, token: "t",
+        backoff: Backoff(base: .seconds(30), cap: .seconds(30)))
+    try await session.connect()
+    let store = WorkspacesStore(session: session)
+    let router = NotificationTapRouter()
+    router.inventory = { store }
+    // Read straight from the session at resolve time, as the app does: no
+    // cached copy that a reconnect's own refresh could outrun.
+    router.activeDaemonSelfID = { await session.remoteDaemonSelfID }
+    router.attach(to: store)
+    let observing = Task { await store.observe() }
+    try await Task.sleep(for: .milliseconds(150))
+
+    await store.refresh()
+    #expect(store.lastError != nil)
+    // Stamped with the id the next handshake will report, not the current one.
+    await router.tapped(NotificationTap(threadID: 42, daemonID: nil, daemonSelfID: "self-v2"))
+    #expect(router.request == nil)
+    #expect(router.hasPendingTap)
+
+    // Back online with a new self-id; the event stream drops and the session
+    // reconnects, whose refetch is the only thing that retries the tap.
+    online.set(true)
+    await daemon.stampHandshake(daemonSelfID: "self-v2")
+    await daemon.endEventConnection()
+    #expect(await eventually { await session.connectionState != .connected })
+    await session.reconnectNow()
+
+    let checkout = try workspace(name: "checkout")
+    #expect(await eventually { @MainActor in router.request == .found(workspace: checkout, threadID: 42) })
+
+    observing.cancel()
+    await session.disconnect()
+    await daemon.stop()
+}
