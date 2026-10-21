@@ -149,12 +149,25 @@ pub(crate) fn mark_session_busy_for_input(state: &mut SessionSnapshot) {
     state.turns.started += 1;
 }
 
-/// Records that the session's latest turn has finished. Called just before
-/// `TurnCompleted` is sent, so the daemon's mark for that event sees it.
-fn note_snapshot_turn_completed(snapshot: &Arc<Mutex<SessionSnapshot>>) {
+/// Sends `TurnCompleted`, first recording the session's latest turn as
+/// finished so the daemon's mark for this event sees it. Every completion goes
+/// through here: one sent without the record would leave `started` ahead of
+/// `completed`, and the daemon's ready mark -- the safety net for a lost
+/// `Ready` -- would never fire for that session again.
+pub(crate) fn send_turn_completed(
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    status: Option<String>,
+) {
     if let Ok(mut state) = snapshot.lock() {
         state.turns.completed = state.turns.started;
     }
+    let _ = event_tx.send(ArchcarEvent::TurnCompleted {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        status,
+    });
 }
 
 #[derive(Clone)]
@@ -753,12 +766,12 @@ fn apply_harness_effect(
                 });
                 return;
             }
-            note_snapshot_turn_completed(snapshot);
-            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                session_id: started.session_id,
-                thread_id: started.thread_id,
-                status: Some(harness_turn_status_label(status).to_owned()),
-            });
+            send_turn_completed(
+                snapshot,
+                event_tx,
+                started,
+                Some(harness_turn_status_label(status).to_owned()),
+            );
         }
         HarnessEffect::TurnSettled { status } => {
             info!(
@@ -768,12 +781,12 @@ fn apply_harness_effect(
                 status = harness_turn_status_label(status),
                 "managed harness turn settled"
             );
-            note_snapshot_turn_completed(snapshot);
-            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                session_id: started.session_id,
-                thread_id: started.thread_id,
-                status: Some(harness_turn_status_label(status).to_owned()),
-            });
+            send_turn_completed(
+                snapshot,
+                event_tx,
+                started,
+                Some(harness_turn_status_label(status).to_owned()),
+            );
         }
         HarnessEffect::ProviderEvent(draft) => {
             append_runtime_provider_event(runtime_store, draft, "provider_native_event");
@@ -2559,12 +2572,12 @@ fn run_codex_app_server_session_loop(
                                 return;
                             }
                         }
-                        note_snapshot_turn_completed(&snapshot);
-                        let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                            session_id: started.session_id,
-                            thread_id: started.thread_id,
-                            status: codex_turn_completed_status(&message),
-                        });
+                        send_turn_completed(
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            codex_turn_completed_status(&message),
+                        );
                         apply_harness_effect(
                             &runtime_store,
                             &snapshot,

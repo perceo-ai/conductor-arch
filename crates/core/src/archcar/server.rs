@@ -8637,6 +8637,166 @@ exit 1
         );
     }
 
+    /// A codex session busy for one input, with a follow-up waiting in its
+    /// chat queue: shared setup for the two turn-generation tests below.
+    struct BusyCodexSession {
+        state: Arc<Mutex<ServerState>>,
+        snapshot: Arc<Mutex<crate::archcar::session::SessionSnapshot>>,
+        command_rx: mpsc::Receiver<SessionCommand>,
+        store: WorkspaceStore,
+        thread_id: i64,
+    }
+
+    fn busy_codex_session_with_a_queued_follow_up(temp: &Path) -> BusyCodexSession {
+        let db_path = temp.join("state.db");
+        let logs_dir = temp.join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp);
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "follow up",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CODEX,
+            )
+            .unwrap();
+        let snapshot = Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::CODEX,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+            turns: Default::default(),
+        }));
+        // The loop's busy mark for the input that opens the turn.
+        crate::archcar::session::mark_session_busy_for_input(&mut snapshot.lock().unwrap());
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::clone(&snapshot),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path,
+            logs_dir,
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+        BusyCodexSession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id: thread.id,
+        }
+    }
+
+    /// The loop's completion path for the session's current turn: the
+    /// `TurnCompleted` it sends, taken off its channel.
+    fn loop_turn_completed(
+        snapshot: &Arc<Mutex<crate::archcar::session::SessionSnapshot>>,
+    ) -> ArchcarEvent {
+        let started = snapshot.lock().unwrap().clone();
+        let (event_tx, event_rx) = mpsc::channel();
+        crate::archcar::session::send_turn_completed(
+            snapshot,
+            &event_tx,
+            &started,
+            Some("completed".to_owned()),
+        );
+        let event = event_rx.try_recv().unwrap();
+        assert!(
+            matches!(event, ArchcarEvent::TurnCompleted { .. }),
+            "{event:?}"
+        );
+        event
+    }
+
+    /// The safety net the turn generation must not disable: the provider's
+    /// own `Ready` for a finished turn is lost, so the daemon's mark on
+    /// `TurnCompleted` is the only thing that makes the session ready. It
+    /// still fires for a session that went busy and finished its turn
+    /// through the loop's real completion path, and the queued follow-up is
+    /// delivered.
+    #[test]
+    fn turn_completion_without_ready_still_delivers_the_queued_follow_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusyCodexSession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = busy_codex_session_with_a_queued_follow_up(temp.path());
+
+        let completed = loop_turn_completed(&snapshot);
+        // No `Ready` follows: the session is still marked busy here.
+        assert!(!snapshot.lock().unwrap().ready);
+        handle_session_event(&state, completed);
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::SendInput { input, delivery: ArchcarInputDelivery::Auto, .. })
+                if input == "follow up"
+        ));
+        assert!(store.list_queued_chat_inputs(thread_id).unwrap().is_empty());
+    }
+
+    /// Failure this guards: the daemon's mark for a turn's `TurnCompleted`
+    /// runs after the loop has already marked the session ready, and a send
+    /// can open the next turn in between. The late mark used to set
+    /// `ready = true` over that turn's busy mark. It must leave it alone, so
+    /// nothing is drained into the live turn.
+    #[test]
+    fn a_late_turn_completion_leaves_a_newer_turn_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusyCodexSession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = busy_codex_session_with_a_queued_follow_up(temp.path());
+
+        let completed = loop_turn_completed(&snapshot);
+        // The loop's own `Ready`, then a send opens the next turn -- all
+        // before the daemon gets to the first turn's `TurnCompleted`.
+        {
+            let mut current = snapshot.lock().unwrap();
+            current.ready = true;
+            current.runtime_state = crate::session_state::AgentSessionState::WaitingForInput;
+            crate::archcar::session::mark_session_busy_for_input(&mut current);
+        }
+        handle_session_event(&state, completed);
+
+        let current = snapshot.lock().unwrap().clone();
+        assert!(!current.ready, "{current:?}");
+        assert_eq!(
+            current.runtime_state,
+            crate::session_state::AgentSessionState::Running
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert_eq!(store.list_queued_chat_inputs(thread_id).unwrap().len(), 1);
+    }
+
     fn interaction_draft_for(
         thread_id: i64,
         session_id: i64,
