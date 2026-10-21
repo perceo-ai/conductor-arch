@@ -167,13 +167,28 @@ pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     if !lock_existed && endpoint.exists() && pre_lock_daemon_answers(endpoint) {
         // Leave no lock file behind: the next start must probe this daemon
         // again, not trust a lock nobody holds.
-        drop(lock);
-        let _ = std::fs::remove_file(&lock_path);
+        release_singleton_lock(lock, &lock_path);
         return Err(live_listener_error());
     }
-    // Held until this process exits, crash included; the OS release is what
-    // lets the next daemon in.
-    std::mem::forget(lock);
+    match publish_endpoint(endpoint) {
+        Ok(listener) => {
+            // Held until this process exits, crash included; the OS release
+            // is what lets the next daemon in. Only now, once this process
+            // really serves the endpoint: forgetting it on a failed bind
+            // would refuse every later bind here for the life of the process.
+            std::mem::forget(lock);
+            Ok(listener)
+        }
+        Err(err) => {
+            release_singleton_lock(lock, &lock_path);
+            Err(err)
+        }
+    }
+}
+
+/// Bind the loopback listener and publish its address and token at `endpoint`.
+#[cfg(windows)]
+fn publish_endpoint(endpoint: &Path) -> io::Result<LocalListener> {
     let listener = LocalListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
     let address = listener.local_addr()?;
     let token = format!(
@@ -190,6 +205,15 @@ pub fn bind(endpoint: &Path) -> io::Result<LocalListener> {
     Ok(listener)
 }
 
+/// Give the lock up on a path where this process does not become the
+/// endpoint's daemon, removing the file so no later start trusts a lock nobody
+/// holds. Best effort: another start may already have it open again.
+#[cfg(windows)]
+fn release_singleton_lock(lock: std::fs::File, lock_path: &Path) {
+    drop(lock);
+    let _ = std::fs::remove_file(lock_path);
+}
+
 #[cfg(windows)]
 fn live_listener_error() -> io::Error {
     io::Error::new(
@@ -198,24 +222,32 @@ fn live_listener_error() -> io::Error {
     )
 }
 
-/// How long the pre-lock probe waits on each connect, write and read, so a
-/// listener that accepts but never answers cannot hold up startup.
+/// The whole pre-lock probe, connect through reply, must finish inside this,
+/// so a listener that never answers, or trickles bytes, cannot hold up startup
+/// while `bind` holds the singleton lock.
 #[cfg(windows)]
 const PRE_LOCK_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The most reply bytes the probe reads. It needs only the envelope's opening
+/// `{"id":"<uuid>","payload":`, not the whole line: a daemon's reply can run
+/// far longer, and a peer that never sends a newline must not grow a buffer.
+#[cfg(windows)]
+const PRE_LOCK_PROBE_REPLY_LIMIT: usize = 256;
 
 /// Whether a daemon still serves `endpoint`: it accepts the recorded token and
 /// answers an RPC with the same envelope id. A successful `connect` alone
 /// proves nothing, since writing the token succeeds against any listener and
-/// the server drops a connection with a wrong token without a word.
+/// the server drops a connection with a wrong token without a word. Any
+/// failure, including running out of time, reads as not live.
 #[cfg(windows)]
 fn pre_lock_daemon_answers(endpoint: &Path) -> bool {
-    probe_pre_lock_daemon(endpoint).unwrap_or(false)
+    let deadline = std::time::Instant::now() + PRE_LOCK_PROBE_TIMEOUT;
+    probe_pre_lock_daemon(endpoint, deadline).unwrap_or(false)
 }
 
 #[cfg(windows)]
-fn probe_pre_lock_daemon(endpoint: &Path) -> io::Result<bool> {
+fn probe_pre_lock_daemon(endpoint: &Path, deadline: std::time::Instant) -> io::Result<bool> {
     use crate::archcar::protocol::{ArchcarRequest, RpcEnvelope};
-    use std::io::BufRead;
 
     let contents = std::fs::read_to_string(endpoint)?;
     let mut lines = contents.lines();
@@ -225,23 +257,43 @@ fn probe_pre_lock_daemon(endpoint: &Path) -> io::Result<bool> {
     let Ok(address) = address.trim().parse::<std::net::SocketAddr>() else {
         return Ok(false);
     };
-    let mut stream = LocalStream::connect_timeout(&address, PRE_LOCK_PROBE_TIMEOUT)?;
-    stream.set_read_timeout(Some(PRE_LOCK_PROBE_TIMEOUT))?;
-    stream.set_write_timeout(Some(PRE_LOCK_PROBE_TIMEOUT))?;
+    let mut stream = LocalStream::connect_timeout(&address, time_left(deadline)?)?;
     // A read-only request every daemon build with Windows support answers.
     let request = RpcEnvelope {
         id: uuid::Uuid::new_v4().to_string(),
         payload: ArchcarRequest::ListLayoutPresets,
     };
     let line = serde_json::to_string(&request).map_err(io::Error::other)?;
+    stream.set_write_timeout(Some(time_left(deadline)?))?;
     stream.write_all(format!("{}\n{line}\n", token.trim_end()).as_bytes())?;
     stream.flush()?;
-    let mut reply = String::new();
-    io::BufReader::new(stream).read_line(&mut reply)?;
-    Ok(
-        serde_json::from_str::<RpcEnvelope<serde_json::Value>>(&reply)
-            .is_ok_and(|reply| reply.id == request.id),
-    )
+    // `RpcEnvelope` serializes `id` first, in every build, so a daemon's reply
+    // opens with exactly this.
+    let id = serde_json::to_string(&request.id).map_err(io::Error::other)?;
+    let expected = format!("{{\"id\":{id},\"payload\":");
+    if expected.len() > PRE_LOCK_PROBE_REPLY_LIMIT {
+        return Ok(false);
+    }
+    let mut reply = vec![0_u8; expected.len()];
+    let mut filled = 0;
+    while filled < reply.len() {
+        stream.set_read_timeout(Some(time_left(deadline)?))?;
+        match stream.read(&mut reply[filled..])? {
+            0 => return Ok(false),
+            read => filled += read,
+        }
+    }
+    Ok(reply == expected.as_bytes())
+}
+
+/// Time left before `deadline`, or `TimedOut` once it has passed. Never zero,
+/// which the socket timeout setters reject.
+#[cfg(windows)]
+fn time_left(deadline: std::time::Instant) -> io::Result<Duration> {
+    deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|left| !left.is_zero())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "pre-lock probe ran out of time"))
 }
 
 #[cfg(windows)]
