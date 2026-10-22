@@ -5,6 +5,15 @@
 //! they never see the real environment read. This binary sets the variable for
 //! its own process instead; it is the only test here, so nothing else in the
 //! suite can observe or race the change.
+//!
+//! LOAD-BEARING: this file must hold exactly ONE `#[test]`. It changes the
+//! process environment with bare `std::env::set_var`/`remove_var`, and that is
+//! safe only because a test binary with one test has no other thread to race
+//! it. The crate's shared `test_support::EnvGuard` (one env lock plus restore
+//! on drop) is `#[cfg(test)]` inside the library, so it cannot reach this
+//! binary. Before adding a second test here, give this file its own single
+//! lock-and-restore guard that every test in it takes, or the two tests will
+//! corrupt each other's environment at cargo's default parallelism.
 
 use archductor_core::archcar::remote;
 use archductor_core::paths::AppPaths;

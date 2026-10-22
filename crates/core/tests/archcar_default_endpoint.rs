@@ -6,6 +6,15 @@
 //! that single-threaded. Every XDG directory (`XDG_RUNTIME_DIR` too: it is the
 //! first base of the short-socket fallback) and `HOME` point into a tempdir
 //! first, so the developer's own state dir is never touched.
+//!
+//! LOAD-BEARING: this file must hold exactly ONE `#[test]`. It changes the
+//! process environment with bare `std::env::set_var`/`remove_var`, and that is
+//! safe only because a test binary with one test has no other thread to race
+//! it. The crate's shared `test_support::EnvGuard` (one env lock plus restore
+//! on drop) is `#[cfg(test)]` inside the library, so it cannot reach this
+//! binary. Before adding a second test here, give this file its own single
+//! lock-and-restore guard that every test in it takes, or the two tests will
+//! corrupt each other's environment at cargo's default parallelism.
 #![cfg(unix)]
 
 use archductor_core::archcar::server::ArchcarServer;

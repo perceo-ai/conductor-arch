@@ -1138,14 +1138,7 @@ fn error_response(id: Value, code: i64, message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    /// The session-binding tests read process environment, so they cannot run
-    /// beside each other.
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
+    use crate::test_support::EnvGuard;
 
     #[test]
     fn every_tool_has_a_unique_name_and_an_object_schema() {
@@ -1429,9 +1422,8 @@ mod tests {
 
     #[test]
     fn a_session_cannot_reach_a_workspace_that_is_not_its_own() {
-        let _guard = env_lock().lock().unwrap();
-        let previous = std::env::var_os(WORKSPACE_ENV);
-        std::env::set_var(WORKSPACE_ENV, "berlin");
+        let mut env = EnvGuard::lock();
+        env.set(WORKSPACE_ENV, "berlin");
         // Unreachable address: binding has to refuse before anything is dialed.
         let client = ArchcarClient::remote("127.0.0.1:1", "unused");
         let tools = tools();
@@ -1465,12 +1457,7 @@ mod tests {
             McpProfile::Full,
         )
         .unwrap();
-
-        if let Some(previous) = previous {
-            std::env::set_var(WORKSPACE_ENV, previous);
-        } else {
-            std::env::remove_var(WORKSPACE_ENV);
-        }
+        drop(env);
 
         assert!(refused.to_string().contains("berlin"), "{refused}");
         assert!(refused.to_string().contains("lisbon"), "{refused}");
@@ -1480,11 +1467,9 @@ mod tests {
 
     #[test]
     fn a_session_cannot_retitle_another_chat() {
-        let _guard = env_lock().lock().unwrap();
-        let previous_workspace = std::env::var_os(WORKSPACE_ENV);
-        let previous_thread = std::env::var_os(THREAD_ENV);
-        std::env::set_var(WORKSPACE_ENV, "berlin");
-        std::env::set_var(THREAD_ENV, "4");
+        let mut env = EnvGuard::lock();
+        env.set(WORKSPACE_ENV, "berlin");
+        env.set(THREAD_ENV, "4");
         let client = ArchcarClient::remote("127.0.0.1:1", "unused");
         let tools = tools();
         let tool = tools
@@ -1506,17 +1491,7 @@ mod tests {
             McpProfile::Session,
         )
         .unwrap();
-
-        if let Some(previous) = previous_workspace {
-            std::env::set_var(WORKSPACE_ENV, previous);
-        } else {
-            std::env::remove_var(WORKSPACE_ENV);
-        }
-        if let Some(previous) = previous_thread {
-            std::env::set_var(THREAD_ENV, previous);
-        } else {
-            std::env::remove_var(THREAD_ENV);
-        }
+        drop(env);
 
         assert!(refused.to_string().contains("chat 9"), "{refused}");
         assert_eq!(bound["thread_id"], 4);

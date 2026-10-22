@@ -7991,10 +7991,12 @@ mod tests {
         // No PR recorded and GitHub has none for the branch. The desktop
         // polls this every minute, so an unchanged answer must not make every
         // client re-pull the inventory.
-        use crate::workspace::tests::{env_lock, install_fake_gh, restore_path};
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        use crate::test_support::EnvGuard;
+        use crate::workspace::tests::install_fake_gh;
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
-        let old_path = install_fake_gh(
+        install_fake_gh(
+            &mut env,
             temp.path(),
             r#"#!/bin/sh
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
@@ -8048,7 +8050,6 @@ exit 1
             &state,
         );
 
-        restore_path(old_path);
         assert!(matches!(response, ArchcarResponse::Ack), "{response:?}");
         assert!(subscriber_rx.try_iter().next().is_none());
     }
