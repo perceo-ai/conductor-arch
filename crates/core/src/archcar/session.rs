@@ -98,6 +98,12 @@ pub enum SessionCommand {
         kind: ArchcarInputKind,
         delivery: ArchcarInputDelivery,
     },
+    /// A queued chat input the server's drain took off the thread's queue.
+    /// The claimed row travels with the command, so only this command can
+    /// put it back if the handoff fails.
+    SendQueuedInput {
+        claim: QueuedChatInputRecord,
+    },
     ApplyControl(HarnessControl),
     Resize {
         rows: u16,
@@ -105,6 +111,26 @@ pub enum SessionCommand {
     },
     InterruptTurn,
     Kill,
+}
+
+impl SessionCommand {
+    /// A queued input is handed over like an automatic send; the claim it
+    /// carries comes apart from it so the loop can requeue it on failure. Every
+    /// other command carries no claim.
+    fn split_queued_claim(self) -> (Self, Option<QueuedChatInputRecord>) {
+        match self {
+            Self::SendQueuedInput { claim } => (
+                Self::SendInput {
+                    input: claim.input.clone(),
+                    visible_input: claim.visible_input.clone(),
+                    kind: claim.input_kind.clone(),
+                    delivery: ArchcarInputDelivery::Auto,
+                },
+                Some(claim),
+            ),
+            command => (command, None),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -154,41 +180,9 @@ pub struct TurnGenerations {
     /// generation below one is live work, and one above it may be a busy mark
     /// whose input is still on its way to the session loop.
     retired: BTreeSet<u64>,
-    /// The queue row the server's drain claimed for the input it is handing
-    /// to the session loop. The loop takes it with that input and, if the
-    /// handoff fails, puts it back at the head of the thread's queue instead
-    /// of losing the message.
-    queued_handoff: Option<QueuedChatInputRecord>,
 }
 
 impl TurnGenerations {
-    /// Parks the claimed queue row until the session loop takes the input it
-    /// was claimed for.
-    pub(crate) fn park_queued_handoff(&mut self, claimed: QueuedChatInputRecord) {
-        self.queued_handoff = Some(claimed);
-    }
-
-    /// Takes the parked queue row if it was claimed for this input. An input
-    /// that did not come from the queue leaves it parked for the one that
-    /// did.
-    pub(crate) fn take_queued_handoff(
-        &mut self,
-        input: &str,
-        visible_input: Option<&str>,
-        kind: &ArchcarInputKind,
-    ) -> Option<QueuedChatInputRecord> {
-        let matches = self.queued_handoff.as_ref().is_some_and(|claimed| {
-            claimed.input == input
-                && claimed.visible_input.as_deref() == visible_input
-                && &claimed.input_kind == kind
-        });
-        if matches {
-            self.queued_handoff.take()
-        } else {
-            None
-        }
-    }
-
     /// The latest turn the session started has been reported finished.
     pub fn latest_turn_completed(&self) -> bool {
         self.completed == self.started
@@ -2182,6 +2176,7 @@ fn run_session_loop(
     );
     loop {
         while let Ok(command) = command_rx.try_recv() {
+            let (command, queued_handoff) = command.split_queued_claim();
             match command {
                 SessionCommand::SendInput {
                     input,
@@ -2243,8 +2238,6 @@ fn run_session_loop(
                         continue;
                     }
                     let persisted_input = visible_input.as_deref().unwrap_or(&input);
-                    let queued_handoff =
-                        take_queued_handoff(&snapshot, &input, visible_input.as_deref(), &kind);
                     info!(
                         session_id = current.session_id,
                         thread_id = current.thread_id,
@@ -2369,6 +2362,9 @@ fn run_session_loop(
                             continue;
                         }
                     }
+                }
+                SessionCommand::SendQueuedInput { .. } => {
+                    unreachable!("split_queued_claim hands a queued input over as SendInput")
                 }
                 SessionCommand::Kill => {
                     let current = snapshot.lock().unwrap().clone();
@@ -2936,6 +2932,7 @@ fn run_codex_app_server_session_loop(
         }
 
         while let Ok(command) = command_rx.try_recv() {
+            let (command, queued_handoff) = command.split_queued_claim();
             match command {
                 SessionCommand::SendInput {
                     input,
@@ -2944,8 +2941,6 @@ fn run_codex_app_server_session_loop(
                     delivery,
                 } => {
                     crate::archcar::test_hooks::pause_before_session_takes_input();
-                    let queued_handoff =
-                        take_queued_handoff(&snapshot, &input, visible_input.as_deref(), &kind);
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
                         false
                     } else {
@@ -3111,6 +3106,9 @@ fn run_codex_app_server_session_loop(
                         });
                     }
                 }
+                SessionCommand::SendQueuedInput { .. } => {
+                    unreachable!("split_queued_claim hands a queued input over as SendInput")
+                }
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
                 }
@@ -3256,6 +3254,7 @@ fn run_claude_stream_session_loop(
         );
 
         while let Ok(command) = command_rx.try_recv() {
+            let (command, queued_handoff) = command.split_queued_claim();
             match command {
                 SessionCommand::SendInput {
                     input,
@@ -3264,8 +3263,6 @@ fn run_claude_stream_session_loop(
                     delivery,
                 } => {
                     crate::archcar::test_hooks::pause_before_session_takes_input();
-                    let queued_handoff =
-                        take_queued_handoff(&snapshot, &input, visible_input.as_deref(), &kind);
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
                         false
                     } else {
@@ -3376,6 +3373,9 @@ fn run_claude_stream_session_loop(
                             user_input_sequence,
                         );
                     }
+                }
+                SessionCommand::SendQueuedInput { .. } => {
+                    unreachable!("split_queued_claim hands a queued input over as SendInput")
                 }
                 SessionCommand::Kill => {
                     kill_requested = true;
@@ -4002,21 +4002,6 @@ fn mark_snapshot_exited(snapshot: &Arc<Mutex<SessionSnapshot>>, exit_code: Optio
     }
 }
 
-/// The queue row the server claimed for this input, if it came from the
-/// thread's queue.
-fn take_queued_handoff(
-    snapshot: &Arc<Mutex<SessionSnapshot>>,
-    input: &str,
-    visible_input: Option<&str>,
-    kind: &ArchcarInputKind,
-) -> Option<QueuedChatInputRecord> {
-    snapshot
-        .lock()
-        .ok()?
-        .turns
-        .take_queued_handoff(input, visible_input, kind)
-}
-
 /// A queued input that never reached the provider goes back to the head of
 /// its thread's queue, so it is delivered when the thread next has a ready
 /// session instead of being lost with the failed one. Run before the session
@@ -4027,6 +4012,7 @@ fn requeue_failed_queued_handoff(
     event_tx: &Sender<ArchcarEvent>,
     claimed: Option<QueuedChatInputRecord>,
 ) {
+    // A direct send carries no claim: there is nothing to put back.
     let Some(claimed) = claimed else {
         return;
     };
@@ -4583,8 +4569,8 @@ mod tests {
             |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
         );
 
-        // What the server's queue drain does: claim the row, park it on the
-        // snapshot, mark the session busy, hand the input over.
+        // What the server's queue drain does: claim the row, mark the
+        // session busy, hand the input over with its claim.
         let queued = store
             .enqueue_chat_input(
                 thread.id,
@@ -4599,17 +4585,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(claimed.id, queued.id);
-        {
-            let mut state = snapshot.lock().unwrap();
-            state.turns.park_queued_handoff(claimed.clone());
-            mark_session_busy_for_input(&mut state);
-        }
+        mark_session_busy_for_input(&mut snapshot.lock().unwrap());
         command_tx
-            .send(SessionCommand::SendInput {
-                input: claimed.input.clone(),
-                visible_input: claimed.visible_input.clone(),
-                kind: claimed.input_kind.clone(),
-                delivery: ArchcarInputDelivery::Auto,
+            .send(SessionCommand::SendQueuedInput {
+                claim: claimed.clone(),
             })
             .unwrap();
 
@@ -4631,6 +4610,127 @@ mod tests {
             .iter()
             .all(|message| message.content != "run the tests"));
 
+        let _ = command_tx.send(SessionCommand::Kill);
+        drop(command_tx);
+        loop_thread.join().unwrap();
+    }
+
+    /// A direct send with the same words as a queued input, ahead of it in
+    /// the channel, must not take the queued input's claim: the claim travels
+    /// inside the queued command, so when that handoff fails its row goes back
+    /// on the queue.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identical_direct_send_does_not_take_a_queued_inputs_claim() {
+        use std::os::fd::OwnedFd;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        // Reads exactly one line, then closes its end: the first write lands,
+        // every later one fails with EPIPE.
+        let mut child = ProcessCommand::new("bash")
+            .args([
+                "-c",
+                "IFS= read -r -d $'\\r' _line; exec 0<&-; exec sleep 30",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let write = fs::File::from(OwnedFd::from(child.stdin.take().unwrap()));
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, pid)
+            .unwrap();
+        let connection = ManagedSessionConnection::Reattached {
+            write,
+            output: Arc::new(Mutex::new(String::new())),
+            read_cursor: 0,
+            pid,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            pid,
+            true,
+        )));
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let loop_thread = thread::spawn(move || {
+            run_session_loop(
+                db_path,
+                logs_dir,
+                snapshot_for_loop,
+                controller_for_kind(SessionKind::CODEX),
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "run the tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CODEX,
+            )
+            .unwrap();
+        let claimed = store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .unwrap();
+        // The same words sent directly, steering the turn: it is written.
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: claimed.input.clone(),
+                visible_input: claimed.visible_input.clone(),
+                kind: claimed.input_kind.clone(),
+                delivery: ArchcarInputDelivery::Immediate,
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_link(format!("/proc/{pid}/fd/0")).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the direct send never reached the session"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Then the queued input itself, whose write fails.
+        command_tx
+            .send(SessionCommand::SendQueuedInput {
+                claim: claimed.clone(),
+            })
+            .unwrap();
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionError { session_id, .. } if *session_id == Some(process.id)),
+        );
+        let remaining = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the direct send took the queued input's claim, so its failed handoff lost it"
+        );
+        assert_eq!(remaining[0].id, claimed.id);
+
+        let _ = child.kill();
+        let _ = child.wait();
         let _ = command_tx.send(SessionCommand::Kill);
         drop(command_tx);
         loop_thread.join().unwrap();

@@ -4164,19 +4164,12 @@ fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
     // prompts and leaves the harness's turn accounting waiting for a
     // completion that never comes. TurnCompleted drains the next one.
     let readiness_before = note_session_not_ready_for_queue(&handle);
-    // The row is off the queue from here on. Park it where the session loop
-    // will take it with the input, so a handoff that fails inside the loop
-    // puts it back rather than losing the message.
-    if let Ok(mut snapshot) = handle.snapshot.lock() {
-        snapshot.turns.park_queued_handoff(queued.clone());
-    }
+    // The row is off the queue from here on. It travels inside the command,
+    // so a handoff that fails inside the loop puts back this row and no other.
     match handle
         .command_tx
-        .send(crate::archcar::session::SessionCommand::SendInput {
-            input: queued.input.clone(),
-            visible_input: queued.visible_input.clone(),
-            kind: queued.input_kind.clone(),
-            delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+        .send(crate::archcar::session::SessionCommand::SendQueuedInput {
+            claim: queued.clone(),
         }) {
         Ok(()) => {
             crate::archcar::test_hooks::pause_after_provider_handoff();
@@ -4186,16 +4179,8 @@ fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
             );
         }
         Err(err) => {
-            // The input never reached the session; undo the busy mark and
-            // the parked claim, and requeue the row here.
+            // The input never reached the session; undo the busy mark.
             restore_session_readiness(&handle, readiness_before);
-            if let Ok(mut snapshot) = handle.snapshot.lock() {
-                snapshot.turns.take_queued_handoff(
-                    &queued.input,
-                    queued.visible_input.as_deref(),
-                    &queued.input_kind,
-                );
-            }
             if let Err(restore_err) = store.requeue_claimed_chat_input_front(&queued) {
                 warn!(
                     thread_id,
@@ -8664,12 +8649,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::SendInput {
-                input,
-                visible_input,
-                delivery: ArchcarInputDelivery::Auto,
-                ..
-            }) if input == "run tests" && visible_input.as_deref() == Some("visible tests")
+            Ok(crate::archcar::session::SessionCommand::SendQueuedInput { claim }) if claim.input == "run tests" && claim.visible_input.as_deref() == Some("visible tests")
         ));
         assert_eq!(
             WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
@@ -8757,8 +8737,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(SessionCommand::SendInput { input, delivery: ArchcarInputDelivery::Auto, .. })
-                if input == "follow up"
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
         ));
         assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
         assert_eq!(
@@ -8881,8 +8860,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(SessionCommand::SendInput { input, delivery: ArchcarInputDelivery::Auto, .. })
-                if input == "follow up"
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
         ));
         assert!(store.list_queued_chat_inputs(thread_id).unwrap().is_empty());
     }
@@ -8973,7 +8951,7 @@ exit 1
         handle_session_event(&state, completed);
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(SessionCommand::SendInput { input, .. }) if input == "follow up"
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
         ));
     }
 
@@ -8998,8 +8976,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(SessionCommand::SendInput { input, delivery: ArchcarInputDelivery::Auto, .. })
-                if input == "follow up"
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
         ));
         assert!(store.list_queued_chat_inputs(thread_id).unwrap().is_empty());
     }
@@ -9276,8 +9253,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::SendInput { input, .. })
-                if input == "left over from before the restart"
+            Ok(crate::archcar::session::SessionCommand::SendQueuedInput { claim }) if claim.input == "left over from before the restart"
         ));
         assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
     }
@@ -9583,11 +9559,7 @@ exit 1
         ));
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::SendInput {
-                input,
-                delivery: ArchcarInputDelivery::Auto,
-                ..
-            }) if input == "run tests"
+            Ok(crate::archcar::session::SessionCommand::SendQueuedInput { claim }) if claim.input == "run tests"
         ));
         assert!(
             WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
