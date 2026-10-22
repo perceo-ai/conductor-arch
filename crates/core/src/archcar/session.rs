@@ -213,7 +213,11 @@ impl TurnGenerations {
             // everything. The max over every matching entry is load-bearing:
             // a refused steer's input is noted at two generations, the
             // steer's and its fallback turn's, and the fallback turn's
-            // completion must finish both.
+            // completion must finish both. This assumes turns complete in
+            // order: if the fallback turn's completion arrived before the
+            // still-live named turn's, it would reach `started`, finish the
+            // named turn's input too, and the loop would mark the session
+            // ready over that turn (as `Latest` always has).
             FinishedTurn::Inputs(local_input_ids) => self
                 .inputs
                 .iter()
