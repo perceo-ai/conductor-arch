@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -149,6 +149,11 @@ pub struct TurnGenerations {
     inputs: VecDeque<(String, u64)>,
     /// The newest of those generations claude has taken in.
     taken: u64,
+    /// Generations above `completed` whose input failed before any turn took
+    /// it in. `completed` steps over them only once it reaches them: a
+    /// generation below one is live work, and one above it may be a busy mark
+    /// whose input is still on its way to the session loop.
+    retired: BTreeSet<u64>,
 }
 
 impl TurnGenerations {
@@ -161,6 +166,29 @@ impl TurnGenerations {
     /// for.
     pub(crate) fn note_input(&mut self, local_input_id: String) {
         self.inputs.push_back((local_input_id, self.started));
+    }
+
+    /// The input failed before any turn took it in, so no completion will
+    /// finish the generations it started; they end here instead, without
+    /// finishing any other.
+    pub(crate) fn retire_input(&mut self, local_input_id: &str) {
+        let completed = self.completed;
+        self.retired.extend(
+            self.inputs
+                .iter()
+                .filter(|(id, generation)| id == local_input_id && *generation > completed)
+                .map(|(_, generation)| *generation),
+        );
+        self.inputs.retain(|(id, _)| id != local_input_id);
+        self.catch_up_over_retired();
+    }
+
+    fn catch_up_over_retired(&mut self) {
+        while self.retired.remove(&(self.completed + 1)) {
+            self.completed += 1;
+        }
+        let completed = self.completed;
+        self.retired.retain(|generation| *generation > completed);
     }
 
     /// The provider has taken the input in: a turn is answering it now.
@@ -182,7 +210,10 @@ impl TurnGenerations {
                 .find(|(id, _)| id == local_input_id)
                 .map_or(self.started, |(_, generation)| self.taken.max(*generation)),
             // As above, a turn none of whose inputs were recorded finishes
-            // everything.
+            // everything. The max over every matching entry is load-bearing:
+            // a refused steer's input is noted at two generations, the
+            // steer's and its fallback turn's, and the fallback turn's
+            // completion must finish both.
             FinishedTurn::Inputs(local_input_ids) => self
                 .inputs
                 .iter()
@@ -194,6 +225,7 @@ impl TurnGenerations {
         self.completed = self.completed.max(finished);
         self.taken = self.taken.max(finished);
         self.inputs.retain(|(_, generation)| *generation > finished);
+        self.catch_up_over_retired();
     }
 }
 
@@ -242,6 +274,35 @@ pub(crate) fn send_turn_completed(
         thread_id: started.thread_id,
         status,
     });
+}
+
+/// Retires a codex input that failed before any turn took it in. The session
+/// is ready again only if nothing newer is live; otherwise the live turn's
+/// completion makes it ready.
+fn retire_failed_codex_input(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    native_thread_id: &mut Option<String>,
+    local_input_id: &str,
+) {
+    let latest_turn_completed = snapshot.lock().map_or(true, |mut state| {
+        state.turns.retire_input(local_input_id);
+        state.turns.latest_turn_completed()
+    });
+    if latest_turn_completed {
+        apply_harness_effect(
+            runtime_store,
+            snapshot,
+            event_tx,
+            started,
+            native_thread_id,
+            HarnessEffect::Ready,
+        );
+    } else {
+        mark_snapshot_running_not_ready(snapshot);
+    }
 }
 
 #[derive(Clone)]
@@ -2619,6 +2680,14 @@ fn run_codex_app_server_session_loop(
                                                 "Codex app-server thread is not initialized yet"
                                                     .to_owned(),
                                         });
+                                        retire_failed_codex_input(
+                                            &runtime_store,
+                                            &snapshot,
+                                            &event_tx,
+                                            &started,
+                                            &mut connection.native_thread_id,
+                                            &pending.local_input_id,
+                                        );
                                         continue;
                                     };
                                     fallback_request_sequence =
@@ -2674,7 +2743,6 @@ fn run_codex_app_server_session_loop(
                                             error,
                                         );
                                     }
-                                    mark_snapshot_running_not_ready(&snapshot);
                                     let _ = event_tx.send(ArchcarEvent::SessionError {
                                         session_id: Some(started.session_id),
                                         thread_id: Some(started.thread_id),
@@ -2682,6 +2750,18 @@ fn run_codex_app_server_session_loop(
                                             "Codex app-server input request failed".to_owned()
                                         }),
                                     });
+                                    // A rejected start, or a refused steer's
+                                    // rejected fallback start: no turn has
+                                    // the input, so no completion will finish
+                                    // the generations it started.
+                                    retire_failed_codex_input(
+                                        &runtime_store,
+                                        &snapshot,
+                                        &event_tx,
+                                        &started,
+                                        &mut connection.native_thread_id,
+                                        &pending.local_input_id,
+                                    );
                                 }
                             }
                         }
@@ -4057,6 +4137,44 @@ mod tests {
         turns.finish(FinishedTurn::Inputs(&["steer-input".to_owned()]));
         assert!(turns.latest_turn_completed(), "{turns:?}");
         assert!(turns.inputs.is_empty(), "{turns:?}");
+    }
+
+    /// The refused steer's fallback start is rejected while the turn the
+    /// steer named is still live: that turn's completion must then finish
+    /// everything, as nothing else is live.
+    #[test]
+    fn a_failed_input_retires_its_generations_once_the_live_turn_ends() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.retire_input("steer-input");
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
+        assert_eq!(turns.completed, 0, "the live turn is not finished");
+
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(
+            turns.inputs.is_empty() && turns.retired.is_empty(),
+            "{turns:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_input_with_nothing_live_finishes_at_once() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        turns.retire_input("steer-input");
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+    }
+
+    /// A busy mark whose input has not reached the session loop yet has no
+    /// ledger entry; retiring an older input must not step over it.
+    #[test]
+    fn retiring_an_input_does_not_finish_a_newer_busy_mark() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        turns.started += 1;
+        turns.retire_input("steer-input");
+        assert_eq!(turns.completed, 3, "{turns:?}");
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
     }
 
     #[test]
