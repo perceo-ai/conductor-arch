@@ -2357,6 +2357,212 @@ fn cli_session_queued_send_dropped_before_the_turn_starts_resolves_to_failed() {
     wait_for_session_exit(temp.path(), session_id);
 }
 
+/// Failure this guards: the daemon takes a queued message off the queue
+/// before the session loop writes it to the provider. When the loop then
+/// failed the handoff, the session was marked failed but the message was
+/// simply gone -- the user had to notice and retype it. It must go back to the
+/// head of the thread's queue, and be delivered (and shown in the thread)
+/// once, by the next session.
+#[cfg(unix)]
+#[test]
+fn cli_session_queued_send_dropped_before_the_turn_starts_stays_queued_for_the_next_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let force_error = temp.path().join("force-first-turn-check-error");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            (
+                "ARCHDUCTOR_TEST_FORCE_FIRST_TURN_CHECK_ERROR_PATH",
+                &force_error,
+            ),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    app()
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app()
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+    fs::write(
+        repo_path.join(".archductor/settings.local.toml"),
+        format!(
+            "codex_executable_path = {:?}\n",
+            fake_codex.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the second task",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("queued codex message"));
+
+    let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
+    let session = store.list_sessions("berlin").unwrap()[0].clone();
+    let session_id = session.id;
+    let thread_id = session.chat_thread_id.unwrap();
+
+    // From here on the session loop's first-turn history check fails. End
+    // turn 1: the daemon marks the session busy and hands "Then the second
+    // task" to the loop, which drops it before starting a turn.
+    fs::write(&force_error, "").unwrap();
+    fs::write(release.with_extension("1"), "").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = app()
+            .args(["archcar", "status", &session_id.to_string()])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let daemon_status = String::from_utf8(output).unwrap();
+        if daemon_status.contains("state=failed") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "a dropped send must resolve the session to failed, not leave it claiming a turn: {daemon_status}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    // The message never reached the provider, so it is back at the head of
+    // the thread's queue rather than gone with the failed session, and the
+    // thread does not claim it was sent.
+    let output = app()
+        .args(["status", "berlin", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(
+        status["workspaces"][0]["sessions"][0]["queued_inputs"], 1,
+        "{status}"
+    );
+    app()
+        .args(["archcar", "queue", "list", &thread_id.to_string()])
+        .assert()
+        .success()
+        .stdout(contains("Then the second task"));
+    let sent = |text: &str| {
+        WorkspaceStore::open(app_database_path(temp.path()))
+            .unwrap()
+            .list_chat_messages(thread_id)
+            .unwrap()
+            .iter()
+            .filter(|message| message.content == text)
+            .count()
+    };
+    assert_eq!(sent("Then the second task"), 0);
+
+    // The next session for the thread delivers it, ahead of anything queued
+    // after it, and the thread shows it once.
+    app()
+        .args(["archcar", "kill", &session_id.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), session_id);
+    fs::remove_file(&force_error).unwrap();
+    app()
+        .args([
+            "archcar",
+            "queue",
+            "add",
+            &thread_id.to_string(),
+            "And a third",
+        ])
+        .assert()
+        .success();
+    // A fresh session has to spawn and come up first, and every handoff on
+    // this daemon stalls.
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let delivered: Vec<String> = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        delivered[1].contains("Then the second task"),
+        "{delivered:?}"
+    );
+    assert!(delivered[2].contains("And a third"), "{delivered:?}");
+    assert_eq!(sent("Then the second task"), 1);
+
+    let live = WorkspaceStore::open(app_database_path(temp.path()))
+        .unwrap()
+        .list_sessions("berlin")
+        .unwrap()
+        .into_iter()
+        .find(|session| session.status == archductor_core::workspace::ProcessStatus::Running)
+        .expect("the retry ran in a new session");
+    app()
+        .args(["archcar", "kill", &live.id.to_string()])
+        .assert()
+        .success();
+    wait_for_session_exit(temp.path(), live.id);
+}
+
 /// Failure this guards: a provider that dies mid-handshake leaves the session
 /// with `runtime_state = failed` while its process `status` still reads
 /// `running`, and `session send` printed both side by side, e.g. "session 1 is
