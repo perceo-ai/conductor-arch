@@ -1795,6 +1795,130 @@ fn cli_session_send_after_a_refused_codex_steer_queues_behind_the_fallback_turn(
     kill_berlin_session(&app, temp.path());
 }
 
+/// Failure this guards: the same refused steer as above, in the other order.
+/// Codex refuses the steer while the turn it named is still ending, the loop
+/// starts the fallback turn, and only then does the old turn's
+/// `turn/completed` arrive. That completion finished every turn started so
+/// far, the fallback turn's included, and marked the session ready over it,
+/// so the next ordinary send was steered into the fallback turn instead of
+/// queueing. A codex completion now finishes only the inputs that joined the
+/// turn it names.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_after_a_steer_refused_before_its_turn_completed_queues_behind_the_fallback_turn(
+) {
+    let temp = tempfile::tempdir().unwrap();
+    init_repo(temp.path().join("demo"));
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+            ("ARCHDUCTOR_FAKE_CODEX_STEER", Path::new("refuse-first")),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    create_berlin_workspace(&app, temp.path(), "codex_executable_path", &fake_codex);
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+
+    let events = subscribe_to_archcar_events(temp.path());
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--immediate",
+            "--timeout-ms",
+            "5000",
+            "Also check the edge case",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent codex immediate message"));
+    // The refused steer, the fallback turn, and only then turn 1's
+    // completion, which is the one completion so far.
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    wait_for_archcar_event(&events, "turn_completed");
+
+    let output = app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "1000",
+            "Then the third task",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(
+        stdout.contains("queued codex message"),
+        "a send after the old turn's late completion must queue behind the fallback turn, \
+         not join it: {stdout}"
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read_to_string(&provider_inputs)
+            .unwrap()
+            .lines()
+            .count(),
+        3,
+        "the third message must wait for the fallback turn to end"
+    );
+    fs::write(release.with_extension("2"), "").unwrap();
+    wait_for_file_lines_through_stalls(&provider_inputs, 4);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured[1..],
+        [
+            (
+                "turn/steer".to_owned(),
+                "Also check the edge case".to_owned()
+            ),
+            (
+                "turn/start".to_owned(),
+                "Also check the edge case".to_owned()
+            ),
+            ("turn/start".to_owned(), "Then the third task".to_owned()),
+        ],
+        "{captured:?}"
+    );
+
+    kill_berlin_session(&app, temp.path());
+}
+
 /// Failure this guards: the daemon marks a session busy before it hands a
 /// queued message to the session loop, trusting the loop to either start the
 /// turn or mark the session failed. Two `continue` paths in the loop's
@@ -2429,6 +2553,11 @@ for raw in sys.stdin:
 /// the open turn ended on codex's side: the turn's `turn/completed` goes out
 /// first, then the steer is refused, as codex refuses a steer whose
 /// `expectedTurnId` is no longer the active turn.
+///
+/// With `$ARCHDUCTOR_FAKE_CODEX_STEER=refuse-first`, the steer is refused
+/// while the turn it named is still ending, and that turn's `turn/completed`
+/// only goes out once the next turn has started: after the fallback
+/// `turn/start`'s response and `turn/started`.
 #[cfg(unix)]
 fn write_fake_held_codex(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -2445,8 +2574,10 @@ import time
 capture = os.environ["ARCHDUCTOR_CAPTURE_PATH"]
 release = os.environ["ARCHDUCTOR_RELEASE_PATH"]
 late_steer = os.environ.get("ARCHDUCTOR_FAKE_CODEX_STEER") == "late"
+refuse_first = os.environ.get("ARCHDUCTOR_FAKE_CODEX_STEER") == "refuse-first"
 lock = threading.RLock()
 completed = set()
+ending = []
 
 def emit(message):
     with lock:
@@ -2483,6 +2614,12 @@ for raw in sys.stdin:
         emit({"id": message["id"], "result": {"turn": {"id": turn_id}}})
         emit({"method": "turn/started", "params": {"turn": {"id": turn_id}}})
         threading.Thread(target=complete_when_released, args=(turns, turn_id), daemon=True).start()
+        while ending:
+            complete(ending.pop())
+    elif method == "turn/steer" and refuse_first:
+        record(method, message["params"])
+        ending.append(message["params"]["expectedTurnId"])
+        emit({"id": message["id"], "error": {"code": -32600, "message": "no active turn to steer"}})
     elif method == "turn/steer" and late_steer:
         record(method, message["params"])
         with lock:
