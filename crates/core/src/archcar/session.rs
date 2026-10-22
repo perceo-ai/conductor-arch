@@ -135,14 +135,17 @@ pub struct SessionSnapshot {
 /// with no boundary left, run as a turn of its own after it. So for claude
 /// each input keeps the generation it started, and a completion catches
 /// `completed` up only to the inputs claude had taken in by then. A codex
-/// steer always joins the open turn, so a codex completion finishes every
-/// generation started so far.
+/// input keeps its generation too: an accepted steer joins the turn it named,
+/// but a refused one starts a turn of its own, which can be live before the
+/// turn it named reports completed. So a codex completion finishes only the
+/// inputs that joined the turn it names.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TurnGenerations {
     pub started: u64,
     pub completed: u64,
-    /// The generation each claude input started, oldest first, until a
-    /// completion finishes it.
+    /// The generation each input started, oldest first, until a completion
+    /// finishes it. A refused codex steer is noted again for the turn it
+    /// starts instead.
     inputs: VecDeque<(String, u64)>,
     /// The newest of those generations claude has taken in.
     taken: u64,
@@ -178,6 +181,15 @@ impl TurnGenerations {
                 .iter()
                 .find(|(id, _)| id == local_input_id)
                 .map_or(self.started, |(_, generation)| self.taken.max(*generation)),
+            // As above, a turn none of whose inputs were recorded finishes
+            // everything.
+            FinishedTurn::Inputs(local_input_ids) => self
+                .inputs
+                .iter()
+                .filter(|(id, _)| local_input_ids.contains(id))
+                .map(|(_, generation)| *generation)
+                .max()
+                .unwrap_or(self.started),
         };
         self.completed = self.completed.max(finished);
         self.taken = self.taken.max(finished);
@@ -192,6 +204,8 @@ pub(crate) enum FinishedTurn<'a> {
     /// The turn this input ran in: it, and any later input the provider took
     /// into the same turn.
     Input(&'a str),
+    /// The codex turn these inputs joined, and every turn before it.
+    Inputs(&'a [String]),
 }
 
 fn note_input_taken(snapshot: &Arc<Mutex<SessionSnapshot>>, local_input_id: &str) {
@@ -2453,7 +2467,8 @@ fn run_codex_app_server_session_loop(
         .unwrap_or(0);
     let mut fallback_request_sequence = 0_u64;
     let mut active_turn_id: Option<String> = None;
-    let mut active_input_ids = Vec::<String>::new();
+    // Each acknowledged input, with the turn it joined.
+    let mut active_inputs = Vec::<(Option<String>, String)>::new();
     let mut pending_input_requests = HashMap::<u64, PendingCodexInputRequest>::new();
     let mut control_adapter = CodexManagedAdapter::new(HarnessAdapterContext {
         session_id: started.session_id,
@@ -2567,7 +2582,33 @@ fn run_codex_app_server_session_loop(
                                         );
                                         return;
                                     }
-                                    active_input_ids.push(pending.local_input_id);
+                                    // A steer accepted for a turn that has
+                                    // already completed: that completion
+                                    // finished it, as it named the turn.
+                                    if pending.turn_id.is_some()
+                                        && pending.turn_id != active_turn_id
+                                    {
+                                        if let Err(err) = runtime_store
+                                            .mark_provider_input_terminal(&pending.local_input_id)
+                                        {
+                                            mark_provider_session_failed(
+                                                &runtime_store,
+                                                &snapshot,
+                                                &event_tx,
+                                                &started,
+                                                format!(
+                                                    "Codex input terminal persistence failed: {err:#}"
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                    } else {
+                                        let joined_turn_id = pending
+                                            .turn_id
+                                            .or_else(|| codex_turn_id_from_message(&message));
+                                        active_inputs
+                                            .push((joined_turn_id, pending.local_input_id));
+                                    }
                                 }
                                 CodexInputResponseAction::RetryStart => {
                                     let Some(thread_id) = provider_thread_id.as_deref() else {
@@ -2592,6 +2633,7 @@ fn run_codex_app_server_session_loop(
                                     // session is busy with like any other.
                                     if let Ok(mut state) = snapshot.lock() {
                                         mark_session_busy_for_input(&mut state);
+                                        state.turns.note_input(pending.local_input_id.clone());
                                     }
                                     let params = codex_turn_start_params(
                                         &connection,
@@ -2621,6 +2663,7 @@ fn run_codex_app_server_session_loop(
                                             kind: CodexInputRequestKind::ImmediateFallbackStart,
                                             local_input_id: pending.local_input_id,
                                             input: pending.input,
+                                            turn_id: None,
                                         },
                                     );
                                 }
@@ -2643,16 +2686,28 @@ fn run_codex_app_server_session_loop(
                             }
                         }
                     }
-                    if let Some(turn_id) = codex_turn_id_from_message(&message) {
-                        active_turn_id = Some(turn_id);
-                        control_adapter.set_active_turn_id(active_turn_id.clone());
-                    }
                     if message.method.as_deref() == Some("turn/completed") {
-                        active_turn_id = None;
-                        control_adapter.set_active_turn_id(None);
-                        for local_input_id in active_input_ids.drain(..) {
+                        let completed_turn_id = codex_turn_id_from_message(&message);
+                        // A late completion for an older turn leaves a newer
+                        // live turn the one to steer into.
+                        if completed_turn_id.is_none() || completed_turn_id == active_turn_id {
+                            active_turn_id = None;
+                            control_adapter.set_active_turn_id(None);
+                        }
+                        let (finished, still_active): (Vec<_>, Vec<_>) =
+                            active_inputs.drain(..).partition(|(turn_id, _)| {
+                                completed_turn_id.is_none()
+                                    || turn_id.is_none()
+                                    || *turn_id == completed_turn_id
+                            });
+                        active_inputs = still_active;
+                        let mut finished_input_ids = finished
+                            .into_iter()
+                            .map(|(_, local_input_id)| local_input_id)
+                            .collect::<Vec<_>>();
+                        for local_input_id in &finished_input_ids {
                             if let Err(err) =
-                                runtime_store.mark_provider_input_terminal(&local_input_id)
+                                runtime_store.mark_provider_input_terminal(local_input_id)
                             {
                                 mark_provider_session_failed(
                                     &runtime_store,
@@ -2664,22 +2719,50 @@ fn run_codex_app_server_session_loop(
                                 return;
                             }
                         }
-                        // Steers joined this turn, so it finishes them too.
+                        // A steer still waiting on its answer named this
+                        // turn, so the turn finishes it too; if codex refuses
+                        // it, the turn it starts instead is a newer one.
+                        finished_input_ids.extend(
+                            pending_input_requests
+                                .values()
+                                .filter(|pending| {
+                                    pending.turn_id.is_some()
+                                        && pending.turn_id == completed_turn_id
+                                })
+                                .map(|pending| pending.local_input_id.clone()),
+                        );
+                        // Without a turn id, or with no input known to have
+                        // joined the turn, the completion cannot be placed,
+                        // so it finishes everything.
+                        let finished_turn =
+                            if completed_turn_id.is_none() || finished_input_ids.is_empty() {
+                                FinishedTurn::Latest
+                            } else {
+                                FinishedTurn::Inputs(&finished_input_ids)
+                            };
                         send_turn_completed(
                             &snapshot,
                             &event_tx,
                             &started,
-                            FinishedTurn::Latest,
+                            finished_turn,
                             codex_turn_completed_status(&message),
                         );
-                        apply_harness_effect(
-                            &runtime_store,
-                            &snapshot,
-                            &event_tx,
-                            &started,
-                            &mut connection.native_thread_id,
-                            HarnessEffect::Ready,
-                        );
+                        let latest_turn_completed = snapshot
+                            .lock()
+                            .map_or(true, |state| state.turns.latest_turn_completed());
+                        if latest_turn_completed {
+                            apply_harness_effect(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                &mut connection.native_thread_id,
+                                HarnessEffect::Ready,
+                            );
+                        }
+                    } else if let Some(turn_id) = codex_turn_id_from_message(&message) {
+                        active_turn_id = Some(turn_id);
+                        control_adapter.set_active_turn_id(active_turn_id.clone());
                     }
                     let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                         thread_id: started.thread_id,
@@ -2778,7 +2861,14 @@ fn run_codex_app_server_session_loop(
                     // provider did not get.
                     if let Ok(mut state) = snapshot.lock() {
                         mark_session_busy_for_input(&mut state);
+                        state.turns.note_input(local_input_id.clone());
                     }
+                    let steered_turn_id = match &route {
+                        CodexInputRoute::Steer { expected_turn_id } => {
+                            Some(expected_turn_id.clone())
+                        }
+                        CodexInputRoute::Start => None,
+                    };
                     let write_result = match route {
                         CodexInputRoute::Steer { expected_turn_id } => {
                             write_turn_steer_request_with_id(
@@ -2838,6 +2928,7 @@ fn run_codex_app_server_session_loop(
                                 kind: request_kind,
                                 local_input_id: local_input_id.clone(),
                                 input: provider_input.clone(),
+                                turn_id: steered_turn_id,
                             },
                         );
                         user_input_sequence = next_input_sequence;
@@ -3366,6 +3457,8 @@ struct PendingCodexInputRequest {
     kind: CodexInputRequestKind,
     local_input_id: String,
     input: String,
+    /// The turn a steer named; `None` for a start.
+    turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3939,6 +4032,37 @@ mod tests {
 
         let mut turns = turns_with_an_immediate_input();
         turns.finish(FinishedTurn::Latest);
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+    }
+
+    /// A codex turn, a steer into it that codex refused, and the turn the
+    /// refused input started instead, noted again for that turn.
+    fn codex_turns_with_a_refused_steer() -> TurnGenerations {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_input("steer-input".to_owned());
+        turns.started += 1;
+        turns.note_input("steer-input".to_owned());
+        turns
+    }
+
+    #[test]
+    fn a_codex_completion_finishes_only_the_inputs_that_joined_its_turn() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
+
+        turns.finish(FinishedTurn::Inputs(&["steer-input".to_owned()]));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.inputs.is_empty(), "{turns:?}");
+    }
+
+    #[test]
+    fn a_codex_completion_for_unrecorded_inputs_finishes_every_turn() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["never-recorded".to_owned()]));
         assert!(turns.latest_turn_completed(), "{turns:?}");
     }
 
@@ -6095,6 +6219,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             kind: CodexInputRequestKind::ImmediateSteer,
             local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
+            turn_id: Some("turn-7".to_owned()),
         };
         assert_eq!(
             codex_input_response_action(&immediate, true),
@@ -6105,6 +6230,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             kind: CodexInputRequestKind::AutoSteer,
             local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
+            turn_id: Some("turn-7".to_owned()),
         };
         assert_eq!(
             codex_input_response_action(&auto, true),
@@ -6115,6 +6241,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             kind: CodexInputRequestKind::ImmediateFallbackStart,
             local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
+            turn_id: None,
         };
         assert_eq!(
             codex_input_response_action(&fallback, true),
