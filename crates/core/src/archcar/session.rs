@@ -2201,6 +2201,18 @@ fn run_session_loop(
                                 error = %err,
                                 "archcar session send_input pty write failed"
                             );
+                            // No turn started, so nothing will clear a busy
+                            // mark the queue drain set; resolve the session
+                            // instead of leaving it Running. The process may
+                            // still be alive, so do not stop it.
+                            mark_provider_session_failed(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                err,
+                            );
+                            continue;
                         }
                     }
                 }
@@ -4030,6 +4042,93 @@ mod tests {
         let _ = child.wait();
         let exited = store.get_process_record(process.id).unwrap();
         assert_eq!(exited.status, ProcessStatus::Exited);
+    }
+
+    /// A codex session restored for a queued drain is served by the PTY loop
+    /// with its original kind; a failed write must not leave the busy mark
+    /// the drain set in place.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn queued_send_input_write_failure_on_pty_loop_resolves_off_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        let mut child = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        let write = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let connection = ManagedSessionConnection::Reattached {
+            write,
+            output: Arc::new(Mutex::new(String::new())),
+            read_cursor: 0,
+            pid: child.id(),
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            child.id(),
+            true,
+        )));
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let loop_thread = thread::spawn(move || {
+            run_session_loop(
+                db_path,
+                logs_dir,
+                snapshot_for_loop,
+                controller_for_kind(SessionKind::CODEX),
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+        // What the server's queue drain marks on a codex/claude snapshot
+        // right before it hands the input to the session loop.
+        {
+            let mut state = snapshot.lock().unwrap();
+            state.ready = false;
+            state.runtime_state = AgentSessionState::Running;
+        }
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "run the tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionError { session_id, .. } if *session_id == Some(process.id)),
+        );
+        {
+            let state = snapshot.lock().unwrap();
+            assert_eq!(state.runtime_state, AgentSessionState::Failed);
+            assert!(!state.ready);
+        }
+
+        command_tx.send(SessionCommand::Kill).unwrap();
+        drop(command_tx);
+        loop_thread.join().unwrap();
+        let _ = child.wait();
     }
 
     #[test]
