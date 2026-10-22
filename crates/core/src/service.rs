@@ -1893,6 +1893,25 @@ mod tests {
         assert!(socket_conflict_warning(&paths, None, None).is_none());
     }
 
+    /// A loopback address that provably has no listener for as long as the
+    /// returned socket lives: the port is bound without `SO_REUSEADDR` and
+    /// never listened on. A port that was merely released is not that — the
+    /// kernel can hand it to another test's listener, or pick it as a probe's
+    /// own source port so the probe connects to itself.
+    #[cfg(unix)]
+    fn bound_but_not_listening() -> (rustix::fd::OwnedFd, std::net::SocketAddr) {
+        use rustix::net::{AddressFamily, SocketType};
+        let socket = rustix::net::socket(AddressFamily::INET, SocketType::STREAM, None).unwrap();
+        let loopback = std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0);
+        rustix::net::bind(&socket, &loopback).unwrap();
+        let addr = rustix::net::getsockname(&socket)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        (socket, addr)
+    }
+
+    #[cfg(unix)]
     #[test]
     fn disabling_remote_access_says_so_while_a_daemon_still_serves_it() {
         // Clearing the saved address only decides what the next daemon binds.
@@ -1903,8 +1922,12 @@ mod tests {
         assert!(warning.contains(&addr.to_string()), "{warning}");
         assert!(warning.contains("until it exits"), "{warning}");
 
+        // Once that daemon exits nothing answers. Probe a port held without a
+        // listener rather than the one just dropped, which concurrent tests
+        // can take over before the probe lands.
         drop(listener);
-        assert!(live_listener_warning(Some(addr)).is_none());
+        let (_held, quiet) = bound_but_not_listening();
+        assert!(live_listener_warning(Some(quiet)).is_none());
         assert!(live_listener_warning(None).is_none());
     }
 
