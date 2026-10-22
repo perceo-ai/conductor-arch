@@ -24,7 +24,8 @@ static PROCESS_ENV: Mutex<()> = Mutex::new(());
 /// need to change the environment (see `workspace::tests::install_fake_gh`).
 pub(crate) struct EnvGuard {
     // Field order is load-bearing: fields drop in declaration order, so the
-    // variables are restored before the lock is released.
+    // variables are restored before the lock is released. Gated by
+    // `tests::the_guard_restores_the_environment_before_releasing_the_lock`.
     saved: SavedEnv,
     _lock: MutexGuard<'static, ()>,
 }
@@ -74,6 +75,8 @@ impl SavedEnv {
 
 impl Drop for SavedEnv {
     fn drop(&mut self) {
+        #[cfg(test)]
+        tests::run_restore_hook();
         for (key, value) in self.0.drain(..).rev() {
             match value {
                 Some(value) => std::env::set_var(&key, value),
@@ -85,8 +88,30 @@ impl Drop for SavedEnv {
 
 #[cfg(test)]
 mod tests {
-    use super::{lock_process_env, EnvGuard};
+    use super::{lock_process_env, EnvGuard, PROCESS_ENV};
+    use std::cell::Cell;
     use std::path::Path;
+    use std::sync::TryLockError;
+
+    thread_local! {
+        /// Runs once at the start of the next `SavedEnv` restore on this
+        /// thread, so a test can observe the guard mid-drop.
+        static RESTORE_HOOK: Cell<Option<fn()>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn run_restore_hook() {
+        if let Some(hook) = RESTORE_HOOK.with(Cell::take) {
+            hook();
+        }
+    }
+
+    /// Whether some thread holds the process env lock right now, asked from
+    /// a fresh thread so the answer never depends on the caller's own guard.
+    fn env_lock_is_held() -> bool {
+        std::thread::spawn(|| matches!(PROCESS_ENV.try_lock(), Err(TryLockError::WouldBlock)))
+            .join()
+            .unwrap()
+    }
 
     /// Gives `key` a known value under the lock, outside any guard, so a
     /// test can check a guard puts it back. Every guard leaves the variable
@@ -137,6 +162,39 @@ mod tests {
         assert_eq!(take(KEY).as_deref(), Some(std::ffi::OsStr::new("before")));
     }
 
+    #[test]
+    fn the_guard_restores_the_environment_before_releasing_the_lock() {
+        thread_local! {
+            static OBSERVED: Cell<Option<bool>> = const { Cell::new(None) };
+        }
+        // The hook runs inside `SavedEnv::drop`, synchronously, on this
+        // thread, so the check lands exactly in the restore window. Another
+        // test could hold the lock at that instant, but only once the guard
+        // has (wrongly) let it go, so retrying a few times keeps a swapped
+        // field order from slipping through while the correct order still
+        // sees the lock held on every try.
+        fn observe() {
+            let held = (0..20).all(|_| {
+                let held = env_lock_is_held();
+                std::thread::yield_now();
+                held
+            });
+            OBSERVED.with(|observed| observed.set(Some(held)));
+        }
+
+        let mut env = EnvGuard::lock();
+        env.set("ARCHDUCTOR_TEST_SUPPORT_DROP_ORDER", "x");
+        RESTORE_HOOK.with(|hook| hook.set(Some(observe)));
+        drop(env);
+
+        assert_eq!(
+            OBSERVED.with(Cell::take),
+            Some(true),
+            "EnvGuard released the env lock before restoring the environment; \
+             keep `saved` declared before `_lock` so it drops first"
+        );
+    }
+
     /// Code outside this module that may change the process environment.
     /// Production paths only: a test must use [`EnvGuard`].
     const PRODUCTION_ENV_WRITERS: &[&str] = &[
@@ -171,10 +229,10 @@ mod tests {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
-            let changes_env = source.contains("env::set_var") || source.contains("env::remove_var");
+            let changes_env = source.lines().any(names_an_env_writer);
             let test_count = source
                 .lines()
-                .filter(|line| line.trim() == "#[test]")
+                .filter(|line| is_test_attribute(line))
                 .count();
             if changes_env && test_count > 1 {
                 crowded.push(format!("{} has {test_count} tests", path.display()));
@@ -209,10 +267,60 @@ mod tests {
             }
             let source = std::fs::read_to_string(&path).unwrap();
             for (index, line) in source.lines().enumerate() {
-                if line.contains("env::set_var") || line.contains("env::remove_var") {
+                if names_an_env_writer(line) {
                     stray.push(format!("{relative}:{}: {}", index + 1, line.trim()));
                 }
             }
+        }
+    }
+
+    /// The functions that change the process environment.
+    const ENV_WRITERS: &[&str] = &["set_var", "remove_var"];
+
+    /// Whether `line` names `set_var` or `remove_var` as a whole identifier,
+    /// whatever path leads to it: `std::env::set_var(..)`, a bare `set_var(..)`
+    /// after `use std::env::{remove_var, set_var};`, or `set_var as alias`.
+    fn names_an_env_writer(line: &str) -> bool {
+        let is_ident = |c: char| c == '_' || c.is_alphanumeric();
+        ENV_WRITERS.iter().any(|writer| {
+            line.match_indices(writer).any(|(start, _)| {
+                let before = line[..start].chars().next_back();
+                let after = line[start + writer.len()..].chars().next();
+                !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+            })
+        })
+    }
+
+    /// Whether `line` opens with a test attribute: `#[test]`, a one-line
+    /// `#[test] fn x() {}`, or a runner's `#[tokio::test]`.
+    fn is_test_attribute(line: &str) -> bool {
+        let line = line.trim();
+        line.starts_with("#[") && line.contains("test]")
+    }
+
+    #[test]
+    fn the_scans_recognise_every_spelling_they_guard_against() {
+        for line in [
+            "std::env::set_var(\"X\", \"1\");",
+            "env::remove_var(\"X\");",
+            "use std::env::{remove_var, set_var};",
+            "    set_var(\"X\", \"1\");",
+            "use std::env::set_var as alias;",
+        ] {
+            assert!(names_an_env_writer(line), "missed {line:?}");
+        }
+        for line in [
+            "fn reset_variable() {}",
+            "unset_var_count += 1;",
+            "let set_vars = 2;",
+        ] {
+            assert!(!names_an_env_writer(line), "flagged {line:?}");
+        }
+        for line in ["#[test]", "  #[test] fn x() {}", "#[tokio::test]"] {
+            assert!(is_test_attribute(line), "missed {line:?}");
+        }
+        for line in ["#[cfg(test)]", "// #[test]", "fn test() {}"] {
+            assert!(!is_test_attribute(line), "flagged {line:?}");
         }
     }
 }
