@@ -618,7 +618,7 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
         ])
         .assert()
         .success();
-    wait_for_file_lines(&provider_inputs, 1);
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
 
     let store = WorkspaceStore::open(app_database_path(temp.path())).unwrap();
     let thread = store
@@ -651,7 +651,7 @@ fn cli_session_send_hides_general_prompt_while_provider_receives_first_turn_pref
         ])
         .assert()
         .success();
-    wait_for_file_lines(&provider_inputs, 2);
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
 
     let captured = fs::read_to_string(&provider_inputs).unwrap();
     let captured = captured
@@ -766,7 +766,7 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
         ])
         .assert()
         .success();
-    wait_for_file_lines(&provider_inputs, 1);
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
 
     // Busy: the first turn is still open. Status says so. The daemon writes
     // the turn to the provider before it records the input and marks the
@@ -805,7 +805,7 @@ fn cli_session_send_to_a_busy_agent_queues_until_the_turn_ends() {
     );
 
     fs::write(&release, "").unwrap();
-    wait_for_file_lines(&provider_inputs, 2);
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
     let captured = fs::read_to_string(&provider_inputs)
         .unwrap()
         .lines()
@@ -2285,7 +2285,7 @@ fn cli_session_queued_send_dropped_before_the_turn_starts_resolves_to_failed() {
         ])
         .assert()
         .success();
-    wait_for_file_lines(&provider_inputs, 1);
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
     wait_for_session_state(&app, "berlin", "working", "awaiting_input");
     app()
         .args([
@@ -2440,7 +2440,7 @@ fn cli_session_queued_send_dropped_before_the_turn_starts_stays_queued_for_the_n
         ])
         .assert()
         .success();
-    wait_for_file_lines(&provider_inputs, 1);
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
     wait_for_session_state(&app, "berlin", "working", "awaiting_input");
     app()
         .args([
@@ -2759,7 +2759,7 @@ fn cli_session_send_first_claude_message_waits_for_the_transport_to_come_up() {
          stdout: {stdout}\nstderr: {stderr}"
     );
     assert!(stdout.contains("sent claude message"), "{stdout}");
-    wait_for_file_lines(&provider_inputs, 1);
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
     // Delivered as the first turn, so behind the general prompt.
     let captured = fs::read_to_string(&provider_inputs).unwrap();
     let captured = serde_json::from_str::<String>(captured.trim_end()).unwrap();
@@ -4006,24 +4006,14 @@ fn wait_for_session_log_contains(root: &Path, workspace: &str, needle: &str) {
     panic!("timed out waiting for session log in {}", log_dir.display());
 }
 
-fn wait_for_file_lines(path: &Path, expected: usize) {
-    for _ in 0..100 {
-        if fs::read_to_string(path)
-            .map(|contents| contents.lines().count() >= expected)
-            .unwrap_or(false)
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    panic!(
-        "timed out waiting for {expected} line(s) in {}",
-        path.display()
-    );
-}
-
-/// [`wait_for_file_lines`] for a daemon built with `test-handoff-delay`:
-/// every handoff stalls it, so allow several stalls' worth of time.
+/// Waits for the fake provider to have recorded `expected` inputs in `path`.
+///
+/// Every provider input reaches that file through several hops — the daemon's
+/// session loop, SQLite writes that fsync, the provider's stdin — so the wait
+/// covers stalls, not only the ordinary case: the `test-handoff-delay` seams
+/// stall each handoff on purpose, and disk contention (a compile running beside
+/// the suite) stalls the fsyncs for seconds. A 2s budget timed out there with
+/// the input landing up to 2.7s later. A missing input still fails the test.
 fn wait_for_file_lines_through_stalls(path: &Path, expected: usize) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
