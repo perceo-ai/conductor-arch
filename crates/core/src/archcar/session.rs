@@ -4941,17 +4941,22 @@ mod tests {
         spawn_provider_stderr_reader(db_path.clone(), process.id, SessionKind::CLAUDE, stderr);
         let _ = child.wait();
 
-        // The drain runs on its own thread; poll the transcript for it.
-        let recorded = (0..100)
-            .find_map(|_| {
-                let text = std::fs::read_to_string(&process.log_path).unwrap_or_default();
-                if text.contains("refusing to start") {
-                    return Some(text);
-                }
-                thread::sleep(Duration::from_millis(20));
-                None
-            })
-            .unwrap_or_default();
+        // The drain runs on its own thread and appends each line through a
+        // fresh store open, so the second line lands after the first. Wait
+        // for every line the assertions below need, not just the first.
+        let has_every_line =
+            |text: &str| text.contains("refusing to start") && text.contains("second line");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let recorded = loop {
+            let text = std::fs::read_to_string(&process.log_path).unwrap_or_default();
+            if has_every_line(&text) {
+                break text;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("stderr lines did not all reach the transcript within 5s:\n{text}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
 
         assert!(recorded.contains("refusing to start"), "{recorded}");
         assert!(recorded.contains("second line"), "{recorded}");
