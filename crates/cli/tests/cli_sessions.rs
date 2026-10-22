@@ -1919,6 +1919,105 @@ fn cli_session_send_after_a_steer_refused_before_its_turn_completed_queues_behin
     kill_berlin_session(&app, temp.path());
 }
 
+/// Failure this guards: a codex completion finishes only the inputs that
+/// joined its turn, so an accepted steer must count as one of them. If it did
+/// not, its turn would stay open after codex ended it, and every later send
+/// would queue behind a turn that never completes.
+#[cfg(unix)]
+#[test]
+fn cli_session_send_after_an_accepted_codex_steer_goes_straight_in_once_its_turn_ends() {
+    let temp = tempfile::tempdir().unwrap();
+    init_repo(temp.path().join("demo"));
+    let fake_codex = temp.path().join("fake-held-codex");
+    let provider_inputs = temp.path().join("provider-inputs.txt");
+    let release = temp.path().join("release-turn");
+    let fake_home = temp.path().join("home");
+    write_fake_held_codex(&fake_codex).unwrap();
+    let _archcar = ArchcarDaemon::start(
+        temp.path(),
+        &[
+            ("HOME", &fake_home),
+            ("USERPROFILE", &fake_home),
+            ("ARCHDUCTOR_CAPTURE_PATH", &provider_inputs),
+            ("ARCHDUCTOR_RELEASE_PATH", &release),
+        ],
+    );
+    let app = || app_with_home(temp.path(), &fake_home);
+
+    create_berlin_workspace(&app, temp.path(), "codex_executable_path", &fake_codex);
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--kind",
+            "codex",
+            "--timeout-ms",
+            "5000",
+            "Start the long task",
+        ])
+        .assert()
+        .success();
+    wait_for_file_lines_through_stalls(&provider_inputs, 1);
+    wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--immediate",
+            "--timeout-ms",
+            "5000",
+            "Also check the edge case",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent codex immediate message"));
+    wait_for_file_lines_through_stalls(&provider_inputs, 2);
+    // The steer's acceptance comes back right after it; give the loop a
+    // moment to read it before the turn ends.
+    std::thread::sleep(Duration::from_millis(300));
+
+    let events = subscribe_to_archcar_events(temp.path());
+    fs::write(release.with_extension("1"), "").unwrap();
+    wait_for_archcar_event(&events, "turn_completed");
+    wait_for_session_state(&app, "berlin", "finished", "working");
+
+    app()
+        .args([
+            "session",
+            "send",
+            "berlin",
+            "--timeout-ms",
+            "5000",
+            "Then the next task",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("sent codex message"));
+    wait_for_file_lines_through_stalls(&provider_inputs, 3);
+    let captured = fs::read_to_string(&provider_inputs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<(String, String)>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captured[1..],
+        [
+            (
+                "turn/steer".to_owned(),
+                "Also check the edge case".to_owned()
+            ),
+            ("turn/start".to_owned(), "Then the next task".to_owned()),
+        ],
+        "{captured:?}"
+    );
+
+    kill_berlin_session(&app, temp.path());
+}
+
 /// Failure this guards: the daemon marks a session busy before it hands a
 /// queued message to the session loop, trusting the loop to either start the
 /// turn or mark the session failed. Two `continue` paths in the loop's
