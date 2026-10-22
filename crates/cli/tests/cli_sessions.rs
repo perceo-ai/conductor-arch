@@ -1721,6 +1721,7 @@ fn cli_session_send_after_a_refused_codex_steer_queues_behind_the_fallback_turn(
         .success();
     wait_for_file_lines_through_stalls(&provider_inputs, 1);
     wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    wait_for_codex_turn_started(temp.path(), "turn-1");
 
     let events = subscribe_to_archcar_events(temp.path());
     app()
@@ -1843,6 +1844,7 @@ fn cli_session_send_after_a_steer_refused_before_its_turn_completed_queues_behin
         .success();
     wait_for_file_lines_through_stalls(&provider_inputs, 1);
     wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    wait_for_codex_turn_started(temp.path(), "turn-1");
 
     let events = subscribe_to_archcar_events(temp.path());
     app()
@@ -1961,6 +1963,7 @@ fn cli_session_send_after_an_accepted_codex_steer_goes_straight_in_once_its_turn
         .success();
     wait_for_file_lines_through_stalls(&provider_inputs, 1);
     wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    wait_for_codex_turn_started(temp.path(), "turn-1");
 
     app()
         .args([
@@ -2063,6 +2066,7 @@ fn a_rejected_fallback_start_must_not_leave_the_session_stuck_busy() {
         .success();
     wait_for_file_lines_through_stalls(&provider_inputs, 1);
     wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    wait_for_codex_turn_started(temp.path(), "turn-1");
 
     let events = subscribe_to_archcar_events(temp.path());
     app()
@@ -2156,6 +2160,7 @@ fn a_fallback_start_rejected_after_its_turn_completed_leaves_the_session_ready()
         .success();
     wait_for_file_lines_through_stalls(&provider_inputs, 1);
     wait_for_session_state(&app, "berlin", "working", "awaiting_input");
+    wait_for_codex_turn_started(temp.path(), "turn-1");
 
     app()
         .args([
@@ -3672,6 +3677,34 @@ fn app_with_home(root: &Path, home: &Path) -> AssertCommand {
     let mut command = app(root);
     command.env("HOME", home).env("USERPROFILE", home);
     command
+}
+
+/// Waits until the codex session loop has read `turn/started` for `turn_id`.
+/// The session reports busy as soon as the turn is written, but an
+/// `--immediate` send is only steered once the loop knows the turn; one sent
+/// before that starts a turn of its own. The loop records each codex message
+/// before acting on it, and acts on it before taking the next send.
+fn wait_for_codex_turn_started(root: &Path, turn_id: &str) {
+    let provider_store = ProviderEventStore::new(app_database_path(root));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let started = provider_store
+            .list_for_chat_thread(1)
+            .unwrap_or_default()
+            .iter()
+            .any(|event| {
+                event.raw_json["method"] == "turn/started"
+                    && event.raw_json["params"]["turn"]["id"] == turn_id
+            });
+        if started {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "codex never reported {turn_id} started"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn app_database_path(root: &Path) -> PathBuf {
