@@ -4164,6 +4164,12 @@ fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
     // prompts and leaves the harness's turn accounting waiting for a
     // completion that never comes. TurnCompleted drains the next one.
     let readiness_before = note_session_not_ready_for_queue(&handle);
+    // The row is off the queue from here on. Park it where the session loop
+    // will take it with the input, so a handoff that fails inside the loop
+    // puts it back rather than losing the message.
+    if let Ok(mut snapshot) = handle.snapshot.lock() {
+        snapshot.turns.park_queued_handoff(queued.clone());
+    }
     match handle
         .command_tx
         .send(crate::archcar::session::SessionCommand::SendInput {
@@ -4180,8 +4186,16 @@ fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
             );
         }
         Err(err) => {
-            // The input never reached the session; undo the busy mark.
+            // The input never reached the session; undo the busy mark and
+            // the parked claim, and requeue the row here.
             restore_session_readiness(&handle, readiness_before);
+            if let Ok(mut snapshot) = handle.snapshot.lock() {
+                snapshot.turns.take_queued_handoff(
+                    &queued.input,
+                    queued.visible_input.as_deref(),
+                    &queued.input_kind,
+                );
+            }
             if let Err(restore_err) = store.requeue_claimed_chat_input_front(&queued) {
                 warn!(
                     thread_id,
@@ -7732,6 +7746,118 @@ mod tests {
         assert_eq!(input.input, "run tests");
         assert_eq!(input.input, claimed.input);
         assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
+    }
+
+    /// The drain claims the row before the session loop writes it. A loop
+    /// that takes the input and then fails the write must put the row back,
+    /// not leave the message gone with the failed session.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn queued_input_returns_to_the_queue_when_the_session_loop_fails_the_handoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let handle = crate::archcar::session::start_session_handle_writing_to_dev_full(
+            db_path.clone(),
+            temp.path().join("logs"),
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            child.id(),
+            event_tx,
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::from([(process.id, handle.clone())]),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run the tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CODEX,
+            )
+            .unwrap();
+
+        drain_queued_input_once(&state, thread.id);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match event_rx.recv_timeout(remaining) {
+                Ok(ArchcarEvent::SessionError { session_id, .. })
+                    if session_id == Some(process.id) =>
+                {
+                    break
+                }
+                Ok(_) => {}
+                Err(err) => panic!("the failed handoff never reported a session error: {err}"),
+            }
+        }
+        assert_eq!(
+            handle.snapshot.lock().unwrap().runtime_state,
+            AgentSessionState::Failed
+        );
+        let remaining = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the queued input was consumed by a handoff that never reached the session"
+        );
+        assert_eq!(remaining[0].id, queued.id);
+        assert_eq!(remaining[0].input, "run the tests");
+        // Nothing reached the agent, so the thread must not show the message
+        // as sent; it shows once, when a retry delivers it.
+        assert!(store
+            .list_chat_messages(thread.id)
+            .unwrap()
+            .iter()
+            .all(|message| message.content != "run the tests"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = handle
+            .command_tx
+            .send(crate::archcar::session::SessionCommand::Kill);
     }
 
     #[test]
