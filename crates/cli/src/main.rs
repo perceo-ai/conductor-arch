@@ -6180,14 +6180,10 @@ fn transfer_workspace(
     let repository_url = transfer_repository_url(source, &remote_workspace.repository_name)?;
     let chats = source_chats(source, &remote_workspace.name)?;
 
-    // Step 1: stop. Before the push, because the branch about to be published
-    // is the one an agent here is still writing.
-    stop_source_sessions(source, workspace, &chats, force)?;
-    progress.sessions_stopped = true;
-
-    // Which chat moves. Explicit `--thread-id` wins; otherwise the most
-    // recently touched live chat, which is the one a human would have been
-    // looking at.
+    // Which chat moves, decided before anything is stopped: a mistyped
+    // `--thread-id` must not cost an agent its turn. Explicit wins; otherwise
+    // the most recently touched live chat, which is the one a human would have
+    // been looking at.
     let moving = match thread_id {
         Some(id) => Some(
             chats
@@ -6202,6 +6198,14 @@ fn transfer_workspace(
         ),
         None => chats.iter().max_by(|a, b| a.updated_at.cmp(&b.updated_at)),
     };
+
+    // Step 1: stop. Before the push, because the branch about to be published
+    // is the one an agent here is still writing.
+    stop_source_sessions(source, workspace, &chats, force)?;
+    progress.sessions_stopped = true;
+
+    // Read after the stop, so whatever the agent flushed on its way out is
+    // part of the conversation the target picks up.
     let (transcript, chat_title, provider) = match moving {
         Some(chat) => {
             let (messages, title) = transfer_transcript(source, chat.thread_id)?;
@@ -6251,7 +6255,7 @@ fn transfer_workspace(
             )?;
             progress.message_delivered = true;
         }
-        _ => {
+        (_, None) => {
             // No chat moved, so there is no conversation to resume and nothing
             // to confirm. Say so rather than silently skipping a named step.
             println!(
@@ -6260,6 +6264,17 @@ fn transfer_workspace(
             );
             progress.message_delivered = true;
         }
+        // A chat moved but the target workspace has no thread to resume it in:
+        // an earlier attempt created the workspace and failed before seeding
+        // the conversation. Archiving the source here would retire the only
+        // copy of a conversation that never arrived.
+        (None, Some(_)) => anyhow::bail!(
+            "`{target_workspace}` is on {} but has no chat to resume, so an earlier attempt \
+             created it without the conversation. Remove it there and re-run; `{workspace}` on \
+             {} has been left alone",
+            target.label,
+            source.label
+        ),
     }
 
     // Step 5: retire. Reversible: the worktree stays on disk and
@@ -6594,10 +6609,14 @@ fn existing_target_workspace(
             archductor_core::archcar::protocol::archcar_response_summary(&other)
         ),
     };
-    Ok(workspaces
-        .iter()
+    // Archived ones are excluded: resuming a session inside a workspace the
+    // target has already retired would look like success while being invisible
+    // on its board. One left there at this branch instead collides at import,
+    // which names the workspace it did create in its own output.
+    let live = || workspaces.iter().filter(|c| c.status != "archived");
+    Ok(live()
         .find(|candidate| candidate.branch == branch)
-        .or_else(|| workspaces.iter().find(|candidate| candidate.name == name))
+        .or_else(|| live().find(|candidate| candidate.name == name))
         .cloned())
 }
 

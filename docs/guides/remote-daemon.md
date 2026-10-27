@@ -214,6 +214,140 @@ shown only while a remote client is selected. It carries the workspace's most
 recently active chat, and when this machine has no clone it asks for a folder
 to clone into.
 
+Import *copies*: the source workspace keeps running and the chat it carries
+lands with no session reading it. To move a workspace instead — stopping the
+source, resuming the target, and retiring the source workspace — see
+[Moving a workspace between daemons](#moving-a-workspace-between-daemons).
+
+## Moving a workspace between daemons
+
+`remote import` copies. The source keeps running, which is how two daemons end
+up driving one branch, and the chat it carries lands inert: the transcript is
+there, nothing is reading it. `remote transfer` moves instead.
+
+```bash
+# Off the server and onto this machine.
+archductor remote transfer fix-auth --from office
+
+# Between two servers, with neither being this machine.
+archductor remote transfer fix-auth --from office --to frankfurt
+```
+
+Omit `--to` to target this machine; omit `--from` to read from the active
+client, as `import` does. `local` and `this-machine` name the local daemon
+explicitly for either flag, and pointing both ends at one daemon is refused.
+
+`--name` and `--branch` rename the workspace on the target. `--clone-into`
+clones onto the *target* daemon when it has no copy of the repository, rather
+than onto this machine. `--thread-id` picks which chat moves; the default is
+the workspace's most recently touched live chat, which is the one you were
+looking at. (This differs from `import`, where omitting `--thread-id` means "no
+chat at all" — a move with no conversation is rarely what you meant.)
+
+In order, the transfer:
+
+1. **Stops** the source's sessions. Without `--force` a live session refuses
+   the whole thing and nothing is pushed or changed:
+
+   ```
+   Error: `fix-auth` on office still has a session running: session 1 (codex, "Codex Chat 1"). Nothing has been pushed and nothing has changed. Let it finish, or retry with `--force` to stop it — its turn is lost either way
+   ```
+
+   With `--force` each session is killed and then *waited on* until the source
+   daemon agrees it is gone, before anything is pushed. An agent that is still
+   writing the worktree would otherwise leave the target starting from a commit
+   the source had already moved past.
+
+2. **Publishes** the branch, exactly as `import` does — including refusing a
+   dirty worktree with the list of files. What goes into a commit on that
+   branch is still not this command's call.
+
+3. **Creates** the workspace on `--to`, at the commit that was pushed, with the
+   source's diff base and the transcript. This is the same
+   `import_workspace_from_remote` request `import` sends; it writes through
+   whichever daemon receives it, which is why the target can be any saved
+   client and not just this machine.
+
+4. **Resumes** it: a session starts on the target under the chat's own provider
+   and is handed one message. Which message is decided by the transcript's last
+   entry, not by whether the agent happened to be mid-turn, so the same
+   transcript always produces the same handover:
+
+   - **Last entry is from the user.** There is a pending ask, so it is replayed
+     verbatim under the preamble:
+
+     ```
+     This conversation moved from daemon office to frankfurt; the branch is at 5055711. Continue from where the transcript leaves off — do not redo completed work.
+
+     Wire up the parser
+     ```
+
+   - **Last entry is from the agent** (it was explaining something when the
+     source stopped), or there is no transcript. There is nothing to replay, so
+     a fixed continuation prompt is sent instead:
+
+     ```
+     This conversation moved from daemon office to frankfurt; the branch is at 5055711. Pick up where you left off and continue the work — do not redo anything already done.
+     ```
+
+   The transcript itself is seeded on the target and replayed to the agent on
+   its first turn by the same path a forked chat uses, so the handover message
+   only has to say what moved and what to do next.
+
+5. **Retires** the source workspace, by archiving it — never deleting. The
+   worktree stays on disk and `archductor workspace restore <name>` brings it
+   back. This happens only after step 4 confirms the message reached the
+   target's session; a target that could not take the work must not cost you
+   the one live copy of it.
+
+### When a transfer stops part-way
+
+Anything that fails after step 1 prints what exists now, so you can see what a
+retry will skip:
+
+```
+transfer of `fix-auth` from office to frankfurt stopped part-way. State now:
+  [x] stop: the source's sessions on office
+  [x] publish: branch pushed at 5055711
+  [ ] create: the workspace on frankfurt
+  [ ] resume: session started on the target and handed the conversation
+  [ ] retire: source workspace archived on office
+Re-run the same command to continue; finished steps are detected and skipped.
+```
+
+Re-running the same command is safe. Two checks make it so:
+
+- **The workspace.** A workspace on the target whose **branch** matches the one
+  being moved is taken to be an earlier attempt of this transfer and is reused:
+
+  ```
+  `fix-auth` is already on frankfurt (branch lc/fix-auth); keeping it rather than importing a second copy
+  ```
+
+  The branch is matched rather than the name because the branch *is* the work,
+  and two worktrees on one branch is the divergence this command exists to
+  prevent. The name is the fallback, for a first attempt whose workspace the
+  target had to rename around a collision. Workspaces the target has already
+  archived are not adopted: resuming a session inside one would look like
+  success while being invisible on its board.
+
+- **The handover.** A chat whose messages already start with the transfer
+  preamble has been handed over, and is left alone:
+
+  ```
+  `fix-auth` on frankfurt was already handed the conversation; leaving its session alone
+  ```
+
+  Read from the chat's messages rather than from "is a session up?", which
+  stops being true the moment you stop the agent — and a re-run after that
+  would tell it to continue work it has since finished.
+
+In the app this is "Transfer to <daemon>…" on a workspace's right-click menu,
+one entry per saved daemon other than the one it is on (plus "this machine"
+while a remote is selected). A live agent on the source asks before it is
+stopped rather than refusing outright, since clicking the item is already the
+decision the CLI's `--force` stands in for.
+
 ## Updating daemons
 
 Every daemon updates itself, so you update a server from your laptop instead

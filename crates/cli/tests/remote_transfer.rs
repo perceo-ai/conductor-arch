@@ -176,6 +176,19 @@ fn remote_transfer_force_stops_the_source_before_pushing_then_resumes_on_the_tar
         "the transcript's last user message should be replayed; got:\n{first}"
     );
 
+    // Criterion: neither end was this machine. The operator root has no daemon
+    // (its `ARCHDUCTOR_ARCHCAR_BIN` is `/bin/false`), so anything that reached
+    // for `ArchcarClient::local` would have failed outright — and nothing was
+    // written here either way.
+    let operator_db = app_database_path(&fixture.operator_root);
+    let operator_workspaces = WorkspaceStore::open(&operator_db)
+        .map(|store| store.list().unwrap_or_default().len())
+        .unwrap_or(0);
+    assert_eq!(
+        operator_workspaces, 0,
+        "the transfer wrote a workspace onto the machine running the command"
+    );
+
     // Criterion: the source is retired, reversibly, and only after the above.
     let source = fixture.source_workspace();
     assert_eq!(source.status, "archived");
