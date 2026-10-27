@@ -273,6 +273,270 @@ fn remote_transfer_leaves_the_source_alone_when_the_target_cannot_take_the_works
     assert!(source.archived_at.is_none());
 }
 
+/// Finding 1. `--from <saved-alias-of-this-box> --to local` is two address
+/// strings and one daemon. The old guard compared the strings the operator
+/// typed, so this passed it: the run then adopted the source workspace as its
+/// own target (the branch matched), handed it the transfer message, and
+/// archived it, leaving a live session inside an archived workspace. The guard
+/// now asks each end who it is.
+#[test]
+fn remote_transfer_refuses_the_same_daemon_reached_under_two_names() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    fixture.save_source_as_its_own_client();
+
+    // `--force` on purpose: the live session must not be what refuses this.
+    let refusal = fixture
+        .source
+        .app()
+        .args([
+            "remote",
+            "transfer",
+            "berlin",
+            "--from",
+            "srcremote",
+            "--to",
+            "local",
+            "--force",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(refusal.get_output().stderr.clone()).unwrap();
+
+    assert!(
+        stderr.contains("are the same daemon reached two ways"),
+        "the same-daemon guard should have fired on identity; got:\n{stderr}"
+    );
+    let source = fixture.source_workspace();
+    assert_eq!(
+        source.status, "active",
+        "a self-transfer archived the workspace it was moving"
+    );
+    assert!(
+        fixture.pushed_commit().is_none(),
+        "a refused self-transfer pushed the branch anyway"
+    );
+}
+
+/// Finding 2. A live chat with nothing said in it yet: the import seeds no
+/// thread (there are no messages to seed), which the old code mistook for a
+/// half-finished earlier attempt and refused — after the sessions were killed
+/// and the branch pushed, so re-running hit the identical refusal forever. It
+/// also made the documented empty-transcript continuation prompt unreachable.
+#[test]
+fn remote_transfer_gives_an_empty_source_chat_the_continuation_prompt() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    // A chat with nothing said in it. Named explicitly rather than relied on to
+    // be the newest: stopping the other chat's session bumps that thread, so
+    // "most recently touched" is not stable across the kill.
+    let empty = fixture
+        .source_store()
+        .create_chat_thread("berlin", "codex", "Nothing said yet", None)
+        .unwrap();
+
+    let moved = fixture
+        .operator(&[
+            "remote",
+            "transfer",
+            "berlin",
+            "--from",
+            "src",
+            "--to",
+            "dst",
+            "--thread-id",
+            &empty.id.to_string(),
+            "--force",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(moved.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("moved `berlin` from src to dst"),
+        "the transfer should complete; got:\n{stdout}"
+    );
+
+    let delivered = wait_for_captured_turns(&fixture.target.capture, 1);
+    let first = delivered.first().expect("the target provider took no turn");
+    // `contains`, not `starts_with`: this thread is opened fresh rather than
+    // seeded from a transcript, so it is the chat's first turn and the
+    // repository's `general` prompt is prepended — the same shape
+    // `cli_sessions.rs` pins for any first message.
+    assert!(
+        first.contains("This conversation moved from daemon src to dst; the branch is at "),
+        "an empty chat should still get the transfer preamble; got:\n{first}"
+    );
+    assert!(
+        first.contains("Pick up where you left off"),
+        "an empty transcript should get the documented continuation prompt, not a replay; \
+         got:\n{first}"
+    );
+    assert!(
+        !first.contains(SOURCE_FIRST_MESSAGE),
+        "the other chat's message was replayed into the empty chat; got:\n{first}"
+    );
+    assert_eq!(
+        fixture.source_workspace().status,
+        "archived",
+        "the source should be retired once the handover landed"
+    );
+}
+
+/// Finding 3. Branch and workspace names are not identities — two repositories
+/// routinely share both. Matching on them alone made the transfer adopt
+/// unrelated work: it skipped the import entirely (so neither branch nor
+/// transcript moved), handed the message to a stranger's chat, and archived the
+/// real source anyway.
+#[test]
+fn remote_transfer_does_not_adopt_a_same_named_workspace_from_another_repository() {
+    let fixture = Fixture::start(TargetSetup::WithDecoyRepository);
+
+    let moved = fixture
+        .operator(&[
+            "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(moved.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains("keeping it rather than importing a second copy"),
+        "the decoy in the other repository was adopted as an earlier attempt; got:\n{stdout}"
+    );
+
+    let pushed = fixture
+        .pushed_commit()
+        .expect("the branch never reached the shared remote");
+    let workspaces = fixture.target_workspaces();
+    let decoy = workspaces
+        .iter()
+        .find(|workspace| {
+            workspace
+                .path
+                .to_string_lossy()
+                .contains("/workspaces/decoy/")
+        })
+        .expect("the decoy workspace vanished");
+    let imported = workspaces
+        .iter()
+        .find(|workspace| {
+            workspace
+                .path
+                .to_string_lossy()
+                .contains("/workspaces/demo/")
+        })
+        .expect("the transfer never imported into the right repository");
+
+    assert_eq!(
+        git_output(&imported.path, &["rev-parse", "HEAD"]),
+        pushed,
+        "the imported workspace is not at the commit the source pushed"
+    );
+    assert_ne!(
+        git_output(&decoy.path, &["rev-parse", "HEAD"]),
+        pushed,
+        "the decoy was moved onto the transferred branch"
+    );
+    assert!(
+        fixture
+            .target_store()
+            .list_chat_threads(&decoy.name)
+            .unwrap()
+            .is_empty(),
+        "the transfer message was handed to the unrelated workspace's chat"
+    );
+    assert_eq!(fixture.source_workspace().status, "archived");
+}
+
+/// Finding 4. `seed_imported_chat` copies a carried transcript verbatim, so a
+/// workspace already moved once arrives carrying the previous hop's transfer
+/// preamble. The old "already resumed?" check matched any preamble-shaped user
+/// message, so the second hop of a chain was skipped as already done: no
+/// session was started on the new target and no message delivered, yet the
+/// source was archived anyway.
+#[test]
+fn remote_transfer_resumes_a_chat_that_already_carries_an_earlier_hops_preamble() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    // Exactly what a previous hop leaves behind: seeded history (source
+    // `fork`) whose newest user message is that hop's transfer preamble.
+    let store = fixture.source_store();
+    let thread = store
+        .list_chat_threads("berlin")
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the source workspace has no chat");
+    store
+        .append_chat_message(
+            thread.id,
+            "user",
+            "This conversation moved from daemon office to src; the branch is at 1234567. \
+             Continue from where the transcript leaves off.",
+            "fork",
+        )
+        .unwrap();
+
+    fixture
+        .operator(&[
+            "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+        ])
+        .assert()
+        .success();
+
+    // The second hop must still start its own session and deliver its own
+    // message, rather than reading the carried preamble as a prior resume.
+    let delivered = wait_for_captured_turns(&fixture.target.capture, 1);
+    let first = delivered.first().unwrap();
+    assert!(
+        first.starts_with("This conversation moved from daemon src to dst; the branch is at "),
+        "hop two did not deliver its own handover; got:\n{first}"
+    );
+    assert_eq!(
+        fixture.source_workspace().status,
+        "archived",
+        "the source should be archived, but only because the handover really happened"
+    );
+}
+
+/// Finding 5. An empty queue is not delivery: `claim_next_queued_chat_input` is
+/// a `DELETE ... RETURNING`, so the row leaves the queue before the session
+/// writes the line and is put back if that write fails. Confirming on queue
+/// emptiness let the transfer archive the source for a message no provider ever
+/// received. Here the target's agent fails its handshake, so nothing can take
+/// the handover.
+#[test]
+fn remote_transfer_does_not_confirm_delivery_when_the_targets_agent_never_takes_it() {
+    let fixture = Fixture::start(TargetSetup::WithFailingProvider);
+
+    let failed = fixture
+        .operator(&[
+            "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(failed.get_output().stderr.clone()).unwrap();
+
+    assert!(
+        stderr.contains("never delivered") || stderr.contains("had taken it within"),
+        "the failure should say the conversation was not delivered; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("[ ] resume"),
+        "the report should show the resume step unfinished; got:\n{stderr}"
+    );
+    let source = fixture.source_workspace();
+    assert_eq!(
+        source.status, "active",
+        "the source was archived for a message the target's agent never took"
+    );
+    assert!(source.archived_at.is_none());
+    assert!(
+        !fixture.target.capture.exists()
+            || fs::read_to_string(&fixture.target.capture)
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+        "the failing provider somehow took a turn"
+    );
+}
+
 // --- harness -------------------------------------------------------------
 
 /// The first thing the source's agent was asked, and therefore the transcript's
@@ -284,6 +548,12 @@ enum TargetSetup {
     WithClone,
     /// The target cannot import, so the create step fails.
     WithoutClone,
+    /// The target also holds an unrelated repository that happens to have a
+    /// workspace of the same name on the same branch.
+    WithDecoyRepository,
+    /// The target has the clone, but its agent fails its handshake, so no
+    /// session there can ever take the handover.
+    WithFailingProvider,
 }
 
 struct Fixture {
@@ -324,16 +594,55 @@ impl Fixture {
         install_pre_receive_hook(&bare, &events, &source.provider_pid);
 
         let source_repo = clone_repo(&bare, root.join("source-repo"));
-        register_repository(&source, &source_repo);
-        if matches!(target_setup, TargetSetup::WithClone) {
+        register_repository(&source, "demo", &source_repo);
+        if !matches!(target_setup, TargetSetup::WithoutClone) {
             let target_repo = clone_repo(&bare, root.join("target-repo"));
-            register_repository(&target, &target_repo);
+            register_repository(&target, "demo", &target_repo);
             // Each daemon's clone points at that daemon's own fake provider, so
             // the turns the target takes land in the target's capture file and
             // cannot be confused with the source's.
+            if matches!(target_setup, TargetSetup::WithFailingProvider) {
+                write_fake_failing_codex(&target.fake_codex).unwrap();
+            }
             install_fake_provider(&target, &target_repo);
         }
         install_fake_provider(&source, &source_repo);
+
+        // A second repository on the target with a `berlin` workspace on
+        // `lc/berlin`: the same branch and the same name as the one being
+        // moved, and nothing to do with it.
+        if matches!(target_setup, TargetSetup::WithDecoyRepository) {
+            let decoy_bare = root.join("decoy.git");
+            let decoy_seed = init_repo(root.join("decoy-seed"));
+            run_git(
+                &root,
+                &["init", "--bare", "--initial-branch", "main"],
+                &decoy_bare,
+            );
+            git_output(
+                &decoy_seed,
+                &["remote", "add", "origin", decoy_bare.to_str().unwrap()],
+            );
+            git_output(&decoy_seed, &["push", "-q", "origin", "main"]);
+            let decoy_repo = clone_repo(&decoy_bare, root.join("decoy-repo"));
+            register_repository(&target, "decoy", &decoy_repo);
+            install_fake_provider(&target, &decoy_repo);
+            target
+                .app()
+                .args([
+                    "workspace",
+                    "create",
+                    "decoy",
+                    "--name",
+                    "berlin",
+                    "--branch",
+                    "lc/berlin",
+                    "--base",
+                    "main",
+                ])
+                .assert()
+                .success();
+        }
 
         let fixture = Self {
             _temp: temp,
@@ -413,6 +722,32 @@ impl Fixture {
         // Leave no active client, so an omitted `--from`/`--to` could not
         // accidentally stand in for either end.
         self.operator(&["remote", "disconnect"]).assert().success();
+    }
+
+    /// Save the source daemon as a saved client *of itself*, so a CLI run
+    /// against the source's own state dir can name one daemon two ways:
+    /// `srcremote` over its loopback listener, and `local` over its socket.
+    fn save_source_as_its_own_client(&self) {
+        self.source
+            .app()
+            .args([
+                "remote",
+                "connect",
+                &self.source.address,
+                "--token",
+                &self.source.token,
+                "--label",
+                "srcremote",
+            ])
+            .assert()
+            .success();
+        // Leave the source pointed at itself locally, so `--to local` is the
+        // local endpoint rather than the client just saved.
+        self.source
+            .app()
+            .args(["remote", "disconnect"])
+            .assert()
+            .success();
     }
 
     fn operator(&self, args: &[&str]) -> AssertCommand {
@@ -708,7 +1043,7 @@ fn install_fake_provider(daemon: &Daemon, repo: &Path) {
     .unwrap();
 }
 
-fn register_repository(daemon: &Daemon, repo: &Path) {
+fn register_repository(daemon: &Daemon, name: &str, repo: &Path) {
     daemon
         .app()
         .args([
@@ -716,11 +1051,11 @@ fn register_repository(daemon: &Daemon, repo: &Path) {
             "add",
             repo.to_str().unwrap(),
             "--name",
-            "demo",
+            name,
             "--default-branch",
             "main",
             "--workspace-parent",
-            daemon.root.join("workspaces").to_str().unwrap(),
+            daemon.root.join("workspaces").join(name).to_str().unwrap(),
         ])
         .assert()
         .success();
@@ -884,6 +1219,25 @@ fn wait_for_captured_turns(capture: &Path, expected: usize) -> Vec<String> {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A `codex` stand-in that refuses `initialize`, so its session never becomes
+/// ready and nothing it is handed can be delivered. Same shape as
+/// `cli_sessions.rs`'s `write_fake_failing_codex`.
+fn write_fake_failing_codex(path: &Path) -> std::io::Result<()> {
+    fs::write(
+        path,
+        r#"#!/usr/bin/env python3
+import json
+import sys
+
+for raw in sys.stdin:
+    message = json.loads(raw)
+    if message.get("method") == "initialize":
+        print(json.dumps({"id": message["id"], "error": {"message": "codex failed to start: port already in use"}}), flush=True)
+"#,
+    )?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
 }
 
 /// The `codex` app-server protocol, just enough of it to hold a session open

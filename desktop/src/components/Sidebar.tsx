@@ -77,13 +77,18 @@ async function copyWorkspaceToThisMachine(name: string): Promise<void> {
  * stopped, because losing a turn mid-thought is their call and not ours.
  */
 async function transferWorkspaceTo(name: string, target: TransferTarget): Promise<void> {
+  // Both ends are captured here, once. A transfer runs for as long as the
+  // agents take, and the source's calls must not follow the switcher if the
+  // user changes daemons part-way through.
   const from = clientsStore.activeLabel();
+  const fromClientId = clientsStore.state.activeId ?? null;
   const run = (force: boolean, cloneInto?: string) =>
     actions.transferWorkspace({
       workspace: name,
       toClientId: target.id,
       toLabel: target.label,
       fromLabel: from,
+      fromClientId,
       force,
       cloneInto,
     });

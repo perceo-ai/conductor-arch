@@ -6038,6 +6038,30 @@ fn resolve_transfer_endpoint(
     }
 }
 
+/// What a daemon says it is, for telling two ends of a transfer apart.
+///
+/// `GetRemoteAccess` answers out of the *serving* daemon's own
+/// `AppPaths::from_env()`, so its token path and token are properties of that
+/// daemon and come back identical however it was reached — a unix socket, a
+/// token-guarded port, or an ssh alias. Configured addresses cannot do this:
+/// one daemon has as many of those as the operator has names for it.
+///
+/// Returns `None` when the daemon will not answer, which means "unknown", not
+/// "different". The pair is only ever compared, never printed: the token is a
+/// credential.
+fn transfer_daemon_identity(endpoint: &TransferEndpoint) -> Option<String> {
+    match endpoint.client.send(ArchcarRequest::GetRemoteAccess) {
+        Ok(ArchcarResponse::RemoteAccess {
+            token, token_path, ..
+        }) => {
+            // Newline-separated: neither a path nor a generated token contains
+            // one, so the pair cannot be made ambiguous by concatenation.
+            Some(format!("{token_path}\n{token}"))
+        }
+        _ => None,
+    }
+}
+
 /// A chat on the source that the transfer has to account for, with the session
 /// holding it if one is live.
 struct TransferChat {
@@ -6084,11 +6108,40 @@ fn run_remote_transfer(
     let clients = remote::load_clients(paths)?;
     let source = resolve_transfer_endpoint(paths, &clients, from, TransferRole::Source)?;
     let target = resolve_transfer_endpoint(paths, &clients, to, TransferRole::Target)?;
-    anyhow::ensure!(
-        source.address != target.address,
-        "`--from` and `--to` are the same daemon ({}); a transfer needs two",
-        source.label
-    );
+    // Identity, not the strings the operator typed. `--from <alias-for-this-box>
+    // --to local` is two address strings and one daemon, and that passed the old
+    // string compare: the run then adopted the source workspace as its own
+    // target (the branch matches), handed it the transfer message, and archived
+    // it — leaving a live session inside an archived workspace.
+    match (
+        transfer_daemon_identity(&source),
+        transfer_daemon_identity(&target),
+    ) {
+        (Some(from_identity), Some(to_identity)) => anyhow::ensure!(
+            from_identity != to_identity,
+            "`--from {}` and `--to {}` are the same daemon reached two ways; a transfer needs \
+             two. Moving a workspace onto the daemon it is already on would archive the very \
+             workspace it just resumed",
+            source.label,
+            target.label
+        ),
+        // One end would not say who it is — a daemon predating `GetRemoteAccess`.
+        // Fall back to the addresses, which still catches the identical-string
+        // case, and say the weaker check ran rather than implying the stronger
+        // one did.
+        _ => {
+            eprintln!(
+                "warning: {} or {} did not report its own identity, so the two ends could only \
+                 be compared as addresses; check yourself that they are different daemons",
+                source.label, target.label
+            );
+            anyhow::ensure!(
+                source.address != target.address,
+                "`--from` and `--to` are the same daemon ({}); a transfer needs two",
+                source.label
+            );
+        }
+    }
 
     let mut progress = TransferProgress::default();
     let result = transfer_workspace(
@@ -6213,6 +6266,7 @@ fn transfer_workspace(
         }
         None => (Vec::new(), None, None),
     };
+    let moved_chat_title = chat_title.clone();
 
     // Step 2: publish. Reused as-is from `remote import`, uncommitted-changes
     // refusal included — what goes into a commit is the operator's call.
@@ -6264,14 +6318,41 @@ fn transfer_workspace(
             );
             progress.message_delivered = true;
         }
-        // A chat moved but the target workspace has no thread to resume it in:
-        // an earlier attempt created the workspace and failed before seeding
-        // the conversation. Archiving the source here would retire the only
-        // copy of a conversation that never arrived.
+        // A live chat with nothing said in it yet. `import_workspace_from_remote`
+        // only seeds a thread when there are messages to seed, so the target has
+        // none — and the old code mistook that for a half-finished earlier
+        // attempt and bailed, unrecoverably: by then the sessions were killed
+        // and the branch pushed, so a re-run hit the identical bail. There is
+        // also nothing to recover; the chat is empty. Give the target the thread
+        // and the continuation prompt the empty-transcript rule already
+        // promises.
+        (None, Some(provider)) if transcript.is_empty() => {
+            let thread_id = create_target_thread(
+                target,
+                &target_workspace,
+                &provider,
+                moved_chat_title.as_deref().unwrap_or("Transferred chat"),
+            )?;
+            progress.target_thread = Some(thread_id);
+            resume_on_target(
+                target,
+                &source.label,
+                &target_workspace,
+                thread_id,
+                &provider,
+                &transcript,
+                source_commit.as_deref(),
+            )?;
+            progress.message_delivered = true;
+        }
+        // A conversation with real history that was never seeded on the target:
+        // an earlier attempt created the workspace and failed before the chat.
+        // Creating a bare thread here would silently drop that history, so
+        // refuse — removing the empty workspace there lets a re-run seed it.
         (None, Some(_)) => anyhow::bail!(
-            "`{target_workspace}` is on {} but has no chat to resume, so an earlier attempt \
-             created it without the conversation. Remove it there and re-run; `{workspace}` on \
-             {} has been left alone",
+            "`{target_workspace}` is on {} but has none of the conversation, so an earlier \
+             attempt created it without the chat. Remove that workspace there and re-run; \
+             `{workspace}` on {} has been left alone",
             target.label,
             source.label
         ),
@@ -6531,7 +6612,13 @@ fn create_on_target(
     target: &TransferEndpoint,
     spec: TargetWorkspaceSpec<'_>,
 ) -> Result<(String, Option<i64>)> {
-    if let Some(existing) = existing_target_workspace(target, &spec.branch, &spec.name)? {
+    if let Some(existing) = existing_target_workspace(
+        target,
+        &spec.repository_url,
+        &spec.branch,
+        &spec.name,
+        spec.source_commit.as_deref(),
+    )? {
         println!(
             "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
             existing.name, target.label, existing.branch
@@ -6596,10 +6683,30 @@ fn create_on_target(
     }
 }
 
+/// A workspace on the target that an earlier run of *this* transfer created.
+///
+/// A branch or workspace name is not an identity: two repositories routinely
+/// share both (`main`, `lc/fix-auth`, `api`). Matching on those alone made the
+/// transfer adopt unrelated work — skipping the import entirely, so neither the
+/// branch nor the transcript ever moved, handing the transfer message to a
+/// stranger's newest chat, and archiving the real source anyway. Three things
+/// have to hold now:
+///
+/// 1. **Not archived.** Resuming inside a workspace the target has already
+///    retired would look like success while being invisible on its board.
+/// 2. **Same repository**, resolved on the target by remote URL rather than by
+///    the source's name for it — names are per-daemon, the URL is the thing the
+///    import itself matches on.
+/// 3. **At the commit this transfer pushed.** This is the load-bearing one: a
+///    same-named branch in another repository is not at our sha, and a
+///    workspace that is at our sha is our own earlier attempt whatever it is
+///    called.
 fn existing_target_workspace(
     target: &TransferEndpoint,
+    repository_url: &str,
     branch: &str,
     name: &str,
+    source_commit: Option<&str>,
 ) -> Result<Option<archductor_core::archcar::protocol::ArchcarWorkspaceSummary>> {
     let workspaces = match target.client.send(ArchcarRequest::ListWorkspaces)? {
         ArchcarResponse::Workspaces { workspaces } => workspaces,
@@ -6609,15 +6716,155 @@ fn existing_target_workspace(
             archductor_core::archcar::protocol::archcar_response_summary(&other)
         ),
     };
-    // Archived ones are excluded: resuming a session inside a workspace the
-    // target has already retired would look like success while being invisible
-    // on its board. One left there at this branch instead collides at import,
-    // which names the workspace it did create in its own output.
-    let live = || workspaces.iter().filter(|c| c.status != "archived");
-    Ok(live()
+    let repository = target_repository_name(target, repository_url)?;
+    let candidates: Vec<&archductor_core::archcar::protocol::ArchcarWorkspaceSummary> = workspaces
+        .iter()
+        .filter(|candidate| candidate.status != "archived")
+        .filter(|candidate| match &repository {
+            Some(repository) => &candidate.repository_name == repository,
+            // The target has no repository at this URL, so it has no workspace
+            // of ours either; the import will say so in its own words.
+            None => false,
+        })
+        .collect();
+
+    let matched = candidates
+        .iter()
         .find(|candidate| candidate.branch == branch)
-        .or_else(|| live().find(|candidate| candidate.name == name))
-        .cloned())
+        .or_else(|| candidates.iter().find(|candidate| candidate.name == name));
+    let Some(matched) = matched else {
+        return Ok(None);
+    };
+
+    // Without a pushed sha to check against there is nothing to pin this to, so
+    // fall back to the repository-and-branch match rather than re-importing and
+    // making the duplicate this check exists to prevent.
+    let Some(expected) = source_commit else {
+        return Ok(Some((*matched).clone()));
+    };
+    let head = workspace_head_commit(target, &matched.name)?;
+    match head.as_deref().filter(|head| commits_match(head, expected)) {
+        Some(_) => Ok(Some((*matched).clone())),
+        None => {
+            println!(
+                "`{}` on {} is on branch {} but at {}, not the {} this transfer pushed; \
+                 importing rather than adopting it",
+                matched.name,
+                target.label,
+                matched.branch,
+                head.as_deref().unwrap_or("an unknown commit"),
+                expected
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// What the target calls the repository at `repository_url`.
+///
+/// Registration names are per-daemon — one clone can be `app` here and
+/// `my-app` there — so the source's name cannot filter the target's workspaces.
+/// Matched on the remote URL instead: exactly, then by its `owner/repo` tail,
+/// which is how the same repository appears across the `git@host:`,
+/// `https://host/` and `ssh://host:22/` forms two machines use.
+fn target_repository_name(
+    target: &TransferEndpoint,
+    repository_url: &str,
+) -> Result<Option<String>> {
+    let repositories = match target.client.send(ArchcarRequest::ListRepositories)? {
+        ArchcarResponse::Repositories { repositories, .. } => repositories,
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+        other => anyhow::bail!(
+            "unexpected response listing the target's repositories: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+    let wanted = repository_url_tail(repository_url);
+    Ok(repositories
+        .iter()
+        .find(|repo| repo.remote_url.as_deref() == Some(repository_url))
+        .or_else(|| {
+            repositories.iter().find(|repo| {
+                !wanted.is_empty()
+                    && repo
+                        .remote_url
+                        .as_deref()
+                        .map(repository_url_tail)
+                        .as_deref()
+                        == Some(wanted.as_str())
+            })
+        })
+        .map(|repo| repo.name.clone()))
+}
+
+/// The `owner/repo` tail of a git remote URL, lowercased and without `.git`.
+fn repository_url_tail(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let path = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    // `git@host:owner/repo` and `host:22/owner/repo` both reduce to the tail.
+    let path = path.split_once(':').map(|(_, rest)| rest).unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    segments[segments.len().saturating_sub(2)..]
+        .join("/")
+        .to_ascii_lowercase()
+}
+
+/// Two abbreviated shas naming one commit. Both ends report through
+/// `GetRecentCommits`, which abbreviates, so neither width is fixed.
+fn commits_match(left: &str, right: &str) -> bool {
+    let left = left.trim().to_ascii_lowercase();
+    let right = right.trim().to_ascii_lowercase();
+    let shared = left.len().min(right.len());
+    shared >= 7
+        && left.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && right.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && left[..shared] == right[..shared]
+}
+
+fn workspace_head_commit(endpoint: &TransferEndpoint, workspace: &str) -> Result<Option<String>> {
+    Ok(
+        match endpoint.client.send(ArchcarRequest::GetRecentCommits {
+            workspace: workspace.to_owned(),
+            limit: Some(1),
+        })? {
+            ArchcarResponse::RecentCommits { log, .. } => {
+                log.split_whitespace().next().map(str::to_owned)
+            }
+            _ => None,
+        },
+    )
+}
+
+/// Open a chat on the target for a conversation the import did not seed.
+///
+/// Only reached for a source chat with an empty transcript: there is nothing to
+/// carry, so the thread is created under the same provider and title and the
+/// continuation prompt goes into it.
+fn create_target_thread(
+    target: &TransferEndpoint,
+    workspace: &str,
+    provider: &str,
+    title: &str,
+) -> Result<i64> {
+    match target.client.send(ArchcarRequest::CreateChatThread {
+        workspace: workspace.to_owned(),
+        provider: provider.to_owned(),
+        title: title.to_owned(),
+    })? {
+        ArchcarResponse::ChatThreadCreated { thread } => Ok(thread.id),
+        ArchcarResponse::Error { message } => anyhow::bail!(
+            "could not open a chat for `{workspace}` on {}: {message}",
+            target.label
+        ),
+        other => anyhow::bail!(
+            "unexpected response opening a chat on the target: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
 }
 
 /// The chat to resume in an adopted workspace: its most recently touched live
@@ -6644,24 +6891,73 @@ fn target_thread_for(target: &TransferEndpoint, workspace: &str) -> Result<Optio
 /// and `target_already_resumed` key off it, so they cannot drift apart.
 const TRANSFER_PREAMBLE_PREFIX: &str = "This conversation moved from daemon ";
 
-/// Whether this chat on the target has already been handed its transfer
-/// message.
+/// Whether a transfer message was *delivered to a session on this daemon* for
+/// this chat.
 ///
-/// Read from the chat's own messages rather than from "is a session up?", which
-/// stops being true the moment the operator stops the agent — and a re-run
-/// after that would hand the same message over a second time, telling the agent
-/// to continue work it has since finished.
-fn target_already_resumed(target: &TransferEndpoint, thread_id: i64) -> Result<bool> {
+/// One predicate, asked twice: before resuming (has an earlier attempt already
+/// handed over?) and after queueing (did the provider actually take it?). Two
+/// things make it the right question, and the obvious alternatives are both
+/// wrong:
+///
+/// - **Not queue emptiness.** `claim_next_queued_chat_input` is a
+///   `DELETE ... RETURNING`, so the row leaves the queue *before* the session
+///   writes the line, and a failed write puts it back via
+///   `requeue_claimed_chat_input_front`. An empty queue therefore means
+///   "claimed", not "delivered", and archiving the source on it can retire work
+///   the target never received. The message row is the real signal: the session
+///   appends it only once the write succeeded (crates/core/src/archcar/
+///   session.rs, "Recorded once the line is written, not before").
+/// - **Not any preamble-shaped message.** `seed_imported_chat` copies a carried
+///   transcript verbatim, so a workspace moved A→B arrives at C with B's
+///   preamble already in its seeded history. Seeded rows carry
+///   `FORKED_MESSAGE_SOURCE`, so excluding them is what keeps the second hop of
+///   a chain from being skipped as "already resumed" — which would archive B
+///   having never started a session on C.
+fn transfer_message_delivered(target: &TransferEndpoint, thread_id: i64) -> Result<bool> {
     match target.client.send(ArchcarRequest::GetChatSnapshot {
         thread_id,
         include_provider_events: Some(false),
     })? {
         ArchcarResponse::ChatSnapshot { snapshot } => Ok(snapshot.messages.iter().any(|message| {
-            message.role == "user" && message.content.starts_with(TRANSFER_PREAMBLE_PREFIX)
+            message.role == "user"
+                && message.source != archductor_core::workspace::FORKED_MESSAGE_SOURCE
+                && message.content.starts_with(TRANSFER_PREAMBLE_PREFIX)
         })),
         ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
         other => anyhow::bail!(
             "unexpected response reading the target's chat: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+/// Whether the target's chat still has a session that could take a message.
+enum TargetSessionLiveness {
+    Live,
+    /// Registered and finished: failed its handshake, exited, or was killed.
+    Gone,
+    /// No session registered for this chat right now.
+    Unknown,
+}
+
+fn target_session_liveness(
+    target: &TransferEndpoint,
+    thread_id: i64,
+) -> Result<TargetSessionLiveness> {
+    match target.client.send(ArchcarRequest::GetChatSnapshot {
+        thread_id,
+        include_provider_events: Some(false),
+    })? {
+        ArchcarResponse::ChatSnapshot { snapshot } => Ok(match snapshot.live_session {
+            Some(live) if archcar_status_is_terminal(&live.status, live.runtime_state) => {
+                TargetSessionLiveness::Gone
+            }
+            Some(_) => TargetSessionLiveness::Live,
+            None => TargetSessionLiveness::Unknown,
+        }),
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+        other => anyhow::bail!(
+            "unexpected response reading the target's session: {}",
             archductor_core::archcar::protocol::archcar_response_summary(&other)
         ),
     }
@@ -6726,7 +7022,7 @@ fn resume_on_target(
     transcript: &[archductor_core::archcar::protocol::ArchcarChatTranscriptMessage],
     commit: Option<&str>,
 ) -> Result<()> {
-    if target_already_resumed(target, thread_id)? {
+    if transfer_message_delivered(target, thread_id)? {
         println!(
             "`{workspace}` on {} was already handed the conversation; leaving its session alone",
             target.label
@@ -6786,19 +7082,33 @@ fn resume_on_target(
         ),
     }
 
+    // Wait for the message row, and give up early when the session that was
+    // supposed to take it has died — a provider that fails its handshake would
+    // otherwise cost the operator the full timeout for an answer already known.
     let deadline = Instant::now() + TRANSFER_DELIVERY_TIMEOUT;
-    loop {
-        match target
-            .client
-            .send(ArchcarRequest::ListQueuedChatInputs { thread_id })?
-        {
-            ArchcarResponse::QueuedChatInputs { inputs, .. } if inputs.is_empty() => break,
-            ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
-            _ => {}
+    let mut session_seen_live = false;
+    while !transfer_message_delivered(target, thread_id)? {
+        match target_session_liveness(target, thread_id)? {
+            TargetSessionLiveness::Live => session_seen_live = true,
+            TargetSessionLiveness::Gone => anyhow::bail!(
+                "the session started for `{workspace}` on {} stopped before taking the \
+                 conversation, so it was never delivered; `{workspace}` on the source has been \
+                 left alone — fix the agent there and re-run",
+                target.label
+            ),
+            // Not registered yet. Only "gone" once it has been seen running,
+            // because a spawn still in flight looks the same from here.
+            TargetSessionLiveness::Unknown if session_seen_live => anyhow::bail!(
+                "the session started for `{workspace}` on {} disappeared before taking the \
+                 conversation, so it was never delivered; `{workspace}` on the source has been \
+                 left alone — fix the agent there and re-run",
+                target.label
+            ),
+            TargetSessionLiveness::Unknown => {}
         }
         anyhow::ensure!(
             Instant::now() < deadline,
-            "the conversation was queued for `{workspace}` on {} but its session had not taken \
+            "the conversation was queued for `{workspace}` on {} but no session there had taken \
              it within {}s; the source workspace has been left alone",
             target.label,
             TRANSFER_DELIVERY_TIMEOUT.as_secs()

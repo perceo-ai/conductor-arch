@@ -235,7 +235,19 @@ archductor remote transfer fix-auth --from office --to frankfurt
 
 Omit `--to` to target this machine; omit `--from` to read from the active
 client, as `import` does. `local` and `this-machine` name the local daemon
-explicitly for either flag, and pointing both ends at one daemon is refused.
+explicitly for either flag.
+
+Pointing both ends at one daemon is refused, and the two ends are compared by
+asking each daemon who it is rather than by the addresses you typed — so a
+saved client that happens to point at this machine is caught too:
+
+```
+Error: `--from office` and `--to local` are the same daemon reached two ways; a transfer needs two. Moving a workspace onto the daemon it is already on would archive the very workspace it just resumed
+```
+
+A daemon too old to answer that question falls back to comparing addresses,
+which catches only the identical-string case; the command says so when it
+happens rather than implying the stronger check ran.
 
 `--name` and `--branch` rename the workspace on the target. `--clone-into`
 clones onto the *target* daemon when it has no copy of the repository, rather
@@ -283,12 +295,19 @@ In order, the transfer:
      ```
 
    - **Last entry is from the agent** (it was explaining something when the
-     source stopped), or there is no transcript. There is nothing to replay, so
-     a fixed continuation prompt is sent instead:
+     source stopped), or the chat is empty. There is nothing to replay, so a
+     fixed continuation prompt is sent instead:
 
      ```
      This conversation moved from daemon office to frankfurt; the branch is at 5055711. Pick up where you left off and continue the work — do not redo anything already done.
      ```
+
+     A chat with *nothing* said in it yet is this second case. Importing a
+     workspace only opens a chat on the target when there are messages to
+     carry, so the transfer opens one itself — same provider, same title — and
+     sends the continuation prompt into it. (Being a brand-new chat, its first
+     turn also carries the repository's `general` prompt, as any first message
+     does.)
 
    The transcript itself is seeded on the target and replayed to the agent on
    its first turn by the same path a forked chat uses, so the handover message
@@ -299,6 +318,17 @@ In order, the transfer:
    back. This happens only after step 4 confirms the message reached the
    target's session; a target that could not take the work must not cost you
    the one live copy of it.
+
+   "Confirmed" means the message is in the target chat's own history, not that
+   the queue it was put on is empty. A queued message is removed from the queue
+   *before* the session writes it out and put back if that write fails, so an
+   empty queue can mean "in flight" or "about to be retried". If the session
+   that was meant to take it dies first — an agent that fails to start, say —
+   the transfer says so and leaves the source alone:
+
+   ```
+   Error: the session started for `fix-auth` on frankfurt stopped before taking the conversation, so it was never delivered; `fix-auth` on the source has been left alone — fix the agent there and re-run
+   ```
 
 ### When a transfer stops part-way
 
@@ -315,38 +345,73 @@ transfer of `fix-auth` from office to frankfurt stopped part-way. State now:
 Re-run the same command to continue; finished steps are detected and skipped.
 ```
 
-Re-running the same command is safe. Two checks make it so:
+Re-running the same command is safe. Two checks make it so.
 
-- **The workspace.** A workspace on the target whose **branch** matches the one
-  being moved is taken to be an earlier attempt of this transfer and is reused:
+**The workspace.** A workspace already on the target is reused rather than
+imported again — but only when all three of these hold, because a branch name
+and a workspace name are not identities and two repositories routinely share
+both:
 
-  ```
-  `fix-auth` is already on frankfurt (branch lc/fix-auth); keeping it rather than importing a second copy
-  ```
+1. It is not archived. Resuming a session inside a workspace the target has
+   already retired would look like success while being invisible on its board.
+   (True of the desktop as well as the CLI.)
+2. It belongs to the same repository, matched by remote URL rather than by what
+   each daemon happens to call it — registration names are per-daemon.
+3. It is at the commit this transfer pushed. This is the check that actually
+   carries the weight: a same-named branch in another repository is not at that
+   sha, and anything that is at it is this transfer's own earlier attempt.
 
-  The branch is matched rather than the name because the branch *is* the work,
-  and two worktrees on one branch is the divergence this command exists to
-  prevent. The name is the fallback, for a first attempt whose workspace the
-  target had to rename around a collision. Workspaces the target has already
-  archived are not adopted: resuming a session inside one would look like
-  success while being invisible on its board.
+```
+`fix-auth` is already on frankfurt (branch lc/fix-auth); keeping it rather than importing a second copy
+```
 
-- **The handover.** A chat whose messages already start with the transfer
-  preamble has been handed over, and is left alone:
+When the branch or name matches but the commit does not, the transfer says so
+and imports instead of adopting:
 
-  ```
-  `fix-auth` on frankfurt was already handed the conversation; leaving its session alone
-  ```
+```
+`fix-auth` on frankfurt is on branch lc/fix-auth but at 9f21abc, not the 5055711 this transfer pushed; importing rather than adopting it
+```
 
-  Read from the chat's messages rather than from "is a session up?", which
-  stops being true the moment you stop the agent — and a re-run after that
-  would tell it to continue work it has since finished.
+A workspace the target has that holds *none* of the conversation is an earlier
+attempt that died before the chat was carried. Creating an empty chat there
+would silently drop the history, so the transfer refuses and leaves the source
+alone:
+
+```
+Error: `fix-auth` is on frankfurt but has none of the conversation, so an earlier attempt created it without the chat. Remove that workspace there and re-run; `fix-auth` on office has been left alone
+```
+
+**The handover.** A chat that has already been handed its transfer message is
+left alone:
+
+```
+`fix-auth` on frankfurt was already handed the conversation; leaving its session alone
+```
+
+This reads the chat's own messages, not "is a session up?" — which stops being
+true the moment you stop the agent, and a re-run after that would tell it to
+continue work it has since finished. It counts only a message a session on
+*that* daemon actually took, never one that arrived as part of a carried
+transcript. That distinction is what makes chains work: a workspace moved from
+A to B arrives at C carrying B's preamble in its history, and counting that as
+a prior handover would skip C's session entirely while still archiving B.
 
 In the app this is "Transfer to <daemon>…" on a workspace's right-click menu,
 one entry per saved daemon other than the one it is on (plus "this machine"
 while a remote is selected). A live agent on the source asks before it is
 stopped rather than refusing outright, since clicking the item is already the
 decision the CLI's `--force` stands in for.
+
+Two differences from the CLI, both deliberate:
+
+- The app always moves *off the daemon it is showing you*, so it has no `--from`
+  of its own. The CLI can run an office→frankfurt transfer from a third machine
+  that is neither end; the app cannot. The daemon it is showing is captured when
+  you click, so switching daemons while a transfer runs does not redirect it —
+  in particular not the archive at the end.
+- `--clone-into` has no app equivalent for a remote target: the folder picker
+  can only choose a path on this machine. Transferring onto a daemon with no
+  clone of the repository asks you to register one there first.
 
 ## Updating daemons
 

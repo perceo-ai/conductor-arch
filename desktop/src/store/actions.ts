@@ -64,6 +64,55 @@ const TERMINAL_SESSION_STATES = new Set(["interrupted", "failed", "exited", "arc
  * marker that a chat has already been handed over. */
 const TRANSFER_PREAMBLE_PREFIX = "This conversation moved from daemon ";
 
+/**
+ * Whether a transfer message was actually *delivered to a session* for this
+ * chat, rather than merely queued or merely present in carried history.
+ *
+ * Seeded rows are excluded. `seed_imported_chat` copies a carried transcript
+ * verbatim, so a workspace moved A→B arrives at C with B's preamble already in
+ * its history; counting that as "already resumed" skipped the second hop of a
+ * chain entirely while still archiving B. Seeded rows carry the fork source,
+ * and only a row the session itself appended after a successful write has any
+ * other source. Mirrors `transfer_message_delivered` in crates/cli/src/main.rs.
+ */
+function hasDeliveredTransferMessage(messages: { role: string; content: string; source: string }[]): boolean {
+  return messages.some(
+    (message) =>
+      message.role === "user" &&
+      message.source !== SEEDED_MESSAGE_SOURCE &&
+      message.content.startsWith(TRANSFER_PREAMBLE_PREFIX),
+  );
+}
+
+/** `FORKED_MESSAGE_SOURCE` in crates/core/src/workspace.rs: the source a
+ * carried/seeded transcript row is written with. */
+const SEEDED_MESSAGE_SOURCE = "fork";
+
+/** The `owner/repo` tail of a git remote URL, lowercased and without `.git`, so
+ * the `git@host:`, `https://host/` and `ssh://host:22/` forms of one repository
+ * compare equal. Mirrors `repository_url_tail` in crates/cli/src/main.rs. */
+export function repositoryUrlTail(url: string): string {
+  let path = url.trim().replace(/\/+$/, "");
+  path = path.replace(/\.git$/, "");
+  const scheme = path.indexOf("://");
+  if (scheme >= 0) path = path.slice(scheme + 3);
+  const colon = path.indexOf(":");
+  if (colon >= 0) path = path.slice(colon + 1);
+  const segments = path.split("/").filter((part) => part.length > 0);
+  return segments.slice(Math.max(0, segments.length - 2)).join("/").toLowerCase();
+}
+
+/** Two abbreviated shas naming one commit; `get_recent_commits` abbreviates, so
+ * neither width is fixed. Mirrors `commits_match` in crates/cli/src/main.rs. */
+export function commitsMatch(left?: string, right?: string): boolean {
+  const a = (left ?? "").trim().toLowerCase();
+  const b = (right ?? "").trim().toLowerCase();
+  const shared = Math.min(a.length, b.length);
+  if (shared < 7) return false;
+  if (!/^[0-9a-f]+$/.test(a) || !/^[0-9a-f]+$/.test(b)) return false;
+  return a.slice(0, shared) === b.slice(0, shared);
+}
+
 const TRANSFER_POLL_INTERVAL_MS = 250;
 const TRANSFER_POLL_TIMEOUT_MS = 60_000;
 
@@ -74,10 +123,13 @@ const TRANSFER_POLL_TIMEOUT_MS = 60_000;
  * id came from a snapshot taken moments ago, so it is not a session still
  * being spawned.
  */
-async function waitForSessionGone(sessionId: number): Promise<void> {
+async function waitForSessionGone(clientId: string | null, sessionId: number): Promise<void> {
   const deadline = Date.now() + TRANSFER_POLL_TIMEOUT_MS;
   for (;;) {
-    const status = await send({ type: "get_session_status", session_id: sessionId });
+    const status = await sendToClient(clientId, {
+      type: "get_session_status",
+      session_id: sessionId,
+    });
     if (status.type === "error") return;
     if (
       status.type === "session_status" &&
@@ -146,12 +198,7 @@ async function resumeTransferredChat(input: {
     thread_id: input.threadId,
     include_provider_events: false,
   });
-  if (
-    snapshot.type === "chat_snapshot" &&
-    snapshot.snapshot.messages.some(
-      (message) => message.role === "user" && message.content.startsWith(TRANSFER_PREAMBLE_PREFIX),
-    )
-  ) {
+  if (snapshot.type === "chat_snapshot" && hasDeliveredTransferMessage(snapshot.snapshot.messages)) {
     // Already handed over by an earlier attempt. Re-sending would tell the
     // agent to continue work it has since finished.
     return;
@@ -188,14 +235,27 @@ async function resumeTransferredChat(input: {
       verbatim: true,
     }),
   );
+  // Delivery is confirmed from the thread's own messages, never from an empty
+  // queue: `claim_next_queued_chat_input` is a `DELETE ... RETURNING`, so the
+  // row leaves the queue before the session writes the line and is put back if
+  // that write fails. An empty queue means "claimed", not "delivered".
   const deadline = Date.now() + TRANSFER_POLL_TIMEOUT_MS;
   for (;;) {
-    const queued = await sendTarget({ type: "list_queued_chat_inputs", thread_id: input.threadId });
-    if (queued.type === "queued_chat_inputs" && queued.inputs.length === 0) return;
-    if (queued.type === "error") throw new Error(queued.message);
+    const current = await sendTarget({
+      type: "get_chat_snapshot",
+      thread_id: input.threadId,
+      include_provider_events: false,
+    });
+    if (current.type === "error") throw new Error(current.message);
+    if (
+      current.type === "chat_snapshot" &&
+      hasDeliveredTransferMessage(current.snapshot.messages)
+    ) {
+      return;
+    }
     if (Date.now() >= deadline) {
       throw new Error(
-        `the conversation was queued for ${input.workspace} on ${input.toLabel} but its session had not taken it in time; the source workspace has been left alone`,
+        `the conversation was queued for ${input.workspace} on ${input.toLabel} but no session there had taken it in time; the source workspace has been left alone`,
       );
     }
     await sleep(TRANSFER_POLL_INTERVAL_MS);
@@ -560,24 +620,36 @@ export const actions = {
     toLabel: string;
     /** Label of the daemon the workspace is moving off, for the preamble. */
     fromLabel: string;
+    /**
+     * Saved client id of the daemon the workspace is moving *off*; `null` is
+     * this machine. Pinned rather than implied by the switcher: `send()`
+     * re-reads the selected client per connection (see `open()` in
+     * desktop/electron/archcar.ts), and a transfer can run for minutes, so a
+     * selection change part-way would send the rest of the source's calls —
+     * the final archive included — to whichever daemon is selected by then.
+     */
+    fromClientId: string | null;
     force?: boolean;
     /** Clone the repository on the *target* first, when it has no copy. */
     cloneInto?: string;
   }): Promise<{ workspace: string }> {
     logAction("transfer_workspace", {
       workspace: input.workspace,
+      from: input.fromClientId ?? "local",
       to: input.toClientId ?? "local",
       force: input.force ? "yes" : "no",
     });
     const toClient = input.toClientId;
+    const fromClient = input.fromClientId;
     const sendTarget = (req: ArchcarRequest) => sendToClient(toClient, req);
+    const sendSource = (req: ArchcarRequest) => sendToClient(fromClient, req);
 
-    const remoteWorkspaces = ensureOk(await send({ type: "list_workspaces" }));
+    const remoteWorkspaces = ensureOk(await sendSource({ type: "list_workspaces" }));
     if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
     const source = remoteWorkspaces.workspaces.find((w) => w.name === input.workspace);
     if (!source) throw new Error(`${input.workspace} is not a workspace on the connected daemon`);
 
-    const remoteRepos = ensureOk(await send({ type: "list_repositories" }));
+    const remoteRepos = ensureOk(await sendSource({ type: "list_repositories" }));
     if (remoteRepos.type !== "repositories") throw new Error("could not list remote repositories");
     const repositoryUrl = remoteRepos.repositories.find(
       (repo) => repo.name === source.repository_name,
@@ -590,13 +662,13 @@ export const actions = {
 
     // Step 1: stop. Before the push, because the branch about to be published is
     // the one an agent on the source is still writing.
-    const listed = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
+    const listed = ensureOk(await sendSource({ type: "list_chat_threads", workspace: source.name }));
     const threads = (listed.type === "chat_threads" ? listed.threads : []).filter(
       (thread) => !thread.archived_at,
     );
     const live: { session: number; provider: string; title: string }[] = [];
     for (const thread of threads) {
-      const snapshot = await send({
+      const snapshot = await sendSource({
         type: "get_chat_snapshot",
         thread_id: thread.id,
         include_provider_events: false,
@@ -617,11 +689,11 @@ export const actions = {
       );
     }
     for (const entry of live) {
-      ensureOk(await send({ type: "kill_session", session_id: entry.session }));
+      ensureOk(await sendSource({ type: "kill_session", session_id: entry.session }));
     }
     // Polled, not slept on: the push must not race an agent still writing files.
     for (const entry of live) {
-      await waitForSessionGone(entry.session);
+      await waitForSessionGone(fromClient, entry.session);
     }
 
     // Which chat moves: the most recently touched live one.
@@ -629,7 +701,7 @@ export const actions = {
     let transcript: { role: string; content: string; created_at: string }[] = [];
     let chatTitle: string | undefined;
     if (moving) {
-      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: moving.id }));
+      const chat = ensureOk(await sendSource({ type: "get_chat_transcript", thread_id: moving.id }));
       if (chat.type === "chat_transcript") {
         transcript = chat.messages;
         chatTitle = chat.title;
@@ -639,7 +711,7 @@ export const actions = {
     // Step 2: publish. Uncommitted changes are refused rather than committed —
     // what goes into someone else's branch is their call.
     const changes = ensureOk(
-      await send({ type: "get_workspace_changes", workspace: source.name, scope: "uncommitted" }),
+      await sendSource({ type: "get_workspace_changes", workspace: source.name, scope: "uncommitted" }),
     );
     if (changes.type === "workspace_changes" && changes.files.length > 0) {
       const shown = changes.files.slice(0, 5).map((file) => file.path);
@@ -648,8 +720,8 @@ export const actions = {
         `${source.name} has ${changes.files.length} uncommitted file(s) on the source: ${shown.join(", ")}. Commit them there first, then transfer again.`,
       );
     }
-    ensureOk(await send({ type: "push_branch", workspace: source.name }));
-    const head = await send({ type: "get_recent_commits", workspace: source.name, limit: 1 });
+    ensureOk(await sendSource({ type: "push_branch", workspace: source.name }));
+    const head = await sendSource({ type: "get_recent_commits", workspace: source.name, limit: 1 });
     const sourceCommit =
       head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
 
@@ -658,9 +730,40 @@ export const actions = {
     // so pointing the request at the target is all it takes.
     const onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
     if (onTarget.type !== "workspaces") throw new Error(`could not list workspaces on ${input.toLabel}`);
-    const existing =
-      onTarget.workspaces.find((w) => w.branch === source.branch) ??
-      onTarget.workspaces.find((w) => w.name === source.name);
+    // Adopt only this transfer's own earlier attempt. A branch or a workspace
+    // name is not an identity — two repositories routinely share both — and an
+    // archived workspace is not a live attempt: resuming inside one would look
+    // like success while being invisible on the target's board. Same three
+    // checks as `existing_target_workspace` in crates/cli/src/main.rs.
+    const targetRepos = ensureOk(await sendTarget({ type: "list_repositories" }));
+    const targetRepository =
+      targetRepos.type === "repositories"
+        ? (targetRepos.repositories.find((repo) => repo.remote_url === repositoryUrl) ??
+          targetRepos.repositories.find(
+            (repo) =>
+              !!repo.remote_url &&
+              repositoryUrlTail(repo.remote_url) === repositoryUrlTail(repositoryUrl),
+          ))?.name
+        : undefined;
+    const candidates = onTarget.workspaces.filter(
+      (w) => w.status !== "archived" && !!targetRepository && w.repository_name === targetRepository,
+    );
+    const matched =
+      candidates.find((w) => w.branch === source.branch) ??
+      candidates.find((w) => w.name === source.name);
+    let existing = matched;
+    if (matched && sourceCommit) {
+      const head = await sendTarget({
+        type: "get_recent_commits",
+        workspace: matched.name,
+        limit: 1,
+      });
+      const headCommit =
+        head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
+      // The load-bearing check: a same-named branch in another repository is
+      // not at our sha, and anything that is at our sha is our own attempt.
+      if (!commitsMatch(headCommit, sourceCommit)) existing = undefined;
+    }
 
     let targetWorkspace: string;
     let targetThread: number | undefined;
@@ -709,6 +812,32 @@ export const actions = {
     }
 
     // Step 4: resume. Nothing is archived until the message has landed.
+    if (moving && targetThread == null) {
+      // A chat moved but the target has no thread for it. Mirrors the CLI: an
+      // empty conversation gets a thread opened for it and the continuation
+      // prompt, and a conversation with real history that was never seeded is
+      // refused rather than silently dropped. Either way the source is not
+      // archived on a path where the work never arrived — which is what the
+      // unconditional archive below used to do.
+      if (transcript.length === 0) {
+        const opened = ensureOk(
+          await sendTarget({
+            type: "create_chat_thread",
+            workspace: targetWorkspace,
+            provider: moving.provider,
+            title: chatTitle ?? "Transferred chat",
+          }),
+        );
+        if (opened.type !== "chat_thread_created") {
+          throw new Error(`could not open a chat for ${targetWorkspace} on ${input.toLabel}`);
+        }
+        targetThread = opened.thread.id;
+      } else {
+        throw new Error(
+          `${targetWorkspace} is on ${input.toLabel} but has none of the conversation, so an earlier attempt created it without the chat. Remove that workspace there and transfer again; ${source.name} has been left alone.`,
+        );
+      }
+    }
     if (targetThread != null && moving) {
       await resumeTransferredChat({
         toClientId: toClient,
@@ -723,7 +852,7 @@ export const actions = {
     }
 
     // Step 5: retire. Archive, never delete: the worktree stays on disk.
-    ensureOk(await send({ type: "archive_workspace", workspace: source.name }));
+    ensureOk(await sendSource({ type: "archive_workspace", workspace: source.name }));
     await refreshInventory();
     return { workspace: targetWorkspace };
   },
