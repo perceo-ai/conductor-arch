@@ -78,13 +78,14 @@ async function copyWorkspaceToThisMachine(name: string): Promise<void> {
  */
 async function transferWorkspaceTo(name: string, target: TransferTarget): Promise<void> {
   const from = clientsStore.activeLabel();
-  const run = (force: boolean) =>
+  const run = (force: boolean, cloneInto?: string) =>
     actions.transferWorkspace({
       workspace: name,
       toClientId: target.id,
       toLabel: target.label,
       fromLabel: from,
       force,
+      cloneInto,
     });
   const landed = async (force: boolean) => {
     let moved: { workspace: string };
@@ -92,13 +93,19 @@ async function transferWorkspaceTo(name: string, target: TransferTarget): Promis
       moved = await run(force);
     } catch (err) {
       if (!(err instanceof MissingLocalRepositoryError)) throw err;
+      // The folder picker can only choose a path on *this* machine, so it is
+      // only offered when this machine is the target. For a remote target,
+      // say what to do there rather than picking a path it does not have.
+      if (target.id !== null) {
+        throw new Error(
+          `${target.label} has no clone of ${err.repositoryName}; register one there first (archductor repo add), then transfer again`,
+        );
+      }
       const parent = await selectFolder({
-        title: `${target.label} has no clone of ${err.repositoryName}. Choose where to clone it`,
+        title: `This machine has no clone of ${err.repositoryName}. Choose where to clone it`,
       });
       if (!parent) return;
-      throw new Error(
-        `${target.label} has no clone of ${err.repositoryName}; clone it there first (the desktop can only clone onto this machine)`,
-      );
+      moved = await run(force, `${parent.replace(/\/+$/, "")}/${err.repositoryName}`);
     }
     toastsStore.push(`Moved ${name} to ${target.label} as ${moved.workspace}`);
   };

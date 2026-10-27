@@ -561,6 +561,8 @@ export const actions = {
     /** Label of the daemon the workspace is moving off, for the preamble. */
     fromLabel: string;
     force?: boolean;
+    /** Clone the repository on the *target* first, when it has no copy. */
+    cloneInto?: string;
   }): Promise<{ workspace: string }> {
     logAction("transfer_workspace", {
       workspace: input.workspace,
@@ -674,6 +676,17 @@ export const actions = {
               .sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0]?.id
           : undefined;
     } else {
+      if (input.cloneInto) {
+        // Through the target daemon, so the clone is registered as one of its
+        // repositories in the same step.
+        ensureOk(
+          await sendTarget({
+            type: "clone_repository",
+            url: repositoryUrl,
+            dest: input.cloneInto,
+          }),
+        );
+      }
       const imported = await sendTarget({
         type: "import_workspace_from_remote",
         repository_url: repositoryUrl,

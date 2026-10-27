@@ -782,6 +782,27 @@ describe("actions.transferWorkspace", () => {
     expect(types).not.toContain("archive_workspace");
   });
 
+  it("clones onto the target daemon, not onto this machine", async () => {
+    // The CLI's `--clone-into` clones on the target; the desktop must not send
+    // the clone to whichever machine happens to be running the app.
+    routeSource({ liveSession: false });
+    routeTarget();
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace({ ...input, cloneInto: "/srv/app" });
+
+    const cloned = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "clone_repository",
+    );
+    expect(cloned?.[0]).toBe("dst");
+    expect(cloned?.[1]).toMatchObject({ url: "git@github.com:me/app.git", dest: "/srv/app" });
+    expect(api.requestLocal).not.toHaveBeenCalled();
+    // And before the import that needs it.
+    expect(order.indexOf("dst:clone_repository")).toBeLessThan(
+      order.indexOf("dst:import_workspace_from_remote"),
+    );
+  });
+
   it("adopts a workspace an earlier attempt already left on the target", async () => {
     routeSource({ liveSession: false });
     routeTarget({ existing: true });
