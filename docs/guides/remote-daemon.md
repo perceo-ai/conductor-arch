@@ -365,12 +365,19 @@ both:
 `fix-auth` is already on frankfurt (branch lc/fix-auth); keeping it rather than importing a second copy
 ```
 
-When the branch or name matches but the commit does not, the transfer says so
-and imports instead of adopting:
+When a workspace is sitting on that branch but at a *different* commit, the
+transfer refuses rather than importing a second one. Within one repository a
+branch name is the branch, so the only two safe answers are "this is my own
+earlier attempt, adopt it" and "this is work that has moved on, stop":
 
 ```
-`fix-auth` on frankfurt is on branch lc/fix-auth but at 9f21abc, not the 5055711 this transfer pushed; importing rather than adopting it
+Error: `fix-auth` on frankfurt is on branch lc/fix-auth but at 9f21abc, not the 5055711 this transfer pushed — that daemon's copy of this branch has its own commits. Importing a second workspace onto one branch is what this command exists to prevent, and re-seeding its chat would start that work twice, so nothing has been changed. If the transfer already completed there is nothing to re-run; otherwise move or rename `fix-auth` on frankfurt and retry
 ```
+
+That is the usual answer to "I re-ran a transfer that had already finished and
+the target had got on with the work". A workspace that merely shares the *name*
+on some other branch is a plain collision, not an earlier attempt, and the
+import renames around it as it always did.
 
 A workspace the target has that holds *none* of the conversation is an earlier
 attempt that died before the chat was carried. Creating an empty chat there
@@ -406,9 +413,11 @@ Two differences from the CLI, both deliberate:
 
 - The app always moves *off the daemon it is showing you*, so it has no `--from`
   of its own. The CLI can run an office→frankfurt transfer from a third machine
-  that is neither end; the app cannot. The daemon it is showing is captured when
-  you click, so switching daemons while a transfer runs does not redirect it —
-  in particular not the archive at the end.
+  that is neither end; the app cannot. Which daemon that is comes from the same
+  answer the switcher label and the menu gating use, so it covers a daemon
+  pinned by `ARCHDUCTOR_ARCHCAR_REMOTE` as well as a saved client or this
+  machine. It is captured when you click, so switching daemons while a transfer
+  runs does not redirect it — in particular not the archive at the end.
 - `--clone-into` has no app equivalent for a remote target: the folder picker
   can only choose a path on this machine. Transferring onto a daemon with no
   clone of the repository asks you to register one there first.

@@ -6612,19 +6612,34 @@ fn create_on_target(
     target: &TransferEndpoint,
     spec: TargetWorkspaceSpec<'_>,
 ) -> Result<(String, Option<i64>)> {
-    if let Some(existing) = existing_target_workspace(
+    match existing_target_workspace(
         target,
         &spec.repository_url,
         &spec.branch,
         &spec.name,
         spec.source_commit.as_deref(),
     )? {
-        println!(
-            "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
-            existing.name, target.label, existing.branch
-        );
-        let thread = target_thread_for(target, &existing.name)?;
-        return Ok((existing.name, thread));
+        TargetWorkspaceMatch::Adopt(existing) => {
+            println!(
+                "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
+                existing.name, target.label, existing.branch
+            );
+            let thread = target_thread_for(target, &existing.name)?;
+            return Ok((existing.name, thread));
+        }
+        TargetWorkspaceMatch::Diverged { name, branch, head } => anyhow::bail!(
+            "`{name}` on {} is on branch {branch} but at {}, not the {} this transfer pushed — \
+             that daemon's copy of this branch has its own commits. Importing a second workspace \
+             onto one branch is what this command exists to prevent, and re-seeding its chat \
+             would start that work twice, so nothing has been changed. If the transfer already \
+             completed there is nothing to re-run; otherwise move or rename `{name}` on {} and \
+             retry",
+            target.label,
+            head.as_deref().unwrap_or("an unknown commit"),
+            spec.source_commit.as_deref().unwrap_or("commit"),
+            target.label
+        ),
+        TargetWorkspaceMatch::Absent => {}
     }
 
     if let Some(dest) = spec.clone_into {
@@ -6683,31 +6698,46 @@ fn create_on_target(
     }
 }
 
-/// A workspace on the target that an earlier run of *this* transfer created.
+/// What the target already has for the branch being moved.
+enum TargetWorkspaceMatch {
+    /// Nothing of this transfer's there; import.
+    Absent,
+    /// This transfer's own earlier attempt, still at the commit it pushed.
+    Adopt(Box<archductor_core::archcar::protocol::ArchcarWorkspaceSummary>),
+    /// That daemon's copy of this branch has its own commits. Importing a
+    /// second workspace onto one branch is the divergence this whole command
+    /// exists to prevent, and re-seeding the chat would start that work twice.
+    Diverged {
+        name: String,
+        branch: String,
+        head: Option<String>,
+    },
+}
+
+/// What the target already holds for this branch, and whether it is safe to
+/// reuse.
 ///
-/// A branch or workspace name is not an identity: two repositories routinely
-/// share both (`main`, `lc/fix-auth`, `api`). Matching on those alone made the
-/// transfer adopt unrelated work — skipping the import entirely, so neither the
-/// branch nor the transcript ever moved, handing the transfer message to a
-/// stranger's newest chat, and archiving the real source anyway. Three things
-/// have to hold now:
+/// A branch or workspace name is not an identity — two repositories routinely
+/// share both — so candidates are first narrowed to the same repository,
+/// resolved on the target by remote URL rather than by the source's name for
+/// it (registration names are per-daemon). Archived ones are excluded:
+/// resuming inside a workspace the target has retired would look like success
+/// while being invisible on its board.
 ///
-/// 1. **Not archived.** Resuming inside a workspace the target has already
-///    retired would look like success while being invisible on its board.
-/// 2. **Same repository**, resolved on the target by remote URL rather than by
-///    the source's name for it — names are per-daemon, the URL is the thing the
-///    import itself matches on.
-/// 3. **At the commit this transfer pushed.** This is the load-bearing one: a
-///    same-named branch in another repository is not at our sha, and a
-///    workspace that is at our sha is our own earlier attempt whatever it is
-///    called.
+/// Then the commit decides, and it decides three ways rather than two. The
+/// earlier version of this treated "not at our commit" as "not ours, import
+/// it", which is how a *completed* transfer whose target had since made its own
+/// commits got a second workspace imported onto the same branch and its chat
+/// seeded a second time. Within one repository a branch name *is* the branch,
+/// so a workspace sitting on it is either this transfer's own attempt (same
+/// commit, safe to adopt and resume) or work that has moved on (refuse).
 fn existing_target_workspace(
     target: &TransferEndpoint,
     repository_url: &str,
     branch: &str,
     name: &str,
     source_commit: Option<&str>,
-) -> Result<Option<archductor_core::archcar::protocol::ArchcarWorkspaceSummary>> {
+) -> Result<TargetWorkspaceMatch> {
     let workspaces = match target.client.send(ArchcarRequest::ListWorkspaces)? {
         ArchcarResponse::Workspaces { workspaces } => workspaces,
         ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
@@ -6728,36 +6758,57 @@ fn existing_target_workspace(
         })
         .collect();
 
-    let matched = candidates
+    let on_branch = candidates
         .iter()
         .find(|candidate| candidate.branch == branch)
-        .or_else(|| candidates.iter().find(|candidate| candidate.name == name));
-    let Some(matched) = matched else {
-        return Ok(None);
+        .copied();
+    let by_name = candidates
+        .iter()
+        .find(|candidate| candidate.name == name)
+        .copied();
+
+    // Without a pushed sha there is nothing to compare, so a branch match is
+    // taken at face value. Re-seeding is still blocked downstream: the handover
+    // only happens for a chat that has not already had one delivered.
+    let Some(expected) = source_commit else {
+        return Ok(match on_branch {
+            Some(matched) => TargetWorkspaceMatch::Adopt(Box::new(matched.clone())),
+            None => TargetWorkspaceMatch::Absent,
+        });
     };
 
-    // Without a pushed sha to check against there is nothing to pin this to, so
-    // fall back to the repository-and-branch match rather than re-importing and
-    // making the duplicate this check exists to prevent.
-    let Some(expected) = source_commit else {
-        return Ok(Some((*matched).clone()));
-    };
-    let head = workspace_head_commit(target, &matched.name)?;
-    match head.as_deref().filter(|head| commits_match(head, expected)) {
-        Some(_) => Ok(Some((*matched).clone())),
-        None => {
-            println!(
-                "`{}` on {} is on branch {} but at {}, not the {} this transfer pushed; \
-                 importing rather than adopting it",
-                matched.name,
-                target.label,
-                matched.branch,
-                head.as_deref().unwrap_or("an unknown commit"),
-                expected
-            );
-            Ok(None)
+    if let Some(matched) = on_branch {
+        let head = workspace_head_commit(target, &matched.name)?;
+        return Ok(
+            if head
+                .as_deref()
+                .is_some_and(|head| commits_match(head, expected))
+            {
+                TargetWorkspaceMatch::Adopt(Box::new(matched.clone()))
+            } else {
+                TargetWorkspaceMatch::Diverged {
+                    name: matched.name.clone(),
+                    branch: matched.branch.clone(),
+                    head,
+                }
+            },
+        );
+    }
+
+    // No workspace on our branch, but one already holding the name we asked
+    // for. At our commit it is this transfer's own attempt under a branch the
+    // target had to rename; otherwise it is an unrelated workspace and the
+    // import renames around it, which is not a duplicate of anything.
+    if let Some(matched) = by_name {
+        let head = workspace_head_commit(target, &matched.name)?;
+        if head
+            .as_deref()
+            .is_some_and(|head| commits_match(head, expected))
+        {
+            return Ok(TargetWorkspaceMatch::Adopt(Box::new(matched.clone())));
         }
     }
+    Ok(TargetWorkspaceMatch::Absent)
 }
 
 /// What the target calls the repository at `repository_url`.

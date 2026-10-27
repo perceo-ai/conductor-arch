@@ -553,10 +553,12 @@ describe("actions.transferWorkspace", () => {
    */
   let order: string[];
   let handlers: Record<string, (req: { type: string }) => unknown>;
+  let envIsSource: boolean;
 
   beforeEach(() => {
     order = [];
     handlers = {};
+    envIsSource = false;
     api.requestClient.mockImplementation(async (id: string | null, req: { type: string }) => {
       const key = id ?? "local";
       order.push(`${key}:${req.type}`);
@@ -564,8 +566,13 @@ describe("actions.transferWorkspace", () => {
       if (!handler) throw new Error(`no daemon mocked for client ${key}`);
       return response(handler(req));
     });
+    // `request` is the switcher-following transport. A transfer may only use it
+    // for the environment-pinned daemon (and for the inventory refresh at the
+    // end), so it stands in for the source there and is logged distinctly.
     api.request.mockImplementation(async (req: { type: string }) => {
       order.push(`switcher:${req.type}`);
+      const handler = handlers.src;
+      if (handler && envIsSource) return response(handler(req));
       if (req.type === "list_repositories")
         return response({ type: "repositories", repositories: [] });
       return response({ type: "workspaces", workspaces: [] });
@@ -623,6 +630,8 @@ describe("actions.transferWorkspace", () => {
           return { type: "workspace_changes", workspace: "parser", files: [] };
         case "get_recent_commits":
           return { type: "recent_commits", workspace: "parser", log: `${PUSHED} port it` };
+        case "get_remote_access":
+          return { type: "remote_access", token: "tok-src", token_path: "/src/archcar.token" };
         default:
           return { type: "ack" };
       }
@@ -642,6 +651,9 @@ describe("actions.transferWorkspace", () => {
       head?: string;
       threads?: unknown[];
       delivered?: boolean;
+      /** Make the target answer the identity probe as the source does. */
+      identity?: string;
+      identityPath?: string;
     } = {},
   ) {
     let imported = opts.existing ?? false;
@@ -668,6 +680,12 @@ describe("actions.transferWorkspace", () => {
           };
         case "get_recent_commits":
           return { type: "recent_commits", workspace: "parser", log: `${opts.head ?? PUSHED} x` };
+        case "get_remote_access":
+          return {
+            type: "remote_access",
+            token: opts.identity ?? "tok-dst",
+            token_path: opts.identityPath ?? "/dst/archcar.token",
+          };
         case "import_workspace_from_remote":
           imported = true;
           return {
@@ -726,7 +744,7 @@ describe("actions.transferWorkspace", () => {
     toClientId: "dst",
     toLabel: "dst",
     fromLabel: "src",
-    fromClientId: "src",
+    fromDaemon: { kind: "client", clientId: "src" } as const,
   };
 
   it("refuses a live source session without force, and pushes nothing", async () => {
@@ -903,9 +921,22 @@ describe("actions.transferWorkspace", () => {
     expect(order).toContain("dst:import_workspace_from_remote");
   });
 
-  it("does not adopt a workspace that is not at the commit this transfer pushed", async () => {
+  it("imports around a same-named workspace that is on another branch", async () => {
+    // A name collision, not an earlier attempt: the target has a `parser`
+    // workspace but on a different branch and at a different commit. The
+    // import renames around it, which duplicates nothing. (A workspace on *our*
+    // branch at another commit is the opposite case — see the re-seed refusal
+    // below, which is what must not become a second import.)
     routeSource({ liveSession: false });
     routeTarget({ existing: true, head: "9999999" });
+    const base = handlers.dst;
+    handlers.dst = (req) => {
+      const res = base(req) as { type: string; workspaces?: { branch: string }[] };
+      if (req.type === "list_workspaces" && res.workspaces) {
+        return { ...res, workspaces: res.workspaces.map((w) => ({ ...w, branch: "lc/other" })) };
+      }
+      return res;
+    };
     const { actions } = await import("./actions");
 
     await actions.transferWorkspace(input);
@@ -994,6 +1025,57 @@ describe("actions.transferWorkspace", () => {
     expect(text).toContain("Pick up where you left off");
     expect(text).not.toContain("port it");
     expect(order).toContain("src:archive_workspace");
+  });
+
+  it("refuses when both ends turn out to be the same daemon", async () => {
+    // A saved client can point at the machine the app is running on, so the
+    // configured addresses can differ while the daemon is one. A self-transfer
+    // would archive the workspace it had just resumed.
+    routeSource({ liveSession: false });
+    routeTarget({ identity: "tok-src", identityPath: "/src/archcar.token" });
+    const { actions } = await import("./actions");
+
+    const err = await actions.transferWorkspace(input).catch((e) => e);
+
+    expect((err as Error).message).toContain("are the same daemon reached two ways");
+    expect(order).not.toContain("src:push_branch");
+    expect(order).not.toContain("src:archive_workspace");
+  });
+
+  it("refuses to re-seed a target that has moved on with its own commits", async () => {
+    // A completed transfer, re-run after the target's agent made its own
+    // commits. The commit check used to read "not at our sha" as "not ours",
+    // and import a *second* workspace onto the same branch — starting the
+    // target's work twice.
+    routeSource({ liveSession: false });
+    routeTarget({ existing: true, head: "9f21abc" });
+    const { actions } = await import("./actions");
+
+    const err = await actions.transferWorkspace(input).catch((e) => e);
+
+    expect((err as Error).message).toContain("has its own commits");
+    expect(order).not.toContain("dst:import_workspace_from_remote");
+    expect(order).not.toContain("dst:queue_chat_input");
+    expect(order).not.toContain("src:archive_workspace");
+  });
+
+  it("moves off the environment-pinned daemon the sidebar is showing", async () => {
+    // `ARCHDUCTOR_ARCHCAR_REMOTE` pins a daemon that has no client id and is
+    // not this machine. Treating that as `null` sent every source call to this
+    // machine's own socket while the sidebar showed the environment's daemon.
+    routeSource({ liveSession: false });
+    routeTarget();
+    envIsSource = true;
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace({ ...input, fromDaemon: { kind: "env" } });
+
+    // Nothing went to this machine, and the source's calls went through the
+    // transport that resolves the environment pin.
+    expect(order.filter((entry) => entry.startsWith("local:"))).toEqual([]);
+    expect(order).toContain("switcher:push_branch");
+    expect(order).toContain("switcher:archive_workspace");
+    expect(api.requestLocal).not.toHaveBeenCalled();
   });
 
   it("pins the source daemon, so switching clients mid-transfer cannot redirect it", async () => {

@@ -81,14 +81,17 @@ async function transferWorkspaceTo(name: string, target: TransferTarget): Promis
   // agents take, and the source's calls must not follow the switcher if the
   // user changes daemons part-way through.
   const from = clientsStore.activeLabel();
-  const fromClientId = clientsStore.state.activeId ?? null;
+  // The same call `activeLabel` and `isRemote` derive from, so the daemon the
+  // transfer moves off is by construction the one on screen — including when
+  // the environment pins it, which has no client id and is not this machine.
+  const fromDaemon = clientsStore.selectedDaemon();
   const run = (force: boolean, cloneInto?: string) =>
     actions.transferWorkspace({
       workspace: name,
       toClientId: target.id,
       toLabel: target.label,
       fromLabel: from,
-      fromClientId,
+      fromDaemon,
       force,
       cloneInto,
     });

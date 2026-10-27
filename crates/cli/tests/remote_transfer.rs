@@ -537,6 +537,72 @@ fn remote_transfer_does_not_confirm_delivery_when_the_targets_agent_never_takes_
     );
 }
 
+/// New P1. A transfer that has already landed, re-run after the target's own
+/// agent made commits of its own.
+///
+/// The commit check added for the unrelated-work finding read "not at our sha"
+/// as "not this transfer's, import it" — so this imported a *second* workspace
+/// onto the same branch and seeded its chat again, starting the target's work
+/// twice and putting two worktrees on one branch. Within one repository a
+/// branch name is the branch, so the only safe answers are adopt (same commit)
+/// or refuse.
+#[test]
+fn remote_transfer_refuses_to_re_seed_a_target_that_has_moved_on() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    let args = [
+        "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+    ];
+    fixture.operator(&args).assert().success();
+    wait_for_captured_turns(&fixture.target.capture, 1);
+
+    // The target picks the work up and commits, as the whole point of moving it
+    // there was for it to do.
+    let moved = fixture.target_workspace("berlin");
+    fs::write(moved.path.join("parser2.rs"), "fn parse_more() {}\n").unwrap();
+    fixture
+        .target
+        .app()
+        .args(["archcar", "commit", "berlin", "more parsing", "--stage-all"])
+        .assert()
+        .success();
+    let diverged_head = git_output(&moved.path, &["rev-parse", "HEAD"]);
+
+    let refusal = fixture.operator(&args).assert().failure();
+    let stderr = String::from_utf8(refusal.get_output().stderr.clone()).unwrap();
+
+    assert!(
+        stderr.contains("has its own commits"),
+        "the re-run should refuse a target that has moved on; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("[ ] create"),
+        "the report should show the create step unfinished; got:\n{stderr}"
+    );
+
+    // Nothing was duplicated and nothing was started twice.
+    let on_target: Vec<String> = fixture
+        .target_workspaces()
+        .into_iter()
+        .map(|workspace| workspace.name)
+        .collect();
+    assert_eq!(
+        on_target,
+        vec!["berlin".to_owned()],
+        "the re-run imported a second workspace onto the same branch"
+    );
+    assert_eq!(
+        git_output(&moved.path, &["rev-parse", "HEAD"]),
+        diverged_head,
+        "the target's own commit was disturbed"
+    );
+    let turns = fs::read_to_string(&fixture.target.capture).unwrap_or_default();
+    assert_eq!(
+        turns.lines().count(),
+        1,
+        "the re-run handed the target's agent the conversation a second time:\n{turns}"
+    );
+}
+
 // --- harness -------------------------------------------------------------
 
 /// The first thing the source's agent was asked, and therefore the transcript's

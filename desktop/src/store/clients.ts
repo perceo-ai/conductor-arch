@@ -1,6 +1,11 @@
 import { createStore } from "solid-js/store";
 
-import { clients as bridge, type ClientSummary, type ClientsResult } from "@/bridge/client";
+import {
+  clients as bridge,
+  type ClientSummary,
+  type ClientsResult,
+  type SelectedDaemon,
+} from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
 import { actions } from "./actions";
 import { bumpDaemonEpoch } from "./daemonEpoch";
@@ -110,11 +115,24 @@ async function run(
 export const clientsStore = {
   state,
 
+  /**
+   * Which daemon the app is pointed at. The single place that precedence is
+   * decided — environment pin, then saved client, then this machine — so
+   * anything that needs to *address* that daemon cannot disagree with what the
+   * sidebar is showing. `activeLabel` and `isRemote` below both derive from it.
+   */
+  selectedDaemon(): SelectedDaemon {
+    if (state.envAddress) return { kind: "env" };
+    if (state.activeId != null) return { kind: "client", clientId: state.activeId };
+    return { kind: "local" };
+  },
+
   /** Label for the active client — what the switcher shows when closed. */
   activeLabel(): string {
-    if (state.envAddress) return state.envAddress;
-    const active = state.clients.find((c) => c.id === state.activeId);
-    return active?.label ?? "This machine";
+    const daemon = this.selectedDaemon();
+    if (daemon.kind === "env") return state.envAddress ?? "Environment";
+    if (daemon.kind === "local") return "This machine";
+    return state.clients.find((c) => c.id === daemon.clientId)?.label ?? "This machine";
   },
 
   /**
@@ -122,7 +140,7 @@ export const clientsStore = {
    * make sense across a machine boundary, like importing a workspace here.
    */
   isRemote(): boolean {
-    return !!state.envAddress || state.activeId != null;
+    return this.selectedDaemon().kind !== "local";
   },
 
   /** The connection is pinned by the environment and cannot be switched here. */

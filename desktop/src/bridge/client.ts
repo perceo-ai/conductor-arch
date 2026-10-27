@@ -145,6 +145,43 @@ export function sendLocal<R extends ArchcarResponse = ArchcarResponse>(
 }
 
 /**
+ * Which daemon the app is pointed at, as three cases rather than a nullable
+ * client id.
+ *
+ * A nullable id cannot tell "this machine" apart from a daemon pinned by
+ * `ARCHDUCTOR_ARCHCAR_REMOTE`: both have no client id, but the second is not
+ * local. Collapsing them sent a transfer's source calls to this machine's own
+ * socket while the sidebar showed — and labelled — the environment's daemon.
+ */
+export type SelectedDaemon =
+  | { kind: "client"; clientId: string }
+  | { kind: "env" }
+  | { kind: "local" };
+
+/**
+ * Typed request to a specific daemon, pinned for the length of a multi-step
+ * operation so a switch part-way cannot redirect the rest of it.
+ *
+ * The environment case follows `request`, which resolves that pin per
+ * connection. That is still stable: an environment variable cannot change while
+ * the app runs, and the switcher is disabled while it is set — so this is both
+ * pinned and the daemon the sidebar is showing.
+ */
+export function sendToDaemon<R extends ArchcarResponse = ArchcarResponse>(
+  daemon: SelectedDaemon,
+  req: ArchcarRequest,
+): Promise<R> {
+  switch (daemon.kind) {
+    case "client":
+      return api().requestClient<R>(daemon.clientId, req);
+    case "local":
+      return api().requestClient<R>(null, req);
+    case "env":
+      return api().request<R>(req);
+  }
+}
+
+/**
  * Typed request to one *named* saved daemon; `null` is this machine.
  *
  * `sendLocal` is the two-endpoint case — read there, write here — which is all

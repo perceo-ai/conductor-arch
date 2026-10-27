@@ -5,7 +5,7 @@
 // sidebar's post-mutation refresh — the caller re-pulls the workspace and
 // repository lists once the mutation acks.
 
-import { send, sendLocal, sendToClient } from "@/bridge/client";
+import { send, sendLocal, sendToClient, sendToDaemon, type SelectedDaemon } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
 import type {
   AppliedDaemonUpdate,
@@ -113,6 +113,29 @@ export function commitsMatch(left?: string, right?: string): boolean {
   return a.slice(0, shared) === b.slice(0, shared);
 }
 
+/**
+ * What a daemon says it is, for telling two ends of a transfer apart.
+ *
+ * `get_remote_access` answers out of the *serving* daemon's own paths, so its
+ * token path and token are properties of that daemon and come back identical
+ * however it was reached. Configured addresses cannot do this: one daemon has
+ * as many of those as there are names for it. Only ever compared, never shown —
+ * the token is a credential. Mirrors `transfer_daemon_identity` in
+ * crates/cli/src/main.rs.
+ */
+async function daemonIdentity(
+  transport: (req: ArchcarRequest) => Promise<ArchcarResponse>,
+): Promise<string | undefined> {
+  try {
+    const res = await transport({ type: "get_remote_access" });
+    if (res.type !== "remote_access") return undefined;
+    return `${res.token_path}\n${res.token}`;
+  } catch {
+    // A daemon too old to answer. Unknown, not "different".
+    return undefined;
+  }
+}
+
 const TRANSFER_POLL_INTERVAL_MS = 250;
 const TRANSFER_POLL_TIMEOUT_MS = 60_000;
 
@@ -123,10 +146,10 @@ const TRANSFER_POLL_TIMEOUT_MS = 60_000;
  * id came from a snapshot taken moments ago, so it is not a session still
  * being spawned.
  */
-async function waitForSessionGone(clientId: string | null, sessionId: number): Promise<void> {
+async function waitForSessionGone(daemon: SelectedDaemon, sessionId: number): Promise<void> {
   const deadline = Date.now() + TRANSFER_POLL_TIMEOUT_MS;
   for (;;) {
-    const status = await sendToClient(clientId, {
+    const status = await sendToDaemon(daemon, {
       type: "get_session_status",
       session_id: sessionId,
     });
@@ -621,28 +644,44 @@ export const actions = {
     /** Label of the daemon the workspace is moving off, for the preamble. */
     fromLabel: string;
     /**
-     * Saved client id of the daemon the workspace is moving *off*; `null` is
-     * this machine. Pinned rather than implied by the switcher: `send()`
-     * re-reads the selected client per connection (see `open()` in
-     * desktop/electron/archcar.ts), and a transfer can run for minutes, so a
-     * selection change part-way would send the rest of the source's calls —
-     * the final archive included — to whichever daemon is selected by then.
+     * The daemon the workspace is moving *off*, captured by the caller from
+     * `clientsStore.selectedDaemon()` so it is exactly the one the sidebar is
+     * showing — including when `ARCHDUCTOR_ARCHCAR_REMOTE` pins it, which has
+     * no client id and is not this machine either.
+     *
+     * Pinned rather than re-read per call: `send()` resolves the selection per
+     * connection (see `open()` in desktop/electron/archcar.ts) and a transfer
+     * can run for minutes, so a switch part-way would send the rest of the
+     * source's calls — the final archive included — somewhere else.
      */
-    fromClientId: string | null;
+    fromDaemon: SelectedDaemon;
     force?: boolean;
     /** Clone the repository on the *target* first, when it has no copy. */
     cloneInto?: string;
   }): Promise<{ workspace: string }> {
     logAction("transfer_workspace", {
       workspace: input.workspace,
-      from: input.fromClientId ?? "local",
+      from: input.fromDaemon.kind === "client" ? input.fromDaemon.clientId : input.fromDaemon.kind,
       to: input.toClientId ?? "local",
       force: input.force ? "yes" : "no",
     });
     const toClient = input.toClientId;
-    const fromClient = input.fromClientId;
+    const fromDaemon = input.fromDaemon;
     const sendTarget = (req: ArchcarRequest) => sendToClient(toClient, req);
-    const sendSource = (req: ArchcarRequest) => sendToClient(fromClient, req);
+    const sendSource = (req: ArchcarRequest) => sendToDaemon(fromDaemon, req);
+
+    // Both ends must be two daemons, and a configured address is no way to
+    // tell: a saved client can point at the very machine the app is running
+    // on. Ask each end who it is, as the CLI does — a self-transfer would
+    // archive the workspace it had just resumed. An end that will not answer
+    // leaves this unchecked rather than blocking the transfer, same as the CLI.
+    const sourceIdentity = await daemonIdentity(sendSource);
+    const targetIdentity = await daemonIdentity(sendTarget);
+    if (sourceIdentity && targetIdentity && sourceIdentity === targetIdentity) {
+      throw new Error(
+        `${input.fromLabel} and ${input.toLabel} are the same daemon reached two ways; a transfer needs two. Moving a workspace onto the daemon it is already on would archive the very workspace it just resumed.`,
+      );
+    }
 
     const remoteWorkspaces = ensureOk(await sendSource({ type: "list_workspaces" }));
     if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
@@ -693,7 +732,7 @@ export const actions = {
     }
     // Polled, not slept on: the push must not race an agent still writing files.
     for (const entry of live) {
-      await waitForSessionGone(fromClient, entry.session);
+      await waitForSessionGone(fromDaemon, entry.session);
     }
 
     // Which chat moves: the most recently touched live one.
@@ -748,21 +787,37 @@ export const actions = {
     const candidates = onTarget.workspaces.filter(
       (w) => w.status !== "archived" && !!targetRepository && w.repository_name === targetRepository,
     );
-    const matched =
-      candidates.find((w) => w.branch === source.branch) ??
-      candidates.find((w) => w.name === source.name);
-    let existing = matched;
-    if (matched && sourceCommit) {
-      const head = await sendTarget({
-        type: "get_recent_commits",
-        workspace: matched.name,
-        limit: 1,
-      });
-      const headCommit =
-        head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
-      // The load-bearing check: a same-named branch in another repository is
-      // not at our sha, and anything that is at our sha is our own attempt.
-      if (!commitsMatch(headCommit, sourceCommit)) existing = undefined;
+    const headOf = async (workspace: string): Promise<string | undefined> => {
+      const head = await sendTarget({ type: "get_recent_commits", workspace, limit: 1 });
+      return head.type === "recent_commits"
+        ? head.log.trim().split(/\s+/)[0] || undefined
+        : undefined;
+    };
+    const onBranch = candidates.find((w) => w.branch === source.branch);
+    const byName = candidates.find((w) => w.name === source.name);
+    let existing: (typeof candidates)[number] | undefined;
+    if (!sourceCommit) {
+      // Nothing to compare against. A branch match is taken at face value;
+      // re-seeding is still blocked downstream by the delivered-handover check.
+      existing = onBranch;
+    } else if (onBranch) {
+      // Within one repository a branch name *is* the branch, so a workspace
+      // sitting on it is either this transfer's own attempt or work that has
+      // moved on. Treating the second as "not ours, import it" is how a
+      // completed transfer got a second workspace on the same branch and its
+      // chat seeded twice, starting the target's work over.
+      if (commitsMatch(await headOf(onBranch.name), sourceCommit)) {
+        existing = onBranch;
+      } else {
+        throw new Error(
+          `${onBranch.name} on ${input.toLabel} is on branch ${onBranch.branch} but not at the ${sourceCommit} this transfer pushed — that daemon's copy of this branch has its own commits. Importing a second workspace onto one branch is what this command exists to prevent, and re-seeding its chat would start that work twice, so nothing has been changed. If the transfer already completed there is nothing to re-run; otherwise move or rename it on ${input.toLabel} and try again.`,
+        );
+      }
+    } else if (byName && commitsMatch(await headOf(byName.name), sourceCommit)) {
+      // Our own attempt under a branch the target had to rename. A same-named
+      // workspace on some other branch is just a name collision, which the
+      // import renames around rather than duplicating.
+      existing = byName;
     }
 
     let targetWorkspace: string;
