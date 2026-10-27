@@ -292,6 +292,54 @@ enum RemoteCommand {
         #[arg(long, value_name = "DIR")]
         clone_into: Option<String>,
     },
+    /// Move a workspace from one daemon to another, chat and all.
+    ///
+    /// `remote import` copies: the source keeps running, so two daemons can
+    /// drive the same branch, and the chat lands inert for a human to restart.
+    /// This moves. In order: stop the source's sessions, push its branch,
+    /// recreate the workspace on `--to`, start a session there and hand it the
+    /// conversation, and only then archive the source workspace (reversible —
+    /// the worktree stays on disk).
+    ///
+    /// Neither end has to be this machine. Omitting `--to` targets this
+    /// machine; omitting `--from` reads from the active client, as `import`
+    /// does.
+    ///
+    /// The resumed session is handed one message, built from the end of the
+    /// transcript: the last user message replayed under a transfer preamble if
+    /// the transcript ends with one, otherwise a fixed "pick up where you left
+    /// off" prompt, because a transcript ending on the agent has no pending ask
+    /// to replay.
+    ///
+    /// Safe to re-run: a transfer that failed part-way resumes from the first
+    /// unfinished step rather than making a second copy.
+    Transfer {
+        /// Workspace name on the source daemon.
+        workspace: String,
+        /// Saved client to move the workspace off. Defaults to the active one.
+        #[arg(long)]
+        from: Option<String>,
+        /// Saved client to move it onto, or `local` for this machine.
+        /// Defaults to this machine.
+        #[arg(long)]
+        to: Option<String>,
+        /// Move this chat. Defaults to the workspace's most recent live chat.
+        #[arg(long)]
+        thread_id: Option<i64>,
+        /// Name for the workspace on the target. Defaults to the source's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Branch for the workspace on the target. Defaults to the source's.
+        #[arg(long)]
+        branch: Option<String>,
+        /// Clone the repository on the target first when it has no copy of it.
+        #[arg(long, value_name = "DIR")]
+        clone_into: Option<String>,
+        /// Stop the source's sessions even if an agent is mid-turn. Without
+        /// this a running session refuses the transfer and nothing is pushed.
+        #[arg(long)]
+        force: bool,
+    },
     /// Update saved daemons from here, without switching to them.
     ///
     /// Each daemon updates itself: a tarball install downloads the release and
@@ -3651,6 +3699,26 @@ fn run_cli() -> Result<()> {
                 branch,
                 clone_into,
             )?,
+            RemoteCommand::Transfer {
+                workspace,
+                from,
+                to,
+                thread_id,
+                name,
+                branch,
+                clone_into,
+                force,
+            } => run_remote_transfer(
+                &paths,
+                &workspace,
+                from.as_deref(),
+                to.as_deref(),
+                thread_id,
+                name,
+                branch,
+                clone_into,
+                force,
+            )?,
             RemoteCommand::Update {
                 client,
                 all,
@@ -5907,6 +5975,850 @@ fn run_remote_import(
         response => print_archcar_response(response),
     }
     Ok(())
+}
+
+/// Which end of a transfer an unnamed client defaults to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferRole {
+    Source,
+    Target,
+}
+
+/// One end of a transfer: a saved client, or this machine.
+struct TransferEndpoint {
+    label: String,
+    /// What identifies the daemon rather than the name someone gave it, so
+    /// "move it onto the daemon it is already on" is caught before anything is
+    /// stopped. Two saved labels can point at one address.
+    address: String,
+    client: ArchcarClient,
+}
+
+/// `--from` / `--to`, resolved the same way every other `remote` subcommand
+/// resolves a client: by saved label or id, with `local`/`this-machine` naming
+/// the local daemon explicitly.
+///
+/// The defaults differ by end on purpose. An omitted `--from` means the active
+/// client, matching `remote import`: the daemon this machine is pointed at is
+/// the one the workspace is on. An omitted `--to` means this machine, which is
+/// the common "bring it here" case and what `import` could only ever do.
+fn resolve_transfer_endpoint(
+    paths: &AppPaths,
+    clients: &remote::ClientsFile,
+    key: Option<&str>,
+    role: TransferRole,
+) -> Result<TransferEndpoint> {
+    let this_machine = || TransferEndpoint {
+        label: "this machine".to_owned(),
+        address: "local".to_owned(),
+        client: ArchcarClient::local(paths),
+    };
+    let saved = |profile: &remote::ClientProfile| -> Result<TransferEndpoint> {
+        Ok(TransferEndpoint {
+            label: profile.label.clone(),
+            address: profile.address.clone(),
+            client: ArchcarClient::from_saved_client(profile)?,
+        })
+    };
+    match key {
+        Some("local" | "this-machine") => Ok(this_machine()),
+        Some(key) => saved(
+            clients
+                .find(key)
+                .ok_or_else(|| anyhow::anyhow!("no saved client named `{key}`"))?,
+        ),
+        None => match role {
+            TransferRole::Source => saved(clients.active().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this machine is using its local daemon; name the source with `--from <client>`"
+                )
+            })?),
+            TransferRole::Target => Ok(this_machine()),
+        },
+    }
+}
+
+/// A chat on the source that the transfer has to account for, with the session
+/// holding it if one is live.
+struct TransferChat {
+    thread_id: i64,
+    provider: String,
+    title: String,
+    updated_at: String,
+    live_session: Option<i64>,
+}
+
+/// How far a transfer got. A failure after the source was stopped leaves real
+/// state on two machines, so the command says what exists rather than only what
+/// broke — and the same command re-run picks up from here.
+#[derive(Default)]
+struct TransferProgress {
+    sessions_stopped: bool,
+    pushed_commit: Option<String>,
+    target_workspace: Option<String>,
+    target_thread: Option<i64>,
+    message_delivered: bool,
+    source_archived: bool,
+}
+
+/// `archductor remote transfer`: move a workspace between two daemons.
+///
+/// The destructive sibling of `run_remote_import`. It shares that command's
+/// reads and reuses `publish_source_branch` unchanged, and adds the four things
+/// a copy cannot do: it stops the source's agents first, it writes to a target
+/// chosen by `--to` instead of always this machine, it starts a session on the
+/// target and hands it the conversation, and it archives the source once that
+/// has landed.
+#[allow(clippy::too_many_arguments)]
+fn run_remote_transfer(
+    paths: &AppPaths,
+    workspace: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    thread_id: Option<i64>,
+    name: Option<String>,
+    branch: Option<String>,
+    clone_into: Option<String>,
+    force: bool,
+) -> Result<()> {
+    let clients = remote::load_clients(paths)?;
+    let source = resolve_transfer_endpoint(paths, &clients, from, TransferRole::Source)?;
+    let target = resolve_transfer_endpoint(paths, &clients, to, TransferRole::Target)?;
+    anyhow::ensure!(
+        source.address != target.address,
+        "`--from` and `--to` are the same daemon ({}); a transfer needs two",
+        source.label
+    );
+
+    let mut progress = TransferProgress::default();
+    let result = transfer_workspace(
+        workspace,
+        &source,
+        &target,
+        thread_id,
+        name,
+        branch,
+        clone_into,
+        force,
+        &mut progress,
+    );
+    // Only once something has actually been done: a transfer that refused at
+    // the first step has changed nothing, and a checklist of five empty boxes
+    // would bury the one line that says why.
+    if result.is_err() {
+        if let Some(state) = transfer_failure_state(workspace, &source, &target, &progress) {
+            eprintln!("{state}");
+        }
+    }
+    result
+}
+
+/// What exists right now, for the operator reading a failure.
+///
+/// Named by step rather than by error so a retry is obvious: everything listed
+/// as done is skipped by the next run. `None` when no step finished, i.e. there
+/// is no state to describe and the error itself is the whole story.
+fn transfer_failure_state(
+    workspace: &str,
+    source: &TransferEndpoint,
+    target: &TransferEndpoint,
+    progress: &TransferProgress,
+) -> Option<String> {
+    if !progress.sessions_stopped {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "transfer of `{workspace}` from {} to {} stopped part-way. State now:",
+        source.label, target.label
+    )];
+    let step = |done: bool, text: String| format!("  [{}] {text}", if done { "x" } else { " " });
+    lines.push(step(
+        progress.sessions_stopped,
+        format!("stop: the source's sessions on {}", source.label),
+    ));
+    lines.push(step(
+        progress.pushed_commit.is_some(),
+        match &progress.pushed_commit {
+            Some(sha) => format!("publish: branch pushed at {sha}"),
+            None => "publish: branch pushed to the git remote".to_owned(),
+        },
+    ));
+    lines.push(step(
+        progress.target_workspace.is_some(),
+        match &progress.target_workspace {
+            Some(name) => format!("create: `{name}` on {}", target.label),
+            None => format!("create: the workspace on {}", target.label),
+        },
+    ));
+    lines.push(step(
+        progress.message_delivered,
+        "resume: session started on the target and handed the conversation".to_owned(),
+    ));
+    lines.push(step(
+        progress.source_archived,
+        format!("retire: source workspace archived on {}", source.label),
+    ));
+    lines.push(
+        "Re-run the same command to continue; finished steps are detected and skipped.".to_owned(),
+    );
+    Some(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transfer_workspace(
+    workspace: &str,
+    source: &TransferEndpoint,
+    target: &TransferEndpoint,
+    thread_id: Option<i64>,
+    name: Option<String>,
+    branch: Option<String>,
+    clone_into: Option<String>,
+    force: bool,
+    progress: &mut TransferProgress,
+) -> Result<()> {
+    let remote_workspace = transfer_find_workspace(source, workspace)?;
+    let repository_url = transfer_repository_url(source, &remote_workspace.repository_name)?;
+    let chats = source_chats(source, &remote_workspace.name)?;
+
+    // Step 1: stop. Before the push, because the branch about to be published
+    // is the one an agent here is still writing.
+    stop_source_sessions(source, workspace, &chats, force)?;
+    progress.sessions_stopped = true;
+
+    // Which chat moves. Explicit `--thread-id` wins; otherwise the most
+    // recently touched live chat, which is the one a human would have been
+    // looking at.
+    let moving = match thread_id {
+        Some(id) => Some(
+            chats
+                .iter()
+                .find(|chat| chat.thread_id == id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "chat {id} is not a live chat of `{workspace}` on {}",
+                        source.label
+                    )
+                })?,
+        ),
+        None => chats.iter().max_by(|a, b| a.updated_at.cmp(&b.updated_at)),
+    };
+    let (transcript, chat_title, provider) = match moving {
+        Some(chat) => {
+            let (messages, title) = transfer_transcript(source, chat.thread_id)?;
+            (messages, Some(title), Some(chat.provider.clone()))
+        }
+        None => (Vec::new(), None, None),
+    };
+
+    // Step 2: publish. Reused as-is from `remote import`, uncommitted-changes
+    // refusal included — what goes into a commit is the operator's call.
+    let source_commit =
+        publish_source_branch(&source.client, &source.label, &remote_workspace.name)?;
+    progress.pushed_commit = source_commit.clone();
+
+    // Step 3: create, on the `--to` daemon.
+    let target_branch = branch.unwrap_or_else(|| remote_workspace.branch.clone());
+    let target_name = name.unwrap_or_else(|| remote_workspace.name.clone());
+    let (target_workspace, target_thread) = create_on_target(
+        target,
+        TargetWorkspaceSpec {
+            repository_url,
+            branch: target_branch,
+            source_branch: remote_workspace.branch.clone(),
+            source_commit: source_commit.clone(),
+            base_ref: remote_workspace.base_ref.clone(),
+            name: target_name,
+            transcript: &transcript,
+            chat_title,
+            provider: provider.clone(),
+            clone_into,
+        },
+    )?;
+    progress.target_workspace = Some(target_workspace.clone());
+    progress.target_thread = target_thread;
+
+    // Step 4: resume. Nothing is archived until this lands.
+    match (target_thread, provider) {
+        (Some(thread_id), Some(provider)) => {
+            resume_on_target(
+                target,
+                &source.label,
+                &target_workspace,
+                thread_id,
+                &provider,
+                &transcript,
+                source_commit.as_deref(),
+            )?;
+            progress.message_delivered = true;
+        }
+        _ => {
+            // No chat moved, so there is no conversation to resume and nothing
+            // to confirm. Say so rather than silently skipping a named step.
+            println!(
+                "no chat moved with `{workspace}`, so no session was started on {}",
+                target.label
+            );
+            progress.message_delivered = true;
+        }
+    }
+
+    // Step 5: retire. Reversible: the worktree stays on disk and
+    // `archductor workspace restore` brings it back.
+    archive_source_workspace(source, &remote_workspace.name)?;
+    progress.source_archived = true;
+
+    println!(
+        "moved `{}` from {} to {} as `{target_workspace}`",
+        remote_workspace.name, source.label, target.label
+    );
+    Ok(())
+}
+
+fn transfer_find_workspace(
+    source: &TransferEndpoint,
+    workspace: &str,
+) -> Result<archductor_core::archcar::protocol::ArchcarWorkspaceSummary> {
+    match source.client.send(ArchcarRequest::ListWorkspaces)? {
+        ArchcarResponse::Workspaces { workspaces } => workspaces
+            .into_iter()
+            .find(|candidate| candidate.name == workspace)
+            .ok_or_else(|| anyhow::anyhow!("`{workspace}` is not a workspace on {}", source.label)),
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", source.label),
+        other => anyhow::bail!(
+            "unexpected response listing workspaces: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+fn transfer_repository_url(source: &TransferEndpoint, repository_name: &str) -> Result<String> {
+    match source.client.send(ArchcarRequest::ListRepositories)? {
+        ArchcarResponse::Repositories { repositories, .. } => repositories
+            .into_iter()
+            .find(|repo| repo.name == repository_name)
+            .and_then(|repo| repo.remote_url)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "repository `{repository_name}` on {} has no remote URL, so there is nothing \
+                     for the target to match a clone against",
+                    source.label
+                )
+            }),
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", source.label),
+        other => anyhow::bail!(
+            "unexpected response listing repositories: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+fn transfer_transcript(
+    source: &TransferEndpoint,
+    thread_id: i64,
+) -> Result<(
+    Vec<archductor_core::archcar::protocol::ArchcarChatTranscriptMessage>,
+    String,
+)> {
+    match source
+        .client
+        .send(ArchcarRequest::GetChatTranscript { thread_id })?
+    {
+        ArchcarResponse::ChatTranscript {
+            title, messages, ..
+        } => Ok((messages, title)),
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", source.label),
+        other => anyhow::bail!(
+            "unexpected response reading the chat: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+/// The workspace's live chats on the source, each with the session running it.
+///
+/// `GetChatSnapshot` is the only request that maps a chat to its session id,
+/// which `KillSession` needs: the chat-thread id and the session id are
+/// different keys (`KillSession`'s handler resolves its argument through
+/// `get_process_record`, a session-process row, in
+/// crates/core/src/archcar/server.rs). Provider events are the bulk of a
+/// snapshot and nothing here reads them, so they are left behind.
+fn source_chats(source: &TransferEndpoint, workspace: &str) -> Result<Vec<TransferChat>> {
+    let threads = match source.client.send(ArchcarRequest::ListChatThreads {
+        workspace: workspace.to_owned(),
+    })? {
+        ArchcarResponse::ChatThreads { threads, .. } => threads,
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", source.label),
+        other => anyhow::bail!(
+            "unexpected response listing chats: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+    let mut chats = Vec::new();
+    for thread in threads {
+        if thread.archived_at.is_some() {
+            continue;
+        }
+        let live_session = match source.client.send(ArchcarRequest::GetChatSnapshot {
+            thread_id: thread.id,
+            include_provider_events: Some(false),
+        })? {
+            ArchcarResponse::ChatSnapshot { snapshot } => snapshot
+                .live_session
+                .filter(|live| !archcar_status_is_terminal(&live.status, live.runtime_state))
+                .map(|live| live.session_id),
+            ArchcarResponse::Error { message } => {
+                anyhow::bail!("{}: reading chat {}: {message}", source.label, thread.id)
+            }
+            other => anyhow::bail!(
+                "unexpected response reading chat {}: {}",
+                thread.id,
+                archductor_core::archcar::protocol::archcar_response_summary(&other)
+            ),
+        };
+        chats.push(TransferChat {
+            thread_id: thread.id,
+            provider: thread.provider,
+            title: thread.title,
+            updated_at: thread.updated_at,
+            live_session,
+        });
+    }
+    Ok(chats)
+}
+
+/// Step 1: get the source's agents out of the way, or refuse.
+///
+/// A live session is the whole reason this is not `remote import`: the agent is
+/// still writing the worktree the next step pushes, so the target would resume
+/// from a commit the source has already moved past. Refusing by default and
+/// stopping only under `--force` is how `remote update` treats a mid-turn agent
+/// too, and nothing has been pushed or changed when the refusal fires.
+fn stop_source_sessions(
+    source: &TransferEndpoint,
+    workspace: &str,
+    chats: &[TransferChat],
+    force: bool,
+) -> Result<()> {
+    let live: Vec<(&TransferChat, i64)> = chats
+        .iter()
+        .filter_map(|chat| chat.live_session.map(|session| (chat, session)))
+        .collect();
+    if live.is_empty() {
+        return Ok(());
+    }
+    if !force {
+        let named = live
+            .iter()
+            .map(|(chat, session)| {
+                format!("session {session} ({}, \"{}\")", chat.provider, chat.title)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "`{workspace}` on {} still has {} running: {named}. Nothing has been pushed and \
+             nothing has changed. Let it finish, or retry with `--force` to stop it — its turn \
+             is lost either way",
+            source.label,
+            if live.len() == 1 {
+                "a session".to_owned()
+            } else {
+                format!("{} sessions", live.len())
+            }
+        );
+    }
+    for (chat, session) in &live {
+        println!(
+            "stopping session {session} ({}) on {}",
+            chat.provider, source.label
+        );
+        if let ArchcarResponse::Error { message } =
+            source.client.send(ArchcarRequest::KillSession {
+                session_id: *session,
+            })?
+        {
+            anyhow::bail!(
+                "could not stop session {session} on {}: {message}",
+                source.label
+            );
+        }
+    }
+    // Polled, not slept on. The push below must not race an agent still
+    // writing files, and the ordering is only real if the exit is observed.
+    for (_, session) in &live {
+        wait_for_source_session_exit(source, *session)?;
+    }
+    Ok(())
+}
+
+const TRANSFER_SESSION_EXIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Wait until the source daemon agrees a session it was asked to kill is gone.
+///
+/// "Unknown session" counts as gone: the daemon cannot reach it either, and the
+/// id came from a snapshot taken moments ago, so it is not a session still
+/// being spawned.
+fn wait_for_source_session_exit(source: &TransferEndpoint, session_id: i64) -> Result<()> {
+    let deadline = Instant::now() + TRANSFER_SESSION_EXIT_TIMEOUT;
+    loop {
+        match source
+            .client
+            .send(ArchcarRequest::GetSessionStatus { session_id })?
+        {
+            ArchcarResponse::SessionStatus {
+                status,
+                runtime_state,
+                ..
+            } if archcar_status_is_terminal(&status, runtime_state) => return Ok(()),
+            ArchcarResponse::Error { .. } => return Ok(()),
+            _ => {}
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "session {session_id} on {} did not stop within {}s; nothing has been pushed",
+            source.label,
+            TRANSFER_SESSION_EXIT_TIMEOUT.as_secs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Everything the target needs to recreate the workspace.
+struct TargetWorkspaceSpec<'a> {
+    repository_url: String,
+    branch: String,
+    source_branch: String,
+    source_commit: Option<String>,
+    base_ref: String,
+    name: String,
+    transcript: &'a [archductor_core::archcar::protocol::ArchcarChatTranscriptMessage],
+    chat_title: Option<String>,
+    provider: Option<String>,
+    clone_into: Option<String>,
+}
+
+/// Step 3: the workspace on the target, created or adopted.
+///
+/// `ImportWorkspaceFromRemote` needed no protocol change to address a second
+/// daemon: its handler (`import_workspace_from_remote`, crates/core/src/archcar
+/// /server.rs) opens the *serving* daemon's own store from its `ServerState`,
+/// so which daemon receives the request is which daemon gets the workspace.
+/// `remote import` only ever reached the local one because it hardcodes
+/// `ArchcarClient::local`, not because the request says so.
+///
+/// Adoption is what makes a retry safe. A workspace already on the target whose
+/// branch matches the branch being moved is taken to be this transfer's own
+/// earlier attempt, and is reused instead of imported again — matching on the
+/// branch rather than the name because the branch *is* the work being moved,
+/// and two worktrees on one branch is the divergence this command exists to
+/// prevent. The name is a fallback, for a first attempt whose workspace the
+/// target had to rename to avoid a collision.
+fn create_on_target(
+    target: &TransferEndpoint,
+    spec: TargetWorkspaceSpec<'_>,
+) -> Result<(String, Option<i64>)> {
+    if let Some(existing) = existing_target_workspace(target, &spec.branch, &spec.name)? {
+        println!(
+            "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
+            existing.name, target.label, existing.branch
+        );
+        let thread = target_thread_for(target, &existing.name)?;
+        return Ok((existing.name, thread));
+    }
+
+    if let Some(dest) = spec.clone_into {
+        // Through the target daemon, so the clone is registered as one of its
+        // repositories in the same step.
+        println!(
+            "cloning {} into {dest} on {}",
+            spec.repository_url, target.label
+        );
+        match target.client.send(ArchcarRequest::CloneRepository {
+            url: spec.repository_url.clone(),
+            dest,
+            name: None,
+        })? {
+            ArchcarResponse::Error { message } => {
+                anyhow::bail!("clone on {} failed: {message}", target.label)
+            }
+            response => print_archcar_response(response),
+        }
+    }
+
+    match target
+        .client
+        .send(ArchcarRequest::ImportWorkspaceFromRemote {
+            repository_url: spec.repository_url,
+            branch: spec.branch,
+            source_branch: Some(spec.source_branch),
+            source_commit: spec.source_commit,
+            base_ref: Some(spec.base_ref),
+            name: Some(spec.name),
+            transcript: spec.transcript.to_vec(),
+            chat_title: spec.chat_title,
+            provider: spec.provider,
+        })? {
+        ArchcarResponse::WorkspaceImported {
+            workspace,
+            branch,
+            thread_id,
+            copied_messages,
+            ..
+        } => {
+            println!(
+                "created `{workspace}` on {} at branch {branch} ({copied_messages} message(s) \
+                 carried over)",
+                target.label
+            );
+            Ok((workspace, thread_id))
+        }
+        ArchcarResponse::Error { message } => {
+            anyhow::bail!("{}: {message}", target.label)
+        }
+        other => anyhow::bail!(
+            "unexpected response importing the workspace: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+fn existing_target_workspace(
+    target: &TransferEndpoint,
+    branch: &str,
+    name: &str,
+) -> Result<Option<archductor_core::archcar::protocol::ArchcarWorkspaceSummary>> {
+    let workspaces = match target.client.send(ArchcarRequest::ListWorkspaces)? {
+        ArchcarResponse::Workspaces { workspaces } => workspaces,
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+        other => anyhow::bail!(
+            "unexpected response listing the target's workspaces: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+    Ok(workspaces
+        .iter()
+        .find(|candidate| candidate.branch == branch)
+        .or_else(|| workspaces.iter().find(|candidate| candidate.name == name))
+        .cloned())
+}
+
+/// The chat to resume in an adopted workspace: its most recently touched live
+/// one, which for a workspace this transfer created is the imported chat.
+fn target_thread_for(target: &TransferEndpoint, workspace: &str) -> Result<Option<i64>> {
+    match target.client.send(ArchcarRequest::ListChatThreads {
+        workspace: workspace.to_owned(),
+    })? {
+        ArchcarResponse::ChatThreads { threads, .. } => Ok(threads
+            .into_iter()
+            .filter(|thread| thread.archived_at.is_none())
+            .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+            .map(|thread| thread.id)),
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+        other => anyhow::bail!(
+            "unexpected response listing the target's chats: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+/// Opens the message a transfer hands its resumed session, and so doubles as
+/// the marker that a chat has already been handed over. Both the builder below
+/// and `target_already_resumed` key off it, so they cannot drift apart.
+const TRANSFER_PREAMBLE_PREFIX: &str = "This conversation moved from daemon ";
+
+/// Whether this chat on the target has already been handed its transfer
+/// message.
+///
+/// Read from the chat's own messages rather than from "is a session up?", which
+/// stops being true the moment the operator stops the agent — and a re-run
+/// after that would hand the same message over a second time, telling the agent
+/// to continue work it has since finished.
+fn target_already_resumed(target: &TransferEndpoint, thread_id: i64) -> Result<bool> {
+    match target.client.send(ArchcarRequest::GetChatSnapshot {
+        thread_id,
+        include_provider_events: Some(false),
+    })? {
+        ArchcarResponse::ChatSnapshot { snapshot } => Ok(snapshot.messages.iter().any(|message| {
+            message.role == "user" && message.content.starts_with(TRANSFER_PREAMBLE_PREFIX)
+        })),
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+        other => anyhow::bail!(
+            "unexpected response reading the target's chat: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+/// The one message the resumed session is handed.
+///
+/// The transcript itself is already seeded on the target and replayed to the
+/// agent on its first turn, so this only has to say what moved and what to do
+/// next. Which of the two forms it takes is decided by the transcript's last
+/// message, not by whether the agent happened to be mid-turn: a transcript
+/// ending on the user has a pending ask, which is replayed verbatim under the
+/// preamble, and one ending on the agent (or an empty one) has nothing to
+/// replay and gets a fixed continuation prompt instead. Keying off the role
+/// keeps it deterministic — the same transcript always produces the same
+/// message, whatever stopped the source.
+fn transfer_resume_message(
+    transcript: &[archductor_core::archcar::protocol::ArchcarChatTranscriptMessage],
+    from_label: &str,
+    to_label: &str,
+    commit: Option<&str>,
+) -> String {
+    let branch_state = match commit {
+        Some(sha) if !sha.trim().is_empty() => {
+            format!("the branch is at {}", &sha[..sha.len().min(12)])
+        }
+        _ => "the branch has been pushed".to_owned(),
+    };
+    let preamble = format!("{TRANSFER_PREAMBLE_PREFIX}{from_label} to {to_label}; {branch_state}.");
+    match transcript.last() {
+        Some(last) if last.role == "user" => format!(
+            "{preamble} Continue from where the transcript leaves off — do not redo completed \
+             work.\n\n{}",
+            last.content.trim()
+        ),
+        _ => format!(
+            "{preamble} Pick up where you left off and continue the work — do not redo anything \
+             already done."
+        ),
+    }
+}
+
+const TRANSFER_DELIVERY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Step 4: start a session on the target and hand it the conversation.
+///
+/// Session first, then the message, which is the order the desktop and the
+/// background-task path already use: the queue drains into a session that is
+/// coming up. The message is queued rather than sent straight at the session so
+/// a target still finishing its handshake does not drop it, and `verbatim`
+/// because the preamble is operator text that must reach the agent as written.
+///
+/// Returns only once the queue has drained, i.e. the message actually reached
+/// the provider. Step 5 depends on that: a target that never took the message
+/// must not cost the operator the source workspace.
+fn resume_on_target(
+    target: &TransferEndpoint,
+    from_label: &str,
+    workspace: &str,
+    thread_id: i64,
+    provider: &str,
+    transcript: &[archductor_core::archcar::protocol::ArchcarChatTranscriptMessage],
+    commit: Option<&str>,
+) -> Result<()> {
+    if target_already_resumed(target, thread_id)? {
+        println!(
+            "`{workspace}` on {} was already handed the conversation; leaving its session alone",
+            target.label
+        );
+        return Ok(());
+    }
+    let kind = SessionKind::new(provider);
+    anyhow::ensure!(
+        !kind.is_shell(),
+        "the chat moved with `{workspace}` runs under `{provider}`, which has no turns to resume; \
+         the workspace is on {} and its branch is pushed, but start a session there yourself",
+        target.label
+    );
+    println!(
+        "starting a {provider} session for `{workspace}` on {}",
+        target.label
+    );
+    match target
+        .client
+        .send(ArchcarRequest::EnsureChatThreadSession {
+            workspace: workspace.to_owned(),
+            thread_id,
+            kind,
+            harness: None,
+        })? {
+        // Queued is as good as spawned here: the daemon owns the spawn, and the
+        // queued message below only drains once a session is actually up.
+        ArchcarResponse::SessionSpawned { .. } | ArchcarResponse::SessionSpawnQueued { .. } => {}
+        ArchcarResponse::Error { message } => anyhow::bail!(
+            "could not start a session for `{workspace}` on {}: {message}",
+            target.label
+        ),
+        other => anyhow::bail!(
+            "unexpected response starting the session: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+
+    let message = transfer_resume_message(transcript, from_label, &target.label, commit);
+    match target.client.send(ArchcarRequest::QueueChatInput {
+        thread_id,
+        input: message.clone(),
+        visible_input: Some(message),
+        kind: ArchcarInputKind::User,
+        session_kind: kind,
+        verbatim: true,
+    })? {
+        ArchcarResponse::QueuedChatInput { .. } => {}
+        ArchcarResponse::Error { message } => anyhow::bail!(
+            "started a session for `{workspace}` on {} but could not hand it the conversation: \
+             {message}",
+            target.label
+        ),
+        other => anyhow::bail!(
+            "unexpected response handing over the conversation: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+
+    let deadline = Instant::now() + TRANSFER_DELIVERY_TIMEOUT;
+    loop {
+        match target
+            .client
+            .send(ArchcarRequest::ListQueuedChatInputs { thread_id })?
+        {
+            ArchcarResponse::QueuedChatInputs { inputs, .. } if inputs.is_empty() => break,
+            ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+            _ => {}
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "the conversation was queued for `{workspace}` on {} but its session had not taken \
+             it within {}s; the source workspace has been left alone",
+            target.label,
+            TRANSFER_DELIVERY_TIMEOUT.as_secs()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    println!("handed the conversation to the session on {}", target.label);
+    Ok(())
+}
+
+/// Step 5: retire the source workspace.
+///
+/// Archive, never delete: the worktree stays on disk and
+/// `archductor workspace restore` brings the workspace back, because the one
+/// irreversible mistake this command could make is throwing away work the
+/// target did not actually take.
+fn archive_source_workspace(source: &TransferEndpoint, workspace: &str) -> Result<()> {
+    match source.client.send(ArchcarRequest::ArchiveWorkspace {
+        workspace: workspace.to_owned(),
+        remove_worktree: false,
+    })? {
+        ArchcarResponse::WorkspaceUpdated { .. } => {
+            println!(
+                "archived `{workspace}` on {} (its worktree is still there; \
+                 `archductor workspace restore {workspace}` undoes this)",
+                source.label
+            );
+            Ok(())
+        }
+        ArchcarResponse::Error { message } => anyhow::bail!(
+            "`{workspace}` is live on {} but could not be archived on {}: {message}",
+            source.label,
+            source.label
+        ),
+        other => anyhow::bail!(
+            "unexpected response archiving the source workspace: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
 }
 
 fn print_update_status(status: &archductor_core::self_update::UpdateStatus) {

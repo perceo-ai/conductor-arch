@@ -9,6 +9,7 @@ export type IconName =
   | "arrow-up-circle"
   | "arrow-down"
   | "arrow-down-circle"
+  | "arrow-right-circle"
   | "bolt"
   | "brain"
   | "circle-dashed"
@@ -75,6 +76,8 @@ const PATHS: Record<IconName, () => JSX.Element> = {
   "arrow-up-circle": () => <><circle cx="12" cy="12" r="10" /><path d="m16 12-4-4-4 4" /><path d="M12 16V8" /></>,
   "arrow-down": () => <><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></>,
   "arrow-down-circle": () => <><circle cx="12" cy="12" r="10" /><path d="M12 8v8" /><path d="m8 12 4 4 4-4" /></>,
+  // "Transfer to another daemon": the sideways twin of the copy-down arrow.
+  "arrow-right-circle": () => <><circle cx="12" cy="12" r="10" /><path d="M8 12h8" /><path d="m12 8 4 4-4 4" /></>,
   // Dashed ring: "nothing here yet", visually lighter than any solid ring so an
   // untouched workspace recedes in a long list.
   "circle-dashed": () => <><path d="M10.1 2.182a10 10 0 0 1 3.8 0" /><path d="M13.9 21.818a10 10 0 0 1-3.8 0" /><path d="M17.609 3.721a10 10 0 0 1 2.69 2.7" /><path d="M2.182 13.9a10 10 0 0 1 0-3.8" /><path d="M20.279 17.609a10 10 0 0 1-2.7 2.69" /><path d="M21.818 10.1a10 10 0 0 1 0 3.8" /><path d="M3.721 6.391a10 10 0 0 1 2.7-2.69" /><path d="M6.391 20.279a10 10 0 0 1-2.69-2.7" /></>,

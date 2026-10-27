@@ -9,6 +9,7 @@ import {
   prefsStore,
   clientsStore,
   MissingLocalRepositoryError,
+  LiveSourceSessionError,
 } from "@/store";
 import { repoAvatar, openExternal, selectFolder } from "@/bridge/client";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
@@ -67,6 +68,70 @@ async function copyWorkspaceToThisMachine(name: string): Promise<void> {
   toastsStore.push(`Copied ${name} to this machine as ${imported.workspace}`);
 }
 
+/**
+ * "Transfer to <daemon>": move a workspace off the connected daemon, rather
+ * than copying it. The source's agents are stopped, the target starts one and
+ * picks the conversation up, and the source workspace is archived.
+ *
+ * A live agent on the source refuses the move; the user is asked before it is
+ * stopped, because losing a turn mid-thought is their call and not ours.
+ */
+async function transferWorkspaceTo(name: string, target: TransferTarget): Promise<void> {
+  const from = clientsStore.activeLabel();
+  const run = (force: boolean) =>
+    actions.transferWorkspace({
+      workspace: name,
+      toClientId: target.id,
+      toLabel: target.label,
+      fromLabel: from,
+      force,
+    });
+  const landed = async (force: boolean) => {
+    let moved: { workspace: string };
+    try {
+      moved = await run(force);
+    } catch (err) {
+      if (!(err instanceof MissingLocalRepositoryError)) throw err;
+      const parent = await selectFolder({
+        title: `${target.label} has no clone of ${err.repositoryName}. Choose where to clone it`,
+      });
+      if (!parent) return;
+      throw new Error(
+        `${target.label} has no clone of ${err.repositoryName}; clone it there first (the desktop can only clone onto this machine)`,
+      );
+    }
+    toastsStore.push(`Moved ${name} to ${target.label} as ${moved.workspace}`);
+  };
+  try {
+    await landed(false);
+  } catch (err) {
+    if (!(err instanceof LiveSourceSessionError)) throw err;
+    dialogs.open({
+      kind: "confirm",
+      title: `${name} has a running agent`,
+      message: `${err.message} Stop it and move ${name} to ${target.label} anyway?`,
+      confirmLabel: "Stop and move",
+      onConfirm: () => runAction(`Transfer to ${target.label}`, landed(true)),
+    });
+  }
+}
+
+interface TransferTarget {
+  /** Saved client id, or null for this machine. */
+  id: string | null;
+  label: string;
+}
+
+/** Every daemon this workspace could move to: the saved clients, minus the one
+ * it is already on, plus this machine when the connection is to somewhere else. */
+function transferTargets(): TransferTarget[] {
+  const targets: TransferTarget[] = clientsStore.state.clients
+    .filter((client) => client.id !== clientsStore.state.activeId)
+    .map((client) => ({ id: client.id, label: client.label }));
+  if (clientsStore.isRemote()) targets.unshift({ id: null, label: "this machine" });
+  return targets;
+}
+
 // Right-click actions for a workspace — Rename / Duplicate / Archive|Restore /
 // Delete plus Open and a "More…" escape hatch to the full actions dialog (branch
 // ops, link dir, default provider). Shared by the sidebar, History, and the
@@ -93,6 +158,14 @@ export function workspaceMenuItems(name: string): ContextMenuItem[] {
           },
         ]
       : []),
+    // One item per candidate daemon rather than a submenu: the context menu is
+    // flat, and "Transfer to <name>" reads as the picker it is.
+    ...transferTargets().map((target) => ({
+      label: `Transfer to ${target.label}…`,
+      icon: "arrow-right-circle" as const,
+      run: () =>
+        runAction(`Transfer to ${target.label}`, transferWorkspaceTo(name, target)),
+    })),
     {
       label: prefsStore.isPinned(name) ? "Unpin" : "Pin to top",
       run: () => prefsStore.togglePinned(name),

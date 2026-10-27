@@ -5,9 +5,14 @@
 // sidebar's post-mutation refresh — the caller re-pulls the workspace and
 // repository lists once the mutation acks.
 
-import { send, sendLocal } from "@/bridge/client";
+import { send, sendLocal, sendToClient } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
-import type { AppliedDaemonUpdate, ArchcarResponse, DaemonUpdateStatus } from "@/bridge/protocol";
+import type {
+  AppliedDaemonUpdate,
+  ArchcarRequest,
+  ArchcarResponse,
+  DaemonUpdateStatus,
+} from "@/bridge/protocol";
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { nav } from "./nav";
@@ -43,6 +48,160 @@ export class MissingLocalRepositoryError extends Error {
   }
 }
 
+/**
+ * A transfer was refused because the source still has a live agent. Distinct
+ * from a generic failure so the caller can offer "stop it and transfer anyway"
+ * rather than only reporting the refusal.
+ */
+export class LiveSourceSessionError extends Error {}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Session states that mean the agent is no longer running. */
+const TERMINAL_SESSION_STATES = new Set(["interrupted", "failed", "exited", "archived"]);
+
+/** Opens the message a transfer hands its resumed session, so it doubles as the
+ * marker that a chat has already been handed over. */
+const TRANSFER_PREAMBLE_PREFIX = "This conversation moved from daemon ";
+
+const TRANSFER_POLL_INTERVAL_MS = 250;
+const TRANSFER_POLL_TIMEOUT_MS = 60_000;
+
+/**
+ * Wait until the source daemon agrees a session it was asked to kill is gone.
+ *
+ * An error response counts as gone: the daemon cannot reach it either, and the
+ * id came from a snapshot taken moments ago, so it is not a session still
+ * being spawned.
+ */
+async function waitForSessionGone(sessionId: number): Promise<void> {
+  const deadline = Date.now() + TRANSFER_POLL_TIMEOUT_MS;
+  for (;;) {
+    const status = await send({ type: "get_session_status", session_id: sessionId });
+    if (status.type === "error") return;
+    if (
+      status.type === "session_status" &&
+      (status.status !== "running" || TERMINAL_SESSION_STATES.has(status.runtime_state))
+    ) {
+      return;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`session ${sessionId} did not stop in time; nothing has been pushed`);
+    }
+    await sleep(TRANSFER_POLL_INTERVAL_MS);
+  }
+}
+
+/**
+ * The one message the resumed session is handed.
+ *
+ * The transcript itself is already seeded on the target and replayed to the
+ * agent on its first turn, so this only says what moved and what to do next.
+ * Which form it takes is decided by the transcript's last message, not by
+ * whether the agent was mid-turn: ending on the user means there is a pending
+ * ask to replay verbatim under the preamble, and ending on the agent (or an
+ * empty transcript) means there is nothing to replay and a fixed continuation
+ * prompt is sent instead. Keyed off the role so the same transcript always
+ * produces the same message. Mirrors `transfer_resume_message` in
+ * crates/cli/src/main.rs.
+ */
+export function transferResumeMessage(
+  transcript: { role: string; content: string }[],
+  fromLabel: string,
+  toLabel: string,
+  commit?: string,
+): string {
+  const branchState = commit?.trim()
+    ? `the branch is at ${commit.trim().slice(0, 12)}`
+    : "the branch has been pushed";
+  const preamble = `${TRANSFER_PREAMBLE_PREFIX}${fromLabel} to ${toLabel}; ${branchState}.`;
+  const last = transcript[transcript.length - 1];
+  if (last?.role === "user") {
+    return `${preamble} Continue from where the transcript leaves off \u2014 do not redo completed work.\n\n${last.content.trim()}`;
+  }
+  return `${preamble} Pick up where you left off and continue the work \u2014 do not redo anything already done.`;
+}
+
+/**
+ * Start a session on the target and hand it the conversation.
+ *
+ * Session first, then the message, which is the order the chat path already
+ * uses: the queue drains into a session that is coming up. Returns only once
+ * the queue has drained, i.e. the message actually reached the provider —
+ * archiving the source depends on that.
+ */
+async function resumeTransferredChat(input: {
+  toClientId: string | null;
+  toLabel: string;
+  workspace: string;
+  threadId: number;
+  provider: string;
+  transcript: { role: string; content: string }[];
+  commit?: string;
+  fromLabel: string;
+}): Promise<void> {
+  const sendTarget = (req: ArchcarRequest) => sendToClient(input.toClientId, req);
+  const snapshot = await sendTarget({
+    type: "get_chat_snapshot",
+    thread_id: input.threadId,
+    include_provider_events: false,
+  });
+  if (
+    snapshot.type === "chat_snapshot" &&
+    snapshot.snapshot.messages.some(
+      (message) => message.role === "user" && message.content.startsWith(TRANSFER_PREAMBLE_PREFIX),
+    )
+  ) {
+    // Already handed over by an earlier attempt. Re-sending would tell the
+    // agent to continue work it has since finished.
+    return;
+  }
+  if (input.provider === "shell") {
+    throw new Error(
+      `the chat moved with ${input.workspace} runs under shell, which has no turns to resume; the workspace is on ${input.toLabel} and its branch is pushed, but start a session there yourself`,
+    );
+  }
+  const kind = input.provider as "codex" | "claude";
+  ensureOk(
+    await sendTarget({
+      type: "ensure_chat_thread_session",
+      workspace: input.workspace,
+      thread_id: input.threadId,
+      kind,
+    }),
+  );
+  const message = transferResumeMessage(
+    input.transcript,
+    input.fromLabel,
+    input.toLabel,
+    input.commit,
+  );
+  ensureOk(
+    await sendTarget({
+      type: "queue_chat_input",
+      thread_id: input.threadId,
+      input: message,
+      visible_input: message,
+      kind: "user",
+      session_kind: kind,
+      // The preamble is operator text and must reach the agent as written.
+      verbatim: true,
+    }),
+  );
+  const deadline = Date.now() + TRANSFER_POLL_TIMEOUT_MS;
+  for (;;) {
+    const queued = await sendTarget({ type: "list_queued_chat_inputs", thread_id: input.threadId });
+    if (queued.type === "queued_chat_inputs" && queued.inputs.length === 0) return;
+    if (queued.type === "error") throw new Error(queued.message);
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `the conversation was queued for ${input.workspace} on ${input.toLabel} but its session had not taken it in time; the source workspace has been left alone`,
+      );
+    }
+    await sleep(TRANSFER_POLL_INTERVAL_MS);
+  }
+}
+
 export interface AddRepositoryInput {
   path: string;
   name?: string;
@@ -56,8 +215,6 @@ export interface CreateWorkspaceInput {
   branch: string;
   baseRef?: string;
 }
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** `send` follows the client switcher; `sendLocal` is always this machine. */
 type Transport = typeof send;
@@ -374,6 +531,188 @@ export const actions = {
     ensureOk(imported);
     if (imported.type !== "workspace_imported") throw new Error("import returned no workspace");
     return { workspace: imported.workspace, threadId: imported.thread_id };
+  },
+
+  /**
+   * "Transfer to…": move a workspace from the connected daemon to another saved
+   * one, the desktop's parity surface for `archductor remote transfer`.
+   *
+   * The difference from `importWorkspaceFromRemote` is the whole point: that one
+   * copies, leaving the source running so two daemons can drive one branch and
+   * leaving the carried chat inert. This one stops the source's sessions first,
+   * starts a session on the target and hands it the conversation, and archives
+   * the source only once that landed.
+   *
+   * `toClientId` is a saved client id, or `null` for this machine. Neither end
+   * has to be this machine, which is why it goes through `sendToClient` rather
+   * than `sendLocal`.
+   *
+   * `force` mirrors the CLI: without it a live session on the source refuses the
+   * transfer and nothing is pushed.
+   *
+   * Re-running after a part-way failure is safe: a workspace already on the
+   * target whose branch matches is adopted rather than imported again, and a chat
+   * already handed its transfer message is left alone.
+   */
+  async transferWorkspace(input: {
+    workspace: string;
+    toClientId: string | null;
+    toLabel: string;
+    /** Label of the daemon the workspace is moving off, for the preamble. */
+    fromLabel: string;
+    force?: boolean;
+  }): Promise<{ workspace: string }> {
+    logAction("transfer_workspace", {
+      workspace: input.workspace,
+      to: input.toClientId ?? "local",
+      force: input.force ? "yes" : "no",
+    });
+    const toClient = input.toClientId;
+    const sendTarget = (req: ArchcarRequest) => sendToClient(toClient, req);
+
+    const remoteWorkspaces = ensureOk(await send({ type: "list_workspaces" }));
+    if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
+    const source = remoteWorkspaces.workspaces.find((w) => w.name === input.workspace);
+    if (!source) throw new Error(`${input.workspace} is not a workspace on the connected daemon`);
+
+    const remoteRepos = ensureOk(await send({ type: "list_repositories" }));
+    if (remoteRepos.type !== "repositories") throw new Error("could not list remote repositories");
+    const repositoryUrl = remoteRepos.repositories.find(
+      (repo) => repo.name === source.repository_name,
+    )?.remote_url;
+    if (!repositoryUrl) {
+      throw new Error(
+        `${source.repository_name} has no remote URL on that daemon, so there is nothing for ${input.toLabel} to match a clone against`,
+      );
+    }
+
+    // Step 1: stop. Before the push, because the branch about to be published is
+    // the one an agent on the source is still writing.
+    const listed = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
+    const threads = (listed.type === "chat_threads" ? listed.threads : []).filter(
+      (thread) => !thread.archived_at,
+    );
+    const live: { session: number; provider: string; title: string }[] = [];
+    for (const thread of threads) {
+      const snapshot = await send({
+        type: "get_chat_snapshot",
+        thread_id: thread.id,
+        include_provider_events: false,
+      });
+      if (snapshot.type !== "chat_snapshot") continue;
+      const session = snapshot.snapshot.live_session;
+      // The chat-thread id and the session id are different keys: `kill_session`
+      // takes a session-process id, and the snapshot is what maps one to the
+      // other.
+      if (session && !TERMINAL_SESSION_STATES.has(session.runtime_state) && session.status === "running") {
+        live.push({ session: session.session_id, provider: thread.provider, title: thread.title });
+      }
+    }
+    if (live.length > 0 && !input.force) {
+      const named = live.map((l) => `session ${l.session} (${l.provider}, "${l.title}")`).join(", ");
+      throw new LiveSourceSessionError(
+        `${source.name} still has ${live.length === 1 ? "a session" : `${live.length} sessions`} running: ${named}. Nothing has been pushed and nothing has changed.`,
+      );
+    }
+    for (const entry of live) {
+      ensureOk(await send({ type: "kill_session", session_id: entry.session }));
+    }
+    // Polled, not slept on: the push must not race an agent still writing files.
+    for (const entry of live) {
+      await waitForSessionGone(entry.session);
+    }
+
+    // Which chat moves: the most recently touched live one.
+    const moving = [...threads].sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0];
+    let transcript: { role: string; content: string; created_at: string }[] = [];
+    let chatTitle: string | undefined;
+    if (moving) {
+      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: moving.id }));
+      if (chat.type === "chat_transcript") {
+        transcript = chat.messages;
+        chatTitle = chat.title;
+      }
+    }
+
+    // Step 2: publish. Uncommitted changes are refused rather than committed —
+    // what goes into someone else's branch is their call.
+    const changes = ensureOk(
+      await send({ type: "get_workspace_changes", workspace: source.name, scope: "uncommitted" }),
+    );
+    if (changes.type === "workspace_changes" && changes.files.length > 0) {
+      const shown = changes.files.slice(0, 5).map((file) => file.path);
+      if (changes.files.length > shown.length) shown.push("…");
+      throw new Error(
+        `${source.name} has ${changes.files.length} uncommitted file(s) on the source: ${shown.join(", ")}. Commit them there first, then transfer again.`,
+      );
+    }
+    ensureOk(await send({ type: "push_branch", workspace: source.name }));
+    const head = await send({ type: "get_recent_commits", workspace: source.name, limit: 1 });
+    const sourceCommit =
+      head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
+
+    // Step 3: create on the target, or adopt what an earlier attempt left there.
+    // `import_workspace_from_remote` writes through whichever daemon serves it,
+    // so pointing the request at the target is all it takes.
+    const onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
+    if (onTarget.type !== "workspaces") throw new Error(`could not list workspaces on ${input.toLabel}`);
+    const existing =
+      onTarget.workspaces.find((w) => w.branch === source.branch) ??
+      onTarget.workspaces.find((w) => w.name === source.name);
+
+    let targetWorkspace: string;
+    let targetThread: number | undefined;
+    if (existing) {
+      targetWorkspace = existing.name;
+      const targetThreads = ensureOk(
+        await sendTarget({ type: "list_chat_threads", workspace: existing.name }),
+      );
+      targetThread =
+        targetThreads.type === "chat_threads"
+          ? [...targetThreads.threads]
+              .filter((thread) => !thread.archived_at)
+              .sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0]?.id
+          : undefined;
+    } else {
+      const imported = await sendTarget({
+        type: "import_workspace_from_remote",
+        repository_url: repositoryUrl,
+        branch: source.branch,
+        source_branch: source.branch,
+        source_commit: sourceCommit,
+        base_ref: source.base_ref,
+        name: source.name,
+        transcript,
+        chat_title: chatTitle,
+        provider: moving?.provider,
+      });
+      if (imported.type === "error" && imported.message.startsWith("no repository here has remote")) {
+        throw new MissingLocalRepositoryError(repositoryUrl, source.repository_name);
+      }
+      ensureOk(imported);
+      if (imported.type !== "workspace_imported") throw new Error("the transfer returned no workspace");
+      targetWorkspace = imported.workspace;
+      targetThread = imported.thread_id;
+    }
+
+    // Step 4: resume. Nothing is archived until the message has landed.
+    if (targetThread != null && moving) {
+      await resumeTransferredChat({
+        toClientId: toClient,
+        toLabel: input.toLabel,
+        fromLabel: input.fromLabel,
+        workspace: targetWorkspace,
+        threadId: targetThread,
+        provider: moving.provider,
+        transcript,
+        commit: sourceCommit,
+      });
+    }
+
+    // Step 5: retire. Archive, never delete: the worktree stays on disk.
+    ensureOk(await send({ type: "archive_workspace", workspace: source.name }));
+    await refreshInventory();
+    return { workspace: targetWorkspace };
   },
 
   /**

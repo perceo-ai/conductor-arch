@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 interface MockApi {
   request: ReturnType<typeof vi.fn>;
   requestLocal: ReturnType<typeof vi.fn>;
+  requestClient: ReturnType<typeof vi.fn>;
   ensureEvents: ReturnType<typeof vi.fn>;
   onEvent: ReturnType<typeof vi.fn>;
   onWindowFocus: ReturnType<typeof vi.fn>;
@@ -26,6 +27,7 @@ beforeEach(() => {
   api = {
     request: vi.fn(async () => response({ type: "workspaces", workspaces: [] })),
     requestLocal: vi.fn(async () => response({ type: "ack" })),
+    requestClient: vi.fn(async () => response({ type: "ack" })),
     ensureEvents: vi.fn(async () => ({ ok: true })),
     onEvent: vi.fn(() => () => {}),
     onWindowFocus: vi.fn(() => () => {}),
@@ -528,5 +530,311 @@ describe("actions.finishBundledDaemonUpdate", () => {
     await expect(actions.finishBundledDaemonUpdate(1)).resolves.toBe(false);
     const types = api.requestLocal.mock.calls.map((c) => (c[0] as { type: string }).type);
     expect(types).not.toContain("apply_update");
+  });
+});
+
+describe("actions.transferWorkspace", () => {
+  const sourceWorkspace = {
+    name: "parser",
+    repository_name: "app",
+    branch: "lc/parser",
+    base_ref: "main",
+  };
+
+  /** Every request either daemon saw, in the order it saw it. Ordering between
+   * the two sides is the thing under test, and neither mock's own call list can
+   * show it. */
+  let order: string[];
+  beforeEach(() => {
+    order = [];
+  });
+
+  /**
+   * The source daemon: one workspace, one chat, and by default one live agent
+   * holding it. `liveSession: false` is the already-idle case.
+   */
+  function routeSource(opts: { liveSession?: boolean } = {}) {
+    const live = opts.liveSession ?? true;
+    let killed = false;
+    api.request.mockImplementation(async (req: { type: string }) => {
+      order.push(`src:${req.type}`);
+      switch (req.type) {
+        case "list_workspaces":
+          return response({ type: "workspaces", workspaces: [sourceWorkspace] });
+        case "list_repositories":
+          return response({
+            type: "repositories",
+            repositories: [{ name: "app", remote_url: "git@github.com:me/app.git" }],
+          });
+        case "list_chat_threads":
+          return response({
+            type: "chat_threads",
+            workspace: "parser",
+            threads: [
+              { id: 7, provider: "codex", title: "Parser port", status: "open", updated_at: "9" },
+            ],
+          });
+        case "get_chat_snapshot":
+          return response({
+            type: "chat_snapshot",
+            snapshot: {
+              thread_id: 7,
+              messages: [],
+              events: [],
+              provider_events: [],
+              queued_inputs: [],
+              live_session:
+                live && !killed
+                  ? { session_id: 42, status: "running", runtime_state: "running", ready: true }
+                  : undefined,
+            },
+          });
+        case "kill_session":
+          killed = true;
+          return response({ type: "ack" });
+        case "get_session_status":
+          return response({
+            type: "session_status",
+            session_id: 42,
+            status: killed ? "exited" : "running",
+            runtime_state: killed ? "exited" : "running",
+            ready: false,
+          });
+        case "get_chat_transcript":
+          return response({
+            type: "chat_transcript",
+            thread_id: 7,
+            title: "Parser port",
+            messages: [{ role: "user", content: "port it", created_at: "1" }],
+          });
+        case "get_workspace_changes":
+          return response({ type: "workspace_changes", workspace: "parser", files: [] });
+        case "get_recent_commits":
+          return response({ type: "recent_commits", workspace: "parser", log: "abc1234 port it" });
+        default:
+          return response({ type: "ack" });
+      }
+    });
+  }
+
+  /** The target daemon: empty until the import lands, then holding it. */
+  function routeTarget(opts: { existing?: boolean } = {}) {
+    let imported = opts.existing ?? false;
+    api.requestClient.mockImplementation(async (_id: string | null, req: { type: string }) => {
+      order.push(`dst:${req.type}`);
+      switch (req.type) {
+        case "list_workspaces":
+          return response({
+            type: "workspaces",
+            workspaces: imported
+              ? [{ name: "parser", repository_name: "app", branch: "lc/parser", base_ref: "main" }]
+              : [],
+          });
+        case "import_workspace_from_remote":
+          imported = true;
+          return response({
+            type: "workspace_imported",
+            workspace: "parser",
+            repository: "app",
+            branch: "lc/parser",
+            thread_id: 11,
+            copied_messages: 1,
+          });
+        case "list_chat_threads":
+          return response({
+            type: "chat_threads",
+            workspace: "parser",
+            threads: [
+              { id: 11, provider: "codex", title: "Parser port", status: "open", updated_at: "9" },
+            ],
+          });
+        case "get_chat_snapshot":
+          return response({
+            type: "chat_snapshot",
+            snapshot: {
+              thread_id: 11,
+              messages: [],
+              events: [],
+              provider_events: [],
+              queued_inputs: [],
+            },
+          });
+        case "list_queued_chat_inputs":
+          return response({ type: "queued_chat_inputs", thread_id: 11, inputs: [] });
+        default:
+          return response({ type: "ack" });
+      }
+    });
+  }
+
+  const input = {
+    workspace: "parser",
+    toClientId: "dst",
+    toLabel: "dst",
+    fromLabel: "src",
+  };
+
+  it("refuses a live source session without force, and pushes nothing", async () => {
+    routeSource();
+    routeTarget();
+    const { actions, LiveSourceSessionError } = await import("./actions");
+
+    const err = await actions.transferWorkspace(input).catch((e) => e);
+
+    expect(err).toBeInstanceOf(LiveSourceSessionError);
+    expect((err as Error).message).toContain("session 42 (codex");
+    const types = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
+    expect(types).not.toContain("push_branch");
+    expect(types).not.toContain("kill_session");
+    expect(types).not.toContain("archive_workspace");
+  });
+
+  it("stops the source's session before it pushes the branch", async () => {
+    routeSource();
+    routeTarget();
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace({ ...input, force: true });
+
+    expect(order.indexOf("src:kill_session")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("src:kill_session")).toBeLessThan(order.indexOf("src:push_branch"));
+    // And the kill was waited on, not fired and forgotten.
+    expect(order.indexOf("src:get_session_status")).toBeLessThan(
+      order.indexOf("src:push_branch"),
+    );
+  });
+
+  it("writes to the named target daemon, never to this machine", async () => {
+    // The gap this closes: `importWorkspaceFromRemote` hardcodes the local
+    // daemon, so daemon-to-daemon was impossible. Neither end here is local.
+    routeSource({ liveSession: false });
+    routeTarget();
+    const { actions } = await import("./actions");
+
+    const moved = await actions.transferWorkspace(input);
+
+    expect(moved).toEqual({ workspace: "parser" });
+    expect(api.requestLocal).not.toHaveBeenCalled();
+    const imported = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "import_workspace_from_remote",
+    );
+    expect(imported?.[0]).toBe("dst");
+    expect(imported?.[1]).toMatchObject({
+      repository_url: "git@github.com:me/app.git",
+      branch: "lc/parser",
+      base_ref: "main",
+      source_commit: "abc1234",
+      provider: "codex",
+    });
+  });
+
+  it("hands the target's session the last user message under a transfer preamble", async () => {
+    routeSource({ liveSession: false });
+    routeTarget();
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    const spawned = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "ensure_chat_thread_session",
+    );
+    expect(spawned?.[1]).toMatchObject({ workspace: "parser", thread_id: 11, kind: "codex" });
+    const queued = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "queue_chat_input",
+    );
+    expect(queued?.[1]).toMatchObject({ thread_id: 11, kind: "user", verbatim: true });
+    const text = (queued?.[1] as { input: string }).input;
+    expect(text).toContain("moved from daemon src to dst; the branch is at abc1234");
+    expect(text).toContain("port it");
+  });
+
+  it("archives the source only after the handover landed", async () => {
+    routeSource({ liveSession: false });
+    routeTarget();
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    // The handover has to have landed first: the queued message drains (the
+    // target reports an empty queue) before the source is archived at all.
+    const archived = order.indexOf("src:archive_workspace");
+    const queued = order.indexOf("dst:queue_chat_input");
+    const drained = order.lastIndexOf("dst:list_queued_chat_inputs");
+    expect(queued).toBeGreaterThanOrEqual(0);
+    expect(archived).toBeGreaterThan(queued);
+    expect(archived).toBeGreaterThan(drained);
+  });
+
+  it("leaves the source alone when the target cannot take the workspace", async () => {
+    routeSource({ liveSession: false });
+    api.requestClient.mockImplementation(async (_id: string | null, req: { type: string }) => {
+      if (req.type === "list_workspaces") return response({ type: "workspaces", workspaces: [] });
+      if (req.type === "import_workspace_from_remote")
+        return response({ type: "error", message: "no repository here has remote git@..." });
+      return response({ type: "ack" });
+    });
+    const { actions, MissingLocalRepositoryError } = await import("./actions");
+
+    const err = await actions.transferWorkspace(input).catch((e) => e);
+
+    expect(err).toBeInstanceOf(MissingLocalRepositoryError);
+    const types = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
+    expect(types).not.toContain("archive_workspace");
+  });
+
+  it("adopts a workspace an earlier attempt already left on the target", async () => {
+    routeSource({ liveSession: false });
+    routeTarget({ existing: true });
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    const targetTypes = api.requestClient.mock.calls.map((c) => (c[1] as { type: string }).type);
+    expect(targetTypes).not.toContain("import_workspace_from_remote");
+  });
+
+  it("does not hand a chat its transfer message twice", async () => {
+    routeSource({ liveSession: false });
+    api.requestClient.mockImplementation(async (_id: string | null, req: { type: string }) => {
+      if (req.type === "list_workspaces")
+        return response({
+          type: "workspaces",
+          workspaces: [
+            { name: "parser", repository_name: "app", branch: "lc/parser", base_ref: "main" },
+          ],
+        });
+      if (req.type === "list_chat_threads")
+        return response({
+          type: "chat_threads",
+          workspace: "parser",
+          threads: [
+            { id: 11, provider: "codex", title: "Parser port", status: "open", updated_at: "9" },
+          ],
+        });
+      if (req.type === "get_chat_snapshot")
+        return response({
+          type: "chat_snapshot",
+          snapshot: {
+            thread_id: 11,
+            messages: [
+              {
+                role: "user",
+                content: "This conversation moved from daemon src to dst; the branch is at abc1234.",
+              },
+            ],
+            events: [],
+            provider_events: [],
+            queued_inputs: [],
+          },
+        });
+      return response({ type: "ack" });
+    });
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    const targetTypes = api.requestClient.mock.calls.map((c) => (c[1] as { type: string }).type);
+    expect(targetTypes).not.toContain("queue_chat_input");
+    expect(targetTypes).not.toContain("ensure_chat_thread_session");
   });
 });

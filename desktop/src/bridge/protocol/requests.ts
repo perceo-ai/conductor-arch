@@ -40,6 +40,8 @@ export type ArchcarRequest =
       visible_input?: string;
       kind: ArchcarInputKind;
       session_kind: SessionKind;
+      /** Deliver the text as written, with no in-band Archductor metadata request appended. */
+      verbatim?: boolean;
     }
   | { type: "list_queued_chat_inputs"; thread_id: number }
   | { type: "remove_queued_chat_input"; queue_id: number }

@@ -321,6 +321,25 @@ ipcMain.handle("archcar:request-local", async (_evt, payload: unknown) => {
   }
 });
 
+// Same shape again, but addressed to a named saved client. Transferring a
+// workspace names both ends, and neither has to be this machine.
+ipcMain.handle(
+  "archcar:request-client",
+  async (_evt, args: { clientId: string | null; payload: unknown }) => {
+    const type = requestType(args?.payload);
+    const target = args?.clientId ?? "local";
+    logLine("rpc", `client(${target}) request ${type}`);
+    try {
+      const res = await bridge.requestClient(args.clientId, args.payload as never);
+      logLine("rpc", `client(${target}) response ${type} \u2192 ${requestType(res)}`);
+      return { ok: true, value: res };
+    } catch (err) {
+      logLine("error", `client(${target}) request ${type} failed: ${(err as Error).message}`);
+      return { ok: false, error: (err as Error).message };
+    }
+  },
+);
+
 ipcMain.handle("fs:list-workspace-files", async (_evt, opts: { rootPath?: string; cap?: number }) => {
   try {
     if (loadRemoteConfig()) {

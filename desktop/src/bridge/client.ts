@@ -48,6 +48,7 @@ export type ClientsResult =
 interface ArchductorApi {
   request<Res = unknown>(payload: unknown): Promise<Res>;
   requestLocal<Res = unknown>(payload: unknown): Promise<Res>;
+  requestClient<Res = unknown>(clientId: string | null, payload: unknown): Promise<Res>;
   ensureEvents(): Promise<{ ok: boolean }>;
   onEvent(cb: (event: unknown) => void): () => void;
   onWindowFocus(cb: (focused: boolean) => void): () => void;
@@ -141,6 +142,20 @@ export function sendLocal<R extends ArchcarResponse = ArchcarResponse>(
   req: ArchcarRequest,
 ): Promise<R> {
   return api().requestLocal<R>(req);
+}
+
+/**
+ * Typed request to one *named* saved daemon; `null` is this machine.
+ *
+ * `sendLocal` is the two-endpoint case — read there, write here — which is all
+ * copying a workspace ever needed. Transferring one names both ends and
+ * neither has to be this machine, so the destination is a client id.
+ */
+export function sendToClient<R extends ArchcarResponse = ArchcarResponse>(
+  clientId: string | null,
+  req: ArchcarRequest,
+): Promise<R> {
+  return api().requestClient<R>(clientId, req);
 }
 
 /** Ensure the event stream is running and route events to a handler. */
