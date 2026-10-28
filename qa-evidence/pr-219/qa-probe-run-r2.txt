@@ -1,0 +1,27 @@
+### qa round-2 probe run — head 01fba9e8542c8054e929ed6cb206cddea003bc28
+
+## A. round-1 defect probes (assert the DEFECT; all must now FAIL)
+ × src/store/qa-probe-r2-defects.test.ts > qa round-1 defect probes, re-run on 01fba9e (all must FAIL) > DEFECT f: adopts an archived target, never imports, still archives the source 342ms
+   → parser on dst is archived but still holds branch lc/parser, the branch this transfer moves. It cannot be resumed while archived, and importing alongside it would put a second worktree on a -v2 branch with another agent replaying this conversation — so nothing has been changed. Restore it there to continue the transfer into it, or delete it if it is finished with.
+ × src/store/qa-probe-r2-defects.test.ts > qa round-1 defect probes, re-run on 01fba9e (all must FAIL) > DEFECT g: retires the source when the adopted target holds no conversation
+   → parser is on dst but has none of the conversation, so an earlier attempt created it without the chat. Remove that workspace there and transfer again; parser has been left alone.
+ × src/store/qa-probe-r2-defects.test.ts > qa round-1 defect probes, re-run on 01fba9e (all must FAIL) > DEFECT c: second hop skips the agent because carried history holds the preamble 5001ms
+   → Test timed out in 5000ms.
+ × src/store/qa-probe-r2-defects.test.ts > qa round-1 defect probes, re-run on 01fba9e (all must FAIL) > DEFECT h: the final archive follows the live selection, not the pinned source
+   → expected [ 'src:get_remote_access', …(17) ] to include 'other-unpinned:archive_workspace'
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯
+ Test Files  1 failed (1)
+      Tests  4 failed (4)
+
+## B. round-2 fixed-behaviour probes (all must PASS)
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > f FIXED: an archived holder of the branch is refused, and the source is left alone 304ms
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > g FIXED: an adopted target with real history but no chat is refused, source left alone
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > b FIXED: an empty source chat gets a thread opened on the target, not a bail
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > c FIXED: the second hop starts a session and sends the real ask, not the carried preamble
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > h FIXED: the final archive goes to the pinned source even after a selection switch
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > a FIXED: a target the daemon renamed on collision is found on retry by its pushed commit
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > a FIXED: a workspace on the same branch in a DIFFERENT repository is not adopted
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > a FIXED: a target on our branch at its OWN commit is refused, not duplicated
+ ✓ src/store/qa-probe-r2-fixed.test.ts > qa round-2 probes: the eight round-1 findings on 01fba9e > e FIXED: an EMPTY QUEUE with no message row is not delivery, so the source is not archived 1515ms
+ Test Files  1 passed (1)
+      Tests  9 passed (9)
