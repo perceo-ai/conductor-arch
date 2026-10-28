@@ -6612,10 +6612,7 @@ fn create_on_target(
     target: &TransferEndpoint,
     spec: TargetWorkspaceSpec<'_>,
 ) -> Result<(String, Option<i64>)> {
-    // True when the lookup below could not scope itself to a repository, so the
-    // branch-rename check after the import is the only guard left. Bound from
-    // the match because every other outcome leaves this function.
-    let import_guarded_by_branch_rename = match existing_target_workspace(
+    match existing_target_workspace(
         target,
         &spec.repository_url,
         &spec.branch,
@@ -6651,10 +6648,8 @@ fn create_on_target(
              delete it if it is finished with",
             target.label
         ),
-        TargetWorkspaceMatch::Absent {
-            repository_resolved,
-        } => !repository_resolved,
-    };
+        TargetWorkspaceMatch::Absent => {}
+    }
 
     if let Some(dest) = spec.clone_into {
         // Through the target daemon, so the clone is registered as one of its
@@ -6675,9 +6670,21 @@ fn create_on_target(
         }
     }
 
-    // Kept for the check after the import: the daemon renames a branch it
-    // already has, and that rename is the one signal that catches a collision
-    // none of the lookups above saw.
+    // Resolved *after* the clone, not before: `--clone-into` registers the
+    // repository, so a reading from before it ran reports "no repository here"
+    // for every first-time transfer. Deciding the check below on that stale
+    // answer rejected the branch rename the daemon does for an ordinary
+    // name collision in some *other* repository — after creating the workspace,
+    // with the source already stopped and its branch pushed.
+    //
+    // Both ways round it is now right. If the repository was absent until the
+    // clone, the clone's repository has no workspaces at all, so nothing there
+    // can be on our branch and a rename can only be a collision elsewhere. If
+    // it was already present, the lookup above scoped itself to it properly.
+    let import_guarded_by_branch_rename =
+        target_repository_name(target, &spec.repository_url)?.is_none();
+    // The daemon renames a branch it already has, and that rename is the one
+    // signal that catches a collision no lookup could see.
     let requested_branch = spec.branch.clone();
     match target
         .client
@@ -6738,11 +6745,8 @@ fn create_on_target(
 
 /// What the target already has for the branch being moved.
 enum TargetWorkspaceMatch {
-    /// Nothing of this transfer's there; import. `repository_resolved` is false
-    /// when the target has no repository this lookup could match to the source's
-    /// remote URL — then there was no repository to scope a branch check to, and
-    /// the check after the import has to stand in for it.
-    Absent { repository_resolved: bool },
+    /// Nothing of this transfer's there; import.
+    Absent,
     /// This transfer's own earlier attempt, still at the commit it pushed.
     Adopt(Box<archductor_core::archcar::protocol::ArchcarWorkspaceSummary>),
     /// That daemon's copy of this branch has its own commits. Importing a
@@ -6832,13 +6836,10 @@ fn existing_target_workspace(
     // Without a pushed sha there is nothing to compare, so a branch match is
     // taken at face value. Re-seeding is still blocked downstream: the handover
     // only happens for a chat that has not already had one delivered.
-    let repository_resolved = repository.is_some();
     let Some(expected) = source_commit else {
         return Ok(match on_branch {
             Some(matched) => TargetWorkspaceMatch::Adopt(Box::new(matched.clone())),
-            None => TargetWorkspaceMatch::Absent {
-                repository_resolved,
-            },
+            None => TargetWorkspaceMatch::Absent,
         });
     };
 
@@ -6873,9 +6874,7 @@ fn existing_target_workspace(
             return Ok(TargetWorkspaceMatch::Adopt(Box::new(matched.clone())));
         }
     }
-    Ok(TargetWorkspaceMatch::Absent {
-        repository_resolved,
-    })
+    Ok(TargetWorkspaceMatch::Absent)
 }
 
 /// What the target calls the repository at `repository_url`.

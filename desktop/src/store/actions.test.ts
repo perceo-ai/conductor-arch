@@ -1145,6 +1145,79 @@ describe("actions.transferWorkspace", () => {
     expect(api.requestLocal).not.toHaveBeenCalled();
   });
 
+  it("clones first, then judges a renamed branch against the repository that now exists", async () => {
+    // The branch-rename guard used to read the repository lookup taken *before*
+    // the clone registered it, so it saw "no repository here" on every first
+    // transfer. The daemon then versioned the branch around an unrelated
+    // workspace — ordinary — and the guard rejected it after the workspace had
+    // been created, with the source already stopped and its branch pushed.
+    routeSource({ liveSession: false });
+    let cloned = false;
+    let delivered = false;
+    handlers.dst = (req: { type: string }) => {
+      switch (req.type) {
+        case "list_workspaces":
+          return { type: "workspaces", workspaces: [] };
+        case "list_repositories":
+          // Nothing matches until the clone has registered it.
+          return {
+            type: "repositories",
+            repositories: cloned ? [{ name: "app-here", remote_url: REPO_URL }] : [],
+          };
+        case "clone_repository":
+          cloned = true;
+          return { type: "ack" };
+        case "import_workspace_from_remote":
+          // Renamed around an unrelated workspace of the same name.
+          return {
+            type: "workspace_imported",
+            workspace: "parser-v2",
+            repository: "app-here",
+            branch: "lc/parser-v2",
+            thread_id: 11,
+            copied_messages: 1,
+          };
+        case "queue_chat_input":
+          delivered = true;
+          return { type: "queued_chat_input", input: { id: 1, thread_id: 11 } };
+        case "get_chat_snapshot":
+          return {
+            type: "chat_snapshot",
+            snapshot: {
+              thread_id: 11,
+              messages: delivered
+                ? [
+                    {
+                      id: 1,
+                      role: "user",
+                      source: "user_send",
+                      content: `This conversation moved from daemon src to dst; the branch is at ${PUSHED}.`,
+                    },
+                  ]
+                : [],
+              events: [],
+              provider_events: [],
+              queued_inputs: [],
+            },
+          };
+        case "get_remote_access":
+          return { type: "remote_access", token: "tok-dst", token_path: "/dst/archcar.token" };
+        default:
+          return { type: "ack" };
+      }
+    };
+    const { actions } = await import("./actions");
+
+    const moved = await actions.transferWorkspace({ ...input, cloneInto: "/srv/app" });
+
+    expect(moved).toEqual({ workspace: "parser-v2" });
+    expect(order.indexOf("dst:clone_repository")).toBeLessThan(
+      order.lastIndexOf("dst:list_repositories"),
+    );
+    expect(order).toContain("dst:queue_chat_input");
+    expect(order).toContain("src:archive_workspace");
+  });
+
   it("pins the source daemon, so switching clients mid-transfer cannot redirect it", async () => {
     // Was: every source call went through `send()`, which re-reads the selected
     // client per connection, so a switch part-way sent the rest — the final

@@ -890,6 +890,15 @@ export const actions = {
           }),
         );
       }
+      const afterClone = await sendTarget({ type: "list_repositories" });
+      const repositoryResolvedForImport =
+        afterClone.type === "repositories" &&
+        afterClone.repositories.some(
+          (repo) =>
+            repo.remote_url === repositoryUrl ||
+            (!!repo.remote_url &&
+              repositoryUrlTail(repo.remote_url) === repositoryUrlTail(repositoryUrl)),
+        );
       const imported = await sendTarget({
         type: "import_workspace_from_remote",
         repository_url: repositoryUrl,
@@ -910,10 +919,16 @@ export const actions = {
       // The daemon suffixes a branch name it already has anywhere on the
       // machine, so a rename alone is not evidence of trouble — usually it
       // collided with an unrelated repository, which is harmless. It only
-      // matters when the lookup above could not resolve this repository on the
-      // target and so never checked our own branch: then the rename is the only
-      // sign something there is already on it.
-      if (!targetRepository && imported.branch !== source.branch) {
+      // matters when this repository could not be resolved on the target and
+      // so our own branch was never checked: then the rename is the only sign
+      // something there is already on it.
+      //
+      // Re-resolved *after* the clone above, never from the reading taken
+      // before it: `cloneInto` registers the repository, so the earlier answer
+      // is "no repository here" on every first-time transfer, and deciding on
+      // that rejected an ordinary cross-repository rename after the workspace
+      // had been created and the source already stopped.
+      if (!repositoryResolvedForImport && imported.branch !== source.branch) {
         throw new Error(
           `${input.toLabel} already has branch ${source.branch}, so it created ${imported.workspace} on ${imported.branch} instead. That would be a second worktree on this branch with another agent replaying the same conversation, so the transfer stopped here: nothing was resumed and the source workspace was not archived. Remove ${imported.workspace} on ${input.toLabel}, sort out what already holds ${source.branch} there, and try again.`,
         );

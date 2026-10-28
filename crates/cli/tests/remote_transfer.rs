@@ -725,6 +725,70 @@ fn remote_transfer_hands_over_to_the_imported_chat_not_the_newest_one() {
     );
 }
 
+/// A first transfer that has to clone the repository on the target, onto a
+/// daemon already using that workspace name for something else.
+///
+/// The branch-rename guard was deciding on a repository lookup taken *before*
+/// `--clone-into` registered the repository, so it read "no repository here" on
+/// every first transfer. The daemon then versioned the name and branch around
+/// the unrelated workspace — ordinary behaviour — and the guard mistook that
+/// for duplicate work and refused *after* creating the workspace, with the
+/// source already stopped and its branch pushed.
+#[test]
+fn remote_transfer_clones_onto_a_target_whose_workspace_name_is_taken() {
+    let fixture = Fixture::start(TargetSetup::DecoyOnlyNeedsClone);
+    let dest = fixture.target.root.join("cloned-demo");
+
+    let moved = fixture
+        .operator(&[
+            "remote",
+            "transfer",
+            "berlin",
+            "--from",
+            "src",
+            "--to",
+            "dst",
+            "--clone-into",
+            dest.to_str().unwrap(),
+            "--force",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(moved.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("moved `berlin` from src to dst"),
+        "the first transfer should land; got:\n{stdout}"
+    );
+
+    // The daemon renamed around the decoy, which is correct: a different
+    // repository, so a same-named branch there is a different branch.
+    let pushed = fixture
+        .pushed_commit()
+        .expect("the branch was never pushed");
+    let imported = fixture
+        .target_workspaces()
+        .into_iter()
+        .find(|workspace| workspace.name != "berlin")
+        .expect("nothing was imported onto the target");
+    assert_eq!(
+        git_output(&imported.path, &["rev-parse", "HEAD"]),
+        pushed,
+        "the imported workspace is not at the commit the source pushed"
+    );
+
+    let delivered = wait_for_captured_turns(&fixture.target.capture, 1);
+    assert!(
+        delivered[0].contains("This conversation moved from daemon src to dst"),
+        "the handover was not delivered; got:\n{}",
+        delivered[0]
+    );
+    assert_eq!(
+        fixture.source_workspace().status,
+        "archived",
+        "the source should be retired once the handover landed"
+    );
+}
+
 // --- harness -------------------------------------------------------------
 
 /// The first thing the source's agent was asked, and therefore the transcript's
@@ -742,6 +806,9 @@ enum TargetSetup {
     /// The target has the clone, but its agent fails its handshake, so no
     /// session there can ever take the handover.
     WithFailingProvider,
+    /// The target has *only* the unrelated repository, so the transfer has to
+    /// clone the real one — and the workspace name it wants is already taken.
+    DecoyOnlyNeedsClone,
 }
 
 struct Fixture {
@@ -783,7 +850,10 @@ impl Fixture {
 
         let source_repo = clone_repo(&bare, root.join("source-repo"));
         register_repository(&source, "demo", &source_repo);
-        if !matches!(target_setup, TargetSetup::WithoutClone) {
+        if !matches!(
+            target_setup,
+            TargetSetup::WithoutClone | TargetSetup::DecoyOnlyNeedsClone
+        ) {
             let target_repo = clone_repo(&bare, root.join("target-repo"));
             register_repository(&target, "demo", &target_repo);
             // Each daemon's clone points at that daemon's own fake provider, so
@@ -799,7 +869,10 @@ impl Fixture {
         // A second repository on the target with a `berlin` workspace on
         // `lc/berlin`: the same branch and the same name as the one being
         // moved, and nothing to do with it.
-        if matches!(target_setup, TargetSetup::WithDecoyRepository) {
+        if matches!(
+            target_setup,
+            TargetSetup::WithDecoyRepository | TargetSetup::DecoyOnlyNeedsClone
+        ) {
             let decoy_bare = root.join("decoy.git");
             let decoy_seed = init_repo(root.join("decoy-seed"));
             run_git(
@@ -830,6 +903,21 @@ impl Fixture {
                 ])
                 .assert()
                 .success();
+        }
+        // A repository the transfer clones for itself carries no settings file,
+        // so the target's fake provider has to be configured daemon-wide or no
+        // session in it can start at all.
+        if matches!(target_setup, TargetSetup::DecoyOnlyNeedsClone) {
+            let shared = target.root.join("xdg/config/archductor/settings.toml");
+            fs::create_dir_all(shared.parent().unwrap()).unwrap();
+            fs::write(
+                &shared,
+                format!(
+                    "codex_executable_path = {:?}\n",
+                    target.fake_codex.to_string_lossy()
+                ),
+            )
+            .unwrap();
         }
 
         let fixture = Self {
