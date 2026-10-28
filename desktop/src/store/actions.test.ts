@@ -896,19 +896,86 @@ describe("actions.transferWorkspace", () => {
 
   // --- regressions ------------------------------------------------------
 
-  it("does not adopt an archived workspace on the target", async () => {
-    // Was: both ends ended up archived and invisible on either board, with no
-    // import and no restore — the transfer resumed a session inside a
-    // workspace the target had already retired.
+  it("refuses when an archived workspace on the target still holds the branch", async () => {
+    // Twice wrong before now. First it *adopted* the archived workspace and
+    // resumed inside something invisible on the target's board. Then the
+    // archived-exclusion fix made it import instead — and because an archived
+    // row still holds its branch, the daemon suffixed it: a second worktree on
+    // a `-v2` branch with a second agent replaying the same conversation,
+    // reported as success. Neither is safe, so it refuses.
     routeSource({ liveSession: false });
     routeTarget({ existing: true, status: "archived" });
     const { actions } = await import("./actions");
 
+    const err = await actions.transferWorkspace(input).catch((e) => e);
+
+    expect((err as Error).message).toContain("is archived but still holds branch");
+    expect(order).not.toContain("dst:import_workspace_from_remote");
+    expect(order).not.toContain("dst:queue_chat_input");
+    expect(order).not.toContain("src:archive_workspace");
+  });
+
+  it("hands over to the imported chat, not whichever is newest", async () => {
+    // Adoption proves the workspace is ours, not which chat in it is the
+    // imported one. An operator's own chat, opened after an interrupted
+    // transfer and therefore newest, used to receive the handover.
+    routeSource({ liveSession: false });
+    routeTarget({ existing: true });
+    const base = handlers.dst;
+    let handedOver = false;
+    handlers.dst = (req: { type: string; thread_id?: number }) => {
+      if (req.type === "queue_chat_input") handedOver = true;
+      if (req.type === "list_chat_threads") {
+        return {
+          type: "chat_threads",
+          workspace: "parser",
+          threads: [
+            // Newest first, and it is the operator's own empty chat.
+            { id: 99, provider: "codex", title: "My notes", status: "open", updated_at: "99" },
+            { id: 11, provider: "codex", title: "Parser port", status: "open", updated_at: "9" },
+          ],
+        };
+      }
+      if (req.type === "get_chat_snapshot") {
+        const seeded = req.thread_id === 11;
+        const messages: unknown[] = seeded
+          ? [{ id: 1, role: "user", source: "fork", content: "port it" }]
+          : [];
+        // Only the imported chat ever receives the handover, and only once the
+        // queue has taken it — which is what the confirmation poll waits for.
+        if (seeded && handedOver) {
+          messages.push({
+            id: 2,
+            role: "user",
+            source: "user_send",
+            content: `This conversation moved from daemon src to dst; the branch is at ${PUSHED}.`,
+          });
+        }
+        return {
+          type: "chat_snapshot",
+          snapshot: {
+            thread_id: req.thread_id,
+            messages,
+            events: [],
+            provider_events: [],
+            queued_inputs: [],
+          },
+        };
+      }
+      return base(req);
+    };
+    const { actions } = await import("./actions");
+
     await actions.transferWorkspace(input);
 
-    expect(order).toContain("dst:import_workspace_from_remote");
-    expect(order).toContain("dst:queue_chat_input");
-    expect(order).toContain("src:archive_workspace");
+    const spawned = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "ensure_chat_thread_session",
+    );
+    expect(spawned?.[1]).toMatchObject({ thread_id: 11 });
+    const queued = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "queue_chat_input",
+    );
+    expect(queued?.[1]).toMatchObject({ thread_id: 11 });
   });
 
   it("does not adopt a same-named workspace from another repository", async () => {

@@ -354,7 +354,15 @@ both:
 
 1. It is not archived. Resuming a session inside a workspace the target has
    already retired would look like success while being invisible on its board.
-   (True of the desktop as well as the CLI.)
+   An archived workspace still *holds its branch*, though, so it cannot simply
+   be imported around either — the daemon renames a branch it already has, and
+   that would quietly produce a second worktree on a `-v2` branch with another
+   agent replaying the same conversation. So this refuses instead, on both
+   surfaces:
+
+   ```
+   Error: `fix-auth` on frankfurt is archived but still holds branch lc/fix-auth, the branch this transfer moves. It cannot be resumed while archived, and importing alongside it would put a second worktree on a `-v2` branch with another agent replaying this conversation — so nothing has been changed. Restore it there (`archductor workspace restore fix-auth`) to continue the transfer into it, or delete it if it is finished with
+   ```
 2. It belongs to the same repository, matched by remote URL rather than by what
    each daemon happens to call it — registration names are per-daemon.
 3. It is at the commit this transfer pushed. This is the check that actually
@@ -387,6 +395,13 @@ alone:
 ```
 Error: `fix-auth` is on frankfurt but has none of the conversation, so an earlier attempt created it without the chat. Remove that workspace there and re-run; `fix-auth` on office has been left alone
 ```
+
+Adopting a workspace settles which *workspace* is this transfer's, not which
+chat in it is the imported one — so the chat is identified rather than guessed:
+one that already has this transfer's handover, else one carrying the seeded
+history an import writes, else the most recently touched. Without that, a chat
+the operator had opened in the target themselves would be the newest, and would
+receive the handover meant for the carried conversation.
 
 **The handover.** A chat that has already been handed its transfer message is
 left alone:

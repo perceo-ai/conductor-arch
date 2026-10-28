@@ -603,6 +603,128 @@ fn remote_transfer_refuses_to_re_seed_a_target_that_has_moved_on() {
     );
 }
 
+/// A completed transfer whose target workspace was then archived, re-run.
+///
+/// Reproduced before the fix: the archived-exclusion filter dropped it from the
+/// candidates, so the import ran, the daemon suffixed the branch it already
+/// had, and the target ended up with
+/// `["berlin [archived] branch=lc/berlin", "berlin-v2 [active] branch=lc/berlin-v2"]`
+/// and *two* delivered turns — a second worktree and a second agent replaying
+/// the same conversation, reported as success. An archived row still holds its
+/// branch, so it can neither be adopted nor imported around.
+#[test]
+fn remote_transfer_refuses_when_an_archived_target_still_holds_the_branch() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    let args = [
+        "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+    ];
+    fixture.operator(&args).assert().success();
+    wait_for_captured_turns(&fixture.target.capture, 1);
+
+    // Archiving refuses while the resumed agent is still running, so stop it
+    // the way an operator would before retiring the workspace.
+    let resumed = fixture.target_session_id("berlin");
+    fixture
+        .target
+        .app()
+        .args(["archcar", "kill", &resumed.to_string()])
+        .assert()
+        .success();
+    fixture.wait_for_target_session_exit(resumed);
+    fixture
+        .target
+        .app()
+        .args(["workspace", "archive", "berlin"])
+        .assert()
+        .success();
+
+    let refusal = fixture.operator(&args).assert().failure();
+    let stderr = String::from_utf8(refusal.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains("is archived but still holds branch lc/berlin"),
+        "the re-run should refuse an archived holder of the branch; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("workspace restore"),
+        "the refusal should say how to continue; got:\n{stderr}"
+    );
+
+    let on_target: Vec<String> = fixture
+        .target_workspaces()
+        .into_iter()
+        .map(|workspace| format!("{}:{}", workspace.name, workspace.branch))
+        .collect();
+    assert_eq!(
+        on_target,
+        vec!["berlin:lc/berlin".to_owned()],
+        "the re-run imported a second workspace on a suffixed branch"
+    );
+    let turns = fs::read_to_string(&fixture.target.capture).unwrap_or_default();
+    assert_eq!(
+        turns.lines().count(),
+        1,
+        "a second agent was started on the same conversation:\n{turns}"
+    );
+}
+
+/// Adoption proves the *workspace* is this transfer's, not which chat in it is
+/// the imported one. An operator's own chat, opened in the target after an
+/// interrupted transfer and therefore the most recently touched, used to
+/// receive the handover instead of the carried conversation.
+#[test]
+fn remote_transfer_hands_over_to_the_imported_chat_not_the_newest_one() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    let args = [
+        "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+    ];
+    fixture.operator(&args).assert().success();
+    wait_for_captured_turns(&fixture.target.capture, 1);
+
+    // The imported chat, identified by the history the import seeded into it.
+    let target_store = fixture.target_store();
+    let imported = target_store
+        .list_chat_threads("berlin")
+        .unwrap()
+        .into_iter()
+        .find(|thread| {
+            target_store
+                .list_chat_messages(thread.id)
+                .unwrap()
+                .iter()
+                .any(|message| message.source == "fork")
+        })
+        .expect("the import seeded no chat");
+
+    // Someone opens their own chat in the target afterwards, so it is now the
+    // most recently touched one.
+    let newer = target_store
+        .create_chat_thread("berlin", "codex", "My own notes", None)
+        .unwrap();
+    assert_ne!(newer.id, imported.id);
+
+    // A retry must leave the already-handed-over chat alone and must not
+    // deliver into the operator's chat.
+    let rerun = fixture.operator(&args).assert().success();
+    let stdout = String::from_utf8(rerun.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("was already handed the conversation"),
+        "the retry should recognise the imported chat as handed over; got:\n{stdout}"
+    );
+    assert!(
+        target_store
+            .list_chat_messages(newer.id)
+            .unwrap()
+            .is_empty(),
+        "the handover was delivered into the operator's own chat"
+    );
+    let turns = fs::read_to_string(&fixture.target.capture).unwrap_or_default();
+    assert_eq!(
+        turns.lines().count(),
+        1,
+        "the agent was handed a second turn"
+    );
+}
+
 // --- harness -------------------------------------------------------------
 
 /// The first thing the source's agent was asked, and therefore the transcript's
@@ -889,6 +1011,42 @@ impl Fixture {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    fn target_session_id(&self, workspace: &str) -> i64 {
+        let store = self.target_store();
+        let deadline = Instant::now() + POLL_TIMEOUT;
+        loop {
+            if let Some(session) = store
+                .list_sessions(workspace)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|session| session.status == ProcessStatus::Running)
+            {
+                return session.id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no running session on the target workspace"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn wait_for_target_session_exit(&self, session_id: i64) {
+        let store = self.target_store();
+        let deadline = Instant::now() + POLL_TIMEOUT;
+        while Instant::now() < deadline {
+            if store
+                .get_process_record(session_id)
+                .map(|process| process.status != ProcessStatus::Running)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("timed out waiting for target session {session_id} to exit");
     }
 
     fn source_session_status(&self) -> ProcessStatus {

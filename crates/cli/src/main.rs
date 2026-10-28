@@ -6612,7 +6612,10 @@ fn create_on_target(
     target: &TransferEndpoint,
     spec: TargetWorkspaceSpec<'_>,
 ) -> Result<(String, Option<i64>)> {
-    match existing_target_workspace(
+    // True when the lookup below could not scope itself to a repository, so the
+    // branch-rename check after the import is the only guard left. Bound from
+    // the match because every other outcome leaves this function.
+    let import_guarded_by_branch_rename = match existing_target_workspace(
         target,
         &spec.repository_url,
         &spec.branch,
@@ -6639,8 +6642,19 @@ fn create_on_target(
             spec.source_commit.as_deref().unwrap_or("commit"),
             target.label
         ),
-        TargetWorkspaceMatch::Absent => {}
-    }
+        TargetWorkspaceMatch::Retired { name, branch } => anyhow::bail!(
+            "`{name}` on {} is archived but still holds branch {branch}, the branch this \
+             transfer moves. It cannot be resumed while archived, and importing alongside it \
+             would put a second worktree on a `-v2` branch with another agent replaying this \
+             conversation — so nothing has been changed. Restore it there \
+             (`archductor workspace restore {name}`) to continue the transfer into it, or \
+             delete it if it is finished with",
+            target.label
+        ),
+        TargetWorkspaceMatch::Absent {
+            repository_resolved,
+        } => !repository_resolved,
+    };
 
     if let Some(dest) = spec.clone_into {
         // Through the target daemon, so the clone is registered as one of its
@@ -6661,6 +6675,10 @@ fn create_on_target(
         }
     }
 
+    // Kept for the check after the import: the daemon renames a branch it
+    // already has, and that rename is the one signal that catches a collision
+    // none of the lookups above saw.
+    let requested_branch = spec.branch.clone();
     match target
         .client
         .send(ArchcarRequest::ImportWorkspaceFromRemote {
@@ -6681,6 +6699,26 @@ fn create_on_target(
             copied_messages,
             ..
         } => {
+            // The daemon suffixes a branch name it already has anywhere on the
+            // machine, so a rename on its own is not evidence of trouble — the
+            // collision is usually with an unrelated repository, which is
+            // harmless. It only matters when the lookup above could not resolve
+            // this repository on the target and so never got to check our own
+            // branch: then a rename is the only sign that something here is
+            // already on it, and continuing would leave two worktrees on one
+            // branch with two agents replaying one conversation. The daemon
+            // cannot tell us until the workspace exists, so say so plainly
+            // rather than resuming into it or archiving the source.
+            anyhow::ensure!(
+                branch == requested_branch || !import_guarded_by_branch_rename,
+                "{} already has branch {requested_branch}, so it created `{workspace}` on \
+                 {branch} instead. That would be a second worktree on this branch with another \
+                 agent replaying the same conversation, so the transfer stopped here: nothing \
+                 was resumed and the source workspace was not archived. Remove `{workspace}` on \
+                 {}, sort out what already holds {requested_branch} there, and re-run",
+                target.label,
+                target.label
+            );
             println!(
                 "created `{workspace}` on {} at branch {branch} ({copied_messages} message(s) \
                  carried over)",
@@ -6700,8 +6738,11 @@ fn create_on_target(
 
 /// What the target already has for the branch being moved.
 enum TargetWorkspaceMatch {
-    /// Nothing of this transfer's there; import.
-    Absent,
+    /// Nothing of this transfer's there; import. `repository_resolved` is false
+    /// when the target has no repository this lookup could match to the source's
+    /// remote URL — then there was no repository to scope a branch check to, and
+    /// the check after the import has to stand in for it.
+    Absent { repository_resolved: bool },
     /// This transfer's own earlier attempt, still at the commit it pushed.
     Adopt(Box<archductor_core::archcar::protocol::ArchcarWorkspaceSummary>),
     /// That daemon's copy of this branch has its own commits. Importing a
@@ -6712,6 +6753,12 @@ enum TargetWorkspaceMatch {
         branch: String,
         head: Option<String>,
     },
+    /// Holding our branch, but archived. It cannot be adopted — resuming inside
+    /// a workspace the target has retired is invisible on its board — and it
+    /// must not be imported around either: the daemon suffixes a branch it
+    /// already has, so that would quietly produce a second worktree on a `-v2`
+    /// branch with a second agent replaying the same conversation.
+    Retired { name: String, branch: String },
 }
 
 /// What the target already holds for this branch, and whether it is safe to
@@ -6747,33 +6794,51 @@ fn existing_target_workspace(
         ),
     };
     let repository = target_repository_name(target, repository_url)?;
-    let candidates: Vec<&archductor_core::archcar::protocol::ArchcarWorkspaceSummary> = workspaces
-        .iter()
-        .filter(|candidate| candidate.status != "archived")
-        .filter(|candidate| match &repository {
-            Some(repository) => &candidate.repository_name == repository,
-            // The target has no repository at this URL, so it has no workspace
-            // of ours either; the import will say so in its own words.
-            None => false,
-        })
-        .collect();
+    // Everything in this repository, archived included. Archived rows are not
+    // adoptable, but they still *hold their branch*, so they have to be seen
+    // here or the import below collides with one and suffixes its way into a
+    // duplicate.
+    let in_repository: Vec<&archductor_core::archcar::protocol::ArchcarWorkspaceSummary> =
+        workspaces
+            .iter()
+            .filter(|candidate| match &repository {
+                Some(repository) => &candidate.repository_name == repository,
+                // The target has no repository at this URL as far as this
+                // lookup can tell; the daemon's own matcher is more forgiving,
+                // so the post-import check covers what is missed here.
+                None => false,
+            })
+            .collect();
 
-    let on_branch = candidates
+    let on_branch = in_repository
         .iter()
         .find(|candidate| candidate.branch == branch)
         .copied();
-    let by_name = candidates
+    if let Some(matched) = on_branch {
+        if matched.status == "archived" {
+            return Ok(TargetWorkspaceMatch::Retired {
+                name: matched.name.clone(),
+                branch: matched.branch.clone(),
+            });
+        }
+    }
+    // A name collision is only a collision: the import renames around it and
+    // one worktree per branch still holds, so archived rows are irrelevant.
+    let by_name = in_repository
         .iter()
-        .find(|candidate| candidate.name == name)
+        .find(|candidate| candidate.status != "archived" && candidate.name == name)
         .copied();
 
     // Without a pushed sha there is nothing to compare, so a branch match is
     // taken at face value. Re-seeding is still blocked downstream: the handover
     // only happens for a chat that has not already had one delivered.
+    let repository_resolved = repository.is_some();
     let Some(expected) = source_commit else {
         return Ok(match on_branch {
             Some(matched) => TargetWorkspaceMatch::Adopt(Box::new(matched.clone())),
-            None => TargetWorkspaceMatch::Absent,
+            None => TargetWorkspaceMatch::Absent {
+                repository_resolved,
+            },
         });
     };
 
@@ -6808,7 +6873,9 @@ fn existing_target_workspace(
             return Ok(TargetWorkspaceMatch::Adopt(Box::new(matched.clone())));
         }
     }
-    Ok(TargetWorkspaceMatch::Absent)
+    Ok(TargetWorkspaceMatch::Absent {
+        repository_resolved,
+    })
 }
 
 /// What the target calls the repository at `repository_url`.
@@ -6918,23 +6985,66 @@ fn create_target_thread(
     }
 }
 
-/// The chat to resume in an adopted workspace: its most recently touched live
-/// one, which for a workspace this transfer created is the imported chat.
+/// The chat in an adopted workspace that actually holds the transferred
+/// conversation.
+///
+/// "Newest thread" was not good enough. Adoption proves the *workspace* is this
+/// transfer's (same repository, same branch, same commit) but says nothing
+/// about which chat in it is the imported one — and an operator who opened
+/// their own chat there after an interrupted transfer would have the handover
+/// delivered into that instead. So the imported chat is identified rather than
+/// guessed, in order of how strong the evidence is:
+///
+/// 1. A chat this transfer has already handed over (a delivered, non-seeded
+///    transfer preamble). A retry then leaves exactly that one alone.
+/// 2. A chat carrying seeded history, which is what an import writes.
+/// 3. Failing both, the most recently touched one — a workspace adopted before
+///    its chat was ever seeded has nothing better to offer, and the caller
+///    refuses rather than guessing when a conversation was supposed to be here.
 fn target_thread_for(target: &TransferEndpoint, workspace: &str) -> Result<Option<i64>> {
-    match target.client.send(ArchcarRequest::ListChatThreads {
+    let threads = match target.client.send(ArchcarRequest::ListChatThreads {
         workspace: workspace.to_owned(),
     })? {
-        ArchcarResponse::ChatThreads { threads, .. } => Ok(threads
-            .into_iter()
-            .filter(|thread| thread.archived_at.is_none())
-            .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
-            .map(|thread| thread.id)),
+        ArchcarResponse::ChatThreads { threads, .. } => threads,
         ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
         other => anyhow::bail!(
             "unexpected response listing the target's chats: {}",
             archductor_core::archcar::protocol::archcar_response_summary(&other)
         ),
+    };
+    let mut live: Vec<_> = threads
+        .into_iter()
+        .filter(|thread| thread.archived_at.is_none())
+        .collect();
+    live.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+    let mut seeded = None;
+    for thread in &live {
+        match target.client.send(ArchcarRequest::GetChatSnapshot {
+            thread_id: thread.id,
+            include_provider_events: Some(false),
+        })? {
+            ArchcarResponse::ChatSnapshot { snapshot } => {
+                if snapshot.messages.iter().any(|message| {
+                    message.role == "user"
+                        && message.source != archductor_core::workspace::FORKED_MESSAGE_SOURCE
+                        && message.content.starts_with(TRANSFER_PREAMBLE_PREFIX)
+                }) {
+                    return Ok(Some(thread.id));
+                }
+                if seeded.is_none()
+                    && snapshot.messages.iter().any(|message| {
+                        message.source == archductor_core::workspace::FORKED_MESSAGE_SOURCE
+                    })
+                {
+                    seeded = Some(thread.id);
+                }
+            }
+            // A chat that cannot be read is not evidence either way.
+            _ => continue,
+        }
     }
+    Ok(seeded.or_else(|| live.first().map(|thread| thread.id)))
 }
 
 /// Opens the message a transfer hands its resumed session, and so doubles as

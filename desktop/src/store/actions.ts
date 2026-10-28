@@ -136,6 +136,46 @@ async function daemonIdentity(
   }
 }
 
+/**
+ * The chat in an adopted workspace that actually holds the transferred
+ * conversation.
+ *
+ * Adoption proves the *workspace* is this transfer's (same repository, branch
+ * and commit) but says nothing about which chat in it is the imported one, and
+ * an operator who opened their own chat there after an interrupted transfer
+ * would have the handover delivered into that instead. So it is identified, in
+ * order of evidence: a chat this transfer has already handed over, then one
+ * carrying seeded history, then the most recently touched. Mirrors
+ * `target_thread_for` in crates/cli/src/main.rs.
+ */
+async function importedThreadIn(
+  transport: (req: ArchcarRequest) => Promise<ArchcarResponse>,
+  workspace: string,
+): Promise<number | undefined> {
+  const listed = await transport({ type: "list_chat_threads", workspace });
+  if (listed.type !== "chat_threads") return undefined;
+  const live = [...listed.threads]
+    .filter((thread) => !thread.archived_at)
+    .sort((a, b) => Number(b.updated_at) - Number(a.updated_at));
+  let seeded: number | undefined;
+  for (const thread of live) {
+    const snapshot = await transport({
+      type: "get_chat_snapshot",
+      thread_id: thread.id,
+      include_provider_events: false,
+    });
+    if (snapshot.type !== "chat_snapshot") continue;
+    if (hasDeliveredTransferMessage(snapshot.snapshot.messages)) return thread.id;
+    if (
+      seeded === undefined &&
+      snapshot.snapshot.messages.some((message) => message.source === SEEDED_MESSAGE_SOURCE)
+    ) {
+      seeded = thread.id;
+    }
+  }
+  return seeded ?? live[0]?.id;
+}
+
 const TRANSFER_POLL_INTERVAL_MS = 250;
 const TRANSFER_POLL_TIMEOUT_MS = 60_000;
 
@@ -784,9 +824,22 @@ export const actions = {
               repositoryUrlTail(repo.remote_url) === repositoryUrlTail(repositoryUrl),
           ))?.name
         : undefined;
-    const candidates = onTarget.workspaces.filter(
-      (w) => w.status !== "archived" && !!targetRepository && w.repository_name === targetRepository,
+    // Everything in this repository, archived included: an archived row is not
+    // adoptable but it still *holds its branch*, so it has to be seen here or
+    // the import collides with it and the daemon suffixes its way into a second
+    // worktree with a second agent on the same conversation.
+    const inRepository = onTarget.workspaces.filter(
+      (w) => !!targetRepository && w.repository_name === targetRepository,
     );
+    const archivedOnBranch = inRepository.find(
+      (w) => w.branch === source.branch && w.status === "archived",
+    );
+    if (archivedOnBranch) {
+      throw new Error(
+        `${archivedOnBranch.name} on ${input.toLabel} is archived but still holds branch ${archivedOnBranch.branch}, the branch this transfer moves. It cannot be resumed while archived, and importing alongside it would put a second worktree on a -v2 branch with another agent replaying this conversation — so nothing has been changed. Restore it there to continue the transfer into it, or delete it if it is finished with.`,
+      );
+    }
+    const candidates = inRepository.filter((w) => w.status !== "archived");
     const headOf = async (workspace: string): Promise<string | undefined> => {
       const head = await sendTarget({ type: "get_recent_commits", workspace, limit: 1 });
       return head.type === "recent_commits"
@@ -824,15 +877,7 @@ export const actions = {
     let targetThread: number | undefined;
     if (existing) {
       targetWorkspace = existing.name;
-      const targetThreads = ensureOk(
-        await sendTarget({ type: "list_chat_threads", workspace: existing.name }),
-      );
-      targetThread =
-        targetThreads.type === "chat_threads"
-          ? [...targetThreads.threads]
-              .filter((thread) => !thread.archived_at)
-              .sort((a, b) => Number(b.updated_at) - Number(a.updated_at))[0]?.id
-          : undefined;
+      targetThread = await importedThreadIn(sendTarget, existing.name);
     } else {
       if (input.cloneInto) {
         // Through the target daemon, so the clone is registered as one of its
@@ -862,6 +907,17 @@ export const actions = {
       }
       ensureOk(imported);
       if (imported.type !== "workspace_imported") throw new Error("the transfer returned no workspace");
+      // The daemon suffixes a branch name it already has anywhere on the
+      // machine, so a rename alone is not evidence of trouble — usually it
+      // collided with an unrelated repository, which is harmless. It only
+      // matters when the lookup above could not resolve this repository on the
+      // target and so never checked our own branch: then the rename is the only
+      // sign something there is already on it.
+      if (!targetRepository && imported.branch !== source.branch) {
+        throw new Error(
+          `${input.toLabel} already has branch ${source.branch}, so it created ${imported.workspace} on ${imported.branch} instead. That would be a second worktree on this branch with another agent replaying the same conversation, so the transfer stopped here: nothing was resumed and the source workspace was not archived. Remove ${imported.workspace} on ${input.toLabel}, sort out what already holds ${source.branch} there, and try again.`,
+        );
+      }
       targetWorkspace = imported.workspace;
       targetThread = imported.thread_id;
     }
