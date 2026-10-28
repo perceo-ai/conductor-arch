@@ -493,6 +493,10 @@ jobs:
           brew tap-new perceo-ai/tap
           tap_formula="$(brew --repository perceo-ai/tap)/Formula/archductor.rb"
           cp packaging/homebrew/Formula/archductor.rb "$tap_formula"
+          # Homebrew refuses to load formulae from non-official taps until they
+          # are trusted. Trust only this one formula, not the whole tap.
+          brew trust --help
+          brew trust --formula perceo-ai/tap/archductor
           brew audit --strict --online --formula perceo-ai/tap/archductor
           brew install --build-from-source perceo-ai/tap/archductor
           brew test perceo-ai/tap/archductor
