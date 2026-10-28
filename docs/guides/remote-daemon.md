@@ -249,7 +249,8 @@ A daemon too old to answer that question falls back to comparing addresses,
 which catches only the identical-string case; the command says so when it
 happens rather than implying the stronger check ran.
 
-`--name` and `--branch` rename the workspace on the target. `--clone-into`
+`--name` and `--branch` choose the workspace name and branch on the target,
+which is also how you get past a name the target already uses. `--clone-into`
 clones onto the *target* daemon when it has no copy of the repository, rather
 than onto this machine. `--thread-id` picks which chat moves; the default is
 the workspace's most recently touched live chat, which is the one you were
@@ -348,53 +349,68 @@ Re-run the same command to continue; finished steps are detected and skipped.
 Re-running the same command is safe. Two checks make it so.
 
 **The workspace.** A workspace already on the target is reused rather than
-imported again — but only when all three of these hold, because a branch name
-and a workspace name are not identities and two repositories routinely share
-both:
-
-1. It is not archived. Resuming a session inside a workspace the target has
-   already retired would look like success while being invisible on its board.
-   An archived workspace still *holds its branch*, though, so it cannot simply
-   be imported around either — the daemon renames a branch it already has, and
-   that would quietly produce a second worktree on a `-v2` branch with another
-   agent replaying the same conversation. So this refuses instead, on both
-   surfaces:
-
-   ```
-   Error: `fix-auth` on frankfurt is archived but still holds branch lc/fix-auth, the branch this transfer moves. It cannot be resumed while archived, and importing alongside it would put a second worktree on a `-v2` branch with another agent replaying this conversation — so nothing has been changed. Restore it there (`archductor workspace restore fix-auth`) to continue the transfer into it, or delete it if it is finished with
-   ```
-2. It belongs to the same repository, matched by remote URL rather than by what
-   each daemon happens to call it — registration names are per-daemon.
-3. It is at the commit this transfer pushed. This is the check that actually
-   carries the weight: a same-named branch in another repository is not at that
-   sha, and anything that is at it is this transfer's own earlier attempt.
+imported again — and it is recognised by *what it is*, not by what it is
+called: in the source's repository (matched by remote URL, since registration
+names are per-daemon) and at the commit this transfer pushed.
 
 ```
 `fix-auth` is already on frankfurt (branch lc/fix-auth); keeping it rather than importing a second copy
 ```
 
-When a workspace is sitting on that branch but at a *different* commit, the
-transfer refuses rather than importing a second one. Within one repository a
-branch name is the branch, so the only two safe answers are "this is my own
-earlier attempt, adopt it" and "this is work that has moved on, stop":
+Neither the workspace name nor the branch is used to identify it, because
+neither is an identity: two repositories share branch names freely, and a
+daemon keeps workspace names unique across the whole machine. Going by them
+meant a retry could both miss its own earlier attempt and adopt a stranger's.
+Matching on the pushed commit also means a retry still finds its target when
+the daemon had to give it a different name (see the name collisions below).
 
-```
-Error: `fix-auth` on frankfurt is on branch lc/fix-auth but at 9f21abc, not the 5055711 this transfer pushed — that daemon's copy of this branch has its own commits. Importing a second workspace onto one branch is what this command exists to prevent, and re-seeding its chat would start that work twice, so nothing has been changed. If the transfer already completed there is nothing to re-run; otherwise move or rename `fix-auth` on frankfurt and retry
-```
+Everything else refuses rather than guessing. Nothing is created or changed in
+any of these cases, so the source workspace is still there:
 
-That is the usual answer to "I re-ran a transfer that had already finished and
-the target had got on with the work". A workspace that merely shares the *name*
-on some other branch is a plain collision, not an earlier attempt, and the
-import renames around it as it always did.
+- **The name is taken.** Workspace names are unique machine-wide, and a
+  collision makes the daemon version the name *and* the branch into `-v2`
+  forms — leaving a workspace a later retry could no longer recognise. So an
+  unrelated workspace already using the name this transfer wants refuses it,
+  rather than renaming around it:
 
-A workspace the target has that holds *none* of the conversation is an earlier
-attempt that died before the chat was carried. Creating an empty chat there
-would silently drop the history, so the transfer refuses and leaves the source
-alone:
+  ```
+  Error: frankfurt already uses the workspace name `fix-auth` for `fix-auth` (other-project, branch lc/fix-auth), and it keeps those names unique — so importing would quietly rename this transfer's workspace *and* its branch to `-v2` forms, leaving something a retry could no longer recognise. Nothing has been changed. Give it a free name with `--name <name>` (and `--branch <branch>` if that collides too), or clear the one on frankfurt first
+  ```
 
-```
-Error: `fix-auth` is on frankfurt but has none of the conversation, so an earlier attempt created it without the chat. Remove that workspace there and re-run; `fix-auth` on office has been left alone
-```
+  Pick a free name with `--name <name>` (and `--branch <branch>` if the branch
+  collides too), or clear the occupied name on the target and transfer again.
+  The app has no name picker, so from the desktop the way through is to rename
+  or remove the workspace holding that name on the target first.
+
+- **An archived workspace still holds the branch.** It cannot be resumed while
+  archived — that would look like success while being invisible on the
+  target's board — and it cannot be imported around either, since an archived
+  workspace keeps its branch and the import would version its way into a
+  second worktree with another agent replaying the conversation:
+
+  ```
+  Error: `fix-auth` on frankfurt is archived but still holds branch lc/fix-auth, the branch this transfer moves. It cannot be resumed while archived, and importing alongside it would put a second worktree on a `-v2` branch with another agent replaying this conversation — so nothing has been changed. Restore it there (`archductor workspace restore fix-auth`) to continue the transfer into it, or delete it if it is finished with
+  ```
+
+- **The target has got on with the work.** A workspace on that branch but at a
+  different commit has commits of its own. Within one repository a branch name
+  *is* the branch, so the only safe answers are "my own earlier attempt, adopt
+  it" and "work that has moved on, stop":
+
+  ```
+  Error: `fix-auth` on frankfurt is on branch lc/fix-auth but at 9f21abc, not the 5055711 this transfer pushed — that daemon's copy of this branch has its own commits. Importing a second workspace onto one branch is what this command exists to prevent, and re-seeding its chat would start that work twice, so nothing has been changed. If the transfer already completed there is nothing to re-run; otherwise move or rename `fix-auth` on frankfurt and retry
+  ```
+
+  That is the usual answer to "I re-ran a transfer that had already finished
+  and the target had got on with the work": there is nothing left to re-run.
+
+- **The workspace is there but the conversation is not.** An earlier attempt
+  died before the chat was carried. Creating an empty chat there would silently
+  drop the history, so this refuses too:
+
+  ```
+  Error: `fix-auth` is on frankfurt but has none of the conversation, so an earlier attempt created it without the chat. Remove that workspace there and re-run; `fix-auth` on office has been left alone
+  ```
 
 Adopting a workspace settles which *workspace* is this transfer's, not which
 chat in it is the imported one — so the chat is identified rather than guessed:
