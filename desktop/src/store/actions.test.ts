@@ -654,6 +654,10 @@ describe("actions.transferWorkspace", () => {
       /** Make the target answer the identity probe as the source does. */
       identity?: string;
       identityPath?: string;
+      /** Name of the pre-placed workspace; defaults to the source's. */
+      name?: string;
+      /** Branch of the pre-placed workspace; defaults to the source's. */
+      branch?: string;
     } = {},
   ) {
     let imported = opts.existing ?? false;
@@ -667,6 +671,8 @@ describe("actions.transferWorkspace", () => {
               ? [
                   {
                     ...targetWorkspace,
+                    name: opts.name ?? targetWorkspace.name,
+                    branch: opts.branch ?? targetWorkspace.branch,
                     status: opts.status ?? "active",
                     repository_name: opts.repository ?? "app-here",
                   },
@@ -679,7 +685,11 @@ describe("actions.transferWorkspace", () => {
             repositories: [{ name: "app-here", remote_url: REPO_URL }],
           };
         case "get_recent_commits":
-          return { type: "recent_commits", workspace: "parser", log: `${opts.head ?? PUSHED} x` };
+          return {
+            type: "recent_commits",
+            workspace: "parser",
+            log: `${opts.head ?? PUSHED} x`,
+          };
         case "get_remote_access":
           return {
             type: "remote_access",
@@ -978,9 +988,13 @@ describe("actions.transferWorkspace", () => {
     expect(queued?.[1]).toMatchObject({ thread_id: 11 });
   });
 
-  it("does not adopt a same-named workspace from another repository", async () => {
+  it("does not adopt a workspace from another repository, even at the same commit", async () => {
+    // Provenance is repository *and* commit. A workspace elsewhere sitting on
+    // the same branch at the same sha is still not this transfer's target, and
+    // adopting it would send the handover into a stranger's chat and archive
+    // the real source anyway.
     routeSource({ liveSession: false });
-    routeTarget({ existing: true, repository: "something-else" });
+    routeTarget({ existing: true, repository: "something-else", name: "decoy-parser" });
     const { actions } = await import("./actions");
 
     await actions.transferWorkspace(input);
@@ -988,27 +1002,43 @@ describe("actions.transferWorkspace", () => {
     expect(order).toContain("dst:import_workspace_from_remote");
   });
 
-  it("imports around a same-named workspace that is on another branch", async () => {
-    // A name collision, not an earlier attempt: the target has a `parser`
-    // workspace but on a different branch and at a different commit. The
-    // import renames around it, which duplicates nothing. (A workspace on *our*
-    // branch at another commit is the opposite case — see the re-seed refusal
-    // below, which is what must not become a second import.)
+  it("refuses a workspace name the target already uses", async () => {
+    // The daemon keeps workspace names unique machine-wide and versions the
+    // name *and* branch around a collision, leaving a target a retry could no
+    // longer recognise. Refusing keeps every state retryable.
     routeSource({ liveSession: false });
-    routeTarget({ existing: true, head: "9999999" });
-    const base = handlers.dst;
-    handlers.dst = (req) => {
-      const res = base(req) as { type: string; workspaces?: { branch: string }[] };
-      if (req.type === "list_workspaces" && res.workspaces) {
-        return { ...res, workspaces: res.workspaces.map((w) => ({ ...w, branch: "lc/other" })) };
-      }
-      return res;
-    };
+    routeTarget({ existing: true, repository: "something-else", branch: "lc/other" });
     const { actions } = await import("./actions");
 
-    await actions.transferWorkspace(input);
+    const err = await actions.transferWorkspace(input).catch((e) => e);
 
-    expect(order).toContain("dst:import_workspace_from_remote");
+    expect((err as Error).message).toContain("already uses the workspace name parser");
+    expect(order).not.toContain("dst:import_workspace_from_remote");
+    expect(order).not.toContain("src:archive_workspace");
+  });
+
+  it("a retry finds a target the daemon had renamed, by repository and commit", async () => {
+    // The one rename this cannot prevent: a branch already present in the
+    // target's own clone is not visible as a workspace. The retry has to
+    // recognise the target by what it is — same repository, same pushed commit
+    // — not by the name and branch originally asked for, which it no longer
+    // has. Deriving it from those is what made a retry import a second copy
+    // and replay the whole conversation.
+    routeSource({ liveSession: false });
+    routeTarget({
+      existing: true,
+      name: "parser-v2",
+      branch: "lc/parser-v2",
+      delivered: true,
+    });
+    const { actions } = await import("./actions");
+
+    const moved = await actions.transferWorkspace(input);
+
+    expect(moved).toEqual({ workspace: "parser-v2" });
+    expect(order).not.toContain("dst:import_workspace_from_remote");
+    expect(order).not.toContain("dst:queue_chat_input");
+    expect(order).toContain("src:archive_workspace");
   });
 
   it("does not count a carried transfer preamble as an already-delivered handover", async () => {

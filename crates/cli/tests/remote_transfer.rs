@@ -407,12 +407,7 @@ fn remote_transfer_does_not_adopt_a_same_named_workspace_from_another_repository
     let workspaces = fixture.target_workspaces();
     let decoy = workspaces
         .iter()
-        .find(|workspace| {
-            workspace
-                .path
-                .to_string_lossy()
-                .contains("/workspaces/decoy/")
-        })
+        .find(|workspace| workspace.name == "decoy-berlin")
         .expect("the decoy workspace vanished");
     let imported = workspaces
         .iter()
@@ -725,22 +720,19 @@ fn remote_transfer_hands_over_to_the_imported_chat_not_the_newest_one() {
     );
 }
 
-/// A first transfer that has to clone the repository on the target, onto a
-/// daemon already using that workspace name for something else.
+/// A first transfer onto a daemon that already uses the workspace name.
 ///
-/// The branch-rename guard was deciding on a repository lookup taken *before*
-/// `--clone-into` registered the repository, so it read "no repository here" on
-/// every first transfer. The daemon then versioned the name and branch around
-/// the unrelated workspace — ordinary behaviour — and the guard mistook that
-/// for duplicate work and refused *after* creating the workspace, with the
-/// source already stopped and its branch pushed.
+/// Letting the daemon version the name used to look harmless, but it versions
+/// the *branch* with it — and the result is a workspace this command can no
+/// longer recognise by name or branch, so a retry imports yet another copy.
+/// Refusing keeps the name meaningful and every state retryable, and `--name`
+/// is how the operator picks another.
 #[test]
-fn remote_transfer_clones_onto_a_target_whose_workspace_name_is_taken() {
+fn remote_transfer_refuses_a_workspace_name_the_target_already_uses() {
     let fixture = Fixture::start(TargetSetup::DecoyOnlyNeedsClone);
     let dest = fixture.target.root.join("cloned-demo");
-
-    let moved = fixture
-        .operator(&[
+    let with_name = |name: Option<&'static str>| {
+        let mut args = vec![
             "remote",
             "transfer",
             "berlin",
@@ -751,41 +743,95 @@ fn remote_transfer_clones_onto_a_target_whose_workspace_name_is_taken() {
             "--clone-into",
             dest.to_str().unwrap(),
             "--force",
-        ])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(moved.get_output().stdout.clone()).unwrap();
+        ];
+        if let Some(name) = name {
+            args.push("--name");
+            args.push(name);
+        }
+        args
+    };
+
+    let refusal = fixture.operator(&with_name(None)).assert().failure();
+    let stderr = String::from_utf8(refusal.get_output().stderr.clone()).unwrap();
     assert!(
-        stdout.contains("moved `berlin` from src to dst"),
-        "the first transfer should land; got:\n{stdout}"
+        stderr.contains("already uses the workspace name `berlin`"),
+        "the transfer should refuse a taken name; got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--name"),
+        "the refusal should say how to pick another; got:\n{stderr}"
+    );
+    assert_eq!(
+        fixture.source_workspace().status,
+        "active",
+        "a refused transfer archived the source"
+    );
+    assert_eq!(
+        fixture.target_workspaces().len(),
+        1,
+        "a refused transfer left a workspace behind on the target"
     );
 
-    // The daemon renamed around the decoy, which is correct: a different
-    // repository, so a same-named branch there is a different branch.
+    // Named explicitly, the same transfer goes through.
+    fixture
+        .operator(&with_name(Some("berlin-from-src")))
+        .assert()
+        .success();
     let pushed = fixture
         .pushed_commit()
         .expect("the branch was never pushed");
-    let imported = fixture
-        .target_workspaces()
-        .into_iter()
-        .find(|workspace| workspace.name != "berlin")
-        .expect("nothing was imported onto the target");
+    let imported = fixture.target_workspace("berlin-from-src");
     assert_eq!(
         git_output(&imported.path, &["rev-parse", "HEAD"]),
         pushed,
         "the imported workspace is not at the commit the source pushed"
     );
-
     let delivered = wait_for_captured_turns(&fixture.target.capture, 1);
+    assert!(delivered[0].contains("This conversation moved from daemon src to dst"));
+    assert_eq!(fixture.source_workspace().status, "archived");
+}
+
+/// A transfer whose target workspace the daemon had versioned anyway — the one
+/// rename this command cannot prevent, because a branch already present in the
+/// target's own clone is not visible as a workspace. A retry has to recognise
+/// it by what it is, not by what it is called.
+#[test]
+fn remote_transfer_retry_finds_a_target_the_daemon_had_renamed() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    // The target's clone already has this branch checked out under another
+    // name, so the import versions the workspace and branch around it.
+    let target_repo = fixture.target.root.parent().unwrap().join("target-repo");
+    git_output(&target_repo, &["branch", "lc/berlin", "main"]);
+
+    let args = [
+        "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+    ];
+    fixture.operator(&args).assert().success();
+    wait_for_captured_turns(&fixture.target.capture, 1);
+    let renamed = fixture
+        .target_workspaces()
+        .into_iter()
+        .find(|workspace| workspace.branch != "lc/berlin")
+        .expect("the daemon did not rename anything, so this test proves nothing");
+    assert_ne!(renamed.name, "berlin");
+
+    // The retry must find it by repository and commit, not by name or branch.
+    let rerun = fixture.operator(&args).assert().success();
+    let stdout = String::from_utf8(rerun.get_output().stdout.clone()).unwrap();
     assert!(
-        delivered[0].contains("This conversation moved from daemon src to dst"),
-        "the handover was not delivered; got:\n{}",
-        delivered[0]
+        stdout.contains("keeping it rather than importing a second copy"),
+        "the retry should adopt the renamed workspace; got:\n{stdout}"
     );
     assert_eq!(
-        fixture.source_workspace().status,
-        "archived",
-        "the source should be retired once the handover landed"
+        fixture.target_workspaces().len(),
+        1,
+        "the retry imported a second copy of a renamed target"
+    );
+    let turns = fs::read_to_string(&fixture.target.capture).unwrap_or_default();
+    assert_eq!(
+        turns.lines().count(),
+        1,
+        "the agent was handed a second turn"
     );
 }
 
@@ -800,14 +846,16 @@ enum TargetSetup {
     WithClone,
     /// The target cannot import, so the create step fails.
     WithoutClone,
-    /// The target also holds an unrelated repository that happens to have a
-    /// workspace of the same name on the same branch.
+    /// The target also holds an unrelated repository with a workspace on the
+    /// same branch name. Branches are unique per repository, so this forces no
+    /// rename — it is purely a chance to adopt the wrong workspace.
     WithDecoyRepository,
     /// The target has the clone, but its agent fails its handshake, so no
     /// session there can ever take the handover.
     WithFailingProvider,
-    /// The target has *only* the unrelated repository, so the transfer has to
-    /// clone the real one — and the workspace name it wants is already taken.
+    /// The target has *only* an unrelated repository, so the transfer has to
+    /// clone the real one — and that repository already uses the workspace
+    /// name this transfer wants.
     DecoyOnlyNeedsClone,
 }
 
@@ -888,6 +936,15 @@ impl Fixture {
             let decoy_repo = clone_repo(&decoy_bare, root.join("decoy-repo"));
             register_repository(&target, "decoy", &decoy_repo);
             install_fake_provider(&target, &decoy_repo);
+            // `DecoyOnlyNeedsClone` wants the *name* taken (which is unique
+            // machine-wide and so forces a rename); `WithDecoyRepository` wants
+            // only the branch taken, in another repository, where it forces
+            // nothing and merely invites a wrong adoption.
+            let decoy_workspace = if matches!(target_setup, TargetSetup::DecoyOnlyNeedsClone) {
+                "berlin"
+            } else {
+                "decoy-berlin"
+            };
             target
                 .app()
                 .args([
@@ -895,7 +952,7 @@ impl Fixture {
                     "create",
                     "decoy",
                     "--name",
-                    "berlin",
+                    decoy_workspace,
                     "--branch",
                     "lc/berlin",
                     "--base",

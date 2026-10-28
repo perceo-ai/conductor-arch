@@ -846,31 +846,48 @@ export const actions = {
         ? head.log.trim().split(/\s+/)[0] || undefined
         : undefined;
     };
-    const onBranch = candidates.find((w) => w.branch === source.branch);
-    const byName = candidates.find((w) => w.name === source.name);
     let existing: (typeof candidates)[number] | undefined;
-    if (!sourceCommit) {
+    // Identity first, and by *provenance* rather than by the name this transfer
+    // asked for: in this repository, at the commit it pushed. The daemon keeps
+    // workspace names unique machine-wide and versions the name and branch
+    // together around a collision, so an earlier attempt can be sitting on
+    // neither the name nor the branch we would look for — and deriving "is this
+    // already transferred" from the requested name/branch is what made a retry
+    // import a second copy of it. The pushed commit is the durable record: the
+    // target is at it until it does work of its own, and that case refuses.
+    if (sourceCommit) {
+      for (const candidate of candidates) {
+        if (commitsMatch(await headOf(candidate.name), sourceCommit)) {
+          existing = candidate;
+          break;
+        }
+      }
+    }
+    const onBranch = candidates.find((w) => w.branch === source.branch);
+    if (!existing && !sourceCommit) {
       // Nothing to compare against. A branch match is taken at face value;
       // re-seeding is still blocked downstream by the delivered-handover check.
       existing = onBranch;
-    } else if (onBranch) {
-      // Within one repository a branch name *is* the branch, so a workspace
-      // sitting on it is either this transfer's own attempt or work that has
-      // moved on. Treating the second as "not ours, import it" is how a
-      // completed transfer got a second workspace on the same branch and its
-      // chat seeded twice, starting the target's work over.
-      if (commitsMatch(await headOf(onBranch.name), sourceCommit)) {
-        existing = onBranch;
-      } else {
+    } else if (!existing && onBranch) {
+      // Within one repository a branch name *is* the branch, so a workspace on
+      // it that is not at our commit is work that has moved on. Treating that
+      // as "not ours, import it" is how a completed transfer got a second
+      // workspace on the same branch and its chat seeded twice.
+      throw new Error(
+        `${onBranch.name} on ${input.toLabel} is on branch ${onBranch.branch} but not at the ${sourceCommit} this transfer pushed — that daemon's copy of this branch has its own commits. Importing a second workspace onto one branch is what this command exists to prevent, and re-seeding its chat would start that work twice, so nothing has been changed. If the transfer already completed there is nothing to re-run; otherwise move or rename it on ${input.toLabel} and try again.`,
+      );
+    } else if (!existing) {
+      // Nothing of ours. Refuse a name already in use anywhere on that daemon
+      // before importing: it would be versioned, and a versioned target is one
+      // neither this lookup nor a later retry can recognise.
+      const taken =
+        onTarget.workspaces.find((w) => w.name === source.name) ??
+        inRepository.find((w) => w.branch === source.branch);
+      if (taken) {
         throw new Error(
-          `${onBranch.name} on ${input.toLabel} is on branch ${onBranch.branch} but not at the ${sourceCommit} this transfer pushed — that daemon's copy of this branch has its own commits. Importing a second workspace onto one branch is what this command exists to prevent, and re-seeding its chat would start that work twice, so nothing has been changed. If the transfer already completed there is nothing to re-run; otherwise move or rename it on ${input.toLabel} and try again.`,
+          `${input.toLabel} already uses the workspace name ${source.name} for ${taken.name} (${taken.repository_name}, branch ${taken.branch}), and it keeps those names unique — so importing would quietly rename this transfer's workspace and its branch to -v2 forms, leaving something a retry could no longer recognise. Nothing has been changed. Clear that name on ${input.toLabel} first.`,
         );
       }
-    } else if (byName && commitsMatch(await headOf(byName.name), sourceCommit)) {
-      // Our own attempt under a branch the target had to rename. A same-named
-      // workspace on some other branch is just a name collision, which the
-      // import renames around rather than duplicating.
-      existing = byName;
     }
 
     let targetWorkspace: string;

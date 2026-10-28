@@ -6648,6 +6648,15 @@ fn create_on_target(
              delete it if it is finished with",
             target.label
         ),
+        TargetWorkspaceMatch::NameTaken { name, used_by } => anyhow::bail!(
+            "{} already uses the workspace name `{name}` for {used_by}, and it keeps those \
+             names unique — so importing would quietly rename this transfer's workspace *and* \
+             its branch to `-v2` forms, leaving something a retry could no longer recognise. \
+             Nothing has been changed. Give it a free name with `--name <name>` (and \
+             `--branch <branch>` if that collides too), or clear the one on {} first",
+            target.label,
+            target.label
+        ),
         TargetWorkspaceMatch::Absent => {}
     }
 
@@ -6757,6 +6766,13 @@ enum TargetWorkspaceMatch {
         branch: String,
         head: Option<String>,
     },
+    /// The workspace name this transfer wants is already in use on that daemon.
+    /// Names are unique machine-wide, and the daemon quietly versions both the
+    /// name *and* the branch around a collision — leaving a workspace this
+    /// command can no longer recognise by either, so a retry cannot find it.
+    /// Refusing keeps the name the operator asked for meaningful; `--name` and
+    /// `--branch` are how they choose another.
+    NameTaken { name: String, used_by: String },
     /// Holding our branch, but archived. It cannot be adopted — resuming inside
     /// a workspace the target has retired is invisible on its board — and it
     /// must not be imported around either: the daemon suffixes a branch it
@@ -6826,12 +6842,6 @@ fn existing_target_workspace(
             });
         }
     }
-    // A name collision is only a collision: the import renames around it and
-    // one worktree per branch still holds, so archived rows are irrelevant.
-    let by_name = in_repository
-        .iter()
-        .find(|candidate| candidate.status != "archived" && candidate.name == name)
-        .copied();
 
     // Without a pushed sha there is nothing to compare, so a branch match is
     // taken at face value. Re-seeding is still blocked downstream: the handover
@@ -6842,6 +6852,23 @@ fn existing_target_workspace(
             None => TargetWorkspaceMatch::Absent,
         });
     };
+
+    // Our own earlier attempt, found by *what it is* rather than what it is
+    // called: in this repository, at the commit this transfer pushed. Checked
+    // before the branch, because a first attempt the daemon versioned around a
+    // name collision sits on neither the branch nor the name we would look
+    // for, and this is the only thing that still recognises it.
+    for candidate in &in_repository {
+        if candidate.status == "archived" {
+            continue;
+        }
+        if workspace_head_commit(target, &candidate.name)?
+            .as_deref()
+            .is_some_and(|head| commits_match(head, expected))
+        {
+            return Ok(TargetWorkspaceMatch::Adopt(Box::new((*candidate).clone())));
+        }
+    }
 
     if let Some(matched) = on_branch {
         let head = workspace_head_commit(target, &matched.name)?;
@@ -6861,18 +6888,29 @@ fn existing_target_workspace(
         );
     }
 
-    // No workspace on our branch, but one already holding the name we asked
-    // for. At our commit it is this transfer's own attempt under a branch the
-    // target had to rename; otherwise it is an unrelated workspace and the
-    // import renames around it, which is not a duplicate of anything.
-    if let Some(matched) = by_name {
-        let head = workspace_head_commit(target, &matched.name)?;
-        if head
-            .as_deref()
-            .is_some_and(|head| commits_match(head, expected))
-        {
-            return Ok(TargetWorkspaceMatch::Adopt(Box::new(matched.clone())));
-        }
+    // Nothing of ours is there. Before importing, refuse a name already in use
+    // anywhere on that daemon: names are unique machine-wide, and the daemon
+    // versions the name and the branch together, leaving a workspace neither
+    // this lookup nor a later retry could recognise by either.
+    if let Some(taken) = workspaces
+        .iter()
+        .find(|candidate| candidate.name == name)
+        .or_else(|| {
+            // A branch is unique per repository, so only this repository's own
+            // copy of it can force a rename.
+            in_repository
+                .iter()
+                .find(|candidate| candidate.branch == branch)
+                .copied()
+        })
+    {
+        return Ok(TargetWorkspaceMatch::NameTaken {
+            name: name.to_owned(),
+            used_by: format!(
+                "`{}` ({}, branch {})",
+                taken.name, taken.repository_name, taken.branch
+            ),
+        });
     }
     Ok(TargetWorkspaceMatch::Absent)
 }
