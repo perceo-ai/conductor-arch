@@ -5984,15 +5984,23 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             .create_chat_thread("berlin", "claude", "Second", None)
             .unwrap();
 
+        // Which port comes back depends on the host: 43000 sits in Linux's
+        // ephemeral range, so a loopback connection that recently used it
+        // (even one in TIME_WAIT) moves the reservation to the next free one.
         let reservation = reserve_provider_native_thread_port(&store, "berlin", first.id).unwrap();
-        assert_eq!(reservation.local_addr().unwrap().port(), 43000);
+        let first_port = reservation.local_addr().unwrap().port();
+        assert!(first_port >= PROVIDER_NATIVE_PORT_START);
+        assert!(
+            TcpListener::bind(("127.0.0.1", first_port)).is_err(),
+            "the reservation must keep port {first_port} bound until the process is recorded"
+        );
 
         let second_reservation =
             reserve_provider_native_thread_port(&store, "berlin", second.id).unwrap();
 
         let second_port = second_reservation.local_addr().unwrap().port();
-        assert_ne!(second_port, reservation.local_addr().unwrap().port());
-        assert!(second_port >= 43001);
+        assert_ne!(second_port, first_port);
+        assert!(second_port >= PROVIDER_NATIVE_PORT_START);
     }
 
     #[test]
