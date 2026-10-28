@@ -745,6 +745,25 @@ export class ArchcarBridge {
     return this.send(await this.openLocal(), payload);
   }
 
+  /**
+   * Send to one *named* saved client, whichever one is selected.
+   *
+   * `requestLocal` covers "read there, write here", which is as far as copying
+   * a workspace ever needed to go. Transferring one names both ends, and
+   * neither has to be this machine, so the destination is a client id rather
+   * than a choice between two fixed endpoints. `null` means this machine.
+   */
+  async requestClient<Req, Res>(clientId: string | null, payload: Req): Promise<Res> {
+    if (clientId === null) return this.requestLocal(payload);
+    const client = loadClients().clients.find((candidate) => candidate.id === clientId);
+    if (!client) throw new Error(`no saved client ${clientId}`);
+    const ssh = parseSshAddress(client.address);
+    const socket = ssh
+      ? await connectSsh(ssh)
+      : await connectRemote({ address: client.address, token: client.token });
+    return this.send(socket, payload);
+  }
+
   async request<Req, Res>(payload: Req): Promise<Res> {
     return this.send(await this.open(), payload);
   }

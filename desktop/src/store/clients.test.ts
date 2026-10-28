@@ -111,3 +111,42 @@ describe("clientsStore navigation", () => {
     expect(nav.selectedWorkspace()).toBe("local-alpha");
   });
 });
+
+describe("clientsStore.selectedDaemon", () => {
+  /**
+   * Everything that needs to *address* the selected daemon reads this, and
+   * everything that describes it on screen derives from it — so a transfer
+   * cannot operate on a different daemon than the sidebar is showing. The case
+   * that used to disagree is `ARCHDUCTOR_ARCHCAR_REMOTE`: it has no client id,
+   * so a nullable id read it as "this machine" while the UI called it remote.
+   */
+  it("reports the environment pin as its own case, not as this machine", async () => {
+    api.clientsList = vi.fn(async () => ({
+      ok: true,
+      activeId: null,
+      clients,
+      envAddress: "office:7420",
+    }));
+    const { clientsStore } = await import("./index");
+    await clientsStore.refresh();
+
+    expect(clientsStore.selectedDaemon()).toEqual({ kind: "env" });
+    // And the three answers agree, which is the whole point.
+    expect(clientsStore.isRemote()).toBe(true);
+    expect(clientsStore.activeLabel()).toBe("office:7420");
+    expect(clientsStore.pinned()).toBe(true);
+  });
+
+  it("reports a saved client by id, and this machine as local", async () => {
+    const { clientsStore } = await import("./index");
+    await clientsStore.refresh();
+    expect(clientsStore.selectedDaemon()).toEqual({ kind: "local" });
+    expect(clientsStore.isRemote()).toBe(false);
+    expect(clientsStore.activeLabel()).toBe("This machine");
+
+    await clientsStore.activate("devbox");
+    expect(clientsStore.selectedDaemon()).toEqual({ kind: "client", clientId: "devbox" });
+    expect(clientsStore.isRemote()).toBe(true);
+    expect(clientsStore.activeLabel()).toBe("Devbox");
+  });
+});
