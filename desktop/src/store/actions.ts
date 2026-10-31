@@ -57,6 +57,33 @@ export class LiveSourceSessionError extends Error {}
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+type ArchcarSender = (req: ArchcarRequest) => Promise<ArchcarResponse>;
+
+async function commitSourceChangesIfNeeded(
+  sender: ArchcarSender,
+  workspace: string,
+  message: string,
+): Promise<void> {
+  const changes = ensureOk(
+    await sender({ type: "get_workspace_changes", workspace, scope: "uncommitted" }),
+  );
+  const visibleChanges = changes.type === "workspace_changes" ? changes.files.length : 0;
+  const committed = await sender({
+    type: "commit_workspace_changes",
+    workspace,
+    message,
+    stage_all: true,
+  });
+  if (
+    visibleChanges === 0 &&
+    committed.type === "error" &&
+    committed.message === "stage at least one file before committing"
+  ) {
+    return;
+  }
+  ensureOk(committed);
+}
+
 /** Session states that mean the agent is no longer running. */
 const TERMINAL_SESSION_STATES = new Set(["interrupted", "failed", "exited", "archived"]);
 
@@ -558,8 +585,8 @@ export const actions = {
    *
    * The branch is the work, and it crosses machines through the git remote:
    * the source must be committed, and is pushed here before the import so the
-   * local workspace starts at its tip. Uncommitted changes are refused rather
-   * than committed — what goes into someone else's branch is their call.
+   * local workspace starts at its tip. Any uncommitted source changes are
+   * committed first, so the copy carries the full working tree.
    *
    * Throws `MissingLocalRepositoryError` when this machine has no clone and no
    * `cloneInto` was given; picking a directory is the user's call, not ours.
@@ -567,6 +594,7 @@ export const actions = {
    */
   async importWorkspaceFromRemote(input: {
     workspace: string;
+    fromDaemon: SelectedDaemon;
     threadId?: number | "latest";
     cloneInto?: string;
   }): Promise<{ workspace: string; threadId?: number }> {
@@ -575,12 +603,14 @@ export const actions = {
       thread_id: input.threadId ?? "none",
       clone_into: input.cloneInto ?? "none",
     });
-    const remoteWorkspaces = ensureOk(await send({ type: "list_workspaces" }));
+    const sendSource = (req: Parameters<typeof sendToDaemon>[1]) =>
+      sendToDaemon(input.fromDaemon, req);
+    const remoteWorkspaces = ensureOk(await sendSource({ type: "list_workspaces" }));
     if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
     const source = remoteWorkspaces.workspaces.find((w) => w.name === input.workspace);
     if (!source) throw new Error(`${input.workspace} is not a workspace on the connected daemon`);
 
-    const remoteRepos = ensureOk(await send({ type: "list_repositories" }));
+    const remoteRepos = ensureOk(await sendSource({ type: "list_repositories" }));
     if (remoteRepos.type !== "repositories") throw new Error("could not list remote repositories");
     const repositoryUrl = remoteRepos.repositories.find(
       (repo) => repo.name === source.repository_name,
@@ -594,7 +624,7 @@ export const actions = {
     let threadId = input.threadId;
     let provider: string | undefined;
     if (threadId != null) {
-      const listed = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
+      const listed = ensureOk(await sendSource({ type: "list_chat_threads", workspace: source.name }));
       const threads = listed.type === "chat_threads" ? listed.threads : [];
       const thread =
         threadId === "latest"
@@ -610,27 +640,22 @@ export const actions = {
     let transcript: { role: string; content: string; created_at: string }[] = [];
     let chatTitle: string | undefined;
     if (threadId != null) {
-      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: threadId }));
+      const chat = ensureOk(await sendSource({ type: "get_chat_transcript", thread_id: threadId }));
       if (chat.type === "chat_transcript") {
         transcript = chat.messages;
         chatTitle = chat.title;
       }
     }
 
-    const changes = ensureOk(
-      await send({ type: "get_workspace_changes", workspace: source.name, scope: "uncommitted" }),
+    await commitSourceChangesIfNeeded(
+      sendSource,
+      source.name,
+      `Transfer ${source.name} before copying workspace`,
     );
-    if (changes.type === "workspace_changes" && changes.files.length > 0) {
-      const shown = changes.files.slice(0, 5).map((file) => file.path);
-      if (changes.files.length > shown.length) shown.push("…");
-      throw new Error(
-        `${source.name} has ${changes.files.length} uncommitted file(s) on the remote: ${shown.join(", ")}. Commit them there first, then copy again.`,
-      );
-    }
-    ensureOk(await send({ type: "push_branch", workspace: source.name }));
+    ensureOk(await sendSource({ type: "push_branch", workspace: source.name }));
     // The commit just pushed: this machine refuses a branch anywhere else — a
     // stale mirror, or a same-path repository an ssh alias matched.
-    const head = await send({ type: "get_recent_commits", workspace: source.name, limit: 1 });
+    const head = await sendSource({ type: "get_recent_commits", workspace: source.name, limit: 1 });
     const sourceCommit = head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
 
     if (input.cloneInto) {
@@ -787,18 +812,13 @@ export const actions = {
       }
     }
 
-    // Step 2: publish. Uncommitted changes are refused rather than committed —
-    // what goes into someone else's branch is their call.
-    const changes = ensureOk(
-      await sendSource({ type: "get_workspace_changes", workspace: source.name, scope: "uncommitted" }),
+    // Step 2: publish. Commit any source changes first so the branch push
+    // carries the full working tree to the target.
+    await commitSourceChangesIfNeeded(
+      sendSource,
+      source.name,
+      `Transfer ${source.name} before moving workspace`,
     );
-    if (changes.type === "workspace_changes" && changes.files.length > 0) {
-      const shown = changes.files.slice(0, 5).map((file) => file.path);
-      if (changes.files.length > shown.length) shown.push("…");
-      throw new Error(
-        `${source.name} has ${changes.files.length} uncommitted file(s) on the source: ${shown.join(", ")}. Commit them there first, then transfer again.`,
-      );
-    }
     ensureOk(await sendSource({ type: "push_branch", workspace: source.name }));
     const head = await sendSource({ type: "get_recent_commits", workspace: source.name, limit: 1 });
     const sourceCommit =

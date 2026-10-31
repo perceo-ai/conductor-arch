@@ -192,9 +192,8 @@ The branch travels through the git remote, not between the daemons. Import
 pushes the source workspace's branch from the server first (`git push -u`,
 which also sets the server copy's upstream to it), then starts the local
 workspace at that tip with the same diff base, so review shows the same work on
-both machines. Uncommitted changes on the server stop the import with the list
-of files — commit them there first; what goes into a commit on that branch is
-not the import's call.
+both machines. If the server worktree still has uncommitted files, Archductor
+stages them all and creates a transfer checkpoint commit before pushing.
 
 Repositories are matched by remote URL across the forms two machines use
 (`git@github.com:`, `https://github.com/`, `ssh://…:22/`). A clone made through
@@ -271,9 +270,10 @@ In order, the transfer:
    writing the worktree would otherwise leave the target starting from a commit
    the source had already moved past.
 
-2. **Publishes** the branch, exactly as `import` does — including refusing a
-   dirty worktree with the list of files. What goes into a commit on that
-   branch is still not this command's call.
+2. **Publishes** the branch, exactly as `import` does. If the source worktree
+   still has uncommitted files, Archductor stages them all and creates a
+   transfer checkpoint commit before pushing, so the target starts from the full
+   source state instead of asking you to commit and retry.
 
 3. **Creates** the workspace on `--to`, at the commit that was pushed, with the
    source's diff base and the transcript. This is the same

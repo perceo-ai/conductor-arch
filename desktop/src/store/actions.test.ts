@@ -165,6 +165,7 @@ describe("actions.archiveWorkspace", () => {
 });
 
 describe("actions.importWorkspaceFromRemote", () => {
+  const selectedRemote = { kind: "env" } as const;
   const remoteWorkspace = {
     name: "parser",
     repository_name: "app",
@@ -192,6 +193,55 @@ describe("actions.importWorkspaceFromRemote", () => {
     });
   }
 
+  it("pins all source requests to the daemon selected when copying starts", async () => {
+    const sourceClient = { kind: "client", clientId: "source-client" } as const;
+    api.request.mockRejectedValue(new Error("selection changed to another daemon"));
+    api.requestClient.mockImplementation(async (clientId: string, req: { type: string }) => {
+      expect(clientId).toBe("source-client");
+      if (req.type === "list_workspaces")
+        return response({ type: "workspaces", workspaces: [remoteWorkspace] });
+      if (req.type === "list_repositories")
+        return response({
+          type: "repositories",
+          repositories: [{ name: "app", remote_url: "git@github.com:me/app.git" }],
+        });
+      if (req.type === "get_workspace_changes")
+        return response({
+          type: "workspace_changes",
+          workspace: "parser",
+          scope: "uncommitted",
+          files: [],
+        });
+      if (req.type === "commit_workspace_changes")
+        return response({ type: "error", message: "stage at least one file before committing" });
+      if (req.type === "get_recent_commits")
+        return response({ type: "recent_commits", workspace: "parser", log: "4ed0c0e checkpoint" });
+      return response({ type: "ack" });
+    });
+    api.requestLocal.mockResolvedValue(
+      response({
+        type: "workspace_imported",
+        workspace: "parser",
+        repository: "app-local",
+        branch: "lc/parser",
+        copied_messages: 0,
+      }),
+    );
+    const { actions } = await import("./actions");
+
+    await actions.importWorkspaceFromRemote({ workspace: "parser", fromDaemon: sourceClient });
+
+    expect(api.request).not.toHaveBeenCalled();
+    expect(api.requestClient.mock.calls.map((call) => call[1].type)).toEqual([
+      "list_workspaces",
+      "list_repositories",
+      "get_workspace_changes",
+      "commit_workspace_changes",
+      "push_branch",
+      "get_recent_commits",
+    ]);
+  });
+
   it("reads from the remote but writes to the local daemon", async () => {
     // The whole point of the action: using `send` for the write would recreate
     // the workspace on the machine it came from.
@@ -208,7 +258,11 @@ describe("actions.importWorkspaceFromRemote", () => {
     );
     const { actions } = await import("./actions");
 
-    const result = await actions.importWorkspaceFromRemote({ workspace: "parser", threadId: 1 });
+    const result = await actions.importWorkspaceFromRemote({
+      workspace: "parser",
+      fromDaemon: selectedRemote,
+      threadId: 1,
+    });
 
     expect(result).toEqual({ workspace: "parser", threadId: 4 });
     // Reads went to the selected daemon...
@@ -240,7 +294,7 @@ describe("actions.importWorkspaceFromRemote", () => {
     );
     const { actions } = await import("./actions");
 
-    await actions.importWorkspaceFromRemote({ workspace: "parser" });
+    await actions.importWorkspaceFromRemote({ workspace: "parser", fromDaemon: selectedRemote });
 
     const readTypes = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
     expect(readTypes).not.toContain("get_chat_transcript");
@@ -251,7 +305,7 @@ describe("actions.importWorkspaceFromRemote", () => {
     routeRemote();
     const { actions } = await import("./actions");
     await expect(
-      actions.importWorkspaceFromRemote({ workspace: "nope" }),
+      actions.importWorkspaceFromRemote({ workspace: "nope", fromDaemon: selectedRemote }),
     ).rejects.toThrow("not a workspace on the connected daemon");
     expect(api.requestLocal).not.toHaveBeenCalled();
   });
@@ -270,6 +324,8 @@ describe("actions.importWorkspaceFromRemote", () => {
         });
       if (req.type === "get_workspace_changes")
         return response({ type: "workspace_changes", workspace: "parser", scope: "uncommitted", files: [] });
+      if (req.type === "commit_workspace_changes")
+        return response({ type: "error", message: "stage at least one file before committing" });
       if (req.type === "get_recent_commits")
         return response({ type: "recent_commits", workspace: "parser", log: "4ed0c0e (HEAD -> lc/parser) port it" });
       return response({ type: "workspace_updated", name: "parser" });
@@ -280,8 +336,12 @@ describe("actions.importWorkspaceFromRemote", () => {
     });
     const { actions } = await import("./actions");
 
-    await actions.importWorkspaceFromRemote({ workspace: "parser" });
+    await actions.importWorkspaceFromRemote({ workspace: "parser", fromDaemon: selectedRemote });
 
+    expect(order).toContain("remote:commit_workspace_changes");
+    expect(order.indexOf("remote:commit_workspace_changes")).toBeLessThan(
+      order.indexOf("remote:push_branch"),
+    );
     expect(order.indexOf("remote:push_branch")).toBeGreaterThan(-1);
     expect(order.indexOf("remote:push_branch")).toBeLessThan(
       order.indexOf("local:import_workspace_from_remote"),
@@ -297,8 +357,10 @@ describe("actions.importWorkspaceFromRemote", () => {
     });
   });
 
-  it("refuses a source with uncommitted changes and pushes nothing", async () => {
+  it("commits source changes hidden from the display change list before copying", async () => {
+    const order: string[] = [];
     api.request.mockImplementation(async (req: { type: string }) => {
+      order.push(`remote:${req.type}`);
       if (req.type === "list_workspaces")
         return response({ type: "workspaces", workspaces: [remoteWorkspace] });
       if (req.type === "list_repositories")
@@ -311,18 +373,41 @@ describe("actions.importWorkspaceFromRemote", () => {
           type: "workspace_changes",
           workspace: "parser",
           scope: "uncommitted",
-          files: [{ path: "wip.txt", staged: false, unstaged: false, untracked: true }],
+          files: [],
+        });
+      if (req.type === "commit_workspace_changes")
+        return response({ type: "workspace_committed", workspace: "parser", output: "checkpoint" });
+      if (req.type === "get_recent_commits")
+        return response({
+          type: "recent_commits",
+          workspace: "parser",
+          log: "4ed0c0e (HEAD -> lc/parser) transfer checkpoint",
         });
       return response({ type: "ack" });
     });
+    api.requestLocal.mockImplementation(async (req: { type: string }) => {
+      order.push(`local:${req.type}`);
+      return response({
+        type: "workspace_imported",
+        workspace: "parser",
+        repository: "app",
+        branch: "lc/parser",
+        copied_messages: 0,
+      });
+    });
     const { actions } = await import("./actions");
 
-    await expect(actions.importWorkspaceFromRemote({ workspace: "parser" })).rejects.toThrow(
-      "1 uncommitted file(s) on the remote: wip.txt",
+    await actions.importWorkspaceFromRemote({ workspace: "parser", fromDaemon: selectedRemote });
+
+    expect(api.request.mock.calls.find((c) => c[0].type === "commit_workspace_changes")?.[0]).toMatchObject({
+      workspace: "parser",
+      message: "Transfer parser before copying workspace",
+      stage_all: true,
+    });
+    expect(order.indexOf("remote:commit_workspace_changes")).toBeLessThan(order.indexOf("remote:push_branch"));
+    expect(order.indexOf("remote:push_branch")).toBeLessThan(
+      order.indexOf("local:import_workspace_from_remote"),
     );
-    const types = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
-    expect(types).not.toContain("push_branch");
-    expect(api.requestLocal).not.toHaveBeenCalled();
   });
 
   it("carries the most recently active open chat when asked for the latest", async () => {
@@ -346,7 +431,11 @@ describe("actions.importWorkspaceFromRemote", () => {
     );
     const { actions } = await import("./actions");
 
-    await actions.importWorkspaceFromRemote({ workspace: "parser", threadId: "latest" });
+    await actions.importWorkspaceFromRemote({
+      workspace: "parser",
+      fromDaemon: selectedRemote,
+      threadId: "latest",
+    });
 
     expect(api.request.mock.calls.find((c) => c[0].type === "get_chat_transcript")?.[0]).toMatchObject({
       thread_id: 3,
@@ -365,7 +454,9 @@ describe("actions.importWorkspaceFromRemote", () => {
     );
     const { actions, MissingLocalRepositoryError } = await import("./actions");
 
-    const err = await actions.importWorkspaceFromRemote({ workspace: "parser" }).catch((e) => e);
+    const err = await actions
+      .importWorkspaceFromRemote({ workspace: "parser", fromDaemon: selectedRemote })
+      .catch((e) => e);
     expect(err).toBeInstanceOf(MissingLocalRepositoryError);
     expect(err).toMatchObject({ repositoryUrl: "git@github.com:me/app.git", repositoryName: "app" });
 
@@ -375,7 +466,11 @@ describe("actions.importWorkspaceFromRemote", () => {
         ? response({ type: "repository_added", name: "app" })
         : response({ type: "workspace_imported", workspace: "parser", repository: "app", branch: "lc/parser", copied_messages: 0 }),
     );
-    await actions.importWorkspaceFromRemote({ workspace: "parser", cloneInto: "/Users/me/src/app" });
+    await actions.importWorkspaceFromRemote({
+      workspace: "parser",
+      fromDaemon: selectedRemote,
+      cloneInto: "/Users/me/src/app",
+    });
     const localTypes = api.requestLocal.mock.calls.map((c) => (c[0] as { type: string }).type);
     expect(localTypes).toEqual(["clone_repository", "import_workspace_from_remote"]);
     expect(api.requestLocal.mock.calls[0][0]).toMatchObject({
@@ -394,7 +489,7 @@ describe("actions.importWorkspaceFromRemote", () => {
     });
     const { actions } = await import("./actions");
     await expect(
-      actions.importWorkspaceFromRemote({ workspace: "parser" }),
+      actions.importWorkspaceFromRemote({ workspace: "parser", fromDaemon: selectedRemote }),
     ).rejects.toThrow("no remote URL");
     expect(api.requestLocal).not.toHaveBeenCalled();
   });
@@ -580,7 +675,7 @@ describe("actions.transferWorkspace", () => {
   });
 
   /** The source: one workspace, one chat, by default one live agent on it. */
-  function routeSource(opts: { liveSession?: boolean; transcript?: unknown[] } = {}) {
+  function routeSource(opts: { liveSession?: boolean; transcript?: unknown[]; changes?: unknown[] } = {}) {
     const live = opts.liveSession ?? true;
     let killed = false;
     const transcript = opts.transcript ?? [{ role: "user", content: "port it", created_at: "1" }];
@@ -627,7 +722,7 @@ describe("actions.transferWorkspace", () => {
         case "get_chat_transcript":
           return { type: "chat_transcript", thread_id: 7, title: "Parser port", messages: transcript };
         case "get_workspace_changes":
-          return { type: "workspace_changes", workspace: "parser", files: [] };
+          return { type: "workspace_changes", workspace: "parser", files: opts.changes ?? [] };
         case "get_recent_commits":
           return { type: "recent_commits", workspace: "parser", log: `${PUSHED} port it` };
         case "get_remote_access":
@@ -782,6 +877,28 @@ describe("actions.transferWorkspace", () => {
     expect(order.indexOf("src:kill_session")).toBeLessThan(order.indexOf("src:push_branch"));
     // And the kill was waited on, not fired and forgotten.
     expect(order.indexOf("src:get_session_status")).toBeLessThan(order.indexOf("src:push_branch"));
+  });
+
+  it("commits source changes before transferring", async () => {
+    routeSource({
+      liveSession: false,
+      changes: [{ path: "wip.txt", staged: false, unstaged: false, untracked: true }],
+    });
+    routeTarget();
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    const commit = api.requestClient.mock.calls.find(
+      (c) => c[0] === "src" && (c[1] as { type: string }).type === "commit_workspace_changes",
+    )?.[1];
+    expect(commit).toMatchObject({
+      workspace: "parser",
+      message: "Transfer parser before moving workspace",
+      stage_all: true,
+    });
+    expect(order.indexOf("src:commit_workspace_changes")).toBeLessThan(order.indexOf("src:push_branch"));
+    expect(order).toContain("src:archive_workspace");
   });
 
   it("writes to the named target daemon, never to this machine", async () => {
