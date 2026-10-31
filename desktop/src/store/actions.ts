@@ -594,6 +594,7 @@ export const actions = {
    */
   async importWorkspaceFromRemote(input: {
     workspace: string;
+    fromDaemon: SelectedDaemon;
     threadId?: number | "latest";
     cloneInto?: string;
   }): Promise<{ workspace: string; threadId?: number }> {
@@ -602,12 +603,14 @@ export const actions = {
       thread_id: input.threadId ?? "none",
       clone_into: input.cloneInto ?? "none",
     });
-    const remoteWorkspaces = ensureOk(await send({ type: "list_workspaces" }));
+    const sendSource = (req: Parameters<typeof sendToDaemon>[1]) =>
+      sendToDaemon(input.fromDaemon, req);
+    const remoteWorkspaces = ensureOk(await sendSource({ type: "list_workspaces" }));
     if (remoteWorkspaces.type !== "workspaces") throw new Error("could not list remote workspaces");
     const source = remoteWorkspaces.workspaces.find((w) => w.name === input.workspace);
     if (!source) throw new Error(`${input.workspace} is not a workspace on the connected daemon`);
 
-    const remoteRepos = ensureOk(await send({ type: "list_repositories" }));
+    const remoteRepos = ensureOk(await sendSource({ type: "list_repositories" }));
     if (remoteRepos.type !== "repositories") throw new Error("could not list remote repositories");
     const repositoryUrl = remoteRepos.repositories.find(
       (repo) => repo.name === source.repository_name,
@@ -621,7 +624,7 @@ export const actions = {
     let threadId = input.threadId;
     let provider: string | undefined;
     if (threadId != null) {
-      const listed = ensureOk(await send({ type: "list_chat_threads", workspace: source.name }));
+      const listed = ensureOk(await sendSource({ type: "list_chat_threads", workspace: source.name }));
       const threads = listed.type === "chat_threads" ? listed.threads : [];
       const thread =
         threadId === "latest"
@@ -637,7 +640,7 @@ export const actions = {
     let transcript: { role: string; content: string; created_at: string }[] = [];
     let chatTitle: string | undefined;
     if (threadId != null) {
-      const chat = ensureOk(await send({ type: "get_chat_transcript", thread_id: threadId }));
+      const chat = ensureOk(await sendSource({ type: "get_chat_transcript", thread_id: threadId }));
       if (chat.type === "chat_transcript") {
         transcript = chat.messages;
         chatTitle = chat.title;
@@ -645,14 +648,14 @@ export const actions = {
     }
 
     await commitSourceChangesIfNeeded(
-      send,
+      sendSource,
       source.name,
       `Transfer ${source.name} before copying workspace`,
     );
-    ensureOk(await send({ type: "push_branch", workspace: source.name }));
+    ensureOk(await sendSource({ type: "push_branch", workspace: source.name }));
     // The commit just pushed: this machine refuses a branch anywhere else — a
     // stale mirror, or a same-path repository an ssh alias matched.
-    const head = await send({ type: "get_recent_commits", workspace: source.name, limit: 1 });
+    const head = await sendSource({ type: "get_recent_commits", workspace: source.name, limit: 1 });
     const sourceCommit = head.type === "recent_commits" ? head.log.trim().split(/\s+/)[0] || undefined : undefined;
 
     if (input.cloneInto) {

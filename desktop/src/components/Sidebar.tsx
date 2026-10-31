@@ -50,9 +50,14 @@ function runAction(label: string, p: Promise<unknown>): void {
  * one, then retries — the same flow as `remote import --clone-into`.
  */
 async function copyWorkspaceToThisMachine(name: string): Promise<void> {
+  const fromDaemon = clientsStore.selectedDaemon();
   let imported: { workspace: string };
   try {
-    imported = await actions.importWorkspaceFromRemote({ workspace: name, threadId: "latest" });
+    imported = await actions.importWorkspaceFromRemote({
+      workspace: name,
+      fromDaemon,
+      threadId: "latest",
+    });
   } catch (err) {
     if (!(err instanceof MissingLocalRepositoryError)) throw err;
     const parent = await selectFolder({
@@ -61,6 +66,7 @@ async function copyWorkspaceToThisMachine(name: string): Promise<void> {
     if (!parent) return;
     imported = await actions.importWorkspaceFromRemote({
       workspace: name,
+      fromDaemon,
       threadId: "latest",
       cloneInto: `${parent.replace(/\/+$/, "")}/${err.repositoryName}`,
     });

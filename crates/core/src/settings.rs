@@ -474,9 +474,21 @@ fn load_prompt_pack_prompts(
     }
     let contents = fs::read_to_string(&path)
         .with_context(|| format!("read prompt pack {}", path.display()))?;
-    let raw: RawPromptPackFile = toml::from_str(&contents)
+    let mut raw: RawPromptPackFile = toml::from_str(&contents)
         .with_context(|| format!("parse prompt pack {}", path.display()))?;
+    migrate_legacy_default_merge_prompt(&mut raw);
     Ok(Some(raw.prompts.into_settings()))
+}
+
+fn migrate_legacy_default_merge_prompt(raw: &mut RawPromptPackFile) -> bool {
+    if raw.name.as_deref() != Some("default")
+        || raw.version.as_deref() != Some("v1")
+        || raw.prompts.merge_pr.as_deref() != Some(LEGACY_DEFAULT_MERGE_PROMPT)
+    {
+        return false;
+    }
+    raw.prompts.merge_pr = Some(DEFAULT_MERGE_PROMPT.to_owned());
+    true
 }
 
 fn merge_prompt_settings(base: PromptSettings, overrides: PromptSettings) -> PromptSettings {
@@ -2953,12 +2965,9 @@ fn refresh_legacy_default_merge_prompt(path: &Path) -> Result<bool> {
     if !contents.contains(LEGACY_DEFAULT_MERGE_PROMPT) {
         return Ok(false);
     }
-    let raw: RawPromptPackFile = toml::from_str(&contents)
+    let mut raw: RawPromptPackFile = toml::from_str(&contents)
         .with_context(|| format!("parse prompt pack {}", path.display()))?;
-    if raw.name.as_deref() != Some("default")
-        || raw.version.as_deref() != Some("v1")
-        || raw.prompts.merge_pr.as_deref() != Some(LEGACY_DEFAULT_MERGE_PROMPT)
-    {
+    if !migrate_legacy_default_merge_prompt(&mut raw) {
         return Ok(false);
     }
 
@@ -4809,6 +4818,40 @@ merge_pr = "Verify merge readiness before merging. Check CI, review decision, un
             Some(LEGACY_DEFAULT_MERGE_PROMPT)
         );
         let merge_prompt = prompts.merge_pr.expect("effective merge prompt");
+        assert!(merge_prompt.contains("repeat the readiness check"));
+        assert!(merge_prompt.contains("merge succeeds"));
+    }
+
+    #[test]
+    fn load_repository_settings_migrates_the_stock_legacy_merge_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let default_pack = temp.path().join(".archductor/prompt-packs/default.toml");
+        fs::create_dir_all(default_pack.parent().unwrap()).unwrap();
+        fs::write(
+            temp.path().join(".archductor/settings.toml"),
+            r#"[prompt_pack]
+active = "default"
+version = "v1"
+path = ".archductor/prompt-packs/default.toml"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &default_pack,
+            format!(
+                "name = \"default\"\nversion = \"v1\"\n\n[prompts]\nmerge_pr = {}\n",
+                toml::Value::String(LEGACY_DEFAULT_MERGE_PROMPT.to_owned())
+            ),
+        )
+        .unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+
+        let merge_prompt = settings
+            .prompts
+            .expect("effective prompts")
+            .merge_pr
+            .expect("effective merge prompt");
         assert!(merge_prompt.contains("repeat the readiness check"));
         assert!(merge_prompt.contains("merge succeeds"));
     }
