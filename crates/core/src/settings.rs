@@ -992,6 +992,9 @@ pub fn default_prompt_pack_toml() -> Result<String> {
     toml::to_string_pretty(&raw).context("serialize default prompt pack")
 }
 
+const LEGACY_DEFAULT_MERGE_PROMPT: &str = "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action. If the `archductor` MCP server is available, read `get_context_briefing` first and call `set_workspace_context` after the merge to record the outcome.";
+const DEFAULT_MERGE_PROMPT: &str = "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers, then repeat the readiness check instead of stopping after one fix. Continue until the merge succeeds with the repository's configured method, or stop only when a blocker needs human input and report the exact reason. After the merge succeeds, report the result and any archive/cleanup action. If the `archductor` MCP server is available, read `get_context_briefing` first and call `set_workspace_context` after the merge to record the outcome.";
+
 fn default_prompt_settings() -> PromptSettings {
     PromptSettings {
         general: Some("Prefer small, reviewable changes. Explain verification clearly.".to_owned()),
@@ -1010,9 +1013,7 @@ fn default_prompt_settings() -> PromptSettings {
         push_branch: Some(
             "Prepare this branch for remote review. Inspect uncommitted changes, stage and commit only appropriate work, avoid committing unrelated local edits, push to the configured remote/upstream, refresh PR state if present, and report commit hash, remote branch, and PR/check status. If the `archductor` MCP server is available, call `set_workspace_context` after the push so the handoff summary matches what is now on the remote.".to_owned(),
         ),
-        merge_pr: Some(
-            "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action. If the `archductor` MCP server is available, read `get_context_briefing` first and call `set_workspace_context` after the merge to record the outcome.".to_owned(),
-        ),
+        merge_pr: Some(DEFAULT_MERGE_PROMPT.to_owned()),
         test_fixing: Some(
             "Run the failing test first, fix the root cause, then rerun focused tests. If the `archductor` MCP server is available, read `get_context_briefing` first and close the item with `update_task` once the test passes.".to_owned(),
         ),
@@ -2814,6 +2815,9 @@ fn ensure_default_prompt_pack_files(
     let default_path = prompt_pack_dir.join("default.toml");
     let default_prompt_pack_created =
         ensure_prompt_pack_file(&default_path, "default", Some("v1"))?;
+    if !default_prompt_pack_created {
+        refresh_legacy_default_merge_prompt(&default_path)?;
+    }
 
     let active_prompt_pack_created = settings
         .prompt_pack
@@ -2941,6 +2945,38 @@ fn ensure_prompt_pack_file(path: &Path, name: &str, version: Option<&str>) -> Re
         }
         Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
     }
+}
+
+fn refresh_legacy_default_merge_prompt(path: &Path) -> Result<bool> {
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("read prompt pack {}", path.display()))?;
+    if !contents.contains(LEGACY_DEFAULT_MERGE_PROMPT) {
+        return Ok(false);
+    }
+    let raw: RawPromptPackFile = toml::from_str(&contents)
+        .with_context(|| format!("parse prompt pack {}", path.display()))?;
+    if raw.name.as_deref() != Some("default")
+        || raw.version.as_deref() != Some("v1")
+        || raw.prompts.merge_pr.as_deref() != Some(LEGACY_DEFAULT_MERGE_PROMPT)
+    {
+        return Ok(false);
+    }
+
+    let legacy_assignment =
+        toml::to_string(&BTreeMap::from([("merge_pr", LEGACY_DEFAULT_MERGE_PROMPT)]))
+            .context("serialize legacy merge prompt assignment")?
+            .trim()
+            .to_owned();
+    if !contents.contains(&legacy_assignment) {
+        return Ok(false);
+    }
+    let current_assignment = toml::to_string(&BTreeMap::from([("merge_pr", DEFAULT_MERGE_PROMPT)]))
+        .context("serialize current merge prompt assignment")?
+        .trim()
+        .to_owned();
+    let updated = contents.replacen(&legacy_assignment, &current_assignment, 1);
+    atomic_write_no_symlink(path, updated.as_bytes())?;
+    Ok(true)
 }
 
 fn prompt_pack_toml(name: &str, version: &str) -> Result<String> {
@@ -4748,6 +4784,64 @@ path = ".archductor/prompt-packs/review.toml"
     }
 
     #[test]
+    fn ensure_repository_config_refreshes_the_stock_legacy_merge_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_repository_config(temp.path()).unwrap();
+        let default_pack = temp.path().join(".archductor/prompt-packs/default.toml");
+        fs::write(
+            &default_pack,
+            r#"name = "default"
+version = "v1"
+
+[prompts]
+general = "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action. If the `archductor` MCP server is available, read `get_context_briefing` first and call `set_workspace_context` after the merge to record the outcome."
+merge_pr = "Verify merge readiness before merging. Check CI, review decision, unresolved comments, mergeability, deployments, source-branch drift, and local workspace state. Resolve safe blockers or stop with exact reasons. Merge with the repository's configured method only when ready, then report the result and any archive/cleanup action. If the `archductor` MCP server is available, read `get_context_briefing` first and call `set_workspace_context` after the merge to record the outcome."
+"#,
+        )
+        .unwrap();
+
+        ensure_repository_config(temp.path()).unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+        let prompts = settings.prompts.expect("effective prompts");
+        assert_eq!(
+            prompts.general.as_deref(),
+            Some(LEGACY_DEFAULT_MERGE_PROMPT)
+        );
+        let merge_prompt = prompts.merge_pr.expect("effective merge prompt");
+        assert!(merge_prompt.contains("repeat the readiness check"));
+        assert!(merge_prompt.contains("merge succeeds"));
+    }
+
+    #[test]
+    fn ensure_repository_config_preserves_a_custom_default_merge_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        ensure_repository_config(temp.path()).unwrap();
+        let default_pack = temp.path().join(".archductor/prompt-packs/default.toml");
+        fs::write(
+            &default_pack,
+            r#"name = "default"
+version = "v1"
+
+[prompts]
+merge_pr = "Use the team's custom merge procedure."
+"#,
+        )
+        .unwrap();
+
+        ensure_repository_config(temp.path()).unwrap();
+
+        let settings = load_repository_settings(temp.path()).unwrap();
+        assert_eq!(
+            settings
+                .prompts
+                .and_then(|prompts| prompts.merge_pr)
+                .as_deref(),
+            Some("Use the team's custom merge procedure.")
+        );
+    }
+
+    #[test]
     fn load_repository_settings_uses_configured_prompt_pack_prompts() {
         let temp = tempfile::tempdir().unwrap();
         let conductor_dir = temp.path().join(".archductor");
@@ -5585,6 +5679,21 @@ file_include_globs = ".env.local"
                 kind.as_str()
             );
         }
+    }
+
+    #[test]
+    fn merge_prompt_tells_agent_to_continue_after_fixing_blockers() {
+        let defaults = default_prompt_settings();
+        let prompt = defaults.get(PromptKind::MergePr).expect("merge prompt");
+
+        assert!(
+            prompt.contains("repeat"),
+            "merge prompt should tell the agent to keep checking after one blocker fix: {prompt}"
+        );
+        assert!(
+            prompt.contains("merge succeeds"),
+            "merge prompt should keep the agent working until the merge actually lands: {prompt}"
+        );
     }
 
     /// Guards against citing a tool the agent cannot see. Agent sessions

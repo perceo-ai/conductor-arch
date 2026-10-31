@@ -270,6 +270,8 @@ describe("actions.importWorkspaceFromRemote", () => {
         });
       if (req.type === "get_workspace_changes")
         return response({ type: "workspace_changes", workspace: "parser", scope: "uncommitted", files: [] });
+      if (req.type === "commit_workspace_changes")
+        return response({ type: "error", message: "stage at least one file before committing" });
       if (req.type === "get_recent_commits")
         return response({ type: "recent_commits", workspace: "parser", log: "4ed0c0e (HEAD -> lc/parser) port it" });
       return response({ type: "workspace_updated", name: "parser" });
@@ -282,6 +284,10 @@ describe("actions.importWorkspaceFromRemote", () => {
 
     await actions.importWorkspaceFromRemote({ workspace: "parser" });
 
+    expect(order).toContain("remote:commit_workspace_changes");
+    expect(order.indexOf("remote:commit_workspace_changes")).toBeLessThan(
+      order.indexOf("remote:push_branch"),
+    );
     expect(order.indexOf("remote:push_branch")).toBeGreaterThan(-1);
     expect(order.indexOf("remote:push_branch")).toBeLessThan(
       order.indexOf("local:import_workspace_from_remote"),
@@ -297,8 +303,10 @@ describe("actions.importWorkspaceFromRemote", () => {
     });
   });
 
-  it("refuses a source with uncommitted changes and pushes nothing", async () => {
+  it("commits source changes hidden from the display change list before copying", async () => {
+    const order: string[] = [];
     api.request.mockImplementation(async (req: { type: string }) => {
+      order.push(`remote:${req.type}`);
       if (req.type === "list_workspaces")
         return response({ type: "workspaces", workspaces: [remoteWorkspace] });
       if (req.type === "list_repositories")
@@ -311,18 +319,41 @@ describe("actions.importWorkspaceFromRemote", () => {
           type: "workspace_changes",
           workspace: "parser",
           scope: "uncommitted",
-          files: [{ path: "wip.txt", staged: false, unstaged: false, untracked: true }],
+          files: [],
+        });
+      if (req.type === "commit_workspace_changes")
+        return response({ type: "workspace_committed", workspace: "parser", output: "checkpoint" });
+      if (req.type === "get_recent_commits")
+        return response({
+          type: "recent_commits",
+          workspace: "parser",
+          log: "4ed0c0e (HEAD -> lc/parser) transfer checkpoint",
         });
       return response({ type: "ack" });
     });
+    api.requestLocal.mockImplementation(async (req: { type: string }) => {
+      order.push(`local:${req.type}`);
+      return response({
+        type: "workspace_imported",
+        workspace: "parser",
+        repository: "app",
+        branch: "lc/parser",
+        copied_messages: 0,
+      });
+    });
     const { actions } = await import("./actions");
 
-    await expect(actions.importWorkspaceFromRemote({ workspace: "parser" })).rejects.toThrow(
-      "1 uncommitted file(s) on the remote: wip.txt",
+    await actions.importWorkspaceFromRemote({ workspace: "parser" });
+
+    expect(api.request.mock.calls.find((c) => c[0].type === "commit_workspace_changes")?.[0]).toMatchObject({
+      workspace: "parser",
+      message: "Transfer parser before copying workspace",
+      stage_all: true,
+    });
+    expect(order.indexOf("remote:commit_workspace_changes")).toBeLessThan(order.indexOf("remote:push_branch"));
+    expect(order.indexOf("remote:push_branch")).toBeLessThan(
+      order.indexOf("local:import_workspace_from_remote"),
     );
-    const types = api.request.mock.calls.map((c) => (c[0] as { type: string }).type);
-    expect(types).not.toContain("push_branch");
-    expect(api.requestLocal).not.toHaveBeenCalled();
   });
 
   it("carries the most recently active open chat when asked for the latest", async () => {
@@ -580,7 +611,7 @@ describe("actions.transferWorkspace", () => {
   });
 
   /** The source: one workspace, one chat, by default one live agent on it. */
-  function routeSource(opts: { liveSession?: boolean; transcript?: unknown[] } = {}) {
+  function routeSource(opts: { liveSession?: boolean; transcript?: unknown[]; changes?: unknown[] } = {}) {
     const live = opts.liveSession ?? true;
     let killed = false;
     const transcript = opts.transcript ?? [{ role: "user", content: "port it", created_at: "1" }];
@@ -627,7 +658,7 @@ describe("actions.transferWorkspace", () => {
         case "get_chat_transcript":
           return { type: "chat_transcript", thread_id: 7, title: "Parser port", messages: transcript };
         case "get_workspace_changes":
-          return { type: "workspace_changes", workspace: "parser", files: [] };
+          return { type: "workspace_changes", workspace: "parser", files: opts.changes ?? [] };
         case "get_recent_commits":
           return { type: "recent_commits", workspace: "parser", log: `${PUSHED} port it` };
         case "get_remote_access":
@@ -782,6 +813,28 @@ describe("actions.transferWorkspace", () => {
     expect(order.indexOf("src:kill_session")).toBeLessThan(order.indexOf("src:push_branch"));
     // And the kill was waited on, not fired and forgotten.
     expect(order.indexOf("src:get_session_status")).toBeLessThan(order.indexOf("src:push_branch"));
+  });
+
+  it("commits source changes before transferring", async () => {
+    routeSource({
+      liveSession: false,
+      changes: [{ path: "wip.txt", staged: false, unstaged: false, untracked: true }],
+    });
+    routeTarget();
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    const commit = api.requestClient.mock.calls.find(
+      (c) => c[0] === "src" && (c[1] as { type: string }).type === "commit_workspace_changes",
+    )?.[1];
+    expect(commit).toMatchObject({
+      workspace: "parser",
+      message: "Transfer parser before moving workspace",
+      stage_all: true,
+    });
+    expect(order.indexOf("src:commit_workspace_changes")).toBeLessThan(order.indexOf("src:push_branch"));
+    expect(order).toContain("src:archive_workspace");
   });
 
   it("writes to the named target daemon, never to this machine", async () => {

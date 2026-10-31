@@ -235,6 +235,62 @@ fn remote_transfer_force_stops_the_source_before_pushing_then_resumes_on_the_tar
     );
 }
 
+#[test]
+fn remote_transfer_force_commits_dirty_source_before_pushing() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    let source = fixture.source_workspace();
+    fs::write(source.path.join("wip.txt"), "carry me\n").unwrap();
+
+    fixture
+        .operator(&[
+            "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+        ])
+        .assert()
+        .success();
+
+    let target = fixture.target_workspace("berlin");
+    let carried = fs::read_to_string(target.path.join("wip.txt")).unwrap();
+    assert_eq!(carried, "carry me\n");
+
+    let subject = Command::new("git")
+        .arg("-C")
+        .arg(&fixture.bare)
+        .args(["log", "-1", "--format=%s", "refs/heads/lc/berlin"])
+        .output()
+        .unwrap();
+    assert!(subject.status.success());
+    assert_eq!(
+        String::from_utf8(subject.stdout).unwrap().trim(),
+        "Transfer berlin before moving workspace"
+    );
+}
+
+#[test]
+fn remote_transfer_commits_source_files_hidden_from_the_change_list() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    let source = fixture.source_workspace();
+    let prompt_pack_dir = source.path.join(".archductor/prompt-packs");
+    fs::create_dir_all(&prompt_pack_dir).unwrap();
+    fs::write(
+        prompt_pack_dir.join("carry.toml"),
+        "name = \"carry\"\nversion = \"v1\"\n",
+    )
+    .unwrap();
+
+    fixture
+        .operator(&[
+            "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+        ])
+        .assert()
+        .success();
+
+    let target = fixture.target_workspace("berlin");
+    assert_eq!(
+        fs::read_to_string(target.path.join(".archductor/prompt-packs/carry.toml")).unwrap(),
+        "name = \"carry\"\nversion = \"v1\"\n"
+    );
+}
+
 /// Failure this guards: archiving the source on the way past, before the target
 /// had actually taken the work, would lose the operator's only live copy. The
 /// target here has no clone of the repository, so the create step fails — and
@@ -1009,8 +1065,8 @@ impl Fixture {
             .assert()
             .success();
 
-        // Committed, not just written: `publish_source_branch` refuses a dirty
-        // worktree, and that refusal is deliberately not under test here.
+        // Start from one committed change; dirty checkpointing is covered in a
+        // focused transfer test below.
         let workspace = self.source_workspace();
         fs::write(workspace.path.join("parser.rs"), "fn parse() {}\n").unwrap();
         self.source

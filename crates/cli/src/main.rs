@@ -5942,9 +5942,17 @@ fn run_remote_import(
     };
 
     // The branch is the work. It crosses machines through the git remote, so
-    // the source has to have committed and pushed it before there is anything
-    // here to start from.
-    let source_commit = publish_source_branch(&source, &profile.label, &remote_workspace.name)?;
+    // the source has to be committed and pushed before there is anything here
+    // to start from.
+    let source_commit = publish_source_branch(
+        &source,
+        &profile.label,
+        &remote_workspace.name,
+        &format!(
+            "Transfer {} before copying workspace",
+            remote_workspace.name
+        ),
+    )?;
 
     let local = archductor_core::archcar::client::ArchcarClient::local(paths);
     if let Some(dest) = clone_into {
@@ -6268,10 +6276,14 @@ fn transfer_workspace(
     };
     let moved_chat_title = chat_title.clone();
 
-    // Step 2: publish. Reused as-is from `remote import`, uncommitted-changes
-    // refusal included — what goes into a commit is the operator's call.
-    let source_commit =
-        publish_source_branch(&source.client, &source.label, &remote_workspace.name)?;
+    // Step 2: publish. Reused as-is from `remote import`: commit any source
+    // changes first so the branch push carries the full working tree.
+    let source_commit = publish_source_branch(
+        &source.client,
+        &source.label,
+        &remote_workspace.name,
+        &format!("Transfer {} before moving workspace", remote_workspace.name),
+    )?;
     progress.pushed_commit = source_commit.clone();
 
     // Step 3: create, on the `--to` daemon.
@@ -7521,35 +7533,42 @@ fn run_remote_update(
 
 /// Get a remote workspace's branch onto its git remote before importing it.
 ///
-/// Refuses on uncommitted changes rather than committing them: what goes into
-/// a commit on someone else's branch is their call, and a takeover that
-/// silently leaves files behind is the bug this exists to fix.
+/// Commits uncommitted source changes first, so the transfer/import carries the
+/// full working tree instead of asking the operator to handle the checkpoint.
 fn publish_source_branch(
     source: &archductor_core::archcar::client::ArchcarClient,
     label: &str,
     workspace: &str,
+    commit_message: &str,
 ) -> Result<Option<String>> {
-    match source.send(ArchcarRequest::GetWorkspaceChanges {
+    let visible_changes = match source.send(ArchcarRequest::GetWorkspaceChanges {
         workspace: workspace.to_owned(),
         scope: WorkspaceChangeScope::Uncommitted,
     })? {
         ArchcarResponse::WorkspaceChanges { files, .. } if !files.is_empty() => {
-            let mut shown: Vec<&str> = files.iter().take(5).map(|f| f.path.as_str()).collect();
-            if files.len() > shown.len() {
-                shown.push("…");
-            }
-            anyhow::bail!(
-                "`{workspace}` on {label} has {} uncommitted file(s): {}. Commit them there \
-                 first (`archductor archcar commit {workspace} \"<message>\" --stage-all` \
-                 while connected to {label}), then retry",
-                files.len(),
-                shown.join(", ")
-            );
+            println!("committing {} uncommitted file(s) on {label}", files.len());
+            files.len()
         }
-        ArchcarResponse::WorkspaceChanges { .. } => {}
+        ArchcarResponse::WorkspaceChanges { .. } => 0,
         ArchcarResponse::Error { message } => anyhow::bail!("{label}: {message}"),
         other => anyhow::bail!(
             "unexpected response reading changes: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    };
+    match source.send(ArchcarRequest::CommitWorkspaceChanges {
+        workspace: workspace.to_owned(),
+        message: commit_message.to_owned(),
+        stage_all: true,
+    })? {
+        ArchcarResponse::WorkspaceCommitted { .. } => {}
+        ArchcarResponse::Error { message }
+            if visible_changes == 0 && message == "stage at least one file before committing" => {}
+        ArchcarResponse::Error { message } => {
+            anyhow::bail!("could not commit `{workspace}` on {label}: {message}")
+        }
+        other => anyhow::bail!(
+            "unexpected response committing changes: {}",
             archductor_core::archcar::protocol::archcar_response_summary(&other)
         ),
     }
