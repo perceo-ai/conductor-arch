@@ -892,7 +892,7 @@ jobs:
     name: "iOS: build ArchcarKit and run Swift tests"
     needs: [preflight]
     if: needs.preflight.outputs.run_rust == 'true'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -901,9 +901,10 @@ jobs:
           ref: ${{ needs.preflight.outputs.checkout_ref }}
           persist-credentials: false
 
-      # ArchcarKit's manifest is swift-tools-version 6.0, which needs Xcode 16,
-      # but the macos-14 image defaults to Xcode 15. Pick the newest installed
-      # Xcode 16 rather than pinning a minor version the image may drop.
+      # ArchcarKit's manifest is swift-tools-version 6.0, which needs Xcode 16.
+      # Don't trust the image default (older images shipped Xcode 15; newer images
+      # move to newer majors). Pick the newest installed Xcode 16 rather than
+      # pinning a minor version the image may drop.
       - name: Select Xcode
         run: |
           set -euo pipefail
