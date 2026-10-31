@@ -26,6 +26,7 @@ public struct KeychainTokenStore: TokenStore {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = item as? Data else {
+            ArchcarLog.keychain.error("keychain read failed status=\(status, privacy: .public)")
             throw KeychainError.status(status)
         }
         return String(decoding: data, as: UTF8.self)
@@ -37,12 +38,16 @@ public struct KeychainTokenStore: TokenStore {
         query[kSecValueData as String] = Data(token.utf8)
         query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else { throw KeychainError.status(status) }
+        guard status == errSecSuccess else {
+            ArchcarLog.keychain.error("keychain write failed status=\(status, privacy: .public)")
+            throw KeychainError.status(status)
+        }
     }
 
     public func removeToken(for id: String) throws {
         let status = SecItemDelete(baseQuery(id: id) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
+            ArchcarLog.keychain.error("keychain delete failed status=\(status, privacy: .public)")
             throw KeychainError.status(status)
         }
     }
@@ -58,6 +63,29 @@ public struct KeychainTokenStore: TokenStore {
     public enum KeychainError: Error, Equatable {
         case status(OSStatus)
     }
+}
+
+/// What the pairing sheet says when the Keychain refuses. `PairDaemonView`
+/// reads `localizedDescription` through `UserFacingMessage` and lands here
+/// through `LocalizedError`, so this is the one place a status becomes words.
+/// The numeric status goes to `ArchcarLog.keychain`, never to the screen.
+extension KeychainTokenStore.KeychainError: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .status(errSecInteractionNotAllowed):
+            "Unlock this device and try again."
+        case .status(errSecDuplicateItem):
+            "A token for this daemon is already saved."
+        case .status:
+            "Could not reach the keychain."
+        }
+    }
+}
+
+/// Foundation's default for a Swift enum is "The operation couldn't be
+/// completed. (ArchcarKit.… error N.)". Same sentence as `description`.
+extension KeychainTokenStore.KeychainError: LocalizedError {
+    public var errorDescription: String? { description }
 }
 
 /// Test double. Never used by the app.

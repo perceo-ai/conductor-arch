@@ -773,10 +773,11 @@ mod tests {
     use crate::archcar::protocol::{
         ArchcarInputDelivery, ArchcarInputKind, ArchcarRequest, RpcEnvelope,
     };
+    use crate::test_support::EnvGuard;
     use std::io::{BufRead, BufReader, Write};
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc, Arc, Mutex, OnceLock,
+        mpsc, Arc, Mutex,
     };
     use std::time::Duration;
 
@@ -818,9 +819,7 @@ mod tests {
             std::thread::sleep(Duration::from_secs(10));
         });
 
-        let _env_guard = archcar_bin_env_lock().lock().unwrap();
-        let previous_archcar_bin = std::env::var_os("ARCHDUCTOR_ARCHCAR_BIN");
-        std::env::set_var("ARCHDUCTOR_ARCHCAR_BIN", "/bin/false");
+        let _bin = archcar_bin_false();
         let client = super::ArchcarClient::new(endpoint);
         let (tx, rx) = mpsc::channel();
         let _client_thread = std::thread::spawn(move || {
@@ -835,17 +834,6 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("client hung on an unresponsive archcar endpoint");
         assert!(result.is_err());
-
-        if let Some(value) = previous_archcar_bin {
-            std::env::set_var("ARCHDUCTOR_ARCHCAR_BIN", value);
-        } else {
-            std::env::remove_var("ARCHDUCTOR_ARCHCAR_BIN");
-        }
-    }
-
-    fn archcar_bin_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
     }
 
     #[cfg(unix)]
@@ -923,32 +911,10 @@ mod tests {
 
     /// Points the sidecar spawn fallback at a binary that exits at once, so a
     /// client test can never launch a real daemon, and restores it on drop.
-    struct ArchcarBinGuard {
-        previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl ArchcarBinGuard {
-        fn bin_false() -> Self {
-            let lock = archcar_bin_env_lock()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let previous = std::env::var_os("ARCHDUCTOR_ARCHCAR_BIN");
-            std::env::set_var("ARCHDUCTOR_ARCHCAR_BIN", "/bin/false");
-            Self {
-                previous,
-                _lock: lock,
-            }
-        }
-    }
-
-    impl Drop for ArchcarBinGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("ARCHDUCTOR_ARCHCAR_BIN", value),
-                None => std::env::remove_var("ARCHDUCTOR_ARCHCAR_BIN"),
-            }
-        }
+    fn archcar_bin_false() -> EnvGuard {
+        let mut env = EnvGuard::lock();
+        env.set("ARCHDUCTOR_ARCHCAR_BIN", "/bin/false");
+        env
     }
 
     /// A daemon that answers every request at once except the first health
@@ -1032,7 +998,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn client_keeps_the_socket_of_a_live_daemon_whose_healthcheck_times_out() {
-        let _bin = ArchcarBinGuard::bin_false();
+        let _bin = archcar_bin_false();
         let temp = tempfile::tempdir().unwrap();
         let endpoint = temp.path().join("archcar.sock");
         let (release, held, stop, server) = spawn_daemon_holding_first_healthcheck(&endpoint);
@@ -1074,7 +1040,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn client_reports_an_unresponsive_listener_as_its_own_error() {
-        let _bin = ArchcarBinGuard::bin_false();
+        let _bin = archcar_bin_false();
         let temp = tempfile::tempdir().unwrap();
         let endpoint = temp.path().join("archcar.sock");
         let (release, _held, stop, server) = spawn_daemon_holding_first_healthcheck(&endpoint);
@@ -1095,7 +1061,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn client_replaces_a_socket_file_nobody_listens_on() {
-        let _bin = ArchcarBinGuard::bin_false();
+        let _bin = archcar_bin_false();
         let temp = tempfile::tempdir().unwrap();
         let endpoint = temp.path().join("archcar.sock");
         // Binding and dropping leaves the file behind with no listener.

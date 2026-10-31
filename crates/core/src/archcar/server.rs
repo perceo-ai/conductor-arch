@@ -354,12 +354,13 @@ impl ArchcarServer {
 /// in-place restart attempt: a successful restart execs into the new binary,
 /// which keeps serving on this same path.
 ///
-/// Unix only. Windows `transport::bind` (the `#[cfg(windows)]` one in
-/// `transport.rs`) has no liveness probe: it removes and renames over an
-/// existing endpoint file unconditionally, so a newer daemon may own the file
-/// by the time this one exits, and removing it would shut that daemon down on
-/// its next accept. Windows must not share this cleanup until it can check the
-/// file still belongs to this listener.
+/// Unix only, for now. Windows `transport::bind` (the `#[cfg(windows)]` one in
+/// `transport.rs`) also refuses with `AddrInUse` while a daemon owns the
+/// endpoint: ownership is an exclusive `.endpoint.lock` file held for the
+/// daemon's life, plus a token-handshake probe for an endpoint with no lock
+/// file, which a daemon built before the lock may still serve. Sharing this
+/// cleanup on Windows is a separate change; it should remove that lock file
+/// too.
 #[cfg(unix)]
 fn unlink_own_endpoint(endpoint_path: &Path) {
     match fs::remove_file(endpoint_path) {
@@ -1004,6 +1005,9 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             .map(|pending| pending.len())
                             .unwrap_or(0)
                     };
+                    if !snapshot.ready {
+                        crate::archcar::test_hooks::note_not_ready_status_served();
+                    }
                     ArchcarResponse::SessionStatus {
                         session_id,
                         status: snapshot.status.as_str().to_owned(),
@@ -4154,27 +4158,29 @@ fn drain_queued_input_once(state: &Arc<Mutex<ServerState>>, thread_id: i64) {
         }
     };
 
+    // One queued input per turn. Mark the session busy before handing the
+    // input over, not after: a `session send` that read `ready` in between
+    // would be steered into the turn this input starts — which merges two
+    // prompts and leaves the harness's turn accounting waiting for a
+    // completion that never comes. TurnCompleted drains the next one.
+    let readiness_before = note_session_not_ready_for_queue(&handle);
+    // The row is off the queue from here on. It travels inside the command,
+    // so a handoff that fails inside the loop puts back this row and no other.
     match handle
         .command_tx
-        .send(crate::archcar::session::SessionCommand::SendInput {
-            input: queued.input.clone(),
-            visible_input: queued.visible_input.clone(),
-            kind: queued.input_kind.clone(),
-            delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+        .send(crate::archcar::session::SessionCommand::SendQueuedInput {
+            claim: queued.clone(),
         }) {
         Ok(()) => {
+            crate::archcar::test_hooks::pause_after_provider_handoff();
             broadcast(
                 &mut state.lock().unwrap(),
                 ArchcarEvent::ChatQueueUpdated { thread_id },
             );
-            // One queued input per turn. The session does not report "busy"
-            // until the provider starts the turn, so a message queued in that
-            // gap would otherwise be written into the same turn — which merges
-            // two prompts and leaves the harness's turn accounting waiting for
-            // a completion that never comes. TurnCompleted drains the next one.
-            note_session_not_ready_for_queue(&handle);
         }
         Err(err) => {
+            // The input never reached the session; undo the busy mark.
+            restore_session_readiness(&handle, readiness_before);
             if let Err(restore_err) = store.requeue_claimed_chat_input_front(&queued) {
                 warn!(
                     thread_id,
@@ -4636,13 +4642,29 @@ fn start_session_for_queued_thread(
     });
 }
 
-fn note_session_not_ready_for_queue(handle: &SessionHandle) {
+/// Marks a codex/claude session busy and returns the readiness it replaced,
+/// for [`restore_session_readiness`] if the input then fails to send.
+fn note_session_not_ready_for_queue(handle: &SessionHandle) -> Option<(bool, AgentSessionState)> {
+    let mut snapshot = handle.snapshot.lock().ok()?;
+    if !matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
+        return None;
+    }
+    let before = (snapshot.ready, snapshot.runtime_state);
+    crate::archcar::session::mark_session_busy_for_input(&mut snapshot);
+    Some(before)
+}
+
+fn restore_session_readiness(handle: &SessionHandle, before: Option<(bool, AgentSessionState)>) {
+    let Some((ready, runtime_state)) = before else {
+        return;
+    };
     let Ok(mut snapshot) = handle.snapshot.lock() else {
         return;
     };
-    if matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
-        snapshot.ready = false;
-        snapshot.runtime_state = crate::session_state::AgentSessionState::Running;
+    // Only undo our own mark; anything the session reported since stands.
+    if !snapshot.ready && snapshot.runtime_state == AgentSessionState::Running {
+        snapshot.ready = ready;
+        snapshot.runtime_state = runtime_state;
     }
 }
 
@@ -4661,9 +4683,14 @@ fn mark_session_ready_at_turn_boundary(
     let Ok(mut snapshot) = handle.snapshot.lock() else {
         return;
     };
+    // The loop marks the session ready itself before this runs, and a send
+    // can open the next turn in between. Its busy mark looks the same as the
+    // one this event ends, so only the turn generation tells them apart: a
+    // late mark for an earlier turn must not reopen the live one to sends.
     if snapshot.thread_id == thread_id
         && matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE)
         && snapshot.status == crate::workspace::ProcessStatus::Running
+        && snapshot.turns.latest_turn_completed()
     {
         snapshot.ready = true;
         snapshot.runtime_state = crate::session_state::AgentSessionState::WaitingForInput;
@@ -4785,6 +4812,7 @@ fn handle_session_event(state: &Arc<Mutex<ServerState>>, event: ArchcarEvent) {
         // Completion is the queue's authoritative turn boundary. Providers
         // also emit SessionReady, but relying on that second event leaves a
         // follow-up stuck when it is delayed or lost.
+        crate::archcar::test_hooks::pause_before_turn_boundary_ready_mark();
         mark_session_ready_at_turn_boundary(state, *session_id, *thread_id);
         raise_codex_plan_approval(state, *thread_id, *session_id);
     }
@@ -5571,7 +5599,7 @@ fn workspace_processes_text(store: &WorkspaceStore, name: &str) -> String {
     section(
         &mut out,
         "Sessions",
-        store.list_sessions(name),
+        store.list_sessions_reconciled(name),
         "No sessions recorded.",
         true,
     );
@@ -7137,6 +7165,7 @@ mod tests {
             .expect("spawn a process that exits non-zero")
     }
     use super::*;
+    use crate::archcar::session::FinishedTurn;
 
     fn pr_row(number: i64, state: &str) -> crate::workspace::PullRequest {
         crate::workspace::PullRequest {
@@ -7614,6 +7643,209 @@ mod tests {
     }
 
     #[test]
+    fn queue_chat_input_reports_an_input_a_drain_claimed_before_the_response() {
+        // A queue drain on `SessionReady` can claim the row `QueueChatInput`
+        // just inserted before the handler has built its response. The input
+        // was delivered, so the send must report it queued, not fail with
+        // "load queued chat input N" and invite a duplicate re-send.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        // Claim the row from a separate connection the moment it is inserted,
+        // exactly as the drain's own store would.
+        let claimed = Arc::new(Mutex::new(None));
+        let hook_claimed = Arc::clone(&claimed);
+        let hook_db_path = db_path.clone();
+        let thread_id = thread.id;
+        crate::workspace::set_after_queued_chat_input_insert_hook(move |inserted_id| {
+            let drained = WorkspaceStore::open_app(&hook_db_path)
+                .unwrap()
+                .claim_next_queued_chat_input(thread_id)
+                .unwrap()
+                .expect("the drain claims the row the handler just inserted");
+            assert_eq!(drained.id, inserted_id);
+            *hook_claimed.lock().unwrap() = Some(drained);
+        });
+
+        let response = dispatch_request(
+            ArchcarRequest::QueueChatInput {
+                thread_id: thread.id,
+                input: "run tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                session_kind: SessionKind::CODEX,
+                verbatim: true,
+            },
+            &state,
+        );
+        let claimed = claimed
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the drain ran between the insert and the response");
+        let input = match response {
+            ArchcarResponse::QueuedChatInput { input } => input,
+            ArchcarResponse::Error { message } => {
+                panic!("a send the drain already claimed must not fail: {message}")
+            }
+            other => panic!("expected queued chat input response, got {other:?}"),
+        };
+        assert_eq!(input.id, claimed.id);
+        assert_eq!(input.thread_id, thread.id);
+        assert_eq!(input.input, "run tests");
+        assert_eq!(input.input, claimed.input);
+        assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
+    }
+
+    /// The drain claims the row before the session loop writes it. A loop
+    /// that takes the input and then fails the write must put the row back,
+    /// not leave the message gone with the failed session.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn queued_input_returns_to_the_queue_when_the_session_loop_fails_the_handoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        let (event_tx, event_rx) = mpsc::channel();
+        let handle = crate::archcar::session::start_session_handle_writing_to_dev_full(
+            db_path.clone(),
+            temp.path().join("logs"),
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            child.id(),
+            event_tx,
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::from([(process.id, handle.clone())]),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run the tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CODEX,
+            )
+            .unwrap();
+
+        drain_queued_input_once(&state, thread.id);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match event_rx.recv_timeout(remaining) {
+                Ok(ArchcarEvent::SessionError { session_id, .. })
+                    if session_id == Some(process.id) =>
+                {
+                    break
+                }
+                Ok(_) => {}
+                Err(err) => panic!("the failed handoff never reported a session error: {err}"),
+            }
+        }
+        assert_eq!(
+            handle.snapshot.lock().unwrap().runtime_state,
+            AgentSessionState::Failed
+        );
+        let remaining = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the queued input was consumed by a handoff that never reached the session"
+        );
+        assert_eq!(remaining[0].id, queued.id);
+        assert_eq!(remaining[0].input, "run the tests");
+        // Nothing reached the agent, so the thread must not show the message
+        // as sent; it shows once, when a retry delivers it.
+        assert!(store
+            .list_chat_messages(thread.id)
+            .unwrap()
+            .iter()
+            .all(|message| message.content != "run the tests"));
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = handle
+            .command_tx
+            .send(crate::archcar::session::SessionCommand::Kill);
+    }
+
+    #[test]
     fn verbatim_queued_input_reaches_the_agent_exactly_as_sent() {
         // `archductor session send` queues behind a busy turn with `verbatim`.
         // The agent must get the operator's words alone, just as it would had
@@ -7870,10 +8102,12 @@ mod tests {
         // No PR recorded and GitHub has none for the branch. The desktop
         // polls this every minute, so an unchanged answer must not make every
         // client re-pull the inventory.
-        use crate::workspace::tests::{env_lock, install_fake_gh, restore_path};
-        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        use crate::test_support::EnvGuard;
+        use crate::workspace::tests::install_fake_gh;
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
-        let old_path = install_fake_gh(
+        install_fake_gh(
+            &mut env,
             temp.path(),
             r#"#!/bin/sh
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
@@ -7927,7 +8161,6 @@ exit 1
             &state,
         );
 
-        restore_path(old_path);
         assert!(matches!(response, ArchcarResponse::Ack), "{response:?}");
         assert!(subscriber_rx.try_iter().next().is_none());
     }
@@ -8173,6 +8406,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8285,6 +8519,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8378,6 +8613,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8413,12 +8649,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::SendInput {
-                input,
-                visible_input,
-                delivery: ArchcarInputDelivery::Auto,
-                ..
-            }) if input == "run tests" && visible_input.as_deref() == Some("visible tests")
+            Ok(crate::archcar::session::SessionCommand::SendQueuedInput { claim }) if claim.input == "run tests" && claim.visible_input.as_deref() == Some("visible tests")
         ));
         assert_eq!(
             WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
@@ -8470,6 +8701,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         }));
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8505,8 +8737,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(SessionCommand::SendInput { input, delivery: ArchcarInputDelivery::Auto, .. })
-                if input == "follow up"
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
         ));
         assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
         assert_eq!(
@@ -8514,6 +8745,240 @@ exit 1
             crate::session_state::AgentSessionState::Running,
             "delivery immediately starts the queued turn",
         );
+    }
+
+    /// A codex session busy for one input, with a follow-up waiting in its
+    /// chat queue: shared setup for the two turn-generation tests below.
+    struct BusySession {
+        state: Arc<Mutex<ServerState>>,
+        snapshot: Arc<Mutex<crate::archcar::session::SessionSnapshot>>,
+        command_rx: mpsc::Receiver<SessionCommand>,
+        store: WorkspaceStore,
+        thread_id: i64,
+    }
+
+    fn busy_session_with_a_queued_follow_up(temp: &Path, kind: SessionKind) -> BusySession {
+        let db_path = temp.join("state.db");
+        let logs_dir = temp.join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp);
+        let thread = store
+            .create_chat_thread("berlin", provider_name(kind), "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(thread.id, "follow up", None, ArchcarInputKind::User, kind)
+            .unwrap();
+        let snapshot = Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+            turns: Default::default(),
+        }));
+        // The loop's busy mark for the input that opens the turn.
+        crate::archcar::session::mark_session_busy_for_input(&mut snapshot.lock().unwrap());
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            9,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::clone(&snapshot),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path,
+            logs_dir,
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+        BusySession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id: thread.id,
+        }
+    }
+
+    /// The loop's completion path for `turn`: the `TurnCompleted` it sends,
+    /// taken off its channel.
+    fn loop_turn_completed(
+        snapshot: &Arc<Mutex<crate::archcar::session::SessionSnapshot>>,
+        turn: FinishedTurn<'_>,
+    ) -> ArchcarEvent {
+        let started = snapshot.lock().unwrap().clone();
+        let (event_tx, event_rx) = mpsc::channel();
+        crate::archcar::session::send_turn_completed(
+            snapshot,
+            &event_tx,
+            &started,
+            turn,
+            Some("completed".to_owned()),
+        );
+        let event = event_rx.try_recv().unwrap();
+        assert!(
+            matches!(event, ArchcarEvent::TurnCompleted { .. }),
+            "{event:?}"
+        );
+        event
+    }
+
+    /// The safety net the turn generation must not disable: the provider's
+    /// own `Ready` for a finished turn is lost, so the daemon's mark on
+    /// `TurnCompleted` is the only thing that makes the session ready. It
+    /// still fires for a session that went busy and finished its turn
+    /// through the loop's real completion path, and the queued follow-up is
+    /// delivered.
+    #[test]
+    fn turn_completion_without_ready_still_delivers_the_queued_follow_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusySession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = busy_session_with_a_queued_follow_up(temp.path(), SessionKind::CODEX);
+
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Latest);
+        // No `Ready` follows: the session is still marked busy here.
+        assert!(!snapshot.lock().unwrap().ready);
+        handle_session_event(&state, completed);
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
+        ));
+        assert!(store.list_queued_chat_inputs(thread_id).unwrap().is_empty());
+    }
+
+    /// Failure this guards: the daemon's mark for a turn's `TurnCompleted`
+    /// runs after the loop has already marked the session ready, and a send
+    /// can open the next turn in between. The late mark used to set
+    /// `ready = true` over that turn's busy mark. It must leave it alone, so
+    /// nothing is drained into the live turn.
+    #[test]
+    fn a_late_turn_completion_leaves_a_newer_turn_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusySession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = busy_session_with_a_queued_follow_up(temp.path(), SessionKind::CODEX);
+
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Latest);
+        // The loop's own `Ready`, then a send opens the next turn -- all
+        // before the daemon gets to the first turn's `TurnCompleted`.
+        {
+            let mut current = snapshot.lock().unwrap();
+            current.ready = true;
+            current.runtime_state = crate::session_state::AgentSessionState::WaitingForInput;
+            crate::archcar::session::mark_session_busy_for_input(&mut current);
+        }
+        handle_session_event(&state, completed);
+
+        let current = snapshot.lock().unwrap().clone();
+        assert!(!current.ready, "{current:?}");
+        assert_eq!(
+            current.runtime_state,
+            crate::session_state::AgentSessionState::Running
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert_eq!(store.list_queued_chat_inputs(thread_id).unwrap().len(), 1);
+    }
+
+    /// A claude session busy with the input that opened its turn, which
+    /// claude has taken in, and then with an immediate message sent into
+    /// that turn.
+    fn claude_session_with_an_immediate_input(temp: &Path) -> BusySession {
+        let busy = busy_session_with_a_queued_follow_up(temp, SessionKind::CLAUDE);
+        {
+            let mut current = busy.snapshot.lock().unwrap();
+            current.turns.note_input("input-1".to_owned());
+            current.turns.note_input_taken("input-1");
+            crate::archcar::session::mark_session_busy_for_input(&mut current);
+            current.turns.note_input("input-2".to_owned());
+        }
+        busy
+    }
+
+    /// Failure this guards: claude had no tool boundary left to take an
+    /// immediate message in at, so it runs it as a turn of its own once the
+    /// open one ends. That turn's completion used to finish the message's
+    /// generation too, and the daemon's mark for it reopened the session
+    /// over the message's live turn. The mark must leave it busy.
+    #[test]
+    fn a_turn_completion_leaves_an_immediate_input_claude_has_not_taken_in_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusySession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = claude_session_with_an_immediate_input(temp.path());
+
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Input("input-1"));
+        handle_session_event(&state, completed);
+
+        let current = snapshot.lock().unwrap().clone();
+        assert!(!current.ready, "{current:?}");
+        assert_eq!(
+            current.runtime_state,
+            crate::session_state::AgentSessionState::Running
+        );
+        assert!(command_rx.try_recv().is_err());
+        assert_eq!(store.list_queued_chat_inputs(thread_id).unwrap().len(), 1);
+
+        // The message's own turn ends: that completion is the boundary.
+        snapshot.lock().unwrap().turns.note_input_taken("input-2");
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Input("input-2"));
+        handle_session_event(&state, completed);
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
+        ));
+    }
+
+    /// The other way claude takes an immediate message: into the open turn,
+    /// whose one completion answers both. Claude skips its own `Ready` when
+    /// it has a message it never ran a turn for, so the daemon's mark is what
+    /// frees the session here, and the queued follow-up must be delivered.
+    #[test]
+    fn a_turn_completion_finishes_an_immediate_input_claude_took_into_the_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let BusySession {
+            state,
+            snapshot,
+            command_rx,
+            store,
+            thread_id,
+        } = claude_session_with_an_immediate_input(temp.path());
+
+        snapshot.lock().unwrap().turns.note_input_taken("input-2");
+        let completed = loop_turn_completed(&snapshot, FinishedTurn::Input("input-1"));
+        handle_session_event(&state, completed);
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::SendQueuedInput { claim }) if claim.input == "follow up"
+        ));
+        assert!(store.list_queued_chat_inputs(thread_id).unwrap().is_empty());
     }
 
     fn interaction_draft_for(
@@ -8558,6 +9023,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8639,6 +9105,7 @@ exit 1
                     ready: false,
                     capabilities: None,
                     screen: String::new(),
+                    turns: Default::default(),
                 })),
                 command_tx,
             },
@@ -8757,6 +9224,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -8785,8 +9253,7 @@ exit 1
 
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::SendInput { input, .. })
-                if input == "left over from before the restart"
+            Ok(crate::archcar::session::SessionCommand::SendQueuedInput { claim }) if claim.input == "left over from before the restart"
         ));
         assert!(store.list_queued_chat_inputs(thread.id).unwrap().is_empty());
     }
@@ -8811,6 +9278,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let handle_snapshot = Arc::new(Mutex::new(snapshot));
         let (command_tx, command_rx) = mpsc::channel();
@@ -8928,6 +9396,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9045,6 +9514,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9089,11 +9559,7 @@ exit 1
         ));
         assert!(matches!(
             command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::SendInput {
-                input,
-                delivery: ArchcarInputDelivery::Auto,
-                ..
-            }) if input == "run tests"
+            Ok(crate::archcar::session::SessionCommand::SendQueuedInput { claim }) if claim.input == "run tests"
         ));
         assert!(
             WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
@@ -9404,6 +9870,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9461,6 +9928,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let starting_snapshot = crate::archcar::session::SessionSnapshot {
             session_id: 10,
@@ -9473,6 +9941,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (ready_tx, _ready_rx) = mpsc::channel();
         let (starting_tx, _starting_rx) = mpsc::channel();
@@ -9605,6 +10074,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let state = Arc::new(Mutex::new(ServerState {
@@ -9684,6 +10154,7 @@ exit 1
             ready: true,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, _command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9738,6 +10209,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -9794,6 +10266,7 @@ exit 1
             ready: false,
             capabilities: None,
             screen: String::new(),
+            turns: Default::default(),
         };
         let (command_tx, command_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
@@ -11586,6 +12059,41 @@ default = true
         let unchanged = store.get_process_record(process.id).unwrap();
         assert_eq!(unchanged.status, ProcessStatus::Running);
         assert_eq!(unchanged.ended_at, None);
+    }
+
+    #[test]
+    fn processes_tab_shows_a_dead_cli_session_as_exited() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(
+            &paths.database_path,
+            &paths.data_dir.join("logs"),
+            temp.path(),
+        );
+        let launch = store.session_launch("berlin", SessionKind::SHELL).unwrap();
+        let cli = store
+            .record_session_process("berlin", &launch, exited_child_pid())
+            .unwrap();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let codex = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        let managed = store
+            .record_session_process_for_thread("berlin", thread.id, &codex, exited_child_pid())
+            .unwrap();
+
+        let text = workspace_processes_text(&store, "berlin");
+
+        assert!(
+            text.contains(&format!("#{} {} exited", cli.id, cli.command)),
+            "{text}"
+        );
+        // Startup restore owns chat-thread rows, so the tab leaves them as
+        // stored for it to resume or interrupt.
+        assert_eq!(
+            store.get_process_record(managed.id).unwrap().status,
+            ProcessStatus::Running
+        );
     }
 
     fn app_paths(root: &Path) -> AppPaths {

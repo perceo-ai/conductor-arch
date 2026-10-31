@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -48,8 +48,8 @@ use crate::runtime_session_store::RuntimeSessionStore;
 use crate::session_state::{AgentSessionState, SessionStateMachine};
 use crate::settings::PromptKind;
 use crate::workspace::{
-    ChatThreadRecord, ProcessStatus, SessionHarnessOptions, SessionKind, SessionLaunch,
-    WorkspaceStore,
+    ChatThreadRecord, ProcessStatus, QueuedChatInputRecord, SessionHarnessOptions, SessionKind,
+    SessionLaunch, WorkspaceStore,
 };
 use serde_json::json;
 
@@ -81,6 +81,9 @@ fn resolved_general_prompt(db_path: &std::path::Path, workspace: &str) -> Result
 }
 
 fn durable_thread_is_first_user_turn(db_path: &std::path::Path, thread_id: i64) -> Result<bool> {
+    if let Some(message) = crate::archcar::test_hooks::forced_first_turn_check_failure() {
+        anyhow::bail!(message);
+    }
     Ok(!WorkspaceStore::open(db_path)?
         .list_chat_messages(thread_id)?
         .iter()
@@ -95,6 +98,12 @@ pub enum SessionCommand {
         kind: ArchcarInputKind,
         delivery: ArchcarInputDelivery,
     },
+    /// A queued chat input the server's drain took off the thread's queue.
+    /// The claimed row travels with the command, so only this command can
+    /// put it back if the handoff fails.
+    SendQueuedInput {
+        claim: QueuedChatInputRecord,
+    },
     ApplyControl(HarnessControl),
     Resize {
         rows: u16,
@@ -102,6 +111,26 @@ pub enum SessionCommand {
     },
     InterruptTurn,
     Kill,
+}
+
+impl SessionCommand {
+    /// A queued input is handed over like an automatic send; the claim it
+    /// carries comes apart from it so the loop can requeue it on failure. Every
+    /// other command carries no claim.
+    fn split_queued_claim(self) -> (Self, Option<QueuedChatInputRecord>) {
+        match self {
+            Self::SendQueuedInput { claim } => (
+                Self::SendInput {
+                    input: claim.input.clone(),
+                    visible_input: claim.visible_input.clone(),
+                    kind: claim.input_kind.clone(),
+                    delivery: ArchcarInputDelivery::Auto,
+                },
+                Some(claim),
+            ),
+            command => (command, None),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +145,194 @@ pub struct SessionSnapshot {
     pub ready: bool,
     pub capabilities: Option<SessionHarnessCapabilities>,
     pub screen: String,
+    pub turns: TurnGenerations,
+}
+
+/// Which turn the session's readiness belongs to. `started` moves on every
+/// busy mark for a new input; `completed` catches up to it when the session
+/// loop reports a turn finished. The daemon marks a session ready again on
+/// `TurnCompleted`, on its own thread and later than the loop does; by then a
+/// send may have opened the next turn, and readiness alone cannot tell "busy
+/// with the turn that just ended" from "busy with the one after it".
+///
+/// A finished turn does not always finish every input started before it. An
+/// immediate message sent to a busy claude session is either taken in at the
+/// open turn's next tool boundary, and answered by that turn's `result`, or,
+/// with no boundary left, run as a turn of its own after it. So for claude
+/// each input keeps the generation it started, and a completion catches
+/// `completed` up only to the inputs claude had taken in by then. A codex
+/// input keeps its generation too: an accepted steer joins the turn it named,
+/// but a refused one starts a turn of its own, which can be live before the
+/// turn it named reports completed. So a codex completion finishes only the
+/// inputs that joined the turn it names.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnGenerations {
+    pub started: u64,
+    pub completed: u64,
+    /// The generation each input started, oldest first, until a completion
+    /// finishes it. A refused codex steer is noted again for the turn it
+    /// starts instead.
+    inputs: VecDeque<(String, u64)>,
+    /// The newest of those generations claude has taken in.
+    taken: u64,
+    /// Generations above `completed` whose input failed before any turn took
+    /// it in. `completed` steps over them only once it reaches them: a
+    /// generation below one is live work, and one above it may be a busy mark
+    /// whose input is still on its way to the session loop.
+    retired: BTreeSet<u64>,
+}
+
+impl TurnGenerations {
+    /// The latest turn the session started has been reported finished.
+    pub fn latest_turn_completed(&self) -> bool {
+        self.completed == self.started
+    }
+
+    /// Ties the generation the latest busy mark started to the input it was
+    /// for.
+    pub(crate) fn note_input(&mut self, local_input_id: String) {
+        self.inputs.push_back((local_input_id, self.started));
+    }
+
+    /// The input failed before any turn took it in, so no completion will
+    /// finish the generations it started; they end here instead, without
+    /// finishing any other.
+    pub(crate) fn retire_input(&mut self, local_input_id: &str) {
+        let completed = self.completed;
+        self.retired.extend(
+            self.inputs
+                .iter()
+                .filter(|(id, generation)| id == local_input_id && *generation > completed)
+                .map(|(_, generation)| *generation),
+        );
+        self.inputs.retain(|(id, _)| id != local_input_id);
+        self.catch_up_over_retired();
+    }
+
+    fn catch_up_over_retired(&mut self) {
+        while self.retired.remove(&(self.completed + 1)) {
+            self.completed += 1;
+        }
+        let completed = self.completed;
+        self.retired.retain(|generation| *generation > completed);
+    }
+
+    /// The provider has taken the input in: a turn is answering it now.
+    pub(crate) fn note_input_taken(&mut self, local_input_id: &str) {
+        if let Some((_, generation)) = self.inputs.iter().find(|(id, _)| id == local_input_id) {
+            self.taken = self.taken.max(*generation);
+        }
+    }
+
+    fn finish(&mut self, turn: FinishedTurn<'_>) {
+        let finished = match turn {
+            FinishedTurn::Latest => self.started,
+            // An input the session never recorded is one this ledger cannot
+            // place; finishing everything keeps the daemon's ready mark, the
+            // safety net for a lost `Ready`, from being disabled by it.
+            FinishedTurn::Input(local_input_id) => self
+                .inputs
+                .iter()
+                .find(|(id, _)| id == local_input_id)
+                .map_or(self.started, |(_, generation)| self.taken.max(*generation)),
+            // As above, a turn none of whose inputs were recorded finishes
+            // everything. The max over every matching entry is load-bearing:
+            // a refused steer's input is noted at two generations, the
+            // steer's and its fallback turn's, and the fallback turn's
+            // completion must finish both. This assumes turns complete in
+            // order: if the fallback turn's completion arrived before the
+            // still-live named turn's, it would reach `started`, finish the
+            // named turn's input too, and the loop would mark the session
+            // ready over that turn (as `Latest` always has).
+            FinishedTurn::Inputs(local_input_ids) => self
+                .inputs
+                .iter()
+                .filter(|(id, _)| local_input_ids.contains(id))
+                .map(|(_, generation)| *generation)
+                .max()
+                .unwrap_or(self.started),
+        };
+        self.completed = self.completed.max(finished);
+        self.taken = self.taken.max(finished);
+        self.inputs.retain(|(_, generation)| *generation > finished);
+        self.catch_up_over_retired();
+    }
+}
+
+/// What a `TurnCompleted` finishes.
+pub(crate) enum FinishedTurn<'a> {
+    /// Every input started so far.
+    Latest,
+    /// The turn this input ran in: it, and any later input the provider took
+    /// into the same turn.
+    Input(&'a str),
+    /// The codex turn these inputs joined, and every turn before it.
+    Inputs(&'a [String]),
+}
+
+fn note_input_taken(snapshot: &Arc<Mutex<SessionSnapshot>>, local_input_id: &str) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.turns.note_input_taken(local_input_id);
+    }
+}
+
+/// Marks a codex/claude session busy for an input that opens (or joins) a
+/// turn, and moves it to a new turn generation.
+pub(crate) fn mark_session_busy_for_input(state: &mut SessionSnapshot) {
+    state.ready = false;
+    state.runtime_state = AgentSessionState::Running;
+    state.turns.started += 1;
+}
+
+/// Sends `TurnCompleted`, first recording what it finished so the daemon's
+/// mark for this event sees it. Every completion goes through here: one sent
+/// without the record would leave `started` ahead of `completed`, and the
+/// daemon's ready mark -- the safety net for a lost `Ready` -- would never
+/// fire for that session again.
+pub(crate) fn send_turn_completed(
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    turn: FinishedTurn<'_>,
+    status: Option<String>,
+) {
+    if let Ok(mut state) = snapshot.lock() {
+        state.turns.finish(turn);
+    }
+    let _ = event_tx.send(ArchcarEvent::TurnCompleted {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        status,
+    });
+}
+
+/// Retires a codex input that failed before any turn took it in. The session
+/// is ready again only if nothing newer is live; otherwise the live turn's
+/// completion makes it ready.
+fn retire_failed_codex_input(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    native_thread_id: &mut Option<String>,
+    local_input_id: &str,
+) {
+    let latest_turn_completed = snapshot.lock().map_or(true, |mut state| {
+        state.turns.retire_input(local_input_id);
+        state.turns.latest_turn_completed()
+    });
+    if latest_turn_completed {
+        apply_harness_effect(
+            runtime_store,
+            snapshot,
+            event_tx,
+            started,
+            native_thread_id,
+            HarnessEffect::Ready,
+        );
+    } else {
+        mark_snapshot_running_not_ready(snapshot);
+    }
 }
 
 #[derive(Clone)]
@@ -445,7 +662,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
     if let Some(stderr) = child_stderr {
         spawn_provider_stderr_reader(start.db_path.to_path_buf(), process.id, start.kind, stderr);
     }
-    let snapshot = running_session_snapshot(
+    let mut snapshot = running_session_snapshot(
         process.id,
         start.thread_id,
         start.workspace,
@@ -453,6 +670,13 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         pid,
         false,
     );
+    if start.kind == SessionKind::CLAUDE {
+        // Booting, not busy: the session loop reports ready once the
+        // transport is up. `running` here read the same as mid-turn, so a
+        // first `session send` racing the start was queued as if behind a
+        // turn rather than waiting for the transport.
+        snapshot.runtime_state = AgentSessionState::Starting;
+    }
     let connection = ProviderProcessConnection {
         child,
         stdin,
@@ -685,6 +909,7 @@ fn apply_harness_effect(
                 local_input_id = %local_input_id,
                 "managed harness input acknowledged"
             );
+            note_input_taken(snapshot, &local_input_id);
             if let Err(err) = runtime_store.mark_provider_input_acknowledged(&local_input_id, None)
             {
                 let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -714,11 +939,13 @@ fn apply_harness_effect(
                 });
                 return;
             }
-            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                session_id: started.session_id,
-                thread_id: started.thread_id,
-                status: Some(harness_turn_status_label(status).to_owned()),
-            });
+            send_turn_completed(
+                snapshot,
+                event_tx,
+                started,
+                FinishedTurn::Input(&local_input_id),
+                Some(harness_turn_status_label(status).to_owned()),
+            );
         }
         HarnessEffect::TurnSettled { status } => {
             info!(
@@ -728,11 +955,13 @@ fn apply_harness_effect(
                 status = harness_turn_status_label(status),
                 "managed harness turn settled"
             );
-            let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                session_id: started.session_id,
-                thread_id: started.thread_id,
-                status: Some(harness_turn_status_label(status).to_owned()),
-            });
+            send_turn_completed(
+                snapshot,
+                event_tx,
+                started,
+                FinishedTurn::Latest,
+                Some(harness_turn_status_label(status).to_owned()),
+            );
         }
         HarnessEffect::ProviderEvent(draft) => {
             append_runtime_provider_event(runtime_store, draft, "provider_native_event");
@@ -807,6 +1036,7 @@ fn apply_harness_effect(
                 local_input_id = %local_input_id,
                 "managed harness turn started"
             );
+            note_input_taken(snapshot, &local_input_id);
         }
         HarnessEffect::Retry { message, delay_ms } => {
             let provider_message = bounded_redacted_provider_message(&message);
@@ -882,6 +1112,40 @@ fn start_session_handle(
     }
 }
 
+/// A ready PTY-loop session whose every write fails, the way a terminal that
+/// went away under a reattached session does. For server tests that need a
+/// real session loop behind a handle.
+#[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_session_handle_writing_to_dev_full(
+    db_path: PathBuf,
+    logs_dir: PathBuf,
+    session_id: i64,
+    thread_id: i64,
+    workspace: String,
+    kind: SessionKind,
+    pid: u32,
+    event_tx: Sender<ArchcarEvent>,
+) -> SessionHandle {
+    let write = OpenOptions::new().write(true).open("/dev/full").unwrap();
+    let connection = ManagedSessionConnection::Reattached {
+        write,
+        output: Arc::new(Mutex::new(String::new())),
+        read_cursor: 0,
+        pid,
+    };
+    let mut snapshot = running_session_snapshot(session_id, thread_id, workspace, kind, pid, true);
+    snapshot.runtime_state = AgentSessionState::WaitingForInput;
+    start_session_handle(
+        db_path,
+        logs_dir,
+        snapshot,
+        controller_for_kind(kind),
+        connection,
+        event_tx,
+    )
+}
+
 fn running_session_snapshot(
     session_id: i64,
     thread_id: i64,
@@ -901,6 +1165,7 @@ fn running_session_snapshot(
         ready,
         capabilities: capabilities_for_kind(kind, Vec::new()),
         screen: String::new(),
+        turns: TurnGenerations::default(),
     }
 }
 
@@ -1911,6 +2176,7 @@ fn run_session_loop(
     );
     loop {
         while let Ok(command) = command_rx.try_recv() {
+            let (command, queued_handoff) = command.split_queued_claim();
             match command {
                 SessionCommand::SendInput {
                     input,
@@ -1980,60 +2246,66 @@ fn run_session_loop(
                         chars = input.chars().count(),
                         "archcar session send_input dequeued"
                     );
-                    let (role, source) = match kind {
-                        ArchcarInputKind::User => ("user", "user_send"),
-                        ArchcarInputKind::ReviewPrompt => ("user", "staged_review_send"),
-                        ArchcarInputKind::ControlCommand => ("system", "control_command"),
-                        ArchcarInputKind::RawTerminal => unreachable!("raw terminal handled above"),
-                    };
-                    let log_text = format_input_audit_log(
-                        &current.workspace,
-                        current.session_id,
-                        persisted_input,
-                        &kind,
-                    );
-                    let _ = runtime_store.append_input_and_audit_log(
-                        current.thread_id,
-                        current.session_id,
-                        role,
-                        persisted_input,
-                        source,
-                        &log_text,
-                    );
-                    user_input_sequence += 1;
-                    let user_input_identity = user_input_identity_suffix(user_input_sequence);
-                    append_runtime_provider_event(
-                        &runtime_store,
-                        runtime_provider_event(RuntimeProviderEventInput {
-                            kind: current.kind,
-                            session_id: current.session_id,
-                            thread_id: current.thread_id,
-                            identity_suffix: Some(&user_input_identity),
-                            provider_sequence: Some(user_input_sequence),
-                            phase: ProviderEventPhase::Started,
-                            event_kind: ProviderEventKind::UserInput,
-                            subtype: match kind {
-                                ArchcarInputKind::User => "user_input",
-                                ArchcarInputKind::ReviewPrompt => "review_prompt",
-                                ArchcarInputKind::ControlCommand => "control_command",
-                                ArchcarInputKind::RawTerminal => {
-                                    unreachable!("raw terminal handled above")
-                                }
-                            },
-                            title: match kind {
-                                ArchcarInputKind::User => "User input",
-                                ArchcarInputKind::ReviewPrompt => "Review prompt",
-                                ArchcarInputKind::ControlCommand => "Control command",
-                                ArchcarInputKind::RawTerminal => {
-                                    unreachable!("raw terminal handled above")
-                                }
-                            },
-                            body: persisted_input,
-                        }),
-                        "user_input",
-                    );
                     match pty.send_line(&input) {
                         Ok(()) => {
+                            // Recorded once the line is written, not before: a
+                            // failed write requeues a queued input, and its
+                            // retry must not show the message twice.
+                            let (role, source) = match kind {
+                                ArchcarInputKind::User => ("user", "user_send"),
+                                ArchcarInputKind::ReviewPrompt => ("user", "staged_review_send"),
+                                ArchcarInputKind::ControlCommand => ("system", "control_command"),
+                                ArchcarInputKind::RawTerminal => {
+                                    unreachable!("raw terminal handled above")
+                                }
+                            };
+                            let log_text = format_input_audit_log(
+                                &current.workspace,
+                                current.session_id,
+                                persisted_input,
+                                &kind,
+                            );
+                            let _ = runtime_store.append_input_and_audit_log(
+                                current.thread_id,
+                                current.session_id,
+                                role,
+                                persisted_input,
+                                source,
+                                &log_text,
+                            );
+                            user_input_sequence += 1;
+                            let user_input_identity =
+                                user_input_identity_suffix(user_input_sequence);
+                            append_runtime_provider_event(
+                                &runtime_store,
+                                runtime_provider_event(RuntimeProviderEventInput {
+                                    kind: current.kind,
+                                    session_id: current.session_id,
+                                    thread_id: current.thread_id,
+                                    identity_suffix: Some(&user_input_identity),
+                                    provider_sequence: Some(user_input_sequence),
+                                    phase: ProviderEventPhase::Started,
+                                    event_kind: ProviderEventKind::UserInput,
+                                    subtype: match kind {
+                                        ArchcarInputKind::User => "user_input",
+                                        ArchcarInputKind::ReviewPrompt => "review_prompt",
+                                        ArchcarInputKind::ControlCommand => "control_command",
+                                        ArchcarInputKind::RawTerminal => {
+                                            unreachable!("raw terminal handled above")
+                                        }
+                                    },
+                                    title: match kind {
+                                        ArchcarInputKind::User => "User input",
+                                        ArchcarInputKind::ReviewPrompt => "Review prompt",
+                                        ArchcarInputKind::ControlCommand => "Control command",
+                                        ArchcarInputKind::RawTerminal => {
+                                            unreachable!("raw terminal handled above")
+                                        }
+                                    },
+                                    body: persisted_input,
+                                }),
+                                "user_input",
+                            );
                             match current.kind {
                                 SessionKind::CODEX => {
                                     if let Ok(mut state) = snapshot.lock() {
@@ -2075,8 +2347,24 @@ fn run_session_loop(
                                 error = %err,
                                 "archcar session send_input pty write failed"
                             );
+                            // No turn started, so nothing will clear a busy
+                            // mark the queue drain set; resolve the session
+                            // instead of leaving it Running. The process may
+                            // still be alive, so do not stop it.
+                            requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                            mark_provider_session_failed(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                err,
+                            );
+                            continue;
                         }
                     }
+                }
+                SessionCommand::SendQueuedInput { .. } => {
+                    unreachable!("split_queued_claim hands a queued input over as SendInput")
                 }
                 SessionCommand::Kill => {
                     let current = snapshot.lock().unwrap().clone();
@@ -2315,7 +2603,8 @@ fn run_codex_app_server_session_loop(
         .unwrap_or(0);
     let mut fallback_request_sequence = 0_u64;
     let mut active_turn_id: Option<String> = None;
-    let mut active_input_ids = Vec::<String>::new();
+    // Each acknowledged input, with the turn it joined.
+    let mut active_inputs = Vec::<(Option<String>, String)>::new();
     let mut pending_input_requests = HashMap::<u64, PendingCodexInputRequest>::new();
     let mut control_adapter = CodexManagedAdapter::new(HarnessAdapterContext {
         session_id: started.session_id,
@@ -2429,7 +2718,33 @@ fn run_codex_app_server_session_loop(
                                         );
                                         return;
                                     }
-                                    active_input_ids.push(pending.local_input_id);
+                                    // A steer accepted for a turn that has
+                                    // already completed: that completion
+                                    // finished it, as it named the turn.
+                                    if pending.turn_id.is_some()
+                                        && pending.turn_id != active_turn_id
+                                    {
+                                        if let Err(err) = runtime_store
+                                            .mark_provider_input_terminal(&pending.local_input_id)
+                                        {
+                                            mark_provider_session_failed(
+                                                &runtime_store,
+                                                &snapshot,
+                                                &event_tx,
+                                                &started,
+                                                format!(
+                                                    "Codex input terminal persistence failed: {err:#}"
+                                                ),
+                                            );
+                                            return;
+                                        }
+                                    } else {
+                                        let joined_turn_id = pending
+                                            .turn_id
+                                            .or_else(|| codex_turn_id_from_message(&message));
+                                        active_inputs
+                                            .push((joined_turn_id, pending.local_input_id));
+                                    }
                                 }
                                 CodexInputResponseAction::RetryStart => {
                                     let Some(thread_id) = provider_thread_id.as_deref() else {
@@ -2440,12 +2755,30 @@ fn run_codex_app_server_session_loop(
                                                 "Codex app-server thread is not initialized yet"
                                                     .to_owned(),
                                         });
+                                        retire_failed_codex_input(
+                                            &runtime_store,
+                                            &snapshot,
+                                            &event_tx,
+                                            &started,
+                                            &mut connection.native_thread_id,
+                                            &pending.local_input_id,
+                                        );
                                         continue;
                                     };
                                     fallback_request_sequence =
                                         fallback_request_sequence.saturating_add(1);
                                     let fallback_request_id =
                                         next_fallback_request_id(fallback_request_sequence);
+                                    // Codex refuses a steer once the turn it
+                                    // named has ended, so the input joined no
+                                    // turn: that turn's completion, and the
+                                    // `Ready` after it, did not finish it. It
+                                    // starts a turn of its own now, which the
+                                    // session is busy with like any other.
+                                    if let Ok(mut state) = snapshot.lock() {
+                                        mark_session_busy_for_input(&mut state);
+                                        state.turns.note_input(pending.local_input_id.clone());
+                                    }
                                     let params = codex_turn_start_params(
                                         &connection,
                                         thread_id,
@@ -2474,6 +2807,7 @@ fn run_codex_app_server_session_loop(
                                             kind: CodexInputRequestKind::ImmediateFallbackStart,
                                             local_input_id: pending.local_input_id,
                                             input: pending.input,
+                                            turn_id: None,
                                         },
                                     );
                                 }
@@ -2484,7 +2818,6 @@ fn run_codex_app_server_session_loop(
                                             error,
                                         );
                                     }
-                                    mark_snapshot_running_not_ready(&snapshot);
                                     let _ = event_tx.send(ArchcarEvent::SessionError {
                                         session_id: Some(started.session_id),
                                         thread_id: Some(started.thread_id),
@@ -2492,20 +2825,44 @@ fn run_codex_app_server_session_loop(
                                             "Codex app-server input request failed".to_owned()
                                         }),
                                     });
+                                    // A rejected start, or a refused steer's
+                                    // rejected fallback start: no turn has
+                                    // the input, so no completion will finish
+                                    // the generations it started.
+                                    retire_failed_codex_input(
+                                        &runtime_store,
+                                        &snapshot,
+                                        &event_tx,
+                                        &started,
+                                        &mut connection.native_thread_id,
+                                        &pending.local_input_id,
+                                    );
                                 }
                             }
                         }
                     }
-                    if let Some(turn_id) = codex_turn_id_from_message(&message) {
-                        active_turn_id = Some(turn_id);
-                        control_adapter.set_active_turn_id(active_turn_id.clone());
-                    }
                     if message.method.as_deref() == Some("turn/completed") {
-                        active_turn_id = None;
-                        control_adapter.set_active_turn_id(None);
-                        for local_input_id in active_input_ids.drain(..) {
+                        let completed_turn_id = codex_turn_id_from_message(&message);
+                        // A late completion for an older turn leaves a newer
+                        // live turn the one to steer into.
+                        if completed_turn_id.is_none() || completed_turn_id == active_turn_id {
+                            active_turn_id = None;
+                            control_adapter.set_active_turn_id(None);
+                        }
+                        let (finished, still_active): (Vec<_>, Vec<_>) =
+                            active_inputs.drain(..).partition(|(turn_id, _)| {
+                                completed_turn_id.is_none()
+                                    || turn_id.is_none()
+                                    || *turn_id == completed_turn_id
+                            });
+                        active_inputs = still_active;
+                        let mut finished_input_ids = finished
+                            .into_iter()
+                            .map(|(_, local_input_id)| local_input_id)
+                            .collect::<Vec<_>>();
+                        for local_input_id in &finished_input_ids {
                             if let Err(err) =
-                                runtime_store.mark_provider_input_terminal(&local_input_id)
+                                runtime_store.mark_provider_input_terminal(local_input_id)
                             {
                                 mark_provider_session_failed(
                                     &runtime_store,
@@ -2517,19 +2874,50 @@ fn run_codex_app_server_session_loop(
                                 return;
                             }
                         }
-                        let _ = event_tx.send(ArchcarEvent::TurnCompleted {
-                            session_id: started.session_id,
-                            thread_id: started.thread_id,
-                            status: codex_turn_completed_status(&message),
-                        });
-                        apply_harness_effect(
-                            &runtime_store,
+                        // A steer still waiting on its answer named this
+                        // turn, so the turn finishes it too; if codex refuses
+                        // it, the turn it starts instead is a newer one.
+                        finished_input_ids.extend(
+                            pending_input_requests
+                                .values()
+                                .filter(|pending| {
+                                    pending.turn_id.is_some()
+                                        && pending.turn_id == completed_turn_id
+                                })
+                                .map(|pending| pending.local_input_id.clone()),
+                        );
+                        // Without a turn id, or with no input known to have
+                        // joined the turn, the completion cannot be placed,
+                        // so it finishes everything.
+                        let finished_turn =
+                            if completed_turn_id.is_none() || finished_input_ids.is_empty() {
+                                FinishedTurn::Latest
+                            } else {
+                                FinishedTurn::Inputs(&finished_input_ids)
+                            };
+                        send_turn_completed(
                             &snapshot,
                             &event_tx,
                             &started,
-                            &mut connection.native_thread_id,
-                            HarnessEffect::Ready,
+                            finished_turn,
+                            codex_turn_completed_status(&message),
                         );
+                        let latest_turn_completed = snapshot
+                            .lock()
+                            .map_or(true, |state| state.turns.latest_turn_completed());
+                        if latest_turn_completed {
+                            apply_harness_effect(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                &mut connection.native_thread_id,
+                                HarnessEffect::Ready,
+                            );
+                        }
+                    } else if let Some(turn_id) = codex_turn_id_from_message(&message) {
+                        active_turn_id = Some(turn_id);
+                        control_adapter.set_active_turn_id(active_turn_id.clone());
                     }
                     let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                         thread_id: started.thread_id,
@@ -2544,6 +2932,7 @@ fn run_codex_app_server_session_loop(
         }
 
         while let Ok(command) = command_rx.try_recv() {
+            let (command, queued_handoff) = command.split_queued_claim();
             match command {
                 SessionCommand::SendInput {
                     input,
@@ -2551,19 +2940,21 @@ fn run_codex_app_server_session_loop(
                     kind,
                     delivery,
                 } => {
+                    crate::archcar::test_hooks::pause_before_session_takes_input();
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
                         false
                     } else {
                         match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
                             Ok(first_turn) => first_turn,
                             Err(err) => {
-                                let _ = event_tx.send(ArchcarEvent::SessionError {
-                                    session_id: Some(started.session_id),
-                                    thread_id: Some(started.thread_id),
-                                    message: format!(
-                                        "Could not prepare Codex input history: {err:#}"
-                                    ),
-                                });
+                                requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                                mark_provider_session_failed(
+                                    &runtime_store,
+                                    &snapshot,
+                                    &event_tx,
+                                    &started,
+                                    format!("Could not prepare Codex input history: {err:#}"),
+                                );
                                 continue;
                             }
                         }
@@ -2572,11 +2963,14 @@ fn run_codex_app_server_session_loop(
                         compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
                     let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
                     let Some(thread_id) = provider_thread_id.as_deref() else {
-                        let _ = event_tx.send(ArchcarEvent::SessionError {
-                            session_id: Some(started.session_id),
-                            thread_id: Some(started.thread_id),
-                            message: "Codex app-server thread is not initialized yet".to_owned(),
-                        });
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            "Codex app-server thread is not initialized yet",
+                        );
                         continue;
                     };
                     let next_input_sequence = user_input_sequence + 1;
@@ -2609,6 +3003,7 @@ fn run_codex_app_server_session_loop(
                         delivery,
                         connection.native_thread_id.clone(),
                     ) {
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -2618,6 +3013,21 @@ fn run_codex_app_server_session_loop(
                         );
                         continue;
                     }
+                    // Busy before the provider has the turn, not after: a
+                    // send that read `ready` once the turn was written would
+                    // be steered into it. If the write fails, the session is
+                    // marked failed below, so this never outlives a turn the
+                    // provider did not get.
+                    if let Ok(mut state) = snapshot.lock() {
+                        mark_session_busy_for_input(&mut state);
+                        state.turns.note_input(local_input_id.clone());
+                    }
+                    let steered_turn_id = match &route {
+                        CodexInputRoute::Steer { expected_turn_id } => {
+                            Some(expected_turn_id.clone())
+                        }
+                        CodexInputRoute::Start => None,
+                    };
                     let write_result = match route {
                         CodexInputRoute::Steer { expected_turn_id } => {
                             write_turn_steer_request_with_id(
@@ -2642,10 +3052,14 @@ fn run_codex_app_server_session_loop(
                             )
                         }
                     };
+                    if write_result.is_ok() {
+                        crate::archcar::test_hooks::pause_after_provider_handoff();
+                    }
                     if let Err(err) = write_result {
                         let _ = runtime_store
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
                         let _ = connection.child.kill();
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -2657,6 +3071,7 @@ fn run_codex_app_server_session_loop(
                         runtime_store.mark_provider_input_written(&local_input_id)
                     {
                         let _ = connection.child.kill();
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -2674,6 +3089,7 @@ fn run_codex_app_server_session_loop(
                                 kind: request_kind,
                                 local_input_id: local_input_id.clone(),
                                 input: provider_input.clone(),
+                                turn_id: steered_turn_id,
                             },
                         );
                         user_input_sequence = next_input_sequence;
@@ -2688,11 +3104,10 @@ fn run_codex_app_server_session_loop(
                         let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                             thread_id: started.thread_id,
                         });
-                        if let Ok(mut state) = snapshot.lock() {
-                            state.ready = false;
-                            state.runtime_state = AgentSessionState::Running;
-                        }
                     }
+                }
+                SessionCommand::SendQueuedInput { .. } => {
+                    unreachable!("split_queued_claim hands a queued input over as SendInput")
                 }
                 SessionCommand::Kill => {
                     let _ = connection.child.kill();
@@ -2807,6 +3222,7 @@ fn run_claude_stream_session_loop(
     // deadlocks the queue: the first message is never delivered. Its stdin
     // accepts input as soon as the transport is up, so that is the moment the
     // session is ready.
+    crate::archcar::test_hooks::hold_before_claude_transport_ready();
     adapter.note_transport_started();
     adapter.note_plan_mode(
         runtime_store
@@ -2838,6 +3254,7 @@ fn run_claude_stream_session_loop(
         );
 
         while let Ok(command) = command_rx.try_recv() {
+            let (command, queued_handoff) = command.split_queued_claim();
             match command {
                 SessionCommand::SendInput {
                     input,
@@ -2845,19 +3262,21 @@ fn run_claude_stream_session_loop(
                     kind,
                     delivery,
                 } => {
+                    crate::archcar::test_hooks::pause_before_session_takes_input();
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
                         false
                     } else {
                         match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
                             Ok(first_turn) => first_turn,
                             Err(err) => {
-                                let _ = event_tx.send(ArchcarEvent::SessionError {
-                                    session_id: Some(started.session_id),
-                                    thread_id: Some(started.thread_id),
-                                    message: format!(
-                                        "Could not prepare Claude input history: {err:#}"
-                                    ),
-                                });
+                                requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                                mark_provider_session_failed(
+                                    &runtime_store,
+                                    &snapshot,
+                                    &event_tx,
+                                    &started,
+                                    format!("Could not prepare Claude input history: {err:#}"),
+                                );
                                 continue;
                             }
                         }
@@ -2878,6 +3297,7 @@ fn run_claude_stream_session_loop(
                         delivery,
                         connection.native_thread_id.clone(),
                     ) {
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -2886,6 +3306,15 @@ fn run_claude_stream_session_loop(
                             format!("Claude input persistence failed: {err:#}"),
                         );
                         continue;
+                    }
+                    // Busy before the provider has the turn, not after: a
+                    // send that read `ready` once the turn was written would
+                    // be steered into it. If the write fails, the session is
+                    // marked failed below, so this never outlives a turn the
+                    // provider did not get.
+                    if let Ok(mut state) = snapshot.lock() {
+                        mark_session_busy_for_input(&mut state);
+                        state.turns.note_input(local_input_id.clone());
                     }
                     let native_write = adapter.encode_input(HarnessInput {
                         local_input_id: local_input_id.clone(),
@@ -2904,11 +3333,15 @@ fn run_claude_stream_session_loop(
                         connection.stdin.flush()?;
                         Ok(())
                     });
+                    if write_result.is_ok() {
+                        crate::archcar::test_hooks::pause_after_provider_handoff();
+                    }
                     if let Err(err) = write_result {
                         let _ = runtime_store
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
                         adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -2921,6 +3354,7 @@ fn run_claude_stream_session_loop(
                     {
                         adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -2938,11 +3372,10 @@ fn run_claude_stream_session_loop(
                             &kind,
                             user_input_sequence,
                         );
-                        if let Ok(mut state) = snapshot.lock() {
-                            state.ready = false;
-                            state.runtime_state = AgentSessionState::Running;
-                        }
                     }
+                }
+                SessionCommand::SendQueuedInput { .. } => {
+                    unreachable!("split_queued_claim hands a queued input over as SendInput")
                 }
                 SessionCommand::Kill => {
                     kill_requested = true;
@@ -3196,6 +3629,8 @@ struct PendingCodexInputRequest {
     kind: CodexInputRequestKind,
     local_input_id: String,
     input: String,
+    /// The turn a steer named; `None` for a start.
+    turn_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3567,6 +4002,37 @@ fn mark_snapshot_exited(snapshot: &Arc<Mutex<SessionSnapshot>>, exit_code: Optio
     }
 }
 
+/// A queued input that never reached the provider goes back to the head of
+/// its thread's queue, so it is delivered when the thread next has a ready
+/// session instead of being lost with the failed one. Run before the session
+/// is marked failed, so a client that sees the error already sees the input
+/// queued again.
+fn requeue_failed_queued_handoff(
+    db_path: &std::path::Path,
+    event_tx: &Sender<ArchcarEvent>,
+    claimed: Option<QueuedChatInputRecord>,
+) {
+    // A direct send carries no claim: there is nothing to put back.
+    let Some(claimed) = claimed else {
+        return;
+    };
+    let requeued = WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.requeue_claimed_chat_input_front(&claimed));
+    match requeued {
+        Ok(()) => {
+            let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
+                thread_id: claimed.thread_id,
+            });
+        }
+        Err(err) => warn!(
+            thread_id = claimed.thread_id,
+            queue_id = claimed.id,
+            error = %format!("{err:#}"),
+            "archcar could not requeue a queued chat input after a failed handoff"
+        ),
+    }
+}
+
 fn mark_provider_session_failed(
     runtime_store: &RuntimeSessionStore,
     snapshot: &Arc<Mutex<SessionSnapshot>>,
@@ -3720,14 +4186,125 @@ fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::repository::{AddRepository, RepositoryStore};
+    use crate::test_support::EnvGuard;
     use crate::workspace::{CreateWorkspace, ProcessRecord};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::Mutex;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// Two claude inputs in flight: the one that opened the turn, taken in,
+    /// and an immediate message sent during it.
+    fn turns_with_an_immediate_input() -> TurnGenerations {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_input("turn-input".to_owned());
+        turns.note_input_taken("turn-input");
+        turns.started += 1;
+        turns.note_input("immediate-input".to_owned());
+        turns
+    }
+
+    #[test]
+    fn a_turn_completion_finishes_only_the_inputs_claude_took_in() {
+        let mut turns = turns_with_an_immediate_input();
+        turns.finish(FinishedTurn::Input("turn-input"));
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
+
+        turns.note_input_taken("immediate-input");
+        turns.finish(FinishedTurn::Input("immediate-input"));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.inputs.is_empty(), "{turns:?}");
+    }
+
+    #[test]
+    fn a_turn_completion_finishes_an_input_claude_took_into_the_same_turn() {
+        let mut turns = turns_with_an_immediate_input();
+        turns.note_input_taken("immediate-input");
+        turns.finish(FinishedTurn::Input("turn-input"));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.inputs.is_empty(), "{turns:?}");
+    }
+
+    /// The daemon's ready mark is the safety net for a lost `Ready`; a
+    /// completion this ledger cannot place must not disable it.
+    #[test]
+    fn a_completion_for_an_unrecorded_input_finishes_every_turn() {
+        let mut turns = turns_with_an_immediate_input();
+        turns.finish(FinishedTurn::Input("never-recorded"));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+
+        let mut turns = turns_with_an_immediate_input();
+        turns.finish(FinishedTurn::Latest);
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+    }
+
+    /// A codex turn, a steer into it that codex refused, and the turn the
+    /// refused input started instead, noted again for that turn.
+    fn codex_turns_with_a_refused_steer() -> TurnGenerations {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_input("steer-input".to_owned());
+        turns.started += 1;
+        turns.note_input("steer-input".to_owned());
+        turns
+    }
+
+    #[test]
+    fn a_codex_completion_finishes_only_the_inputs_that_joined_its_turn() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
+
+        turns.finish(FinishedTurn::Inputs(&["steer-input".to_owned()]));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.inputs.is_empty(), "{turns:?}");
+    }
+
+    /// The refused steer's fallback start is rejected while the turn the
+    /// steer named is still live: that turn's completion must then finish
+    /// everything, as nothing else is live.
+    #[test]
+    fn a_failed_input_retires_its_generations_once_the_live_turn_ends() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.retire_input("steer-input");
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
+        assert_eq!(turns.completed, 0, "the live turn is not finished");
+
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(
+            turns.inputs.is_empty() && turns.retired.is_empty(),
+            "{turns:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_input_with_nothing_live_finishes_at_once() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        turns.retire_input("steer-input");
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+    }
+
+    /// A busy mark whose input has not reached the session loop yet has no
+    /// ledger entry; retiring an older input must not step over it.
+    #[test]
+    fn retiring_an_input_does_not_finish_a_newer_busy_mark() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()]));
+        turns.started += 1;
+        turns.retire_input("steer-input");
+        assert_eq!(turns.completed, 3, "{turns:?}");
+        assert!(!turns.latest_turn_completed(), "{turns:?}");
+    }
+
+    #[test]
+    fn a_codex_completion_for_unrecorded_inputs_finishes_every_turn() {
+        let mut turns = codex_turns_with_a_refused_steer();
+        turns.finish(FinishedTurn::Inputs(&["never-recorded".to_owned()]));
+        assert!(turns.latest_turn_completed(), "{turns:?}");
     }
 
     #[test]
@@ -3830,6 +4407,333 @@ mod tests {
         let _ = child.wait();
         let exited = store.get_process_record(process.id).unwrap();
         assert_eq!(exited.status, ProcessStatus::Exited);
+    }
+
+    /// A codex session restored for a queued drain is served by the PTY loop
+    /// with its original kind; a failed write must not leave the busy mark
+    /// the drain set in place.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn queued_send_input_write_failure_on_pty_loop_resolves_off_running() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        let mut child = ProcessCommand::new("sleep").arg("30").spawn().unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, child.id())
+            .unwrap();
+        let write = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let connection = ManagedSessionConnection::Reattached {
+            write,
+            output: Arc::new(Mutex::new(String::new())),
+            read_cursor: 0,
+            pid: child.id(),
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            child.id(),
+            true,
+        )));
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let loop_thread = thread::spawn(move || {
+            run_session_loop(
+                db_path,
+                logs_dir,
+                snapshot_for_loop,
+                controller_for_kind(SessionKind::CODEX),
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+        // What the server's queue drain marks on a codex/claude snapshot
+        // right before it hands the input to the session loop.
+        {
+            let mut state = snapshot.lock().unwrap();
+            state.ready = false;
+            state.runtime_state = AgentSessionState::Running;
+        }
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "run the tests".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionError { session_id, .. } if *session_id == Some(process.id)),
+        );
+        {
+            let state = snapshot.lock().unwrap();
+            assert_eq!(state.runtime_state, AgentSessionState::Failed);
+            assert!(!state.ready);
+        }
+
+        command_tx.send(SessionCommand::Kill).unwrap();
+        drop(command_tx);
+        loop_thread.join().unwrap();
+        let _ = child.wait();
+    }
+
+    /// The claude stream loop's write-failure exit: the queue row the drain
+    /// claimed for the input goes back to the head of the queue, and the
+    /// thread does not show a message the agent never got.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn queued_input_returns_to_the_queue_when_the_claude_stream_write_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        // A transport that closed its stdin: every write to it fails.
+        let mut child = ProcessCommand::new("bash")
+            .args(["-c", "exec 0<&-; exec sleep 30"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_link(format!("/proc/{pid}/fd/0")).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the transport never closed its stdin"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let process = record_thread_session_with_port_and_pid(&store, &thread, 43993, pid);
+        let connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: spawn_stdout_line_reader(stdout),
+            next_read_line: 0,
+            native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: Some("claude-sonnet-fixture".to_owned()),
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            pid,
+            false,
+        )));
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let loop_thread = thread::spawn(move || {
+            run_claude_stream_session_loop(
+                db_path,
+                snapshot_for_loop,
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
+        );
+
+        // What the server's queue drain does: claim the row, mark the
+        // session busy, hand the input over with its claim.
+        let queued = store
+            .enqueue_chat_input(
+                thread.id,
+                "run the tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+        let claimed = store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.id, queued.id);
+        mark_session_busy_for_input(&mut snapshot.lock().unwrap());
+        command_tx
+            .send(SessionCommand::SendQueuedInput {
+                claim: claimed.clone(),
+            })
+            .unwrap();
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionError { session_id, message, .. } if *session_id == Some(process.id) && message.contains("Claude stream input failed")),
+        );
+        assert_eq!(
+            snapshot.lock().unwrap().runtime_state,
+            AgentSessionState::Failed
+        );
+        let remaining = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, queued.id);
+        assert_eq!(remaining[0].input, "run the tests");
+        assert!(store
+            .list_chat_messages(thread.id)
+            .unwrap()
+            .iter()
+            .all(|message| message.content != "run the tests"));
+
+        let _ = command_tx.send(SessionCommand::Kill);
+        drop(command_tx);
+        loop_thread.join().unwrap();
+    }
+
+    /// A direct send with the same words as a queued input, ahead of it in
+    /// the channel, must not take the queued input's claim: the claim travels
+    /// inside the queued command, so when that handoff fails its row goes back
+    /// on the queue.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identical_direct_send_does_not_take_a_queued_inputs_claim() {
+        use std::os::fd::OwnedFd;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CODEX).unwrap();
+        // Reads exactly one line, then closes its end: the first write lands,
+        // every later one fails with EPIPE.
+        let mut child = ProcessCommand::new("bash")
+            .args([
+                "-c",
+                "IFS= read -r -d $'\\r' _line; exec 0<&-; exec sleep 30",
+            ])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let write = fs::File::from(OwnedFd::from(child.stdin.take().unwrap()));
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, pid)
+            .unwrap();
+        let connection = ManagedSessionConnection::Reattached {
+            write,
+            output: Arc::new(Mutex::new(String::new())),
+            read_cursor: 0,
+            pid,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            pid,
+            true,
+        )));
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let loop_thread = thread::spawn(move || {
+            run_session_loop(
+                db_path,
+                logs_dir,
+                snapshot_for_loop,
+                controller_for_kind(SessionKind::CODEX),
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionStarted { session_id, .. } if *session_id == process.id),
+        );
+
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "run the tests",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CODEX,
+            )
+            .unwrap();
+        let claimed = store
+            .claim_next_queued_chat_input(thread.id)
+            .unwrap()
+            .unwrap();
+        // The same words sent directly, steering the turn: it is written.
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: claimed.input.clone(),
+                visible_input: claimed.visible_input.clone(),
+                kind: claimed.input_kind.clone(),
+                delivery: ArchcarInputDelivery::Immediate,
+            })
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while fs::read_link(format!("/proc/{pid}/fd/0")).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the direct send never reached the session"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Then the queued input itself, whose write fails.
+        command_tx
+            .send(SessionCommand::SendQueuedInput {
+                claim: claimed.clone(),
+            })
+            .unwrap();
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionError { session_id, .. } if *session_id == Some(process.id)),
+        );
+        let remaining = store.list_queued_chat_inputs(thread.id).unwrap();
+        assert_eq!(
+            remaining.len(),
+            1,
+            "the direct send took the queued input's claim, so its failed handoff lost it"
+        );
+        assert_eq!(remaining[0].id, claimed.id);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = command_tx.send(SessionCommand::Kill);
+        drop(command_tx);
+        loop_thread.join().unwrap();
     }
 
     #[test]
@@ -4037,17 +4941,22 @@ mod tests {
         spawn_provider_stderr_reader(db_path.clone(), process.id, SessionKind::CLAUDE, stderr);
         let _ = child.wait();
 
-        // The drain runs on its own thread; poll the transcript for it.
-        let recorded = (0..100)
-            .find_map(|_| {
-                let text = std::fs::read_to_string(&process.log_path).unwrap_or_default();
-                if text.contains("refusing to start") {
-                    return Some(text);
-                }
-                thread::sleep(Duration::from_millis(20));
-                None
-            })
-            .unwrap_or_default();
+        // The drain runs on its own thread and appends each line through a
+        // fresh store open, so the second line lands after the first. Wait
+        // for every line the assertions below need, not just the first.
+        let has_every_line =
+            |text: &str| text.contains("refusing to start") && text.contains("second line");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let recorded = loop {
+            let text = std::fs::read_to_string(&process.log_path).unwrap_or_default();
+            if has_every_line(&text) {
+                break text;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("stderr lines did not all reach the transcript within 5s:\n{text}");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
 
         assert!(recorded.contains("refusing to start"), "{recorded}");
         assert!(recorded.contains("second line"), "{recorded}");
@@ -5075,15 +5984,23 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             .create_chat_thread("berlin", "claude", "Second", None)
             .unwrap();
 
+        // Which port comes back depends on the host: 43000 sits in Linux's
+        // ephemeral range, so a loopback connection that recently used it
+        // (even one in TIME_WAIT) moves the reservation to the next free one.
         let reservation = reserve_provider_native_thread_port(&store, "berlin", first.id).unwrap();
-        assert_eq!(reservation.local_addr().unwrap().port(), 43000);
+        let first_port = reservation.local_addr().unwrap().port();
+        assert!(first_port >= PROVIDER_NATIVE_PORT_START);
+        assert!(
+            TcpListener::bind(("127.0.0.1", first_port)).is_err(),
+            "the reservation must keep port {first_port} bound until the process is recorded"
+        );
 
         let second_reservation =
             reserve_provider_native_thread_port(&store, "berlin", second.id).unwrap();
 
         let second_port = second_reservation.local_addr().unwrap().port();
-        assert_ne!(second_port, reservation.local_addr().unwrap().port());
-        assert!(second_port >= 43001);
+        assert_ne!(second_port, first_port);
+        assert!(second_port >= PROVIDER_NATIVE_PORT_START);
     }
 
     #[test]
@@ -5351,7 +6268,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
 
     #[test]
     fn codex_thread_launch_with_native_id_resumes_that_session() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::CODEX);
@@ -5373,8 +6290,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             ),
         )
         .unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &fake_home);
+        env.set("HOME", &fake_home);
 
         let ThreadSessionLaunch { launch, .. } = build_thread_session_launch(
             &store,
@@ -5396,24 +6312,17 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             launch.session_resume_id.as_deref(),
             Some("codex-native-thread")
         );
-
-        if let Some(previous) = previous_home {
-            std::env::set_var("HOME", previous);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
     fn codex_thread_launch_clears_native_id_when_rollout_is_missing() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
         let store = seeded_workspace_store(temp.path());
         let controller = controller_for_kind(SessionKind::CODEX);
         let fake_home = temp.path().join("home");
         fs::create_dir_all(fake_home.join(".codex/sessions")).unwrap();
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &fake_home);
+        env.set("HOME", &fake_home);
         let thread = store
             .create_chat_thread("berlin", "codex", "Codex", None)
             .and_then(|thread| store.update_chat_thread_native_id(thread.id, "missing-rollout"))
@@ -5446,17 +6355,11 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             .unwrap()
             .native_thread_id
             .is_none());
-
-        if let Some(previous) = previous_home {
-            std::env::set_var("HOME", previous);
-        } else {
-            std::env::remove_var("HOME");
-        }
     }
 
     #[test]
     fn managed_session_store_uses_app_shared_provider_settings() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = EnvGuard::lock();
         let temp = tempfile::tempdir().unwrap();
         drop(seeded_workspace_store(temp.path()));
         let config_home = temp.path().join("xdg/config");
@@ -5467,18 +6370,12 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             "codex_executable_path = \"/shared/bin/codex\"\n",
         )
         .unwrap();
-        let previous_config_home = std::env::var_os("XDG_CONFIG_HOME");
-        std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        env.set("XDG_CONFIG_HOME", &config_home);
 
         let store =
             open_managed_session_store(temp.path().join("state.db"), temp.path().join("logs"))
                 .unwrap();
-
-        if let Some(previous) = previous_config_home {
-            std::env::set_var("XDG_CONFIG_HOME", previous);
-        } else {
-            std::env::remove_var("XDG_CONFIG_HOME");
-        }
+        drop(env);
         assert_eq!(
             store
                 .session_launch("berlin", SessionKind::CODEX)
@@ -5816,6 +6713,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             kind: CodexInputRequestKind::ImmediateSteer,
             local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
+            turn_id: Some("turn-7".to_owned()),
         };
         assert_eq!(
             codex_input_response_action(&immediate, true),
@@ -5826,6 +6724,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             kind: CodexInputRequestKind::AutoSteer,
             local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
+            turn_id: Some("turn-7".to_owned()),
         };
         assert_eq!(
             codex_input_response_action(&auto, true),
@@ -5836,6 +6735,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             kind: CodexInputRequestKind::ImmediateFallbackStart,
             local_input_id: "input-1".to_owned(),
             input: "adjust course".to_owned(),
+            turn_id: None,
         };
         assert_eq!(
             codex_input_response_action(&fallback, true),

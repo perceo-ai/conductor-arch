@@ -179,6 +179,24 @@ impl ClaudeTurnTracker {
         let Some(active) = self.active_turn.as_mut() else {
             return;
         };
+        // The next written input echoed while this turn is open: claude took
+        // it in at a tool boundary, into this turn, whose one `result`
+        // answers both. Left queued, it would wait for a turn of its own that
+        // never comes.
+        let echoes_active = active.content == text && !active.acknowledged;
+        if !echoes_active
+            && self
+                .written_inputs
+                .front()
+                .is_some_and(|next| next.content == text)
+        {
+            if let Some(merged) = self.written_inputs.pop_front() {
+                effects.push(HarnessEffect::InputAcknowledged {
+                    local_input_id: merged.local_input_id,
+                });
+            }
+            return;
+        }
         if active.content == text && !active.acknowledged {
             active.acknowledged = true;
             effects.push(HarnessEffect::InputAcknowledged {
@@ -3979,6 +3997,81 @@ mod tests {
         assert!(!replay
             .iter()
             .any(|effect| matches!(effect, HarnessEffect::TurnStarted { .. })));
+    }
+
+    /// Claude takes a message sent during a turn in at that turn's next tool
+    /// boundary, echoing it inside the turn, and one `result` answers both.
+    /// Left queued, the message would hold back `Ready` for a turn of its own
+    /// that never comes.
+    #[test]
+    fn claude_input_echoed_inside_the_open_turn_finishes_with_it() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter.note_transport_started();
+        for (local_input_id, content, delivery) in [
+            (
+                "turn-input",
+                "Run the tests",
+                crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            ),
+            (
+                "immediate-input",
+                "Also run clippy",
+                crate::archcar::protocol::ArchcarInputDelivery::Immediate,
+            ),
+        ] {
+            adapter
+                .encode_input(HarnessInput {
+                    local_input_id: local_input_id.to_owned(),
+                    content: content.to_owned(),
+                    visible_content: None,
+                    kind: crate::archcar::protocol::ArchcarInputKind::User,
+                    delivery,
+                })
+                .unwrap();
+        }
+        let observe = |adapter: &mut ClaudeManagedAdapter, line: &str| {
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: CLAUDE_PROVIDER_NAME,
+                    payload: format!("{line}\n").into_bytes(),
+                })
+                .unwrap()
+        };
+        observe(
+            &mut adapter,
+            r#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Run the tests"}]}}"#,
+        );
+
+        let merged = observe(
+            &mut adapter,
+            r#"{"type":"user","session_id":"s1","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"Also run clippy"}]}}"#,
+        );
+        assert!(merged.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::InputAcknowledged { local_input_id } if local_input_id == "immediate-input"
+        )));
+        assert!(!merged
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::TurnStarted { .. })));
+
+        let finished = observe(
+            &mut adapter,
+            r#"{"type":"result","subtype":"success","session_id":"s1","uuid":"r1","result":"done"}"#,
+        );
+        assert!(finished.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted { local_input_id, .. } if local_input_id == "turn-input"
+        )));
+        assert!(finished
+            .iter()
+            .any(|effect| matches!(effect, HarnessEffect::Ready)));
+        assert!(adapter.tracker.ready());
     }
 
     #[test]

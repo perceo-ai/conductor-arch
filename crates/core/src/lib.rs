@@ -53,6 +53,9 @@ pub mod workspace;
 pub mod workspace_intel;
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod pty_tests {
     use std::env;
     use std::ffi::OsString;

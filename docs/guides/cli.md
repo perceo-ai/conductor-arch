@@ -75,7 +75,7 @@ An agent's `state` is one of:
 | `working` | alive and mid-turn: thinking, streaming, or running a tool |
 | `awaiting_input` | alive and blocked on a person: a permission prompt, a question, a plan to approve, or a fresh chat with no task yet |
 | `finished` | the last turn completed successfully (idle, or exited) |
-| `failed` | the last turn ended in an error |
+| `failed` | the last turn ended in an error, or the daemon marked the session failed (even if its last turn succeeded) |
 | `stopped` | not running, and the last turn did not finish |
 
 `status --json` (`schema_version` 1):

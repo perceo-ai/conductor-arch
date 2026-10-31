@@ -688,11 +688,8 @@ pub fn is_public_addr(addr: &SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
-/// The listen address from the environment, if the operator asked for one.
-pub fn listen_addr_from_env() -> Option<Result<SocketAddr>> {
-    std::env::var(LISTEN_ENV)
-        .ok()
-        .map(|value| parse_listen_addr(&value))
+fn listen_addr_from(env_value: Option<&str>) -> Option<Result<SocketAddr>> {
+    env_value.map(parse_listen_addr)
 }
 
 pub fn listen_path(paths: &AppPaths) -> PathBuf {
@@ -749,7 +746,13 @@ pub fn load_listen_addr(paths: &AppPaths) -> Option<Result<SocketAddr>> {
 /// Where this daemon should listen: the environment first, so a one-off run
 /// can still override, then what was saved when remote access was enabled.
 pub fn configured_listen_addr(paths: &AppPaths) -> Option<Result<SocketAddr>> {
-    listen_addr_from_env().or_else(|| load_listen_addr(paths))
+    resolve_listen_addr(std::env::var(LISTEN_ENV).ok().as_deref(), paths)
+}
+
+/// `configured_listen_addr` with the environment value passed in, so tests can
+/// drive both inputs without touching the process-wide environment.
+fn resolve_listen_addr(env_value: Option<&str>, paths: &AppPaths) -> Option<Result<SocketAddr>> {
+    listen_addr_from(env_value).or_else(|| load_listen_addr(paths))
 }
 
 pub fn bind(addr: SocketAddr) -> Result<TcpListener> {
@@ -1362,9 +1365,23 @@ mod tests {
         let saved = parse_listen_addr("0.0.0.0:7420").unwrap();
         save_listen_addr(&paths, Some(&saved)).unwrap();
 
+        // The env value is passed in rather than read from the process, so the
+        // result does not depend on what the invoking shell exported.
+        let from_env = parse_listen_addr("127.0.0.1:9000").unwrap();
+        assert_eq!(
+            resolve_listen_addr(Some("127.0.0.1:9000"), &paths)
+                .unwrap()
+                .unwrap(),
+            from_env
+        );
+
         // No env var: the saved address is what a daemon binds, which is the
         // whole point — an app-spawned sidecar has no service environment.
-        assert_eq!(configured_listen_addr(&paths).unwrap().unwrap(), saved);
+        assert_eq!(resolve_listen_addr(None, &paths).unwrap().unwrap(), saved);
+
+        // Neither configured: no TCP listener at all.
+        let empty = tempfile::tempdir().unwrap();
+        assert!(resolve_listen_addr(None, &paths_in(empty.path())).is_none());
     }
 
     #[test]

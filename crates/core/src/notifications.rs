@@ -644,14 +644,9 @@ mod tests {
         assert_eq!(second.platform, "ios");
     }
 
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[test]
     fn apns_config_requires_an_explicit_environment() {
-        let _guard = env_lock().lock().unwrap();
+        let mut env = crate::test_support::EnvGuard::lock();
         let vars = [
             ("ARCHDUCTOR_APNS_TEAM_ID", Some("TEAM")),
             ("ARCHDUCTOR_APNS_KEY_ID", Some("KEY")),
@@ -660,14 +655,10 @@ mod tests {
             ("ARCHDUCTOR_APNS_ENDPOINT", None),
             ("ARCHDUCTOR_APNS_ENV", None),
         ];
-        let saved: Vec<_> = vars
-            .iter()
-            .map(|(name, _)| (*name, std::env::var(name).ok()))
-            .collect();
         for (name, value) in vars {
             match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
+                Some(value) => env.set(name, value),
+                None => env.remove(name),
             }
         }
 
@@ -676,34 +667,27 @@ mod tests {
         // production tokens.
         assert!(ApnsConfig::from_env().is_none());
 
-        std::env::set_var("ARCHDUCTOR_APNS_ENV", "nonsense");
+        env.set("ARCHDUCTOR_APNS_ENV", "nonsense");
         assert!(ApnsConfig::from_env().is_none());
 
-        std::env::set_var("ARCHDUCTOR_APNS_ENV", "development");
+        env.set("ARCHDUCTOR_APNS_ENV", "development");
         assert_eq!(
             ApnsConfig::from_env().unwrap().endpoint,
             "https://api.sandbox.push.apple.com"
         );
 
-        std::env::set_var("ARCHDUCTOR_APNS_ENV", "production");
+        env.set("ARCHDUCTOR_APNS_ENV", "production");
         assert_eq!(
             ApnsConfig::from_env().unwrap().endpoint,
             "https://api.push.apple.com"
         );
 
         // An explicit endpoint override still wins.
-        std::env::set_var("ARCHDUCTOR_APNS_ENDPOINT", "https://apns.test.local");
+        env.set("ARCHDUCTOR_APNS_ENDPOINT", "https://apns.test.local");
         assert_eq!(
             ApnsConfig::from_env().unwrap().endpoint,
             "https://apns.test.local"
         );
-
-        for (name, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
     }
 
     #[test]

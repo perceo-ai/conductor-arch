@@ -52,6 +52,19 @@ const api = {
     return res.value;
   },
 
+  /**
+   * Send a request to one named saved client (`null` for this machine). Only
+   * for cross-daemon work where both ends are named, like transferring a
+   * workspace between two remote daemons.
+   */
+  requestClient: async <Res = unknown>(clientId: string | null, payload: unknown): Promise<Res> => {
+    const res = (await ipcRenderer.invoke("archcar:request-client", { clientId, payload })) as
+      | { ok: true; value: Res }
+      | { ok: false; error: string };
+    if (!res.ok) throw new Error(res.error);
+    return res.value;
+  },
+
   /** Ensure the event subscription is running. Idempotent. */
   ensureEvents: (): Promise<{ ok: boolean }> => ipcRenderer.invoke("archcar:subscribe"),
 
