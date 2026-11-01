@@ -504,7 +504,11 @@ impl SessionLaunch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionHarnessOptions {
+    // Clients may omit the bools (the desktop prompt tab once sent only
+    // `model`); `Option` fields already decode as `None` when missing.
+    #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
     pub fast_mode: bool,
     pub model: Option<String>,
     pub approval_mode: Option<String>,
@@ -14131,6 +14135,18 @@ pub(crate) mod tests {
             Some("gpt-5.6-sol approval=never next")
         );
         assert!(parsed.approval_mode.is_none());
+    }
+
+    #[test]
+    fn session_harness_options_decode_model_only_payload() {
+        // The desktop prompt tab used to send just `{ model }`; a missing
+        // bool must decode as false rather than reject the whole request.
+        let harness: SessionHarnessOptions =
+            serde_json::from_str(r#"{"model":"claude-opus-4"}"#).unwrap();
+
+        assert!(!harness.plan_mode);
+        assert!(!harness.fast_mode);
+        assert_eq!(harness.model, Some("claude-opus-4".to_string()));
     }
 
     #[test]

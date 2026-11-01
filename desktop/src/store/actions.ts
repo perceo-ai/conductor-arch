@@ -559,7 +559,8 @@ export const actions = {
     if (prompt) {
       const provider = prefsStore.state.defaultProvider;
       const model = prefsStore.state.defaultModel.trim();
-      const harness = model ? { model } : undefined;
+      // Send the bools explicitly: older daemons reject a harness without them.
+      const harness = { plan_mode: false, fast_mode: false, model: model || undefined };
       const thread = ensureOk(
         await send({ type: "create_chat_thread", workspace: name, provider, title: "New chat" }),
       );
