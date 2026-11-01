@@ -6,6 +6,7 @@ import type {
   ArchcarInputDelivery,
   ArchcarInputKind,
   SessionKind,
+  SessionHarnessOptions,
   LayoutPresetRecord,
   SyncSelection,
   WorkspaceGitAction,
@@ -14,8 +15,14 @@ import type { ProviderInteractionResolution } from "./events";
 import type { ContextKind, ContextSource, SummaryRefreshScopeType, SummaryScope, TaskUpdate } from "./tasks";
 
 export type ArchcarRequest =
-  | { type: "ensure_chat_thread_session"; workspace: string; thread_id: number; kind: SessionKind }
-  | { type: "spawn_session"; workspace: string; kind: SessionKind }
+  | {
+      type: "ensure_chat_thread_session";
+      workspace: string;
+      thread_id: number;
+      kind: SessionKind;
+      harness?: SessionHarnessOptions;
+    }
+  | { type: "spawn_session"; workspace: string; kind: SessionKind; harness?: SessionHarnessOptions }
   | {
       type: "send_input";
       session_id: number;

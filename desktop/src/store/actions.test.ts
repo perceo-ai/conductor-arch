@@ -103,6 +103,55 @@ describe("actions.createWorkspace", () => {
       issue_id: "ARC-123",
     });
   });
+
+  it("sends a prompt workspace's first message through the default provider and model", async () => {
+    const storage = new Map<string, string>([
+      [
+        "archductor.prefs.v1",
+        JSON.stringify({
+          defaultProvider: "claude",
+          defaultModel: "claude-opus-5",
+        }),
+      ],
+    ]);
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => void storage.set(k, v),
+    });
+    routeByType({
+      create_workspace: { type: "workspace_created", name: "berlin" },
+      create_chat_thread: {
+        type: "chat_thread_created",
+        thread: { id: 7, provider: "claude", title: "New chat", status: "open", updated_at: "9" },
+      },
+      ensure_chat_thread_session: { type: "session_spawn_queued", workspace: "berlin", kind: "claude" },
+      queue_chat_input: { type: "queued_chat_input", input: { id: 1, thread_id: 7 } },
+    });
+
+    const { actions } = await import("./actions");
+    await actions.createWorkspaceFromPromptMessage({ repository: "demo", prompt: "Fix defaults" });
+
+    const calls = api.request.mock.calls.map((c) => c[0] as Record<string, unknown>);
+    expect(calls.find((p) => p.type === "create_chat_thread")).toMatchObject({
+      type: "create_chat_thread",
+      workspace: "berlin",
+      provider: "claude",
+    });
+    expect(calls.find((p) => p.type === "ensure_chat_thread_session")).toMatchObject({
+      type: "ensure_chat_thread_session",
+      workspace: "berlin",
+      thread_id: 7,
+      kind: "claude",
+      harness: { model: "claude-opus-5" },
+    });
+    expect(calls.find((p) => p.type === "queue_chat_input")).toMatchObject({
+      type: "queue_chat_input",
+      thread_id: 7,
+      input: "Fix defaults",
+      kind: "user",
+      session_kind: "claude",
+    });
+  });
 });
 
 describe("actions.deleteWorkspace", () => {
