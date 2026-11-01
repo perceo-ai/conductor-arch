@@ -26,6 +26,7 @@ import {
   repositoriesStore,
   layoutStore,
   updateStore,
+  appearanceStore,
 } from "./store";
 import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
@@ -111,6 +112,7 @@ export default function App() {
   // theme.css class hooks (lc-theme-*, lc-accent-*, lc-density-*) are already
   // defined; this restores the GTK runtime controls that toggle them.
   createEffect(() => {
+    if (appearanceStore.state.loaded) return;
     const body = document.body;
     body.classList.toggle("lc-theme-dark", prefsStore.state.theme === "dark");
     body.classList.toggle("lc-theme-light", prefsStore.state.theme === "light");

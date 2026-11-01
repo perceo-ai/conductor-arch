@@ -1,6 +1,5 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
 import { repositoriesStore, prefsStore, nav, updateStore } from "@/store";
-import { ACCENT_HEX } from "@/store/prefs";
 import { checkForUpdates, installUpdate, openExternal, send } from "@/bridge/client";
 import { MODELS, CHAT_PROVIDERS, modelLabel, providerLabel } from "@/lib/models";
 import { DEFAULT_SHORTCUTS, parseKeybindingOverrides } from "@/lib/shortcuts";
@@ -27,6 +26,7 @@ import { PairPhoneCard } from "./settings/PairPhoneCard";
 import { BackgroundServiceCard } from "./settings/BackgroundServiceCard";
 import { DaemonUpdateCard } from "./settings/DaemonUpdateCard";
 import { McpRegistrationCard } from "./settings/McpRegistrationCard";
+import AppearanceSettings from "./settings/AppearanceSettings";
 
 // Settings page — two panes per scope:
 //   Effective : the merged, read-only config (get_settings) for reference.
@@ -285,61 +285,6 @@ export function SettingsPage() {
                       )}
                     </For>
                   </select>
-                }
-              />
-              <SettingsRow
-                title="Theme"
-                description="Choose the desktop appearance."
-                control={
-                  <div class="settings-segmented">
-                    <For each={["dark", "light"] as const}>
-                      {(t) => (
-                        <button
-                          classList={{ active: prefsStore.state.theme === t }}
-                          onClick={() => prefsStore.setTheme(t)}
-                        >
-                          {t === "dark" ? "Dark" : "Light"}
-                        </button>
-                      )}
-                    </For>
-                  </div>
-                }
-              />
-              <SettingsRow
-                title="Accent"
-                description="Used for selected tabs, rows, and primary affordances."
-                control={
-                  <div class="settings-swatch-row">
-                    <For each={["amber", "blue", "green", "rose"] as const}>
-                      {(a) => (
-                        <button
-                          class="settings-swatch"
-                          classList={{ active: prefsStore.state.accent === a }}
-                          style={{ "--swatch": ACCENT_HEX[a] }}
-                          title={a}
-                          onClick={() => prefsStore.setAccent(a)}
-                        />
-                      )}
-                    </For>
-                  </div>
-                }
-              />
-              <SettingsRow
-                title="Density"
-                description="Adjust spacing across workspace lists and controls."
-                control={
-                  <div class="settings-segmented">
-                    <For each={["compact", "cozy", "comfortable"] as const}>
-                      {(d) => (
-                        <button
-                          classList={{ active: prefsStore.state.density === d }}
-                          onClick={() => prefsStore.setDensity(d)}
-                        >
-                          {d[0].toUpperCase() + d.slice(1)}
-                        </button>
-                      )}
-                    </For>
-                  </div>
                 }
               />
             </SettingsSectionBlock>
@@ -714,6 +659,10 @@ export function SettingsPage() {
               />
             </SettingsSectionBlock>
           </div>
+        </Show>
+
+        <Show when={activeSection() === "appearance"}>
+          <AppearanceSettings />
         </Show>
 
         <Show when={activeSection() === "advanced"}>

@@ -313,10 +313,58 @@ for one workspace is used as written.
 ```toml
 [customization.view]
 default_layout_preset = "review"
+theme = "system"
+accent_color = "#5b9dff"
+density = "compact"
+ui_font = "Mona Sans, Inter, sans-serif"
+ui_font_size = 13
+code_font = "Commit Mono, JetBrains Mono, monospace"
+code_font_size = 13
+terminal_font = "Commit Mono, JetBrains Mono, monospace"
+terminal_font_size = 13
+terminal_scrollback = 5000
+
+[customization.view.colors]
+background = "#191919"
+surface = "#1e1e1e"
+surface_raised = "#202020"
+surface_muted = "#181818"
+hover = "#2a2a2a"
+hover_soft = "#242424"
+border = "#2a2a2a"
+border_strong = "#3a3a3a"
+text = "#e4e4e4"
+text_strong = "#f8fafc"
+text_muted = "#8a8a8a"
+accent = "#5b9dff"
+accent_fg = "#071a33"
+success = "#d0d0d0"
+warning = "#f59e0b"
+danger = "#ff8a8a"
 ```
 
 `default_layout_preset` is the team-level layout default and is what
 `archductor layout set-default` writes.
+
+The Electron app applies app-shared view settings at startup and after a save.
+Use Settings > Appearance for the app-shared layer. `theme` accepts `system`,
+`dark`, or `light`; `density` accepts `compact`, `cozy`, or `comfortable`.
+Colors must use `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa` hex syntax and only
+the keys shown above are supported. Font values are CSS font-family lists.
+`ui_font_size`, `code_font_size`, and `terminal_font_size` accept whole pixels
+from 9 through 32. `terminal_scrollback` accepts 100 through 100,000 lines.
+
+The CLI reads and writes the same values. For example:
+
+```bash
+archductor archcar settings
+archductor archcar settings-source | sed '1d' > /tmp/archductor-settings.toml
+$EDITOR /tmp/archductor-settings.toml
+archductor archcar save-settings < /tmp/archductor-settings.toml
+```
+
+Add `--repository NAME --layer repository` or `--layer local` to target a
+repository layer. Omitting both targets app-shared settings.
 
 ## Keys the schema accepts but does not act on yet
 
@@ -333,7 +381,7 @@ them changes nothing today:
 | `[customization.automation] auto_start_agent`, `required_local_files` | Parsed only |
 | `[customization.merge_rules] definition_of_done` | Parsed only |
 | `[customization.workspace_defaults] auto_open`, `checkpoint_timing` | Parsed only |
-| `[customization.view] theme`, `accent_color`, `colors`, `density`, `keybindings`, `terminal_font`, `terminal_scrollback`, `command_palette_presets`, `notification_rules` | Core surfaces these as repository view defaults, but the Electron app reads its own per-machine preferences instead. Change them in Settings. |
+| `[customization.view] keybindings`, `command_palette_presets`, `notification_rules` | Core surfaces these as repository view defaults. Electron uses its own keyboard editor and does not yet apply repository-specific notification rules or command-palette presets. |
 | `[customization.view] sidebar_layout`, `diff_preference`, `transcript_display`, `dashboard_columns`, `settings_import_export` | Parsed only |
 | `[customization.agent_profiles]` | Profile names are surfaced; the profiles do not yet drive session launches |
 

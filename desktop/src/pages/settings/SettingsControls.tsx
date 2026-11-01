@@ -2,7 +2,7 @@ import {  Show,  type JSX } from "solid-js";
 import Icon, { type IconName } from "@/components/Icon";
 import PeekCard, { type PeekTriggerProps } from "@/components/PeekCard";
 
-export type SettingsSection = "general" | "clients" | "agents" | "repository" | "advanced";
+export type SettingsSection = "general" | "appearance" | "clients" | "agents" | "repository" | "advanced";
 
 // Shared settings chrome: the section list, the nav button, and the row/section\n// wrappers every settings pane is built from.
 export const SETTINGS_SECTIONS: Array<{
@@ -14,6 +14,7 @@ export const SETTINGS_SECTIONS: Array<{
   keywords?: string[];
 }> = [
   { id: "general", label: "General", group: "Personal", icon: "settings", keywords: ["theme", "density", "appearance", "updates", "shortcuts", "keybindings"] },
+  { id: "appearance", label: "Appearance", group: "Personal", icon: "monitor", keywords: ["theme", "color", "accent", "font", "density", "terminal"] },
   {
     id: "clients",
     label: "Clients",

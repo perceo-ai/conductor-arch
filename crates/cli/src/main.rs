@@ -8587,7 +8587,7 @@ fn print_setup(report: doctor::SetupReport) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_chat_projection, ArchcarProjectionItem};
+    use super::{format_chat_projection, ArchcarCommand, ArchcarProjectionItem, Command};
 
     fn projection_item(
         id: &str,
@@ -8931,6 +8931,41 @@ mod tests {
         ])
         .unwrap();
         assert!(matches!(cli.command, Command::Settings { .. }));
+    }
+
+    #[test]
+    fn archcar_save_settings_accepts_complete_appearance_toml() {
+        let appearance = r##"[customization.view]
+theme = "system"
+ui_font = "Inter, sans-serif"
+ui_font_size = 14
+code_font = "JetBrains Mono, monospace"
+code_font_size = 13
+terminal_font = "Iosevka, monospace"
+terminal_font_size = 15
+terminal_scrollback = 9000
+
+[customization.view.colors]
+background = "#101010"
+accent = "#5b9dff"
+text = "#f0f0f0"
+"##;
+        let cli = try_parse([
+            "archductor",
+            "archcar",
+            "save-settings",
+            "--content",
+            appearance,
+        ])
+        .unwrap();
+
+        let Command::Archcar {
+            command: ArchcarCommand::SaveSettings { content, .. },
+        } = cli.command
+        else {
+            panic!("expected archcar save-settings");
+        };
+        assert_eq!(content.as_deref(), Some(appearance));
     }
 
     #[test]

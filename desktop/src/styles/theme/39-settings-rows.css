@@ -11,6 +11,13 @@
     background: transparent;
 }
 
+.settings-fieldset {
+    min-width: 0;
+    border: 0;
+    margin: 0;
+    padding: 0;
+}
+
 .settings-section-list > .settings-field {
     flex-direction: column;
     align-items: stretch;
@@ -115,6 +122,60 @@
     outline-offset: 2px;
 }
 
+.settings-color-control,
+.settings-inline-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.settings-color-control input[type="color"] {
+    width: 34px;
+    height: 30px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 6px;
+    background: transparent;
+    padding: 2px;
+}
+
+.settings-color-control input[type="text"] {
+    width: 112px;
+    min-height: 32px;
+    border: 1px solid var(--lc-border-strong);
+    border-radius: 6px;
+    background: var(--lc-surface-muted);
+    color: var(--lc-text-strong);
+    padding: 0 8px;
+    font-family: var(--ui-font-mono);
+}
+
+.settings-icon-button {
+    width: 30px;
+    height: 30px;
+    display: inline-grid;
+    place-items: center;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--lc-text-muted);
+}
+
+.settings-icon-button:hover,
+.settings-icon-button:focus-visible {
+    border-color: var(--lc-border-strong);
+    color: var(--lc-text-strong);
+    background: var(--lc-hover-soft);
+}
+
+.settings-number-control {
+    width: 112px;
+}
+
+.settings-loading {
+    color: var(--lc-text-muted);
+    padding: 12px 0;
+}
+
 .settings-keybinding-entry {
     width: 100%;
     resize: vertical;
@@ -201,6 +262,11 @@
     }
 
     .settings-control {
+        width: 100%;
+    }
+
+    .settings-inline-control,
+    .settings-color-control {
         width: 100%;
     }
 

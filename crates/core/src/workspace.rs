@@ -1107,7 +1107,12 @@ pub struct WorkspaceViewDefaults {
     pub colors: std::collections::BTreeMap<String, String>,
     pub density: Option<String>,
     pub keybindings: Option<String>,
+    pub ui_font: Option<String>,
+    pub ui_font_size: Option<u16>,
+    pub code_font: Option<String>,
+    pub code_font_size: Option<u16>,
     pub terminal_font: Option<String>,
+    pub terminal_font_size: Option<u16>,
     pub terminal_scrollback: Option<u32>,
     pub command_palette_presets: Vec<String>,
     pub agent_profile_names: Vec<String>,
@@ -7453,7 +7458,12 @@ mutation($threadId: ID!) {{
             colors: settings.customization.view.colors.clone(),
             density: settings.customization.view.density.clone(),
             keybindings: settings.customization.view.keybindings.clone(),
+            ui_font: settings.customization.view.ui_font.clone(),
+            ui_font_size: settings.customization.view.ui_font_size,
+            code_font: settings.customization.view.code_font.clone(),
+            code_font_size: settings.customization.view.code_font_size,
             terminal_font: settings.customization.view.terminal_font.clone(),
+            terminal_font_size: settings.customization.view.terminal_font_size,
             terminal_scrollback: settings.customization.view.terminal_scrollback,
             command_palette_presets: repository_command_palette_presets(&settings),
             agent_profile_names: settings
@@ -20326,7 +20336,12 @@ theme = "dark"
 accent_color = "blue"
 density = "compact"
 keybindings = "vim"
+ui_font = "Inter, sans-serif"
+ui_font_size = 14
+code_font = "JetBrains Mono, monospace"
+code_font_size = 13
 terminal_font = "JetBrains Mono 13"
+terminal_font_size = 15
 terminal_scrollback = 5000
 command_palette_presets = ["test", "Preview=pnpm dev"]
 
@@ -20383,7 +20398,15 @@ accent = "#0ea5e9"
         assert_eq!(defaults.colors.get("accent"), Some(&"#0ea5e9".to_owned()));
         assert_eq!(defaults.density.as_deref(), Some("compact"));
         assert_eq!(defaults.keybindings.as_deref(), Some("vim"));
+        assert_eq!(defaults.ui_font.as_deref(), Some("Inter, sans-serif"));
+        assert_eq!(defaults.ui_font_size, Some(14));
+        assert_eq!(
+            defaults.code_font.as_deref(),
+            Some("JetBrains Mono, monospace")
+        );
+        assert_eq!(defaults.code_font_size, Some(13));
         assert_eq!(defaults.terminal_font.as_deref(), Some("JetBrains Mono 13"));
+        assert_eq!(defaults.terminal_font_size, Some(15));
         assert_eq!(defaults.terminal_scrollback, Some(5000));
         assert_eq!(
             defaults.command_palette_presets,

@@ -321,6 +321,7 @@ Scripts and agent processes receive Archductor context via environment variables
 - Create / refresh / merge / archive GitHub PRs via local `gh`; configurable merge blockers
 - Restore archived workspaces; inspect saved Linux session history
 - File-editable repository settings (scripts, prompts, environment, Git behavior, merge rules, workspace/view defaults)
+- Durable appearance customization for all 16 semantic colors, theme, density, UI/code/terminal fonts and sizes, and terminal scrollback; Electron and CLI use the same settings
 - CLI parity with the app backend; export/import of shared and local settings bundles
 - Linked workspace directories (symlinked under `.context/linked-directories`)
 - Command palette, force-push, Linear-sourced workspace creation, and prompt-pack switching in the desktop app
@@ -333,7 +334,7 @@ Scripts and agent processes receive Archductor context via environment variables
 
 **In progress 🚧**
 
-- Electron UI polish and full visual parity; PR review-thread resolve/reopen is still CLI-only (`archductor pr resolve-thread`), and the settings editors want more structure
+- Electron UI polish and full visual parity; PR review-thread resolve/reopen is still CLI-only (`archductor pr resolve-thread`), and historical hard-coded CSS colors still need conversion to semantic tokens
 - Terminal rendering handles common ANSI/control redraws but is not a full emulator
 - Prompt-pack import/export and richer notification controls
 - Native Windows: compiles and assembles a portable ZIP, but install/launch/runtime smoke still required before a stable support claim

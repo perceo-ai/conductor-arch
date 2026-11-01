@@ -416,6 +416,65 @@ command_palette_presets = []
 }
 
 #[test]
+fn cli_archcar_round_trips_complete_appearance_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let _archcar = ArchcarDaemon::start(temp.path(), &[]);
+    let appearance = r##"# Preserve this comment.
+[customization.view]
+theme = "dark"
+ui_font = "Georgia, serif"
+ui_font_size = 14
+code_font = "JetBrains Mono, monospace"
+code_font_size = 15
+terminal_font = "Iosevka, monospace"
+terminal_font_size = 16
+terminal_scrollback = 9000
+future_visual_setting = "keep-me"
+
+[customization.view.colors]
+background = "#102030"
+accent = "#5b9dff"
+text = "#f0f0f0"
+"##;
+
+    app(temp.path())
+        .args(["archcar", "save-settings", "--content", appearance])
+        .assert()
+        .success()
+        .stdout(contains("settings_saved global global"));
+    app(temp.path())
+        .args(["archcar", "settings-source"])
+        .assert()
+        .success()
+        .stdout(contains("# Preserve this comment."))
+        .stdout(contains("future_visual_setting = \"keep-me\""))
+        .stdout(contains("terminal_font_size = 16"));
+    app(temp.path())
+        .args(["archcar", "settings"])
+        .assert()
+        .success()
+        .stdout(contains("ui_font = \"Georgia, serif\""))
+        .stdout(contains("terminal_font_size = 16"))
+        .stdout(contains("background = \"#102030\""));
+
+    app(temp.path())
+        .args([
+            "archcar",
+            "save-settings",
+            "--content",
+            "# Reset appearance overrides.\n",
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args(["archcar", "settings"])
+        .assert()
+        .success()
+        .stdout(contains("ui_font_size = 13"))
+        .stdout(contains("terminal_font_size = 13"));
+}
+
+#[test]
 fn cli_session_open_print_command_uses_explicit_provider_models() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
