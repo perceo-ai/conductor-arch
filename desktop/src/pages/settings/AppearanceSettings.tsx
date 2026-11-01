@@ -5,11 +5,12 @@ import {
   appearanceStore,
   COLOR_KEYS,
   DEFAULT_APPEARANCE,
+  hasInlineColorsTable,
   HEX_COLOR,
   type AppearanceColorKey,
 } from "@/store/appearance";
 import Icon from "@/components/Icon";
-import { readTomlValue, tomlSectionBounds, writeTomlValue, type TomlValueKind } from "./toml";
+import { readTomlValue, writeTomlValue, type TomlValueKind } from "./toml";
 import { SettingsRow, SettingsSectionBlock } from "./SettingsControls";
 
 const COLOR_LABELS: Record<AppearanceColorKey, string> = {
@@ -25,18 +26,6 @@ interface AppearanceEdit {
   key: string;
   value: string;
   kind: TomlValueKind;
-}
-
-/**
- * `colors = { ... }` inside `[customization.view]` is valid TOML the daemon
- * keeps, but the line-based writer cannot edit it: it would add a second
- * `[customization.view.colors]` table, which the daemon then rejects.
- */
-export function hasInlineColorsTable(source: string): boolean {
-  const lines = source.split("\n");
-  const bounds = tomlSectionBounds(lines, "customization.view");
-  if (!bounds) return false;
-  return lines.slice(bounds[0] + 1, bounds[1]).some((line) => /^\s*["']?colors["']?\s*=\s*\{/.test(line));
 }
 
 export function sixDigitColor(value: string): string {

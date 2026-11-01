@@ -268,4 +268,39 @@ accent = "#111111"
     expect(window.archductor.request).not.toHaveBeenCalled();
     expect(window.archductor.requestClient).not.toHaveBeenCalled();
   });
+
+  describe("saved accent through refresh", () => {
+    async function refreshWith(effectiveAccentColor: string, effectiveAccent: string, source: string) {
+      send.mockImplementation(async (request: { type: string }) => {
+        if (request.type === "get_settings") {
+          const effective = COMPLETE_TOML
+            .replace('accent_color = "#123456"', `accent_color = "${effectiveAccentColor}"`)
+            .replace('accent = "#121212"', `accent = "${effectiveAccent}"`);
+          return { type: "settings", scope: "global", toml: effective };
+        }
+        if (request.type === "get_settings_source") {
+          return { type: "settings_source", scope: "global", layer: "global", toml: source };
+        }
+        return { type: "ack" };
+      });
+      const { appearanceStore } = await import("./appearance");
+      await appearanceStore.refresh();
+      return appearanceStore.state.colors.accent;
+    }
+
+    it.each([
+      ["section form", '[customization.view]\n\n[customization.view.colors]\naccent = "#abcdef"\n'],
+      ["inline table", '[customization.view]\ncolors = { accent = "#abcdef" }\n'],
+      ["quoted key in an inline table", '[customization.view]\ncolors = { "accent" = "#abcdef" }\n'],
+      ["quoted inline table key", '[customization.view]\n"colors" = { surface = "#222222", \'accent\' = "#abcdef" }\n'],
+    ])("keeps a saved accent in %s instead of the accent_color default", async (_shape, source) => {
+      expect(await refreshWith("#5b9dff", "#abcdef", source)).toBe("#abcdef");
+    });
+
+    it("falls back to accent_color when no accent was saved in any form", async () => {
+      const { ACCENT_PRESETS } = await import("./appearance");
+      const source = '[customization.view]\naccent_color = "rose"\ncolors = { surface = "#222222" }\n';
+      expect(await refreshWith("rose", "#5b9dff", source)).toBe(ACCENT_PRESETS.find(([label]) => label === "Rose")![1]);
+    });
+  });
 });

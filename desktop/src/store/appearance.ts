@@ -1,6 +1,11 @@
 import { createStore } from "solid-js/store";
 import { send, sendToDaemon } from "@/bridge/client";
-import { readTomlValue, writeTomlValue, type TomlValueKind } from "@/pages/settings/toml";
+import {
+  readTomlValue,
+  tomlSectionBounds,
+  writeTomlValue,
+  type TomlValueKind,
+} from "@/pages/settings/toml";
 import { clientsStore } from "./clients";
 
 export const COLOR_KEYS = [
@@ -116,6 +121,48 @@ const CSS_COLOR_ALIASES: Partial<Record<AppearanceColorKey, readonly string[]>> 
   danger: ["--lc-status-danger"],
 };
 
+function sectionLines(source: string, section: string): string[] {
+  const lines = source.split("\n");
+  const bounds = tomlSectionBounds(lines, section);
+  return bounds ? lines.slice(bounds[0] + 1, bounds[1]) : [];
+}
+
+// A bare or quoted key, as TOML allows: `colors`, `"colors"`, `'colors'`.
+const tomlKey = (name: string) => `["']?${name}["']?`;
+const INLINE_COLORS = new RegExp(`^\\s*${tomlKey("colors")}\\s*=\\s*\\{(.*)$`);
+const ACCENT_ASSIGNMENT = new RegExp(`(?:^|[{,])\\s*${tomlKey("accent")}\\s*=`);
+
+/** Body of a `colors = { ... }` inline table under `[customization.view]`, if any. */
+function inlineColorsTable(source: string): string | undefined {
+  for (const line of sectionLines(source, "customization.view")) {
+    const match = INLINE_COLORS.exec(line);
+    if (match) return `{${match[1]}`;
+  }
+  return undefined;
+}
+
+/**
+ * `colors = { ... }` inside `[customization.view]` is valid TOML the daemon
+ * keeps, but the line-based writer cannot edit it: it would add a second
+ * `[customization.view.colors]` table, which the daemon then rejects.
+ */
+export function hasInlineColorsTable(source: string): boolean {
+  return inlineColorsTable(source) !== undefined;
+}
+
+/**
+ * Whether the saved source sets `colors.accent` in any shape: the section
+ * form, an inline table, or a quoted key. The scalar reader only sees the
+ * first, so it cannot answer this on its own.
+ */
+function hasSavedAccent(source: string): boolean {
+  if (sectionLines(source, "customization.view.colors").some((line) => ACCENT_ASSIGNMENT.test(line))) {
+    return true;
+  }
+  const inline = inlineColorsTable(source);
+  return inline !== undefined && ACCENT_ASSIGNMENT.test(inline);
+}
+
 function stringValue(toml: string, section: string, key: string, fallback: string): string {
   return readTomlValue(toml, section, key) || fallback;
 }
@@ -145,7 +192,7 @@ export function parseAppearance(toml: string, source: string = toml): Appearance
     colors[key] = stringValue(toml, "customization.view.colors", key, colors[key]);
   }
   // An explicit colors.accent wins; otherwise a saved accent_color drives the token.
-  if (readTomlValue(source, "customization.view.colors", "accent") === "") {
+  if (!hasSavedAccent(source)) {
     const accent = resolveAccentColor(readTomlValue(toml, "customization.view", "accent_color"));
     if (accent) colors.accent = accent;
   }
