@@ -39,6 +39,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete (globalThis as { window?: unknown }).window;
+  vi.unstubAllGlobals();
 });
 
 /** Route requests by type: return `map[type]`, defaulting to a list response. */
@@ -142,7 +143,7 @@ describe("actions.createWorkspace", () => {
       workspace: "berlin",
       thread_id: 7,
       kind: "claude",
-      harness: { model: "claude-opus-5" },
+      harness: { plan_mode: false, fast_mode: false, model: "claude-opus-5" },
     });
     expect(calls.find((p) => p.type === "queue_chat_input")).toMatchObject({
       type: "queue_chat_input",
