@@ -1,6 +1,14 @@
 import { For, Show, createEffect, createResource, createSignal } from "solid-js";
 import { send } from "@/bridge/client";
-import { appearanceStore, COLOR_KEYS, DEFAULT_APPEARANCE, type AppearanceColorKey } from "@/store/appearance";
+import {
+  ACCENT_PRESETS,
+  appearanceStore,
+  COLOR_KEYS,
+  DEFAULT_APPEARANCE,
+  hasInlineColorsTable,
+  HEX_COLOR,
+  type AppearanceColorKey,
+} from "@/store/appearance";
 import Icon from "@/components/Icon";
 import { readTomlValue, writeTomlValue, type TomlValueKind } from "./toml";
 import { SettingsRow, SettingsSectionBlock } from "./SettingsControls";
@@ -13,10 +21,12 @@ const COLOR_LABELS: Record<AppearanceColorKey, string> = {
   accent_fg: "Accent text", success: "Success", warning: "Warning", danger: "Danger",
 };
 
-const ACCENT_PRESETS = [
-  ["Amber", "#c39b50"], ["Blue", "#5b8def"], ["Green", "#3fb27f"], ["Rose", "#e0567b"],
-] as const;
-const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+interface AppearanceEdit {
+  section: string;
+  key: string;
+  value: string;
+  kind: TomlValueKind;
+}
 
 export function sixDigitColor(value: string): string {
   if (/^#[0-9a-f]{6}$/i.test(value)) return value;
@@ -50,6 +60,9 @@ export default function AppearanceSettings() {
     return { effective: effective.toml, source: source.toml, error: "" };
   });
   const [draft, setDraft] = createSignal("");
+  // The keys this screen changed, replayed onto fresh source at save time so a
+  // change saved elsewhere while this screen was open is not overwritten.
+  const [edits, setEdits] = createSignal<AppearanceEdit[]>([]);
   const [baseline, setBaseline] = createSignal("");
   const [status, setStatus] = createSignal("");
   const [saving, setSaving] = createSignal(false);
@@ -59,30 +72,27 @@ export default function AppearanceSettings() {
     if (!loaded) return;
     setDraft(loaded.source);
     setBaseline(loaded.source);
+    setEdits([]);
     setStatus("");
   });
 
   const dirty = () => draft() !== baseline();
   const editable = () => Boolean(settings()) && !settings()?.error;
+  const colorsLocked = () => hasInlineColorsTable(settings()?.source ?? "");
   const value = (section: string, key: string, fallback: string) =>
     readTomlValue(draft(), section, key) || readTomlValue(settings()?.effective ?? "", section, key) || fallback;
   const write = (section: string, key: string, next: string, kind: TomlValueKind = "string") => {
     setDraft((current) => writeTomlValue(current, section, key, next, kind));
+    setEdits((current) => [
+      ...current.filter((edit) => edit.section !== section || edit.key !== key),
+      { section, key, value: next, kind },
+    ]);
     setStatus("");
   };
   const reset = (section: string, key: string) => write(section, key, "");
   const resetAccent = () => {
-    setDraft((current) => {
-      const withoutColor = writeTomlValue(
-        current,
-        "customization.view.colors",
-        "accent",
-        "",
-        "string",
-      );
-      return writeTomlValue(withoutColor, "customization.view", "accent_color", "", "string");
-    });
-    setStatus("");
+    write("customization.view.colors", "accent", "");
+    write("customization.view", "accent_color", "");
   };
   const colorValue = (key: AppearanceColorKey) =>
     value("customization.view.colors", key, DEFAULT_APPEARANCE.colors[key]);
@@ -100,7 +110,16 @@ export default function AppearanceSettings() {
     setSaving(true);
     setStatus("Saving...");
     try {
-      const response = await send({ type: "save_settings", toml: draft() });
+      const fresh = await send({ type: "get_settings_source" });
+      if (fresh.type !== "settings_source") {
+        setStatus(fresh.type === "error" ? `Save failed: ${fresh.message}` : "Save failed");
+        return;
+      }
+      const toml = edits().reduce(
+        (current, edit) => writeTomlValue(current, edit.section, edit.key, edit.value, edit.kind),
+        fresh.toml,
+      );
+      const response = await send({ type: "save_settings", toml });
       if (response.type !== "settings_saved") {
         setStatus(response.type === "error" ? `Save failed: ${response.message}` : "Save failed");
         return;
@@ -150,18 +169,23 @@ export default function AppearanceSettings() {
       </SettingsSectionBlock>
 
       <SettingsSectionBlock title="Colors">
+        <Show when={colorsLocked()}>
+          <div class="settings-loading" role="note">
+            These colors are defined as an inline table in the settings file and can't be edited here — edit the file directly.
+          </div>
+        </Show>
         <SettingsRow title="Accent presets" description="Shortcuts for the accent token; every color remains independently editable below." control={
           <div class="settings-swatch-row">
             <For each={ACCENT_PRESETS}>{([label, color]) => (
-              <button class="settings-swatch" classList={{ active: colorValue("accent").toLowerCase() === color }} style={{ "--swatch": color }} title={label} aria-label={`${label} accent`} onClick={() => setColor("accent", color)} />
+              <button class="settings-swatch" classList={{ active: colorValue("accent").toLowerCase() === color }} style={{ "--swatch": color }} title={label} aria-label={`${label} accent`} disabled={colorsLocked()} onClick={() => setColor("accent", color)} />
             )}</For>
           </div>
         } />
         <For each={COLOR_KEYS}>{(key) => (
           <SettingsRow title={COLOR_LABELS[key]} control={
             <div class="settings-color-control" data-color-key={key}>
-              <input type="color" aria-label={`${COLOR_LABELS[key]} color`} value={sixDigitColor(colorValue(key))} onInput={(event) => setColor(key, event.currentTarget.value)} />
-              <input type="text" aria-label={`${COLOR_LABELS[key]} hex`} value={colorValue(key)} spellcheck={false} onChange={(event) => setColor(key, event.currentTarget.value)} />
+              <input type="color" aria-label={`${COLOR_LABELS[key]} color`} disabled={colorsLocked()} value={sixDigitColor(colorValue(key))} onInput={(event) => setColor(key, event.currentTarget.value)} />
+              <input type="text" aria-label={`${COLOR_LABELS[key]} hex`} disabled={colorsLocked()} value={colorValue(key)} spellcheck={false} onChange={(event) => setColor(key, event.currentTarget.value)} />
               {key === "accent"
                 ? <button class="settings-icon-button" title="Reset Accent color" aria-label="Reset Accent color" onClick={resetAccent}><Icon name="refresh" /></button>
                 : resetButton(`${COLOR_LABELS[key]} color`, "customization.view.colors", key)}
