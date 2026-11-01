@@ -195,6 +195,43 @@ describe("nav workspace tabs", () => {
     expect(tabsOf(back)).toEqual([{ tabs: ["remote-ws"], active: "remote-ws" }]);
   });
 
+  it("selects the restored realm's chat even when the workspace name matches", async () => {
+    const local = await freshNav();
+    local.selectWorkspace("shared-name");
+    local.selectChatThread(11);
+
+    const remote = await freshNav();
+    remote.restoreWorkspaceTabs("client:x", () => true);
+    remote.selectWorkspace("shared-name");
+    remote.selectChatThread(77);
+
+    // Same selected workspace name on both daemons; thread 11 is local's.
+    remote.restoreWorkspaceTabs("local", () => true);
+    expect(remote.selectedWorkspace()).toBe("shared-name");
+    expect(remote.selectedChatThread()).toBe(11);
+    remote.restoreWorkspaceTabs("client:x", () => true);
+    expect(remote.selectedChatThread()).toBe(77);
+  });
+
+  it("pauses persistence while a restore is owed, so stale pruning cannot stick", async () => {
+    const before = await freshNav();
+    before.selectWorkspace("alpha");
+    before.selectWorkspace("beta");
+
+    const during = await freshNav();
+    during.deferTabRestore();
+    expect(during.awaitingTabRestore()).toBe(true);
+    // The destructive sequence a daemon switch used to run: prune the old
+    // tabs against the new daemon's inventory before the realm moved over.
+    during.selectWorkspace("alpha");
+    during.retainWorkspaceTabs(() => false);
+    // Storage still holds the saved tabs: nothing persisted while owed.
+    const after = await freshNav();
+    after.restoreWorkspaceTabs("local", () => true);
+    expect(after.awaitingTabRestore()).toBe(false);
+    expect(tabsOf(after)).toEqual([{ tabs: ["alpha", "beta"], active: "beta" }]);
+  });
+
   it("reopens a closed workspace's tab on back", async () => {
     const nav = await freshNav();
     nav.selectWorkspace("alpha");

@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
 import {
   actions,
   prefsStore,
@@ -9,6 +9,7 @@ import type {
 } from "@/bridge/protocol";
 import { commitScopeSha } from "@/bridge/protocol";
 import { shortSha } from "@/lib/commitLog";
+import { editorDraftStash } from "@/lib/editorDraftStash";
 import { DiffView } from "../WorkspaceChanges";
 import Diff from "@/components/Diff";
 import Icon from "@/components/Icon";
@@ -45,10 +46,18 @@ function FileEditor(props: { workspace: string; path: string }) {
   );
   const [draft, setDraft] = createSignal<string | null>(null);
   const [status, setStatus] = createSignal("");
-  // Reset the local draft whenever a fresh file load arrives.
+  // Reset the local draft whenever a fresh file load arrives — unless unsaved
+  // edits were parked when this editor last unmounted (a pane focus change in
+  // a split remounts the whole chat surface); those come back instead.
   createEffect(() => {
     const l = loaded();
-    if (l && !l.error) setDraft(l.content);
+    if (l && !l.error) setDraft(editorDraftStash.take(props.workspace, props.path) ?? l.content);
+  });
+  onCleanup(() => {
+    const l = untrack(loaded);
+    const text = untrack(draft);
+    const dirtyText = l && !l.error && text != null && text !== l.content ? text : null;
+    editorDraftStash.park(untrack(() => props.workspace), untrack(() => props.path), dirtyText);
   });
   const dirty = () => {
     const l = loaded();
@@ -67,6 +76,7 @@ function FileEditor(props: { workspace: string; path: string }) {
         content: text
       });
       setStatus(res.type === "workspace_file_written" ? "Saved" : "Save failed");
+      if (res.type === "workspace_file_written") editorDraftStash.clear(props.workspace, props.path);
     } catch (err) {
       setStatus(`Save failed: ${(err as Error).message}`);
     }

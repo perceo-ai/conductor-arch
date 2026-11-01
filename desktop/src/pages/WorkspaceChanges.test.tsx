@@ -79,7 +79,7 @@ describe("ChangesTab", () => {
 
   it("opens a changed file in the center with the selected scope", async () => {
     const opened = vi.fn();
-    registerOpenFile(opened);
+    registerOpenFile("demo", opened);
     const host = mount();
 
     const row = await vi.waitFor(() => {
@@ -89,6 +89,6 @@ describe("ChangesTab", () => {
     });
     row.click();
 
-    expect(opened).toHaveBeenCalledWith("demo", "src/main.ts", "all");
+    expect(opened).toHaveBeenCalledWith("src/main.ts", "all");
   });
 });

@@ -75,16 +75,23 @@ export default function ChatSurface(props: { workspace: string }) {
     if (pane.focused()) nav.setChatSurfaceShowsChat(true);
   });
 
-  // Let the right-panel Browse/Changes open files into the center.
-  onMount(() => registerOpenFile((ws, path, scope) => {
-    if (ws !== props.workspace) return;
-    openFile(path, scope);
-  }));
-  // Let the recent-commits list open a commit's diff into the center.
-  onMount(() => registerOpenCommit((ws, commit) => {
-    if (ws !== props.workspace) return;
-    setView({ kind: "commit", commit });
-  }));
+  // Let the right-panel Browse/Changes open files, and the recent-commits
+  // list open a commit's diff, into this workspace's center. Registered per
+  // workspace (and re-registered when the pane's tab switches workspace) so
+  // two mounted chat surfaces each answer only for their own.
+  createEffect(
+    on(
+      () => props.workspace,
+      (ws) => {
+        const offFile = registerOpenFile(ws, (path, scope) => openFile(path, scope));
+        const offCommit = registerOpenCommit(ws, (commit) => setView({ kind: "commit", commit }));
+        onCleanup(() => {
+          offFile();
+          offCommit();
+        });
+      },
+    ),
+  );
 
   function openFile(path: string, scope: WorkspaceChangeScope = "all") {
     setOpenFilePath(path);

@@ -1135,8 +1135,11 @@ export const actions = {
   async renameWorkspace(workspace: string, newName: string): Promise<void> {
     logAction("rename_workspace", { workspace, newName });
     ensureOk(await send({ type: "rename_workspace", workspace, new_name: newName }));
-    await refreshInventory();
+    // Before the refresh: once the inventory stops listing the old name, the
+    // tab pruning would close the tab as missing and there would be nothing
+    // left to rename.
     nav.renameWorkspace(workspace, newName);
+    await refreshInventory();
   },
 
   async duplicateWorkspace(workspace: string, newName: string, branch?: string): Promise<string | undefined> {

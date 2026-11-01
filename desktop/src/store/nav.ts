@@ -36,8 +36,16 @@ const [threadByWorkspace, setThreadByWorkspace] = createSignal<Record<string, nu
 // Which daemon's tabs these are. Saved continuously under this key, so a
 // daemon switch or an app quit never has a "flush on exit" step to miss.
 let tabRealm = "local";
+// True from "a restore is owed" (boot before the inventory arrived, or a
+// daemon switch in flight) until restoreWorkspaceTabs runs. While it holds,
+// nothing persists: the tabs on screen are the old realm's (or nothing), and
+// writing them — or an inventory-driven pruning of them — under whichever
+// realm key is current would corrupt saved state. restoreWorkspaceTabs is the
+// only thing that clears it.
+const [awaitingTabRestore, setAwaitingTabRestore] = createSignal(false);
 
 function persistTabs() {
+  if (awaitingTabRestore()) return;
   saveTabRealm(tabRealm, serializeTabs(workspaceTabs(), threadByWorkspace()));
 }
 
@@ -109,6 +117,13 @@ export const nav = {
   canBack,
   canForward,
   workspaceTabs,
+  awaitingTabRestore,
+  /** Storage realm of the tabs currently on screen (drafts key off it too). */
+  tabRealm: () => tabRealm,
+  /** Pause tab persistence until the owed restoreWorkspaceTabs call. */
+  deferTabRestore() {
+    setAwaitingTabRestore(true);
+  },
 
   setWindowFocused,
   setChatSurfaceShowsChat,
@@ -254,10 +269,16 @@ export const nav = {
    */
   restoreWorkspaceTabs(realm: string, keep: (name: string) => boolean) {
     tabRealm = realm;
+    setAwaitingTabRestore(false);
     const { state, threads } = materializeTabs(loadTabRealm(realm), keep);
     setThreadByWorkspace(threads);
     commitTabs(state);
-    if (activeWorkspace(state) != null) setActivePage("workspace");
+    // commitTabs's selection short-circuits when the focused workspace kept
+    // its name across realms, but the thread ids under it are the new
+    // daemon's — point the selection at the restored memory explicitly.
+    const active = activeWorkspace(state);
+    setSelectedChatThread(active != null ? (threads[active] ?? null) : null);
+    if (active != null) setActivePage("workspace");
   },
 
   /** Drop tabs for workspaces that were archived, deleted, or are not on this daemon. */

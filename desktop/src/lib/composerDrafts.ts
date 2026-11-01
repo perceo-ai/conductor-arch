@@ -1,16 +1,25 @@
-import type { ComposerNode } from "./composerDocument";
-
 // Unsent composer text, per chat thread. Switching chats — or workspace tabs —
 // remounts or re-points the composer; without this the half-written prompt
 // either vanished or followed the user into the next chat.
-const drafts = new Map<number, ComposerNode[]>();
+//
+// Keys are `"<realm>:<threadId>"` (see draftKey): thread ids are one daemon's
+// numbering, so after a daemon switch plain ids would surface another
+// daemon's draft in an unrelated conversation.
+import type { ComposerNode } from "./composerDocument";
+
+const drafts = new Map<string, ComposerNode[]>();
+
+/** Storage key for a thread's draft; `realm` is nav.tabRealm() at selection time. */
+export function draftKey(realm: string, threadId: number): string {
+  return `${realm}:${threadId}`;
+}
 
 export const composerDrafts = {
-  get(threadId: number): ComposerNode[] {
-    return drafts.get(threadId) ?? [];
+  get(key: string): ComposerNode[] {
+    return drafts.get(key) ?? [];
   },
-  save(threadId: number, nodes: ComposerNode[]): void {
-    if (nodes.length === 0) drafts.delete(threadId);
-    else drafts.set(threadId, nodes);
+  save(key: string, nodes: ComposerNode[]): void {
+    if (nodes.length === 0) drafts.delete(key);
+    else drafts.set(key, nodes);
   },
 };

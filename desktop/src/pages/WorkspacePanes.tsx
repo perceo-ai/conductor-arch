@@ -1,5 +1,5 @@
 import { For, Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
-import { nav, workspacesStore } from "@/store";
+import { nav, restoreTabsForActiveDaemon, workspacesStore } from "@/store";
 import type { TabGroup, SplitDirection } from "@/lib/workspaceTabs";
 import { titleCaseWorkspace } from "@/lib/text";
 import Icon from "@/components/Icon";
@@ -110,9 +110,16 @@ function WorkspaceTab(props: { name: string; groupIndex: number; active: boolean
   );
 }
 
-/** Index a drop lands at: before the tab under the pointer, or at the end. */
-function dropIndex(strip: HTMLElement, clientX: number): number {
-  const tabs = [...strip.querySelectorAll<HTMLElement>("[data-workspace-tab]")];
+/**
+ * Index a drop lands at: before the tab under the pointer, or at the end.
+ * Counted without the dragged tab itself — moveTab inserts into the list with
+ * that tab already removed, so counting it put a rightward drop one past
+ * where the pointer sat.
+ */
+export function dropIndex(strip: HTMLElement, clientX: number, dragged: string): number {
+  const tabs = [...strip.querySelectorAll<HTMLElement>("[data-workspace-tab]")].filter(
+    (tab) => tab.dataset.workspaceTab !== dragged,
+  );
   const at = tabs.findIndex((tab) => {
     const rect = tab.getBoundingClientRect();
     return clientX < rect.left + rect.width / 2;
@@ -140,7 +147,7 @@ function TabStrip(props: { group: TabGroup; index: number; focused: boolean }) {
         setDraggingTab(null);
         if (!name || !strip) return;
         e.preventDefault();
-        nav.moveWorkspaceTab(name, props.index, dropIndex(strip, e.clientX));
+        nav.moveWorkspaceTab(name, props.index, dropIndex(strip, e.clientX, name));
       }}
     >
       <div class="ws-pane-tabs" role="tablist" ref={strip}>
@@ -274,6 +281,18 @@ export default function WorkspacePanes() {
       },
       (inventory) => {
         if (inventory == null) return;
+        // A restore still owed (boot or daemon switch that could not validate
+        // yet) is retried here instead: this effect fires exactly when a good
+        // inventory lands, and pruning the stale tabs would be wrong anyway.
+        if (nav.awaitingTabRestore()) {
+          const selected = nav.selectedWorkspace();
+          restoreTabsForActiveDaemon();
+          // What the user opened while the restore was owed wins over it.
+          if (selected && workspacesStore.row(selected)?.status !== "archived" && workspacesStore.row(selected)) {
+            nav.selectWorkspace(selected);
+          }
+          return;
+        }
         nav.retainWorkspaceTabs((name) => {
           const row = workspacesStore.row(name);
           return row != null && row.status !== "archived";
