@@ -31,4 +31,20 @@ export const editorDraftStash = {
   clear(realm: string, workspace: string, path: string): void {
     stash.delete(key(realm, workspace, path));
   },
+  /**
+   * Startup correcting the provisional realm renames the realm, not the
+   * daemon: every draft parked under it belongs to the corrected key. Called
+   * from nav's assignTabRealm so it runs whether or not the editor that
+   * parked a draft is still mounted. The `workspace:path` remainder is kept
+   * byte-for-byte — prefix replacement only.
+   */
+  migrateRealm(from: string, to: string): void {
+    if (from === to) return;
+    const prefix = `${from}:`;
+    for (const [k, draft] of [...stash]) {
+      if (!k.startsWith(prefix)) continue;
+      stash.delete(k);
+      stash.set(`${to}:${k.slice(prefix.length)}`, draft);
+    }
+  },
 };

@@ -14,6 +14,8 @@ import {
   type WorkspaceTabsState,
 } from "@/lib/workspaceTabs";
 import { loadTabRealm, materializeTabs, saveTabRealm, serializeTabs } from "@/lib/tabPersistence";
+import { composerDrafts } from "@/lib/composerDrafts";
+import { editorDraftStash } from "@/lib/editorDraftStash";
 
 // Navigation state — mirrors the navigation fields of
 // crates/gtk-app/src/state.rs::AppStateSnapshot. Each field is its own signal so
@@ -71,6 +73,7 @@ let realmKnown = false;
 let daemonSwitchPending = false;
 
 function assignTabRealm(realm: string) {
+  const prev = untrack(tabRealm);
   // A declared switch always replaces the session, with no realm-string
   // comparison: switching daemons must remount the views keyed on it, or the
   // old daemon's text saves to the new daemon's file. (The distinct
@@ -80,10 +83,19 @@ function assignTabRealm(realm: string) {
   // clientsStore switch declares); only the remaining case, correcting the
   // placeholder to the daemon's real identity, edits in place so startup
   // never remounts over unsaved state.
-  if (daemonSwitchPending || (realmKnown && realm !== untrack(tabRealm))) {
+  if (daemonSwitchPending || (realmKnown && realm !== prev)) {
     setTabRealmSession({ realm });
   } else {
     untrack(tabRealmSession).realm = realm;
+    // The one moment the daemon behind the placeholder gets its real name:
+    // everything parked under the sentinel belongs to it, whether or not the
+    // component that parked it is still mounted. A declared switch never
+    // migrates — the other branch — so another daemon's sentinel-era drafts
+    // cannot leak across. Runs once: `prev` is never the sentinel again.
+    if (prev === UNASSIGNED_REALM && realm !== UNASSIGNED_REALM) {
+      composerDrafts.migrateRealm(prev, realm);
+      editorDraftStash.migrateRealm(prev, realm);
+    }
   }
   realmKnown = true;
   daemonSwitchPending = false;

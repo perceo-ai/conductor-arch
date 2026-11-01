@@ -206,6 +206,74 @@ describe("nav workspace tabs", () => {
     expect(tabsOf(back)).toEqual([{ tabs: ["remote-ws"], active: "remote-ws" }]);
   });
 
+  describe("leaving the unassigned realm migrates parked drafts", () => {
+    /**
+     * Drafts parked while the realm was still unassigned belong to the daemon
+     * startup is about to identify. The migration must run where the
+     * correction happens — components that parked them may be long unmounted.
+     */
+    async function freshStores() {
+      vi.resetModules();
+      const { nav, UNASSIGNED_REALM } = await import("./nav");
+      const { composerDrafts, draftKey } = await import("@/lib/composerDrafts");
+      const { editorDraftStash } = await import("@/lib/editorDraftStash");
+      return { nav, UNASSIGNED_REALM, composerDrafts, draftKey, editorDraftStash };
+    }
+
+    it("moves a composer draft parked with no composer mounted", async () => {
+      const { nav, UNASSIGNED_REALM, composerDrafts, draftKey } = await freshStores();
+      composerDrafts.save(draftKey(UNASSIGNED_REALM, 5), [{ kind: "text", text: "early" }]);
+
+      nav.setTabRealm("client:a"); // startup's correction; nothing is mounted
+
+      expect(composerDrafts.get(draftKey("client:a", 5))).toEqual([{ kind: "text", text: "early" }]);
+      expect(composerDrafts.get(draftKey(UNASSIGNED_REALM, 5))).toEqual([]);
+    });
+
+    it("moves a file-editor draft parked with no editor mounted", async () => {
+      const { nav, UNASSIGNED_REALM, editorDraftStash } = await freshStores();
+      editorDraftStash.park(UNASSIGNED_REALM, "ws", "src/f.ts", "early edit");
+
+      nav.setTabRealm("client:a");
+
+      expect(editorDraftStash.take("client:a", "ws", "src/f.ts")).toBe("early edit");
+      expect(editorDraftStash.take(UNASSIGNED_REALM, "ws", "src/f.ts")).toBeNull();
+    });
+
+    it("does not migrate on a declared daemon switch, even from the unassigned realm", async () => {
+      const { nav, UNASSIGNED_REALM, composerDrafts, draftKey, editorDraftStash } = await freshStores();
+      composerDrafts.save(draftKey(UNASSIGNED_REALM, 5), [{ kind: "text", text: "early" }]);
+      editorDraftStash.park(UNASSIGNED_REALM, "ws", "src/f.ts", "early edit");
+
+      nav.deferTabRestore({ daemonSwitch: true });
+      nav.restoreWorkspaceTabs("local", () => true);
+
+      // The other daemon's drafts must not leak into this one.
+      expect(composerDrafts.get(draftKey("local", 5))).toEqual([]);
+      expect(editorDraftStash.take("local", "ws", "src/f.ts")).toBeNull();
+      expect(composerDrafts.get(draftKey(UNASSIGNED_REALM, 5))).toEqual([{ kind: "text", text: "early" }]);
+      expect(editorDraftStash.take(UNASSIGNED_REALM, "ws", "src/f.ts")).toBe("early edit");
+    });
+
+    it("migrates exactly once, on the assignment that leaves the sentinel", async () => {
+      const { nav, UNASSIGNED_REALM, composerDrafts, draftKey } = await freshStores();
+      nav.setTabRealm("local"); // the one sentinel -> real transition
+      // Anything that lands under the sentinel afterwards is a bug of its
+      // own, not something later assignments may quietly re-home.
+      composerDrafts.save(draftKey(UNASSIGNED_REALM, 7), [{ kind: "text", text: "stray" }]);
+      const kept = [{ kind: "text", text: "mine" }];
+      composerDrafts.save(draftKey("local", 7), kept);
+
+      nav.setTabRealm("local"); // repeated correction, same realm
+      nav.deferTabRestore({ daemonSwitch: true });
+      nav.restoreWorkspaceTabs("client:b", () => true); // later genuine switch
+
+      expect(composerDrafts.get(draftKey(UNASSIGNED_REALM, 7))).toEqual([{ kind: "text", text: "stray" }]);
+      expect(composerDrafts.get(draftKey("local", 7))).toEqual(kept);
+      expect(composerDrafts.get(draftKey("client:b", 7))).toEqual([]);
+    });
+  });
+
   it("replaces the realm session on a declared switch out of the unassigned placeholder", async () => {
     // Startup never learned the realm (event subscription failed): still
     // unassigned. The user explicitly switches to "This machine".
