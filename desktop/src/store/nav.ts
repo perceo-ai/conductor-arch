@@ -33,24 +33,35 @@ const [chatSurfaceShowsChat, setChatSurfaceShowsChat] = createSignal(true);
 // every other tab remembers the chat it was on so coming back lands there.
 const [workspaceTabs, setWorkspaceTabs] = createSignal<WorkspaceTabsState>(emptyTabs());
 const [threadByWorkspace, setThreadByWorkspace] = createSignal<Record<string, number>>({});
+/**
+ * The realm before any daemon identity is known. Deliberately a different
+ * string from every real tabRealmKey() value ("local", "client:<id>",
+ * "env:<address>"): "no realm assigned yet" and "this machine" must never
+ * share a storage or draft-stash key, or state from the unassigned window
+ * leaks into the local daemon's (and vice versa) the moment they meet.
+ */
+export const UNASSIGNED_REALM = "__unassigned__";
+
 // Which daemon's tabs these are. Saved continuously under this key, so a
 // daemon switch or an app quit never has a "flush on exit" step to miss. A
 // signal so views that cache it (the file editor) can be remounted when it
 // changes; persistence reads it untracked.
-const [tabRealm, setTabRealmRaw] = createSignal("local");
+const [tabRealm, setTabRealmRaw] = createSignal(UNASSIGNED_REALM);
 
 /**
  * The daemon the views on screen belong to. A real daemon switch replaces the
  * object, so views keyed on it (the file editor) remount and anything holding
  * the old object keeps the old realm for its cleanup. Startup learning the
  * daemon's identity for the first time is not a switch — same daemon, the
- * realm was just the "local" placeholder — so it corrects `realm` in place and
- * nothing remounts or loses unsaved state.
+ * realm was just the unassigned placeholder — so it corrects `realm` in place
+ * and nothing remounts or loses unsaved state.
  */
 export interface TabRealmSession {
   realm: string;
 }
-const [tabRealmSession, setTabRealmSession] = createSignal<TabRealmSession>({ realm: "local" });
+const [tabRealmSession, setTabRealmSession] = createSignal<TabRealmSession>({
+  realm: UNASSIGNED_REALM,
+});
 // False until a restore or startup first assigns the active daemon's realm.
 let realmKnown = false;
 // True while an explicit daemon switch (clientsStore) is in flight. A switch is
@@ -60,15 +71,15 @@ let realmKnown = false;
 let daemonSwitchPending = false;
 
 function assignTabRealm(realm: string) {
-  // A declared switch always replaces the session — even when the realm key
-  // string matches the current one. Switching to "This machine" while the
-  // realm still held the unset "local" placeholder is a different daemon
-  // behind the same string, and views keyed on the session must remount or
-  // the old daemon's text saves to the new daemon's file. Without a
-  // declaration, a changed realm after the realm was known is still treated
-  // as a switch (defensive — every clientsStore switch declares); only the
-  // remaining case, correcting the placeholder to the daemon's real identity,
-  // edits in place so startup never remounts over unsaved state.
+  // A declared switch always replaces the session, with no realm-string
+  // comparison: switching daemons must remount the views keyed on it, or the
+  // old daemon's text saves to the new daemon's file. (The distinct
+  // UNASSIGNED_REALM makes the strings differ too, but the declaration is
+  // what makes it a switch.) Without a declaration, a changed realm after the
+  // realm was known is still treated as a switch (defensive — every
+  // clientsStore switch declares); only the remaining case, correcting the
+  // placeholder to the daemon's real identity, edits in place so startup
+  // never remounts over unsaved state.
   if (daemonSwitchPending || (realmKnown && realm !== untrack(tabRealm))) {
     setTabRealmSession({ realm });
   } else {
@@ -88,7 +99,13 @@ const [awaitingTabRestore, setAwaitingTabRestore] = createSignal(false);
 
 function persistTabs() {
   if (awaitingTabRestore()) return;
-  saveTabRealm(untrack(tabRealm), serializeTabs(workspaceTabs(), threadByWorkspace()));
+  const realm = untrack(tabRealm);
+  // Nothing valid can be stored for "no realm assigned yet": an entry under
+  // the sentinel is never restored, so the write would just lose the tabs.
+  // The first real assignment (setTabRealm, restoreWorkspaceTabs) persists
+  // whatever is on screen then — same shape as the awaitingTabRestore gate.
+  if (realm === UNASSIGNED_REALM) return;
+  saveTabRealm(realm, serializeTabs(workspaceTabs(), threadByWorkspace()));
 }
 
 interface NavEntry {

@@ -6,6 +6,17 @@ async function freshNav() {
   return (await import("./nav")).nav;
 }
 
+/**
+ * A fresh launch that will WRITE tab state for the local machine: nothing
+ * persists while the realm is unassigned, so stamp it the way startup does.
+ * Readers assign the realm through their own restoreWorkspaceTabs call.
+ */
+async function freshLocalNav() {
+  const nav = await freshNav();
+  nav.setTabRealm("local");
+  return nav;
+}
+
 // Node's own localStorage global is unusable in vitest; every nav mutation
 // persists tabs through it, so give the whole file a working in-memory one.
 const storage = new Map<string, string>();
@@ -144,7 +155,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("restores the saved tabs, chats, and page after a restart", async () => {
-    const before = await freshNav();
+    const before = await freshLocalNav();
     before.selectWorkspace("alpha");
     before.selectChatThread(11);
     before.selectWorkspace("beta");
@@ -165,7 +176,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("drops deleted workspaces on restore and stays on the dashboard when nothing survives", async () => {
-    const before = await freshNav();
+    const before = await freshLocalNav();
     before.selectWorkspace("alpha");
     before.selectWorkspace("beta");
 
@@ -180,7 +191,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("keeps each daemon realm's tabs apart", async () => {
-    const local = await freshNav();
+    const local = await freshLocalNav();
     local.selectWorkspace("alpha");
 
     const remote = await freshNav();
@@ -195,23 +206,39 @@ describe("nav workspace tabs", () => {
     expect(tabsOf(back)).toEqual([{ tabs: ["remote-ws"], active: "remote-ws" }]);
   });
 
-  it("replaces the realm session on a declared switch even when the realm key matches the placeholder", async () => {
-    const nav = await freshNav();
-    // Startup never learned the realm (event subscription failed): still the
-    // "local" placeholder. The user explicitly switches to "This machine".
+  it("replaces the realm session on a declared switch out of the unassigned placeholder", async () => {
+    // Startup never learned the realm (event subscription failed): still
+    // unassigned. The user explicitly switches to "This machine".
+    vi.resetModules();
+    const { nav, UNASSIGNED_REALM } = await import("./nav");
     const before = nav.tabRealmSession();
-    expect(nav.tabRealm()).toBe("local");
+    expect(nav.tabRealm()).toBe(UNASSIGNED_REALM);
     nav.deferTabRestore({ daemonSwitch: true });
     nav.restoreWorkspaceTabs("local", () => true);
 
-    // Same realm string, different daemon: views keyed on the session must
-    // still remount, or the old daemon's text saves to the new daemon's file.
+    // A declared switch replaces the session even from the unassigned state:
+    // views keyed on it must remount, or the old daemon's text saves to the
+    // new daemon's file.
     expect(nav.tabRealm()).toBe("local");
     expect(nav.tabRealmSession()).not.toBe(before);
+    expect(before.realm).toBe(UNASSIGNED_REALM);
+  });
+
+  it("persists nothing while the realm is unassigned, then saves the screen on assignment", async () => {
+    vi.resetModules();
+    const { nav } = await import("./nav");
+    nav.selectWorkspace("early");
+    // Nothing may land under the sentinel key, and "local" is untouched.
+    expect(storage.size).toBe(0);
+    nav.setTabRealm("local");
+    expect(storage.size).toBe(1);
+    const fresh = await freshNav();
+    fresh.restoreWorkspaceTabs("local", () => true);
+    expect(tabsOf(fresh)).toEqual([{ tabs: ["early"], active: "early" }]);
   });
 
   it("selects the restored realm's chat even when the workspace name matches", async () => {
-    const local = await freshNav();
+    const local = await freshLocalNav();
     local.selectWorkspace("shared-name");
     local.selectChatThread(11);
 
@@ -229,7 +256,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("pauses persistence while a restore is owed, so stale pruning cannot stick", async () => {
-    const before = await freshNav();
+    const before = await freshLocalNav();
     before.selectWorkspace("alpha");
     before.selectWorkspace("beta");
 

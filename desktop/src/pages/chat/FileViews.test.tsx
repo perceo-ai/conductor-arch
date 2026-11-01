@@ -24,9 +24,9 @@ async function launch() {
   vi.resetModules();
   const { render } = await import("solid-js/web");
   const { FileView } = await import("./FileViews");
-  const { nav } = await import("@/store/nav");
+  const { nav, UNASSIGNED_REALM } = await import("@/store/nav");
   const { editorDraftStash } = await import("@/lib/editorDraftStash");
-  return { render, FileView, nav, editorDraftStash };
+  return { render, FileView, nav, editorDraftStash, UNASSIGNED_REALM };
 }
 
 async function openEditorAndEdit(
@@ -89,9 +89,9 @@ describe("FileEditor draft stash", () => {
   });
 
   it("keeps the editor and its unsaved text when startup first learns the daemon's realm", async () => {
-    const { render, FileView, nav, editorDraftStash } = await launch();
-    // Startup has not learned the daemon yet: the realm is the "local" default.
-    expect(nav.tabRealm()).toBe("local");
+    const { render, FileView, nav, editorDraftStash, UNASSIGNED_REALM } = await launch();
+    // Startup has not learned the daemon yet: the realm is unassigned.
+    expect(nav.tabRealm()).toBe(UNASSIGNED_REALM);
     const { host, area } = await openEditorAndEdit(render, FileView);
 
     // Startup's correction (index.ts, tabs already open): same daemon, now
@@ -107,15 +107,15 @@ describe("FileEditor draft stash", () => {
     // And the draft belongs to the corrected realm from here on.
     dispose!();
     dispose = undefined;
-    expect(editorDraftStash.take("local", "ws", "src/f.ts")).toBeNull();
+    expect(editorDraftStash.take(UNASSIGNED_REALM, "ws", "src/f.ts")).toBeNull();
     expect(editorDraftStash.take("client:devbox", "ws", "src/f.ts")).toBe("unsaved edit\n");
   });
 
   it("still remounts on a daemon switch that is the first realm assignment (startup never learned the realm)", async () => {
-    const { render, FileView, nav, editorDraftStash } = await launch();
+    const { render, FileView, nav, editorDraftStash, UNASSIGNED_REALM } = await launch();
     // Startup failed before learning the daemon; a focus refresh still loaded
-    // workspaces, and the user is editing under the "local" placeholder.
-    expect(nav.tabRealm()).toBe("local");
+    // workspaces, and the user is editing under the unassigned placeholder.
+    expect(nav.tabRealm()).toBe(UNASSIGNED_REALM);
     const { host, area } = await openEditorAndEdit(render, FileView);
 
     // Then they switch daemons (what clientsStore.activate/add/remove do), and
@@ -131,8 +131,40 @@ describe("FileEditor draft stash", () => {
       return el!;
     });
     expect(fresh.isConnected).toBe(true);
-    // The old daemon's text stayed with the old daemon's editor.
-    expect(editorDraftStash.take("local", "ws", "src/f.ts")).toBe("unsaved edit\n");
+    // The old daemon's text stayed with the unassigned-era editor.
+    expect(editorDraftStash.take(UNASSIGNED_REALM, "ws", "src/f.ts")).toBe("unsaved edit\n");
     expect(editorDraftStash.take("client:devbox", "ws", "src/f.ts")).toBeNull();
+  });
+
+  it("does not hand the unassigned-era draft to the real local daemon after a declared switch", async () => {
+    const { render, FileView, nav, editorDraftStash, UNASSIGNED_REALM } = await launch();
+    // Startup never learned the daemon (event subscription failed); the user
+    // edits under the unassigned placeholder...
+    expect(nav.tabRealm()).toBe(UNASSIGNED_REALM);
+    const { host, area } = await openEditorAndEdit(render, FileView);
+
+    // ...then explicitly switches to "This machine" — whose realm key is the
+    // real "local". The remount alone is not enough: if the placeholder and
+    // the real local realm share a key string, the fresh editor immediately
+    // re-adopts the old daemon's parked draft and can save it here.
+    nav.deferTabRestore({ daemonSwitch: true });
+    nav.restoreWorkspaceTabs("local", () => true);
+
+    const fresh = await vi.waitFor(() => {
+      const el = host.querySelector<HTMLTextAreaElement>("textarea.ws-file-editor-area");
+      expect(el).toBeTruthy();
+      expect(el).not.toBe(area);
+      return el!;
+    });
+    // The real local daemon's editor shows the file as saved on THIS machine,
+    // not the text typed against the other daemon.
+    await vi.waitFor(() => expect(fresh.value).toBe("saved text\n"));
+
+    dispose!();
+    dispose = undefined;
+    // The unassigned-era draft stays under the sentinel; nothing leaked into
+    // the real local realm.
+    expect(editorDraftStash.take(UNASSIGNED_REALM, "ws", "src/f.ts")).toBe("unsaved edit\n");
+    expect(editorDraftStash.take("local", "ws", "src/f.ts")).toBeNull();
   });
 });

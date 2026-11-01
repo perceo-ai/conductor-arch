@@ -266,15 +266,16 @@ describe("clientsStore switches replace the tab realm session", () => {
    */
   it("activate from a never-assigned realm replaces the session", async () => {
     const { clientsStore, nav, refreshInventory } = await import("./index");
+    const { UNASSIGNED_REALM } = await import("./nav");
     await refreshInventory();
     const before = nav.tabRealmSession();
-    expect(before.realm).toBe("local");
+    expect(before.realm).toBe(UNASSIGNED_REALM);
 
     expect(await clientsStore.activate("devbox")).toBe(true);
 
     expect(nav.tabRealm()).toBe("client:devbox");
     expect(nav.tabRealmSession()).not.toBe(before);
-    expect(before.realm).toBe("local");
+    expect(before.realm).toBe(UNASSIGNED_REALM);
   });
 
   it("a failed switch leaves the next startup correction in place", async () => {

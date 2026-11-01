@@ -162,6 +162,9 @@ describe("startStore: tab realm when a workspace opens during startup", () => {
     // ...and the tab already on screen is saved under it, not just future ones.
     const { loadTabRealm } = await import("@/lib/tabPersistence");
     expect(loadTabRealm("client:devbox")?.groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
+    // The click that landed before the realm was known wrote nothing under the
+    // real local machine's key (it used to, via the shared "local" string).
+    expect(loadTabRealm("local")).toBeNull();
   });
 
   it("points persistence at the environment-pinned daemon's realm", async () => {
