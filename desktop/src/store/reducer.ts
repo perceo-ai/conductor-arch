@@ -278,7 +278,7 @@ export function applyEvent(event: ArchcarEvent) {
 
     case "turn_completed": {
       const e = event as { thread_id: number };
-      chatStore.setCompletedTurnAttention(e.thread_id, nav.selectedChatThread() !== e.thread_id);
+      chatStore.setCompletedTurnAttention(e.thread_id, !nav.chatThreadInView(e.thread_id));
       // The end of a turn is the state the user reads; never sit on it.
       chatRefresh.flush(e.thread_id);
       void refreshThreadWorkspace(e.thread_id);
@@ -314,7 +314,7 @@ export function applyEvent(event: ArchcarEvent) {
       // name, so re-point selection before reloading or the open workspace goes
       // blank.
       const e = event as { old_name: string; new_name: string };
-      if (nav.selectedWorkspace() === e.old_name) nav.selectWorkspace(e.new_name);
+      nav.renameWorkspace(e.old_name, e.new_name);
       void refreshWorkspaceInventoryAndChats();
       break;
     }

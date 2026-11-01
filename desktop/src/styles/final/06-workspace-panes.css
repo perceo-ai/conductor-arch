@@ -1,0 +1,203 @@
+
+/* Workspace tabs and the two-pane split.
+
+   The strip reuses the chat-tab rail's metrics (30px, flat, underline on the
+   active tab) one level up, so the hierarchy reads as tabs-over-tabs rather
+   than a new chrome. The empty part of the strip drags the window, like the
+   topbar it sits above. */
+.ws-panes {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+.ws-panes.ws-panes-down {
+  flex-direction: column;
+}
+
+.ws-pane {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* In a side-by-side split the focused pane carries the whole workbench —
+   inspector included — while the compact pane is a lone chat column, so an
+   even share starves the side that has more to show. The extra width moves
+   with focus, like the inspector itself. Stacked (down) panes divide height,
+   where the inspector costs nothing. */
+.ws-panes-split:not(.ws-panes-down) > .ws-pane-focused {
+  flex-grow: 1.7;
+}
+.ws-panes-split .ws-pane + .ws-pane {
+  border-left: 1px solid var(--lc-border, #2a2a2a);
+}
+.ws-panes-split.ws-panes-down .ws-pane + .ws-pane {
+  border-left: none;
+  border-top: 1px solid var(--lc-border, #2a2a2a);
+}
+
+.ws-pane-body {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ws-pane-tabbar {
+  flex: 0 0 auto;
+  height: 30px;
+  min-height: 30px;
+  display: flex;
+  align-items: stretch;
+  background: #111111;
+  border-bottom: 1px solid var(--lc-border, #2a2a2a);
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-app-region: drag;
+}
+.ws-pane-tabbar.ws-pane-tabbar-drop {
+  background: #161616;
+}
+.ws-pane-tabs {
+  display: flex;
+  align-items: stretch;
+  width: max-content;
+  padding: 0 6px;
+}
+
+.ws-pane-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 0 4px 0 10px;
+  font-size: 12px;
+  color: var(--lc-text-muted, #8a8a8a);
+  cursor: pointer;
+  user-select: none;
+  -webkit-app-region: no-drag;
+}
+.ws-pane-tab:hover {
+  background: #171717;
+  color: var(--lc-text, #e4e4e4);
+}
+.ws-pane-tab.ws-pane-tab-active {
+  color: var(--lc-text, #e4e4e4);
+}
+/* The accent underline marks the tab the keyboard acts on; the other pane's
+   active tab keeps a neutral one so focus is never ambiguous. */
+.ws-pane-tab.ws-pane-tab-active::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--lc-border-strong, #3a3a3a);
+}
+.ws-pane-tab.ws-pane-tab-focused::after {
+  background: var(--lc-accent);
+}
+.ws-pane-tab:focus-visible {
+  outline: 1px solid var(--lc-accent);
+  outline-offset: -1px;
+}
+.ws-pane-tab-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-pane-tab-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--lc-accent);
+}
+.ws-pane-tab-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  opacity: 0;
+  cursor: pointer;
+}
+.ws-pane-tab-close .ui-icon {
+  width: 11px;
+  height: 11px;
+}
+.ws-pane-tab:hover .ws-pane-tab-close,
+.ws-pane-tab.ws-pane-tab-active .ws-pane-tab-close,
+.ws-pane-tab-close:focus-visible {
+  opacity: 0.55;
+}
+.ws-pane-tab-close:hover {
+  opacity: 1;
+  background: #242424;
+}
+
+/* Drop targets, shown only while a workspace tab is dragged. */
+.ws-pane-dropzones {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+.ws-pane-dropzone {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  font-size: 12px;
+  color: transparent;
+  border-radius: 8px;
+  transition: background-color 80ms ease, color 80ms ease;
+}
+.ws-pane-dropzone-right {
+  top: 0;
+  right: 0;
+  bottom: 30%;
+  width: 30%;
+}
+.ws-pane-dropzone-down {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 30%;
+}
+.ws-pane-dropzone-all {
+  inset: 0;
+}
+.ws-pane-dropzone.is-over {
+  background: color-mix(in srgb, var(--lc-accent) 14%, transparent);
+  outline: 1px dashed color-mix(in srgb, var(--lc-accent) 60%, transparent);
+  outline-offset: -6px;
+  color: var(--lc-text, #e4e4e4);
+}
+
+.lc-theme-light .ws-pane-tabbar {
+  background: #f3f3f3;
+}
+.lc-theme-light .ws-pane-tabbar.ws-pane-tabbar-drop,
+.lc-theme-light .ws-pane-tab:hover {
+  background: #e9e9e9;
+}
+.lc-theme-light .ws-pane-tab-close:hover {
+  background: #dddddd;
+}

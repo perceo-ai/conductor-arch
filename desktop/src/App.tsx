@@ -176,8 +176,10 @@ export default function App() {
   });
 
   function focusFirst(selectors: string[]) {
+    // With the workspace view split, "the composer" means the focused pane's.
+    const scope = document.querySelector<HTMLElement>(".ws-pane-focused") ?? document;
     for (const selector of selectors) {
-      const el = document.querySelector<HTMLElement>(selector);
+      const el = scope.querySelector<HTMLElement>(selector) ?? document.querySelector<HTMLElement>(selector);
       if (el) {
         el.focus();
         return true;

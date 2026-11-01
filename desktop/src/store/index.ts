@@ -5,6 +5,7 @@ import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { threadsStore } from "./threads";
 import { layoutPresetsStore } from "./layoutPresets";
+import { clientsStore, restoreTabsForActiveDaemon } from "./clients";
 
 export { nav } from "./nav";
 export { chatStore } from "./chat";
@@ -32,6 +33,7 @@ export { layoutStore } from "./layout";
 export { layoutPresetsStore } from "./layoutPresets";
 export { updateMetrics, metricsEnabled } from "./metrics";
 export { uiStore } from "./ui";
+export { restoreTabsForActiveDaemon } from "./clients";
 
 let focusWired = false;
 let startPromise: Promise<void> | null = null;
@@ -87,7 +89,22 @@ export function startStore(): Promise<void> {
       focusWired = true;
     }
     await connectEvents((event) => applyEvent(event));
-    await refreshInventory().catch(() => {});
+    // The tab realm is the active daemon's, so its identity must be known
+    // before the restore — quietly, since the switcher will refresh again.
+    await clientsStore.ensureLoaded();
+    let inventoryOk = true;
+    await refreshInventory().catch(() => {
+      inventoryOk = false;
+    });
+    // Bring back the tabs from last run — unless the user already opened
+    // something while we were loading, which wins. A failed inventory pull
+    // leaves the restore owed instead: restoring against an empty store would
+    // drop every saved tab and persist the loss. WorkspacePanes retries once
+    // a good inventory lands (the on-focus refresh, typically).
+    if (nav.workspaceTabs().groups.every((group) => group.tabs.length === 0)) {
+      if (inventoryOk && workspacesStore.loaded()) restoreTabsForActiveDaemon();
+      else nav.deferTabRestore();
+    }
     const selected = nav.selectedWorkspace();
     const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
     await layoutPresetsStore.load(repository).catch(() => {});

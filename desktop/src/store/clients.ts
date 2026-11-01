@@ -47,12 +47,41 @@ function clientKey(id: string | null): string {
   return id ?? "local";
 }
 
+/** Storage realm for the active daemon's workspace tabs (see tabPersistence). */
+function tabRealmKey(): string {
+  if (state.envAddress) return `env:${state.envAddress}`;
+  return state.activeId != null ? `client:${state.activeId}` : "local";
+}
+
+/** A stored tab name is only kept when this daemon still has the workspace. */
+function liveWorkspace(name: string): boolean {
+  const row = workspacesStore.row(name);
+  return row != null && row.status !== "archived";
+}
+
+/** Bring back the active daemon's saved tabs, validated against the inventory. */
+export function restoreTabsForActiveDaemon(): void {
+  nav.restoreWorkspaceTabs(tabRealmKey(), liveWorkspace);
+}
+
 function rememberCurrentWorkspace(id: string | null): void {
   const selected = nav.selectedWorkspace();
   if (selected) lastWorkspaceByClient.set(clientKey(id), selected);
 }
 
-function restoreWorkspaceForClient(id: string | null): void {
+function restoreWorkspaceForClient(id: string | null, inventoryOk: boolean): void {
+  // The old daemon's tabs are already saved under its own realm; what comes
+  // back is whatever this daemon's realm holds, checked against the inventory
+  // resync just pulled. Thread ids in it are this daemon's too. If that pull
+  // failed, the stores still describe the old daemon — restoring against them
+  // would prune (and then persist) the wrong things, so the restore stays
+  // owed: persistence is paused, and WorkspacePanes retries it when a good
+  // inventory arrives.
+  if (!inventoryOk) return;
+  restoreTabsForActiveDaemon();
+  if (nav.selectedWorkspace() != null) return;
+  // No saved tabs for this daemon: fall back to the workspace that was on
+  // screen the last time this session pointed at it, then the dashboard.
   const remembered = lastWorkspaceByClient.get(clientKey(id));
   if (remembered && workspacesStore.row(remembered)) {
     nav.selectWorkspace(remembered);
@@ -81,12 +110,15 @@ async function resync(): Promise<void> {
   // re-pull below issues requests to the new one. Without this a slow response
   // from the old daemon can land afterwards and overwrite the new state.
   bumpDaemonEpoch();
-  await actions.refreshInventory().catch(() => undefined);
+  let inventoryOk = true;
+  await actions.refreshInventory().catch(() => {
+    inventoryOk = false;
+  });
   await setupStore.check().catch(() => undefined);
   // The new daemon may know a different set of agents than the old one, so a
   // stale registry would offer providers this host cannot actually run.
   await providersStore.load().catch(() => undefined);
-  restoreWorkspaceForClient(state.activeId);
+  restoreWorkspaceForClient(state.activeId, inventoryOk);
   const selected = nav.selectedWorkspace();
   const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
   await layoutPresetsStore.load(repository).catch(() => undefined);
@@ -150,11 +182,29 @@ export const clientsStore = {
 
   refresh: () => run("clients refreshed", () => bridge.list()),
 
+  /**
+   * Quiet one-shot load for boot: startStore needs the active daemon's id to
+   * pick the right tab realm before restoring, and must not toast when a build
+   * without client support says no.
+   */
+  async ensureLoaded(): Promise<void> {
+    if (state.loaded) return;
+    try {
+      applyResult(await bridge.list());
+    } catch {
+      // Leave defaults: this machine.
+    }
+  },
+
   /** Switch to a saved client, or to this machine with null. */
   async activate(id: string | null): Promise<boolean> {
     if (id === state.activeId) return true;
     logAction("switch client", { id });
     rememberCurrentWorkspace(state.activeId);
+    // From here until the new realm's restore, the on-screen tabs belong to
+    // the daemon being left — pause persistence so the inventory pruning in
+    // between cannot be saved over the old realm's entry.
+    nav.deferTabRestore();
     return run("client switched", () => bridge.activate(id), resync);
   },
 
@@ -162,12 +212,14 @@ export const clientsStore = {
   async add(opts: { label?: string; address: string; token: string }): Promise<boolean> {
     logAction("add client", { address: opts.address });
     rememberCurrentWorkspace(state.activeId);
+    nav.deferTabRestore();
     return run("client added", () => bridge.add(opts), resync);
   },
 
   async remove(id: string): Promise<boolean> {
     const wasActive = state.activeId === id;
     logAction("remove client", { id });
+    if (wasActive) nav.deferTabRestore();
     return run("client removed", () => bridge.remove(id), wasActive ? resync : undefined);
   },
 

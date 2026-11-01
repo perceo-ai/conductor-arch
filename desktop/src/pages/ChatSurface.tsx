@@ -16,6 +16,7 @@ import { titleCaseWorkspace } from "@/lib/text";
 import { chatTabLabel } from "@/lib/chatTabLabel";
 import { seedForSelectedThread } from "@/lib/chatSeed";
 import { registerOpenFile, registerOpenCommit } from "./openFileBridge";
+import { usePane } from "./paneContext";
 import Icon from "@/components/Icon";
 import { ThreadTab, FileTab } from "./chat/ChatTabs";
 import { Timeline } from "./chat/Timeline";
@@ -41,6 +42,7 @@ type CenterView =
   | { kind: "commit"; commit: string };
 
 export default function ChatSurface(props: { workspace: string }) {
+  const pane = usePane();
   // Only agent chats (codex/claude) belong in the tab strip. "shell" sessions
   // are the terminal dock, not chats — hide any legacy shell-provider threads.
   const threads = createMemo(() =>
@@ -64,19 +66,32 @@ export default function ChatSurface(props: { workspace: string }) {
 
   // A file or commit open here hides the selected chat; the turn-finished
   // sound's "quiet for the chat on screen" needs to know it is not on screen.
-  createEffect(() => nav.setChatSurfaceShowsChat(view().kind === "chat"));
-  onCleanup(() => nav.setChatSurfaceShowsChat(true));
+  // Only the focused pane speaks for "on screen"; the other pane is judged by
+  // its active chat alone.
+  createEffect(() => {
+    if (pane.focused()) nav.setChatSurfaceShowsChat(view().kind === "chat");
+  });
+  onCleanup(() => {
+    if (pane.focused()) nav.setChatSurfaceShowsChat(true);
+  });
 
-  // Let the right-panel Browse/Changes open files into the center.
-  onMount(() => registerOpenFile((ws, path, scope) => {
-    if (ws !== props.workspace) return;
-    openFile(path, scope);
-  }));
-  // Let the recent-commits list open a commit's diff into the center.
-  onMount(() => registerOpenCommit((ws, commit) => {
-    if (ws !== props.workspace) return;
-    setView({ kind: "commit", commit });
-  }));
+  // Let the right-panel Browse/Changes open files, and the recent-commits
+  // list open a commit's diff, into this workspace's center. Registered per
+  // workspace (and re-registered when the pane's tab switches workspace) so
+  // two mounted chat surfaces each answer only for their own.
+  createEffect(
+    on(
+      () => props.workspace,
+      (ws) => {
+        const offFile = registerOpenFile(ws, (path, scope) => openFile(path, scope));
+        const offCommit = registerOpenCommit(ws, (commit) => setView({ kind: "commit", commit }));
+        onCleanup(() => {
+          offFile();
+          offCommit();
+        });
+      },
+    ),
+  );
 
   function openFile(path: string, scope: WorkspaceChangeScope = "all") {
     setOpenFilePath(path);
@@ -104,7 +119,7 @@ export default function ChatSurface(props: { workspace: string }) {
             void newChat();
             return;
           }
-          const current = nav.selectedChatThread();
+          const current = pane.threadId();
           if (current == null || !list.some((t) => t.id === current)) {
             selectThread(list[0]);
           }
@@ -118,13 +133,13 @@ export default function ChatSurface(props: { workspace: string }) {
     // seed it with the default just as newChat() does.
     const seed = seedForSelectedThread(thread, pendingSeed(), prefsStore.seedModelFor);
     if (seed) setPendingSeed((p) => ({ ...p, [thread.id]: seed }));
-    nav.selectChatThread(thread.id);
+    pane.selectThread(thread.id);
     chatStore.setCompletedTurnAttention(thread.id, false);
     setView({ kind: "chat" });
     loadThread(thread.id);
   }
 
-  const activeThread = createMemo(() => threads().find((t) => t.id === nav.selectedChatThread()));
+  const activeThread = createMemo(() => threads().find((t) => t.id === pane.threadId()));
 
   async function newChat(provider?: string, model?: string) {
     const chosen = provider ?? newProvider();
@@ -160,8 +175,8 @@ export default function ChatSurface(props: { workspace: string }) {
         void newChat();
         return;
       }
-      if (nav.selectedChatThread() === thread.id) {
-        nav.selectChatThread(list[0].id);
+      if (pane.threadId() === thread.id) {
+        pane.selectThread(list[0].id);
       }
     } catch {
       // non-fatal
@@ -169,14 +184,17 @@ export default function ChatSurface(props: { workspace: string }) {
   }
 
   onMount(() => {
-    const onNewChat = () => void newChat();
+    const onNewChat = () => {
+      if (pane.focused()) void newChat();
+    };
     const onCloseActiveChat = () => {
+      if (!pane.focused()) return;
       const file = openFilePath();
       if (file && view().kind === "file") {
         closeFile(file);
         return;
       }
-      const threadId = nav.selectedChatThread();
+      const threadId = pane.threadId();
       const thread = threads().find((candidate) => candidate.id === threadId) ?? threads()[0];
       if (thread) void closeThread(thread);
     };
@@ -210,7 +228,7 @@ export default function ChatSurface(props: { workspace: string }) {
                 label={chatTabLabel(thread.title, i())}
                 queued={chatStore.slice(thread.id).queue.length}
                 pendingInteraction={interactionsStore.pending(thread.id) != null}
-                active={view().kind === "chat" && nav.selectedChatThread() === thread.id}
+                active={view().kind === "chat" && pane.threadId() === thread.id}
                 onClick={() => selectThread(thread)}
                 onClose={() => void closeThread(thread)}
               />

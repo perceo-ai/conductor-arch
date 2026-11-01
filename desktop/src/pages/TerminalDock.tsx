@@ -7,6 +7,7 @@ import { runScriptAvailabilityLabel, runScriptStatusText, scriptConsoleActions }
 import { ansiToHtml } from "@/lib/ansi";
 import Icon from "@/components/Icon";
 import { configuredShortcut } from "@/lib/configuredShortcut";
+import { usePane } from "./paneContext";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
 // collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
@@ -131,7 +132,7 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
   function queueDraft() {
     const text = (prompt() ?? "").trim();
     if (!text) return;
-    const tid = nav.selectedChatThread();
+    const tid = nav.threadFor(props.workspace);
     const thread = tid != null ? threadsStore.list(props.workspace).find((t) => t.id === tid) : undefined;
     if (!thread) {
       toastsStore.push("Open a chat to queue this prompt.", "info");
@@ -236,6 +237,8 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
 }
 
 export default function TerminalDock(props: { workspace: string }) {
+  const pane = usePane();
+  let dockEl: HTMLDivElement | undefined;
   // Open by default. It was collapsed on the theory that chat is primary and
   // the dock is a drawer, but the terminal and the setup/run consoles are part
   // of the normal loop, and a collapsed dock hides that they exist at all. An
@@ -278,9 +281,10 @@ export default function TerminalDock(props: { workspace: string }) {
 
   onMount(() => {
     const onToggle = () => {
+      if (!pane.focused()) return;
       setExpanded((expanded) => !expanded);
       queueMicrotask(() => {
-        document.querySelector<HTMLElement>("[data-focus-target='terminal-dock']")?.focus();
+        dockEl?.focus();
       });
     };
     window.addEventListener("archductor:toggle-terminal-dock", onToggle);
@@ -289,6 +293,7 @@ export default function TerminalDock(props: { workspace: string }) {
 
   return (
     <div
+      ref={dockEl}
       class="ws-run-section"
       data-focus-target="terminal-dock"
       tabIndex={-1}

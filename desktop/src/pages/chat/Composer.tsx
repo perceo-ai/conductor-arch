@@ -1,5 +1,6 @@
-import { Show, createEffect, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
+import { Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, untrack } from "solid-js";
 import {
+  nav,
   chatStore,
   interactionsStore,
   actions,
@@ -42,6 +43,7 @@ import { inlineFileMentionAt } from "@/lib/chatAttachments";
 import { loadWorkspaceFiles } from "@/lib/workspaceFiles";
 import { openFileInCenter } from "@/pages/openFileBridge";
 import { fuzzyScore } from "@/lib/fuzzy";
+import { composerDrafts, draftKey } from "@/lib/composerDrafts";
 import { pastedAttachmentsFromClipboard } from "@/lib/pasteAttachments";
 import { providerToKind } from "./providerKind";
 import { applyApprovalMode, supportsApprovalMode } from "./approvalMode";
@@ -84,7 +86,9 @@ export function Composer(props: {
   // composer used to hold directly — so everything downstream of it is
   // unchanged; what a string cannot hold is a chip, which is why the document
   // is the source of truth now and the string is derived from it.
-  const [nodes, setNodes] = createSignal<ComposerNode[]>([]);
+  const [nodes, setNodes] = createSignal<ComposerNode[]>(
+    composerDrafts.get(draftKey(nav.tabRealm(), untrack(() => props.threadId))),
+  );
   const text = () => toVisible(nodes());
   let input: RichInputApi | undefined;
   const [fileMention, setFileMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
@@ -249,14 +253,38 @@ export function Composer(props: {
     setSkillMentionCursor(0);
   }
 
-  function setEditorNodes(next: ComposerNode[], cursor?: number) {
+  function setEditorNodes(next: ComposerNode[], cursor?: number, focus = true) {
     const document_ = normalize(next);
     setNodes(document_);
     queueMicrotask(() => {
-      input?.setNodes(document_, cursor);
+      input?.setNodes(document_, cursor, focus);
       syncFileMention(toVisible(document_), cursor);
     });
   }
+
+  // Each chat keeps its own unsent draft: park this one, bring the next one
+  // back. The key is cached rather than derived at cleanup time, twice over:
+  // the parent's `threadId` getter dereferences the active thread, which is
+  // already gone by the time this composer is torn down (a throw there aborts
+  // the whole update that unmounted it), and on a daemon switch the realm has
+  // already moved on while this draft still belongs to the old realm's thread.
+  let currentDraftKey = draftKey(nav.tabRealm(), untrack(() => props.threadId));
+  createEffect(
+    on(
+      () => props.threadId,
+      (threadId) => {
+        const next = draftKey(nav.tabRealm(), threadId);
+        if (next === currentDraftKey) return;
+        composerDrafts.save(currentDraftKey, untrack(nodes));
+        currentDraftKey = next;
+        // No focus: switching chats or tabs must not pull focus into this
+        // composer — in a split it would also steal focus from the other pane.
+        setEditorNodes(composerDrafts.get(next), undefined, false);
+      },
+      { defer: true },
+    ),
+  );
+  onCleanup(() => composerDrafts.save(currentDraftKey, untrack(nodes)));
 
   /**
    * Replace the typed `@query` (or `/query`) with a chip.

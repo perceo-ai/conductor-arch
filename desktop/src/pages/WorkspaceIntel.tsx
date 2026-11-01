@@ -369,7 +369,7 @@ function extractCurrentChatSection(markdown: string): string | null {
 
 /** Read-only view of the selected chat thread's maintained context. */
 function CurrentChatSection(props: { workspace: string }) {
-  const threadId = () => nav.selectedChatThread();
+  const threadId = () => nav.threadFor(props.workspace);
   const [chatContext] = createResource(
     () => {
       const id = threadId();

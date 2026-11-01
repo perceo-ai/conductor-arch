@@ -11,7 +11,8 @@ import { fileChipElement, openableChipPath } from "@/lib/fileChip";
 export interface RichInputApi {
   focus(): void;
   /** Replace the whole document, optionally putting the caret at a visible offset. */
-  setNodes(nodes: ComposerNode[], caret?: number): void;
+  /** Repaint the document. Focuses the editor unless `focus` is false. */
+  setNodes(nodes: ComposerNode[], caret?: number, focus?: boolean): void;
   caret(): number;
   isEmpty(): boolean;
 }
@@ -163,8 +164,9 @@ export default function RichInput(props: {
     paint(props.nodes());
     props.ref?.({
       focus: () => el?.focus(),
-      setNodes: (nodes, caret) => {
+      setNodes: (nodes, caret, focus = true) => {
         paint(nodes);
+        if (!focus) return;
         el?.focus();
         if (caret != null) placeCaret(caret);
       },

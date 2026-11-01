@@ -1,7 +1,7 @@
 import { Show } from "solid-js";
 import { nav } from "@/store";
 import { DashboardPage } from "./Dashboard";
-import CommandCenter from "./CommandCenter";
+import WorkspacePanes from "./WorkspacePanes";
 import { HistoryPage } from "./History";
 import { SettingsPage } from "./Settings";
 
@@ -9,7 +9,7 @@ import { SettingsPage } from "./Settings";
 // is mounted (see PageStack), so unmounted pages cost nothing.
 
 export function WorkspacePage() {
-  return <CommandCenter />;
+  return <WorkspacePanes />;
 }
 
 export function PageStack() {
