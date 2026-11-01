@@ -14595,6 +14595,71 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn git_worktree_diff_output_reads_an_edit_made_in_the_same_tick_as_staging() {
+        // End to end through the read path, so it fails whether the copy loses
+        // the mtime inside the helper or the call site stops using the helper.
+        // The entry and the index are pinned to one instant, so git must treat
+        // the entry as racily clean and re-read it; a same-size edit in that
+        // tick is then visible only if the copy kept the index's mtime.
+        // Deterministic: no wall clock, no filesystem timestamp granularity.
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let pin_mtime = |path: &Path, at: std::time::SystemTime| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        let tick = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let file = workspace.path.join("f");
+
+        // Staged with its mtime at the tick, so `git add` records the tick.
+        fs::write(&file, b"bbbb\n").unwrap();
+        pin_mtime(&file, tick);
+        git_output(&workspace.path, ["add", "f"]);
+        // The index written in that same tick.
+        let index = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        );
+        pin_mtime(&index, tick);
+        // A same-size edit inside the tick: the stat data still matches.
+        fs::write(&file, b"cccc\n").unwrap();
+        pin_mtime(&file, tick);
+
+        let out = git_worktree_diff_output(&workspace.path, &["diff", "--stat"]).unwrap();
+        assert!(
+            out.contains("f |"),
+            "a same-tick, same-size edit vanished from the worktree diff: {out:?}"
+        );
+    }
+
+    #[test]
     fn committed_work_still_counts_as_something_to_propose() {
         // Regression: the PR precondition read the *working tree*, so
         // committing your work — exactly what the old error told you to do —
