@@ -38,6 +38,28 @@ const [threadByWorkspace, setThreadByWorkspace] = createSignal<Record<string, nu
 // signal so views that cache it (the file editor) can be remounted when it
 // changes; persistence reads it untracked.
 const [tabRealm, setTabRealmRaw] = createSignal("local");
+
+/**
+ * The daemon the views on screen belong to. A real daemon switch replaces the
+ * object, so views keyed on it (the file editor) remount and anything holding
+ * the old object keeps the old realm for its cleanup. Startup learning the
+ * daemon's identity for the first time is not a switch — same daemon, the
+ * realm was just the "local" placeholder — so it corrects `realm` in place and
+ * nothing remounts or loses unsaved state.
+ */
+export interface TabRealmSession {
+  realm: string;
+}
+const [tabRealmSession, setTabRealmSession] = createSignal<TabRealmSession>({ realm: "local" });
+// False until a restore or startup first assigns the active daemon's realm.
+let realmKnown = false;
+
+function assignTabRealm(realm: string) {
+  if (realmKnown && realm !== untrack(tabRealm)) setTabRealmSession({ realm });
+  else untrack(tabRealmSession).realm = realm;
+  realmKnown = true;
+  setTabRealmRaw(realm);
+}
 // True from "a restore is owed" (boot before the inventory arrived, or a
 // daemon switch in flight) until restoreWorkspaceTabs runs. While it holds,
 // nothing persists: the tabs on screen are the old realm's (or nothing), and
@@ -122,6 +144,7 @@ export const nav = {
   awaitingTabRestore,
   /** Storage realm of the tabs currently on screen (drafts key off it too). */
   tabRealm,
+  tabRealmSession,
   /** Pause tab persistence until the owed restoreWorkspaceTabs call. */
   deferTabRestore() {
     setAwaitingTabRestore(true);
@@ -132,7 +155,7 @@ export const nav = {
    * was known would otherwise never reach this realm's entry).
    */
   setTabRealm(realm: string) {
-    setTabRealmRaw(realm);
+    assignTabRealm(realm);
     persistTabs();
   },
   /** Cancel an owed restore after a failed switch, without touching current tabs. */
@@ -286,7 +309,7 @@ export const nav = {
     // One batch: views keyed on the realm remount once, against the restored
     // selection, not against the old realm's tabs in between.
     batch(() => {
-      setTabRealmRaw(realm);
+      assignTabRealm(realm);
       setAwaitingTabRestore(false);
       const { state, threads } = materializeTabs(loadTabRealm(realm), keep);
       setThreadByWorkspace(threads);
