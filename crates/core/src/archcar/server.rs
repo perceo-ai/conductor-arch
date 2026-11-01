@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -1179,8 +1180,43 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 .and_then(|store| store.save_thread_paste_attachment(thread_id, &text))
             {
                 Ok(saved) => ArchcarResponse::ChatPasteSaved {
+                    label: file_name_from_relative_path(&saved.relative_path),
                     relative_path: saved.relative_path,
-                    label: "pasted text".to_owned(),
+                },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::SaveChatAttachment {
+            thread_id,
+            label,
+            kind,
+            data_base64,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            let max_base64_len = crate::chat_attachments::MAX_CHAT_ATTACHMENT_BYTES.div_ceil(3) * 4;
+            let result = if data_base64.len() > max_base64_len {
+                Err(anyhow!("chat attachment is larger than 25 MiB"))
+            } else {
+                base64::engine::general_purpose::STANDARD
+                    .decode(data_base64)
+                    .map_err(|err| anyhow!("decode pasted attachment: {err}"))
+            }
+            .and_then(|bytes| {
+                let kind = match kind.as_str() {
+                    "image" => crate::chat_attachments::AttachmentKind::Image,
+                    "file" => crate::chat_attachments::AttachmentKind::File,
+                    other => anyhow::bail!("unsupported chat attachment kind {other}"),
+                };
+                WorkspaceStore::open_app(&db_path).and_then(|store| {
+                    store.save_thread_file_attachment(thread_id, &label, kind, &bytes)
+                })
+            });
+            match result {
+                Ok(saved) => ArchcarResponse::ChatPasteSaved {
+                    label: file_name_from_relative_path(&saved.relative_path),
+                    relative_path: saved.relative_path,
                 },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -6587,6 +6623,14 @@ impl<'a> SpawnInFlight<'a> {
             spawn_registration_gate::pass(&db_path, self.pid.get());
         }
     }
+}
+
+fn file_name_from_relative_path(path: &str) -> String {
+    path.rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_owned()
 }
 
 /// Lets a test hold a background spawn inside the race window instead of

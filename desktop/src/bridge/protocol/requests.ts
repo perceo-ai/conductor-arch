@@ -54,6 +54,13 @@ export type ArchcarRequest =
   | { type: "remove_queued_chat_input"; queue_id: number }
   | { type: "move_queued_chat_input"; queue_id: number; up: boolean }
   | { type: "save_chat_paste"; thread_id: number; text: string }
+  | {
+      type: "save_chat_attachment";
+      thread_id: number;
+      label: string;
+      kind: "file" | "image";
+      data_base64: string;
+    }
   | { type: "resolve_provider_interaction"; interaction_id: string; resolution: ProviderInteractionResolution }
   | { type: "list_provider_interactions"; thread_id?: number; pending_only: boolean }
   | { type: "set_chat_plan_mode"; thread_id: number; plan_mode: boolean }

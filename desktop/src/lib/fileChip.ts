@@ -135,7 +135,7 @@ export function chatAttachmentPath(threadId: number, filename: string): string {
  * and that shape is specific enough to recognise without asking the daemon.
  */
 export function isChatAttachmentFilename(label: string): boolean {
-  return /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}\.(?:md|png)$/.test(label);
+  return /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}\.[a-z0-9+-]{1,16}$/.test(label);
 }
 
 /**
