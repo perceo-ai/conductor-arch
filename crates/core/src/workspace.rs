@@ -52,6 +52,7 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
@@ -4098,9 +4099,9 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            return git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()]);
+            return git_worktree_diff_output(&workspace.path, &["diff", "--", path_value.as_str()]);
         }
-        git_output(&workspace.path, ["diff", "--"])
+        git_worktree_diff_output(&workspace.path, &["diff", "--"])
     }
 
     pub fn staged_diff(&self, name: &str, path: Option<&Path>) -> Result<String> {
@@ -4130,7 +4131,7 @@ impl WorkspaceStore {
                 &["diff", "--cached", "--", path_value.as_str()],
             )?
         } else {
-            git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()])?
+            git_worktree_diff_output(&workspace.path, &["diff", "--", path_value.as_str()])?
         };
         Ok(diff_hunk_summaries(&diff, staged))
     }
@@ -4144,7 +4145,7 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let validated = validate_workspace_relative_path(relative_path)?;
         let path_value = validated.to_string_lossy().to_string();
-        let diff = git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()])?;
+        let diff = git_worktree_diff_output(&workspace.path, &["diff", "--", path_value.as_str()])?;
         let patch = diff_hunk_patch(&diff, hunk_index)?;
         validate_hunk_patch_supported(&patch)?;
         git_patch(&workspace.path, &["apply", "--cached", "-"], &patch)?;
@@ -4194,12 +4195,12 @@ impl WorkspaceStore {
         let base_ref = workspace_base_ref(&workspace);
         let mut diff = if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            git_output_dynamic(
+            git_worktree_diff_output(
                 &workspace.path,
                 &["diff", base_ref, "--", path_value.as_str()],
             )?
         } else {
-            git_output_dynamic(&workspace.path, &["diff", base_ref, "--"])?
+            git_worktree_diff_output(&workspace.path, &["diff", base_ref, "--"])?
         };
         diff.push_str(&untracked_patch(&workspace.path, path)?);
         Ok(diff)
@@ -4214,12 +4215,12 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let mut diff = if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            git_output_dynamic(
+            git_worktree_diff_output(
                 &workspace.path,
                 &["diff", "HEAD", "--", path_value.as_str()],
             )?
         } else {
-            git_output_dynamic(&workspace.path, &["diff", "HEAD", "--"])?
+            git_worktree_diff_output(&workspace.path, &["diff", "HEAD", "--"])?
         };
         diff.push_str(&untracked_patch(&workspace.path, path)?);
         Ok(diff)
@@ -4422,7 +4423,7 @@ impl WorkspaceStore {
 
     pub fn diff_file_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
-        let unstaged = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
+        let unstaged = git_worktree_diff_output(&workspace.path, &["diff", "--numstat", "--"])?;
         let staged = git_output(&workspace.path, ["diff", "--cached", "--numstat", "--"])?;
         file_change_summaries_from_numstat(
             &workspace.path,
@@ -4437,7 +4438,8 @@ impl WorkspaceStore {
     pub fn all_file_change_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
-        let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
+        let diff =
+            git_worktree_diff_output(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
         file_change_summaries_from_numstat(&workspace.path, parse_diff_numstat(&diff))
     }
 
@@ -11721,7 +11723,8 @@ fn workspace_diff_stats_against_resolved_ref(
     workspace: &Workspace,
     base_commit: &str,
 ) -> Result<(usize, usize)> {
-    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_commit, "--"])?;
+    let diff =
+        git_worktree_diff_output(&workspace.path, &["diff", "--numstat", base_commit, "--"])?;
     let mut additions = 0;
     let mut deletions = 0;
     for summary in parse_diff_numstat(&diff) {
@@ -12955,18 +12958,54 @@ fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Every read the daemon makes of a worktree goes through here, and the daemon
-/// reads often — a summary refresh after each agent turn runs `git status`
-/// several times. Plain `git status` takes `index.lock` to write back the
-/// index it refreshed, so a `git add` or `git commit` racing it (the agent's,
-/// the user's, or the daemon's own `CommitWorkspaceChanges`) failed with
-/// "index.lock: File exists". `--no-optional-locks` skips only that optional
-/// write-back; locks an operation actually needs are still taken.
+/// Runs git with `--no-optional-locks`. The daemon reads worktrees often — a
+/// summary refresh after each agent turn runs `git status` several times — and
+/// plain `git status` takes `index.lock` to write back the index it refreshed,
+/// so a `git add` or `git commit` racing it (the agent's, the user's, or the
+/// daemon's own `CommitWorkspaceChanges`) failed with "index.lock: File
+/// exists". The flag stops that for `status`, and for reads that never look at
+/// the working tree (`diff --cached`, tree-to-tree `diff`, `log`, `rev-parse`)
+/// there is no lock to take.
+///
+/// It does *not* stop a `git diff` that compares the working tree: that still
+/// refreshes and writes the index under `index.lock`, flag or not. Those go
+/// through [`git_worktree_diff_output`] instead. Some writes (`commit`) also
+/// come through here; the flag never drops a lock an operation needs.
 fn git_output_dynamic(cwd: &Path, args: &[&str]) -> Result<String> {
     let mut with_flag = Vec::with_capacity(args.len() + 1);
     with_flag.push("--no-optional-locks");
     with_flag.extend_from_slice(args);
     command_output(cwd, "git", &with_flag)
+}
+
+/// A `git diff` that compares the working tree (`diff`, `diff <ref>`,
+/// `diff HEAD`, with or without `--numstat`/`--binary`/a path), read against a
+/// throwaway copy of the live index — the same `GIT_INDEX_FILE` approach
+/// `root_tracked_patch` uses. Such a diff refreshes stat data and writes the
+/// index back under `index.lock` even with `--no-optional-locks`, so run on the
+/// live index it made a concurrent `git add`/`git commit` fail. Against the
+/// copy, the only lock it can take is the copy's. The output is the same: the
+/// copy holds the same entries the live index did when it was read.
+fn git_worktree_diff_output(cwd: &Path, args: &[&str]) -> Result<String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let live = cwd.join(git_output_dynamic(cwd, &["rev-parse", "--git-path", "index"])?.trim());
+    if !live.exists() {
+        // No index yet means no entries and nothing to lock against.
+        return git_output_dynamic(cwd, args);
+    }
+    let copy = std::env::temp_dir().join(format!(
+        "archductor-read-index-{}-{}-{}",
+        std::process::id(),
+        timestamp_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    // git replaces the index by renaming a finished file over it, so this copy
+    // is one whole version, never a half-written one.
+    fs::copy(&live, &copy)
+        .with_context(|| format!("copy {} for a lock-free read", live.display()))?;
+    let output = git_with_index_output(cwd, &copy, args);
+    let _ = fs::remove_file(&copy);
+    output
 }
 
 /// Render one untracked file as a new-file patch. `git diff` never reports
@@ -13041,7 +13080,10 @@ fn workspace_tracked_patch(workspace: &Workspace) -> Result<String> {
         &workspace.path,
         &["diff", "--binary", "--cached", "HEAD"],
     )?);
-    patch.push_str(&git_output_dynamic(&workspace.path, &["diff", "--binary"])?);
+    patch.push_str(&git_worktree_diff_output(
+        &workspace.path,
+        &["diff", "--binary"],
+    )?);
     Ok(patch)
 }
 
@@ -14275,6 +14317,161 @@ pub(crate) mod tests {
         assert!(
             fs::read(&index).unwrap() == before,
             "reading the worktree's status rewrote its index, so it held index.lock"
+        );
+    }
+
+    #[test]
+    fn reading_a_worktrees_diffs_never_takes_its_index_lock() {
+        // Follow-up to the status regression above: a `git diff` that compares
+        // the working tree refreshes and writes the index under `index.lock`
+        // even with `--no-optional-locks`, so the changes panel, diff stats on
+        // every `ListWorkspaces`, and the handoff patch could each make a
+        // concurrent commit fail. Same deterministic check: with stale stat
+        // data, did the read rewrite the live index?
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        // Real content in every diff, so the reads are checked doing real work.
+        fs::write(workspace.path.join("notes.txt"), "first\n").unwrap();
+        git(&workspace.path, ["add", "notes.txt"]).unwrap();
+        git(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add notes",
+            ],
+        )
+        .unwrap();
+        fs::write(workspace.path.join("notes.txt"), "first\nsecond\n").unwrap();
+        let index = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        );
+        let mut stale_at = 1_000_000;
+        let mut make_stale = || {
+            stale_at += 1_000;
+            fs::File::options()
+                .write(true)
+                .open(workspace.path.join("README.md"))
+                .unwrap()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(stale_at))
+                .unwrap();
+        };
+
+        // The premise: the flag alone does not stop `git diff` writing the index.
+        make_stale();
+        let before = fs::read(&index).unwrap();
+        git_output(&workspace.path, ["--no-optional-locks", "diff", "--"]);
+        assert!(
+            fs::read(&index).unwrap() != before,
+            "git --no-optional-locks diff should have refreshed the index, or this test proves nothing"
+        );
+
+        // (what is read, text it must show, the read itself)
+        type Read<'a> = (&'a str, &'a str, Box<dyn Fn() -> String + 'a>);
+        let reads: Vec<Read<'_>> = vec![
+            (
+                "unified_diff",
+                "+second",
+                Box::new(|| store.unified_diff("berlin", None).unwrap()),
+            ),
+            (
+                // Path-limited reads only refresh entries inside the pathspec,
+                // so these two name the stale file; it has no diff to show.
+                "unified_diff for one path",
+                "",
+                Box::new(|| {
+                    store
+                        .unified_diff("berlin", Some(Path::new("README.md")))
+                        .unwrap()
+                }),
+            ),
+            (
+                "diff_hunks (unstaged)",
+                "[]",
+                Box::new(|| {
+                    format!(
+                        "{:?}",
+                        store.diff_hunks("berlin", "README.md", false).unwrap()
+                    )
+                }),
+            ),
+            (
+                "unified_diff_against_base",
+                "+second",
+                Box::new(|| store.unified_diff_against_base("berlin", None).unwrap()),
+            ),
+            (
+                "uncommitted_diff",
+                "+second",
+                Box::new(|| store.uncommitted_diff("berlin", None).unwrap()),
+            ),
+            (
+                "diff_file_summaries",
+                "notes.txt",
+                Box::new(|| format!("{:?}", store.diff_file_summaries("berlin").unwrap())),
+            ),
+            (
+                "all_file_change_summaries",
+                "notes.txt",
+                Box::new(|| format!("{:?}", store.all_file_change_summaries("berlin").unwrap())),
+            ),
+            (
+                "diff_stats_against_base (every ListWorkspaces)",
+                "(2, 0)",
+                Box::new(|| format!("{:?}", store.diff_stats_against_base("berlin").unwrap())),
+            ),
+            (
+                "workspace_tracked_patch",
+                "+second",
+                Box::new(|| workspace_tracked_patch(&workspace).unwrap()),
+            ),
+        ];
+        let mut took_the_lock = Vec::new();
+        for (label, expected, read) in reads {
+            make_stale();
+            let before = fs::read(&index).unwrap();
+            let output = read();
+            assert!(
+                output.contains(expected),
+                "{label} should show {expected:?}; got:\n{output}"
+            );
+            if fs::read(&index).unwrap() != before {
+                took_the_lock.push(label);
+            }
+        }
+        assert!(
+            took_the_lock.is_empty(),
+            "these reads rewrote the worktree's index, so they held index.lock: {took_the_lock:?}"
         );
     }
 
