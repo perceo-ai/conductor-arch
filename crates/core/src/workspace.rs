@@ -13003,16 +13003,50 @@ fn git_worktree_diff_output(cwd: &Path, args: &[&str]) -> Result<String> {
     ));
     // git replaces the index by renaming a finished file over it, so this copy
     // is one whole version, never a half-written one.
-    fs::copy(&live, &copy).map_err(|err| {
+    copy_index_preserving_mtime(&live, &copy)?;
+    let output = git_with_index_output(cwd, &copy, args);
+    let _ = fs::remove_file(&copy);
+    output
+}
+
+/// Copy the live index for [`git_worktree_diff_output`] and give the copy the
+/// live index's mtime.
+///
+/// git trusts an entry's cached stat data only when the entry is strictly
+/// older than the index file it came from: in `read-cache.c`, once
+/// `ce_match_stat_basic()` finds the stat data unchanged, `ie_match_stat()`
+/// asks `is_racy_timestamp()` whether the entry's mtime is at or after the
+/// index file's mtime, and if so re-reads the content
+/// (`ce_modified_check_fs()`). That is what catches a same-size edit made in
+/// the same timestamp tick as the staging write. A copy stamped "now" moves
+/// the index's mtime forward, so those entries stop looking racy and the edit
+/// reads as unmodified. The mtime comes from the handle the bytes are read
+/// through, so a concurrent index write between a separate `stat` and the
+/// copy cannot pair one version's bytes with another's mtime.
+fn copy_index_preserving_mtime(live: &Path, copy: &Path) -> Result<()> {
+    let mut source = fs::File::open(live)
+        .map_err(|err| anyhow::anyhow!("open {} for a lock-free read: {err}", live.display()))?;
+    let source_mtime = source
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .map_err(|err| anyhow::anyhow!("read mtime of {}: {err}", live.display()))?;
+    let mut dest = fs::File::create(copy)
+        .map_err(|err| anyhow::anyhow!("create {} for a lock-free read: {err}", copy.display()))?;
+    std::io::copy(&mut source, &mut dest).map_err(|err| {
         anyhow::anyhow!(
             "copy {} to {} for a lock-free read: {err}",
             live.display(),
             copy.display()
         )
     })?;
-    let output = git_with_index_output(cwd, &copy, args);
-    let _ = fs::remove_file(&copy);
-    output
+    dest.set_modified(source_mtime).map_err(|err| {
+        anyhow::anyhow!(
+            "preserve mtime of {} on {}: {err}",
+            live.display(),
+            copy.display()
+        )
+    })?;
+    Ok(())
 }
 
 /// Render one untracked file as a new-file patch. `git diff` never reports
@@ -14479,6 +14513,84 @@ pub(crate) mod tests {
         assert!(
             took_the_lock.is_empty(),
             "these reads rewrote the worktree's index, so they held index.lock: {took_the_lock:?}"
+        );
+    }
+
+    #[test]
+    fn index_copy_for_a_lock_free_read_keeps_the_live_mtime_and_leaves_nothing_behind() {
+        // (a) The copy must carry the live index's mtime: git decides which
+        // entries are racily clean by comparing them with the index file's own
+        // mtime, so a copy stamped "now" made a same-tick, same-size edit read
+        // as unmodified.
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("index");
+        let copy = temp.path().join("index-copy");
+        fs::write(&live, b"not a real index; only the mtime matters here").unwrap();
+        let live_mtime = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&live)
+            .unwrap()
+            .set_modified(live_mtime)
+            .unwrap();
+        copy_index_preserving_mtime(&live, &copy).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), fs::read(&live).unwrap());
+        assert_eq!(
+            fs::metadata(&copy).unwrap().modified().unwrap(),
+            live_mtime,
+            "the copy's mtime must be the live index's, or git's racy-clean check reads it wrong"
+        );
+
+        // (b) The copy is removed whether git succeeds or fails.
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let index_dir = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        )
+        .parent()
+        .unwrap()
+        .to_path_buf();
+        let leftovers = || -> Vec<String> {
+            fs::read_dir(&index_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("archductor-read-index-"))
+                .collect()
+        };
+        git_worktree_diff_output(&workspace.path, &["diff", "--"]).unwrap();
+        assert!(
+            leftovers().is_empty(),
+            "a successful read left {:?}",
+            leftovers()
+        );
+        assert!(git_worktree_diff_output(&workspace.path, &["diff", "--not-a-real-flag"]).is_err());
+        assert!(
+            leftovers().is_empty(),
+            "a failed read left {:?}",
+            leftovers()
         );
     }
 
