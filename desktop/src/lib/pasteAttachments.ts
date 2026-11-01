@@ -6,11 +6,29 @@ export type PastedAttachment = {
 
 const MAX_CHAT_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
-export async function pastedAttachmentsFromClipboard(data: DataTransfer | null | undefined): Promise<PastedAttachment[]> {
-  const files = clipboardFiles(data);
+export type PastedClipboard = {
+  attachments: PastedAttachment[];
+  /** Labels of files that could not be read, so the caller can name them. */
+  failed: string[];
+};
+
+/**
+ * One unreadable or oversized file must not discard the rest of the paste: a
+ * screenshot pasted beside a 30 MiB archive still attaches.
+ */
+export async function pastedAttachmentsFromClipboard(
+  data: DataTransfer | null | undefined,
+): Promise<PastedClipboard> {
   const attachments: PastedAttachment[] = [];
-  for (const file of files) attachments.push(await fileToPastedAttachment(file));
-  return attachments;
+  const failed: string[] = [];
+  for (const file of clipboardFiles(data)) {
+    try {
+      attachments.push(await fileToPastedAttachment(file));
+    } catch {
+      failed.push(file.name || "pasted file");
+    }
+  }
+  return { attachments, failed };
 }
 
 function clipboardFiles(data: DataTransfer | null | undefined): File[] {

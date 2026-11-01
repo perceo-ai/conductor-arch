@@ -325,21 +325,26 @@ export function Composer(props: {
   // plain-text insertion, used for everything that is not a big paste.
   async function onPaste(e: ClipboardEvent, insert: (value: string) => void) {
     let files;
+    let failed: string[];
     try {
-      files = await pastedAttachmentsFromClipboard(e.clipboardData);
+      const clipboard = await pastedAttachmentsFromClipboard(e.clipboardData);
+      files = clipboard.attachments;
+      failed = clipboard.failed;
     } catch (err) {
       toastsStore.error(`Could not paste attachment: ${sendErrorText(err)}`);
       return;
     }
-    if (files.length > 0) {
+    if (files.length > 0 || failed.length > 0) {
+      // The composer stays mounted across chat switches, so a save that lands
+      // after a switch must not file the attachment under the new chat.
+      const threadId = props.threadId;
       const caret = input?.caret() ?? text().length;
       const chips: ComposerNode[] = [];
-      const failed: string[] = [];
       for (const file of files) {
         try {
           const res = await send({
             type: "save_chat_attachment",
-            thread_id: props.threadId,
+            thread_id: threadId,
             label: file.label,
             kind: file.kind,
             data_base64: file.dataBase64,
@@ -357,6 +362,7 @@ export function Composer(props: {
           failed.push(file.label);
         }
       }
+      if (props.threadId !== threadId) return;
       if (chips.length > 0) insertChips({ start: caret, end: caret }, chips);
       if (failed.length > 0) toastsStore.error(`Could not paste ${failed.join(", ")}.`);
       return;

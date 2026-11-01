@@ -216,12 +216,29 @@ archductor archcar queue remove <queue-id>
 archductor archcar interactions list --all
 archductor archcar interactions allow <id> --always
 archductor archcar plan-mode <thread-id> --on
+
+archductor archcar save-attachment <thread-id> ./screenshot.png
+archductor archcar save-attachment <thread-id> ./dump.bin --label crash-dump.bin --kind file
 ```
 
 `chat-projection` prints each card's title with a one-line preview. Rows a
 subagent produced are indented under the Agent card that spawned it, and
 backgrounded commands and agents appear as their own cards. Pass `--full` to
 print bodies untruncated, for example to read a command's whole output.
+
+`save-attachment` copies a local file into the chat's attachment directory —
+the same place the desktop composer puts a pasted image or file — and prints
+the repo-relative `@` path to reference it with:
+
+```
+@.context/archductor/<thread-id>/screenshot-a1b2c3d4.png
+```
+
+It stores the file and prints that path; it does not send a message. Pass the
+path to `session send` (or paste it into a chat) to put it in front of the
+agent. `--label` overrides the stored filename and `--kind` (`file` or
+`image`) overrides the type guessed from the extension. Attachments are capped
+at 25 MiB.
 
 ## Running and checking
 
