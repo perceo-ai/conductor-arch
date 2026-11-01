@@ -112,6 +112,185 @@ describe("clientsStore navigation", () => {
   });
 });
 
+describe("clientsStore failed switches", () => {
+  /**
+   * A switch pauses tab persistence until the new daemon's restore runs. When
+   * the switch itself fails there is no restore coming, so the pause has to be
+   * lifted — otherwise every later tab change silently stops being saved.
+   */
+  async function openLocalTab() {
+    const mod = await import("./index");
+    await mod.refreshInventory();
+    mod.nav.selectWorkspace("local-alpha");
+    return { ...mod, before: JSON.stringify(mod.nav.workspaceTabs()) };
+  }
+
+  it("activate: an error result lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, before } = await openLocalTab();
+    api.clientsActivate.mockResolvedValueOnce({ ok: false, error: "devbox unreachable" });
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+
+  it("activate: a thrown bridge call lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, before } = await openLocalTab();
+    api.clientsActivate.mockRejectedValueOnce(new Error("ipc closed"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+
+  it("add: a failed verify lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, before } = await openLocalTab();
+    api.clientsAdd.mockResolvedValueOnce({ ok: false, error: "bad token" });
+
+    expect(await clientsStore.add({ address: "new:7420", token: "t" })).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+
+  it("remove of the active client: a failure lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, refreshInventory } = await import("./index");
+    await refreshInventory();
+    expect(await clientsStore.activate("devbox")).toBe(true);
+    nav.selectWorkspace("remote-alpha");
+    const before = JSON.stringify(nav.workspaceTabs());
+    api.clientsRemove.mockResolvedValueOnce({ ok: false, error: "clients.json is read-only" });
+
+    expect(await clientsStore.remove("devbox")).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+  // A restore can already be owed when a switch starts: an earlier switch
+  // succeeded but its inventory pull failed, so the old tabs are on screen and
+  // saving is paused. A later failed attempt must not lift that pause.
+  it("activate: does not clear a restore already owed before this failed switch", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore();
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+    // ...but the switch bit this attempt declared must not survive its failure:
+    // stuck true, the next startup correction would read as a daemon switch.
+    expect(nav.daemonSwitchPending()).toBe(false);
+  });
+
+  it("add: does not clear a restore already owed before this failed add", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore();
+    api.clientsAdd.mockResolvedValueOnce({ ok: false, error: "bad token" });
+
+    expect(await clientsStore.add({ address: "new:7420", token: "t" })).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+    // ...but the switch bit this attempt declared must not survive its failure:
+    // stuck true, the next startup correction would read as a daemon switch.
+    expect(nav.daemonSwitchPending()).toBe(false);
+  });
+
+  it("remove of the active client: does not clear a restore already owed before this failed remove", async () => {
+    const { clientsStore, nav, refreshInventory } = await import("./index");
+    await refreshInventory();
+    expect(await clientsStore.activate("devbox")).toBe(true);
+    nav.deferTabRestore();
+    api.clientsRemove.mockResolvedValueOnce({ ok: false, error: "clients.json is read-only" });
+
+    expect(await clientsStore.remove("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+    // ...but the switch bit this attempt declared must not survive its failure:
+    // stuck true, the next startup correction would read as a daemon switch.
+    expect(nav.daemonSwitchPending()).toBe(false);
+  });
+});
+
+describe("clientsStore failed switches over an owed restore", () => {
+  /**
+   * The owed-restore guard skips cancelTabRestore(), which is also what used
+   * to clear the pending-switch bit — so a failed attempt left its own
+   * daemonSwitch declaration stuck, and the next startup realm correction
+   * replaced the session (remounting the editor over its unsaved text).
+   * Three-state matrix: nothing owed → full cancel; owed without a pending
+   * switch → undeclare only this attempt's bit; owed with a switch already
+   * pending → leave everything, the earlier switch is still completing.
+   */
+  it("activate: a failure over an earlier owed restore leaves the next startup correction in place", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore(); // earlier owed restore, no switch pending
+    const before = nav.tabRealmSession();
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+    expect(nav.daemonSwitchPending()).toBe(false);
+
+    // Startup's correction still edits the session in place — no remount.
+    nav.setTabRealm("client:laptop");
+    expect(nav.tabRealmSession()).toBe(before);
+    expect(before.realm).toBe("client:laptop");
+  });
+
+  it("activate: a failure does not undeclare an earlier switch still pending", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore({ daemonSwitch: true }); // an earlier genuine switch, restore still owed
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+    expect(nav.daemonSwitchPending()).toBe(true);
+  });
+
+  it("activate: a failure with nothing owed cancels the pause and the switch bit", async () => {
+    const { clientsStore, nav } = await import("./index");
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(nav.daemonSwitchPending()).toBe(false);
+  });
+});
+
+describe("clientsStore switches replace the tab realm session", () => {
+  /**
+   * A switch must replace nav's tab realm session, even when it is the first
+   * realm assignment of the run (startup failed before learning the realm).
+   * Views keyed on the session — the file editor — remount on it; an in-place
+   * correction would keep the old daemon's unsaved text in front of the new
+   * daemon's file.
+   */
+  it("activate from a never-assigned realm replaces the session", async () => {
+    const { clientsStore, nav, refreshInventory } = await import("./index");
+    const { UNASSIGNED_REALM } = await import("./nav");
+    await refreshInventory();
+    const before = nav.tabRealmSession();
+    expect(before.realm).toBe(UNASSIGNED_REALM);
+
+    expect(await clientsStore.activate("devbox")).toBe(true);
+
+    expect(nav.tabRealm()).toBe("client:devbox");
+    expect(nav.tabRealmSession()).not.toBe(before);
+    expect(before.realm).toBe(UNASSIGNED_REALM);
+  });
+
+  it("a failed switch leaves the next startup correction in place", async () => {
+    const { clientsStore, nav } = await import("./index");
+    const before = nav.tabRealmSession();
+    api.clientsActivate.mockResolvedValueOnce({ ok: false, error: "devbox unreachable" });
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    nav.setTabRealm("client:laptop");
+
+    expect(nav.tabRealmSession()).toBe(before);
+    expect(before.realm).toBe("client:laptop");
+  });
+});
+
 describe("clientsStore.selectedDaemon", () => {
   /**
    * Everything that needs to *address* the selected daemon reads this, and
