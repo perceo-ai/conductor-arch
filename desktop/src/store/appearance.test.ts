@@ -2,7 +2,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const send = vi.fn();
-vi.mock("@/bridge/client", () => ({ send }));
+vi.mock("@/bridge/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/bridge/client")>()),
+  send,
+}));
+const selectedDaemon = vi.fn();
+vi.mock("./clients", () => ({ clientsStore: { selectedDaemon } }));
 
 const COMPLETE_TOML = `
 [customization.view]
@@ -137,5 +142,53 @@ surface = "#fedcba"
     expect(send).toHaveBeenCalledWith({ type: "get_settings" });
     expect(appearanceStore.state.uiFont).toBe("Inter, sans-serif");
     expect(document.documentElement.style.getPropertyValue("--lc-danger")).toBe("#161616");
+  });
+
+  it("resolves a saved accent_color when no explicit colors.accent exists", async () => {
+    const { ACCENT_PRESETS, parseAppearance } = await import("./appearance");
+    expect(parseAppearance('[customization.view]\naccent_color = "#abcdef"\n').colors.accent).toBe("#abcdef");
+    const blue = ACCENT_PRESETS.find(([label]) => label === "Blue")![1];
+    expect(parseAppearance('[customization.view]\naccent_color = "blue"\n').colors.accent).toBe(blue);
+    expect(parseAppearance(`[customization.view]
+accent_color = "#abcdef"
+
+[customization.view.colors]
+accent = "#111111"
+`).colors.accent).toBe("#111111");
+  });
+
+  it("saves global appearance to the daemon it read from even if the selection switches mid-flight", async () => {
+    const stores: Record<string, string> = {
+      A: '[customization.view]\ntheme = "dark"\n',
+      B: '[customization.view]\ntheme = "light"\n',
+    };
+    let active = "A";
+    const handle = async (daemonId: string, request: { type: string; toml?: string }) => {
+      if (request.type === "get_settings_source") {
+        const toml = stores[daemonId];
+        active = "B";
+        return { type: "settings_source", scope: "global", layer: "global", toml };
+      }
+      if (request.type === "save_settings") {
+        stores[daemonId] = request.toml!;
+        return { type: "settings_saved", scope: "global", layer: "global" };
+      }
+      if (request.type === "get_settings") return { type: "settings", scope: "global", toml: stores[daemonId] };
+      return { type: "ack" };
+    };
+    window.archductor = {
+      request: vi.fn((request) => handle(active, request)),
+      requestClient: vi.fn((clientId, request) => handle(clientId ?? "local", request)),
+    } as unknown as typeof window.archductor;
+    send.mockImplementation((request) => window.archductor.request(request));
+    selectedDaemon.mockReturnValue({ kind: "client", clientId: "A" });
+    const { updateGlobalAppearance } = await import("./appearance");
+
+    await updateGlobalAppearance([{ section: "customization.view", key: "ui_font", value: "Georgia, serif" }]);
+
+    expect(stores).toEqual({
+      A: '[customization.view]\ntheme = "dark"\nui_font = "Georgia, serif"\n',
+      B: '[customization.view]\ntheme = "light"\n',
+    });
   });
 });

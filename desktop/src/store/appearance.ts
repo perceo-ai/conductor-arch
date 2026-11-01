@@ -1,6 +1,7 @@
 import { createStore } from "solid-js/store";
-import { send } from "@/bridge/client";
+import { send, sendToDaemon } from "@/bridge/client";
 import { readTomlValue, writeTomlValue, type TomlValueKind } from "@/pages/settings/toml";
+import { clientsStore } from "./clients";
 
 export const COLOR_KEYS = [
   "background",
@@ -20,6 +21,18 @@ export const COLOR_KEYS = [
   "warning",
   "danger",
 ] as const;
+
+export const ACCENT_PRESETS = [
+  ["Amber", "#c39b50"], ["Blue", "#5b8def"], ["Green", "#3fb27f"], ["Rose", "#e0567b"],
+] as const;
+
+export const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+/** `accent_color` holds either a hex color or a preset name such as "blue". */
+function resolveAccentColor(value: string): string | undefined {
+  if (HEX_COLOR.test(value)) return value.toLowerCase();
+  return ACCENT_PRESETS.find(([label]) => label.toLowerCase() === value.trim().toLowerCase())?.[1];
+}
 
 export type AppearanceColorKey = (typeof COLOR_KEYS)[number];
 export type AppearanceTheme = "system" | "dark" | "light";
@@ -124,6 +137,11 @@ export function parseAppearance(toml: string): Appearance {
   const colors = { ...DEFAULT_APPEARANCE.colors };
   for (const key of COLOR_KEYS) {
     colors[key] = stringValue(toml, "customization.view.colors", key, colors[key]);
+  }
+  // An explicit colors.accent wins; otherwise a saved accent_color drives the token.
+  if (readTomlValue(toml, "customization.view.colors", "accent") === "") {
+    const accent = resolveAccentColor(readTomlValue(toml, "customization.view", "accent_color"));
+    if (accent) colors.accent = accent;
   }
   return {
     theme,
@@ -276,7 +294,9 @@ export interface AppearanceUpdate {
 }
 
 export async function updateGlobalAppearance(updates: AppearanceUpdate[]): Promise<void> {
-  const source = await send({ type: "get_settings_source" });
+  // Read and save on the same daemon even if the selection switches in between.
+  const daemon = clientsStore.selectedDaemon();
+  const source = await sendToDaemon(daemon, { type: "get_settings_source" });
   if (source.type !== "settings_source") {
     throw new Error(source.type === "error" ? source.message : "Could not load app-shared settings");
   }
@@ -285,7 +305,7 @@ export async function updateGlobalAppearance(updates: AppearanceUpdate[]): Promi
       writeTomlValue(current, update.section, update.key, update.value, update.kind ?? "string"),
     source.toml,
   );
-  const saved = await send({ type: "save_settings", toml });
+  const saved = await sendToDaemon(daemon, { type: "save_settings", toml });
   if (saved.type !== "settings_saved") {
     throw new Error(saved.type === "error" ? saved.message : "Could not save app-shared settings");
   }

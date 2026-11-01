@@ -7,7 +7,7 @@ import { appearanceStore } from "@/store/appearance";
 import { toastsStore } from "@/store/toasts";
 
 const send = vi.hoisted(() => vi.fn());
-vi.mock("@/bridge/client", () => ({ send }));
+vi.mock("@/bridge/client", () => ({ send, sendToDaemon: vi.fn((_daemon: unknown, request: unknown) => send(request)) }));
 
 let dispose: (() => void) | undefined;
 
