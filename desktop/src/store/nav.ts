@@ -124,6 +124,10 @@ export const nav = {
   deferTabRestore() {
     setAwaitingTabRestore(true);
   },
+  /** Point future persistence at `realm` without touching tabs already on screen. */
+  setTabRealm(realm: string) {
+    tabRealm = realm;
+  },
   /** Cancel an owed restore after a failed switch, without touching current tabs. */
   cancelTabRestore() {
     setAwaitingTabRestore(false);

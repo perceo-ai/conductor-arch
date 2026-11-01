@@ -48,7 +48,7 @@ function clientKey(id: string | null): string {
 }
 
 /** Storage realm for the active daemon's workspace tabs (see tabPersistence). */
-function tabRealmKey(): string {
+export function tabRealmKey(): string {
   if (state.envAddress) return `env:${state.envAddress}`;
   return state.activeId != null ? `client:${state.activeId}` : "local";
 }
