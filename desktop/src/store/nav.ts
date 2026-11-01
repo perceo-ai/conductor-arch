@@ -1,4 +1,4 @@
-import { createSignal } from "solid-js";
+import { batch, createSignal, untrack } from "solid-js";
 import {
   activeWorkspace,
   closeTab,
@@ -34,8 +34,10 @@ const [chatSurfaceShowsChat, setChatSurfaceShowsChat] = createSignal(true);
 const [workspaceTabs, setWorkspaceTabs] = createSignal<WorkspaceTabsState>(emptyTabs());
 const [threadByWorkspace, setThreadByWorkspace] = createSignal<Record<string, number>>({});
 // Which daemon's tabs these are. Saved continuously under this key, so a
-// daemon switch or an app quit never has a "flush on exit" step to miss.
-let tabRealm = "local";
+// daemon switch or an app quit never has a "flush on exit" step to miss. A
+// signal so views that cache it (the file editor) can be remounted when it
+// changes; persistence reads it untracked.
+const [tabRealm, setTabRealmRaw] = createSignal("local");
 // True from "a restore is owed" (boot before the inventory arrived, or a
 // daemon switch in flight) until restoreWorkspaceTabs runs. While it holds,
 // nothing persists: the tabs on screen are the old realm's (or nothing), and
@@ -46,7 +48,7 @@ const [awaitingTabRestore, setAwaitingTabRestore] = createSignal(false);
 
 function persistTabs() {
   if (awaitingTabRestore()) return;
-  saveTabRealm(tabRealm, serializeTabs(workspaceTabs(), threadByWorkspace()));
+  saveTabRealm(untrack(tabRealm), serializeTabs(workspaceTabs(), threadByWorkspace()));
 }
 
 interface NavEntry {
@@ -119,14 +121,19 @@ export const nav = {
   workspaceTabs,
   awaitingTabRestore,
   /** Storage realm of the tabs currently on screen (drafts key off it too). */
-  tabRealm: () => tabRealm,
+  tabRealm,
   /** Pause tab persistence until the owed restoreWorkspaceTabs call. */
   deferTabRestore() {
     setAwaitingTabRestore(true);
   },
-  /** Point future persistence at `realm` without touching tabs already on screen. */
+  /**
+   * Point persistence at `realm` without touching the tabs on screen, and save
+   * them under it now (the startup case: a workspace opened before the realm
+   * was known would otherwise never reach this realm's entry).
+   */
   setTabRealm(realm: string) {
-    tabRealm = realm;
+    setTabRealmRaw(realm);
+    persistTabs();
   },
   /** Cancel an owed restore after a failed switch, without touching current tabs. */
   cancelTabRestore() {
@@ -276,17 +283,21 @@ export const nav = {
    * workspace page so the app opens where it was closed.
    */
   restoreWorkspaceTabs(realm: string, keep: (name: string) => boolean) {
-    tabRealm = realm;
-    setAwaitingTabRestore(false);
-    const { state, threads } = materializeTabs(loadTabRealm(realm), keep);
-    setThreadByWorkspace(threads);
-    commitTabs(state);
-    // commitTabs's selection short-circuits when the focused workspace kept
-    // its name across realms, but the thread ids under it are the new
-    // daemon's — point the selection at the restored memory explicitly.
-    const active = activeWorkspace(state);
-    setSelectedChatThread(active != null ? (threads[active] ?? null) : null);
-    if (active != null) setActivePage("workspace");
+    // One batch: views keyed on the realm remount once, against the restored
+    // selection, not against the old realm's tabs in between.
+    batch(() => {
+      setTabRealmRaw(realm);
+      setAwaitingTabRestore(false);
+      const { state, threads } = materializeTabs(loadTabRealm(realm), keep);
+      setThreadByWorkspace(threads);
+      commitTabs(state);
+      // commitTabs's selection short-circuits when the focused workspace kept
+      // its name across realms, but the thread ids under it are the new
+      // daemon's — point the selection at the restored memory explicitly.
+      const active = activeWorkspace(state);
+      setSelectedChatThread(active != null ? (threads[active] ?? null) : null);
+      if (active != null) setActivePage("workspace");
+    });
   },
 
   /** Drop tabs for workspaces that were archived, deleted, or are not on this daemon. */

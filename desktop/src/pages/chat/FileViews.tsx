@@ -329,7 +329,13 @@ export function FileView(props: { workspace: string; path: string; scope?: Works
       </div>
       <Switch>
         <Match when={active() === "edit"}>
-          <FileEditor workspace={props.workspace} path={props.path} />
+          {/* Keyed on the daemon realm: the editor caches its realm, so a
+              daemon switch that keeps this view up (same workspace name on
+              both) must replace it. The old instance's cleanup still parks
+              under the realm it was opened in. */}
+          <Show when={nav.tabRealm()} keyed>
+            <FileEditor workspace={props.workspace} path={props.path} />
+          </Show>
         </Match>
         <Match when={active() === "preview"}>
           <FilePreview workspace={props.workspace} path={props.path} />

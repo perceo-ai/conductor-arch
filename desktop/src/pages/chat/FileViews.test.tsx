@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 describe("FileEditor draft stash", () => {
-  it("parks unsaved text under the realm the editor opened in, even if the realm changes before unmount", async () => {
+  it("remounts the editor on a daemon switch, parking the old editor's draft under its own realm", async () => {
     // Opened while pointed at daemon-a.
     nav.restoreWorkspaceTabs("daemon-a", () => true);
     const host = document.createElement("div");
@@ -50,16 +50,25 @@ describe("FileEditor draft stash", () => {
     area.value = "unsaved edit\n";
     area.dispatchEvent(new Event("input", { bubbles: true }));
 
-    // The realm moves on (a daemon switch) while this editor is still mounted;
-    // when the workspace name matches on both daemons the chat surface can
-    // stay up across the swap.
+    // A daemon switch that lands on a workspace with the same name keeps the
+    // file view mounted. The editor itself must not survive it: its cached
+    // realm would hand the new daemon the old daemon's drafts.
     nav.restoreWorkspaceTabs("daemon-b", () => true);
     expect(nav.tabRealm()).toBe("daemon-b");
 
-    dispose();
-    dispose = undefined;
+    const fresh = await vi.waitFor(() => {
+      const el = host.querySelector<HTMLTextAreaElement>("textarea.ws-file-editor-area");
+      expect(el).toBeTruthy();
+      expect(el).not.toBe(area);
+      expect(el!.value).toBe("saved text\n");
+      return el!;
+    });
+    expect(fresh.isConnected).toBe(true);
+    expect(area.isConnected).toBe(false);
 
-    expect(editorDraftStash.take("daemon-b", "ws", "src/f.ts")).toBeNull();
+    // The torn-down editor parked under the realm it was opened in; nothing
+    // went under the new one.
     expect(editorDraftStash.take("daemon-a", "ws", "src/f.ts")).toBe("unsaved edit\n");
+    expect(editorDraftStash.take("daemon-b", "ws", "src/f.ts")).toBeNull();
   });
 });

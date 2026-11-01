@@ -17,6 +17,15 @@ interface MockApi {
   window: { minimize: () => void; toggleMaximize: () => void; close: () => void };
 }
 
+// Node's own localStorage global is unusable in vitest; startup persists tabs
+// through it, so give the file a working in-memory one.
+const storage = new Map<string, string>();
+vi.stubGlobal("localStorage", {
+  getItem: (key: string) => storage.get(key) ?? null,
+  setItem: (key: string, value: string) => void storage.set(key, value),
+  removeItem: (key: string) => void storage.delete(key),
+});
+
 let offEvent: ReturnType<typeof vi.fn>;
 let api: MockApi;
 
@@ -39,6 +48,7 @@ const workspaceSummary = (id: number, name: string, status = "active") => ({
 
 beforeEach(() => {
   vi.resetModules();
+  storage.clear();
   offEvent = vi.fn();
   api = {
     request: vi.fn(async () => ({ type: "workspaces", workspaces: [] })),
@@ -149,11 +159,16 @@ describe("startStore: tab realm when a workspace opens during startup", () => {
   it("points persistence at the saved client's realm", async () => {
     const nav = await openTabWhileClientsLoad({ activeId: "devbox" });
     expect(nav.tabRealm()).toBe("client:devbox");
+    // ...and the tab already on screen is saved under it, not just future ones.
+    const { loadTabRealm } = await import("@/lib/tabPersistence");
+    expect(loadTabRealm("client:devbox")?.groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
   });
 
   it("points persistence at the environment-pinned daemon's realm", async () => {
     const nav = await openTabWhileClientsLoad({ activeId: null, envAddress: "office:7420" });
     expect(nav.tabRealm()).toBe("env:office:7420");
+    const { loadTabRealm } = await import("@/lib/tabPersistence");
+    expect(loadTabRealm("env:office:7420")?.groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
   });
 });
 

@@ -168,6 +168,37 @@ describe("clientsStore failed switches", () => {
     expect(nav.awaitingTabRestore()).toBe(false);
     expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
   });
+  // A restore can already be owed when a switch starts: an earlier switch
+  // succeeded but its inventory pull failed, so the old tabs are on screen and
+  // saving is paused. A later failed attempt must not lift that pause.
+  it("activate: does not clear a restore already owed before this failed switch", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore();
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+  });
+
+  it("add: does not clear a restore already owed before this failed add", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore();
+    api.clientsAdd.mockResolvedValueOnce({ ok: false, error: "bad token" });
+
+    expect(await clientsStore.add({ address: "new:7420", token: "t" })).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+  });
+
+  it("remove of the active client: does not clear a restore already owed before this failed remove", async () => {
+    const { clientsStore, nav, refreshInventory } = await import("./index");
+    await refreshInventory();
+    expect(await clientsStore.activate("devbox")).toBe(true);
+    nav.deferTabRestore();
+    api.clientsRemove.mockResolvedValueOnce({ ok: false, error: "clients.json is read-only" });
+
+    expect(await clientsStore.remove("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+  });
 });
 
 describe("clientsStore.selectedDaemon", () => {
