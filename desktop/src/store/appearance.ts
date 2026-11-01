@@ -125,7 +125,13 @@ function numberValue(toml: string, key: string, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
-export function parseAppearance(toml: string): Appearance {
+/**
+ * `toml` is the document values are read from (usually the effective view).
+ * `source` is what was actually saved; the daemon fills built-in colors into
+ * the effective view, so only the source can say whether `colors.accent` was
+ * set on purpose. It defaults to `toml` when the caller has one document.
+ */
+export function parseAppearance(toml: string, source: string = toml): Appearance {
   const rawTheme = readTomlValue(toml, "customization.view", "theme");
   const theme: AppearanceTheme = ["system", "dark", "light"].includes(rawTheme)
     ? (rawTheme as AppearanceTheme)
@@ -139,7 +145,7 @@ export function parseAppearance(toml: string): Appearance {
     colors[key] = stringValue(toml, "customization.view.colors", key, colors[key]);
   }
   // An explicit colors.accent wins; otherwise a saved accent_color drives the token.
-  if (readTomlValue(toml, "customization.view.colors", "accent") === "") {
+  if (readTomlValue(source, "customization.view.colors", "accent") === "") {
     const accent = resolveAccentColor(readTomlValue(toml, "customization.view", "accent_color"));
     if (accent) colors.accent = accent;
   }
@@ -273,7 +279,10 @@ export const appearanceStore = {
         key,
       ) !== "")
       : [];
-    setState({ ...parseAppearance(response.toml), loaded: true });
+    setState({
+      ...parseAppearance(response.toml, source.type === "settings_source" ? source.toml : undefined),
+      loaded: true,
+    });
     applyCurrent();
   },
   apply: applyCurrent,
@@ -294,6 +303,12 @@ export interface AppearanceUpdate {
 }
 
 export async function updateGlobalAppearance(updates: AppearanceUpdate[]): Promise<void> {
+  // Before the client list loads, selectedDaemon() reports this machine even
+  // when a remote is configured; never guess which daemon owns the settings.
+  if (!clientsStore.state.loaded) await clientsStore.ensureLoaded();
+  if (!clientsStore.state.loaded) {
+    throw new Error("Could not determine the selected daemon; appearance not saved");
+  }
   // Read and save on the same daemon even if the selection switches in between.
   const daemon = clientsStore.selectedDaemon();
   const source = await sendToDaemon(daemon, { type: "get_settings_source" });

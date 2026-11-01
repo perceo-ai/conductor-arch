@@ -36,7 +36,7 @@ export function hasInlineColorsTable(source: string): boolean {
   const lines = source.split("\n");
   const bounds = tomlSectionBounds(lines, "customization.view");
   if (!bounds) return false;
-  return lines.slice(bounds[0] + 1, bounds[1]).some((line) => /^\s*colors\s*=\s*\{/.test(line));
+  return lines.slice(bounds[0] + 1, bounds[1]).some((line) => /^\s*["']?colors["']?\s*=\s*\{/.test(line));
 }
 
 export function sixDigitColor(value: string): string {

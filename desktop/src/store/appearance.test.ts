@@ -7,7 +7,17 @@ vi.mock("@/bridge/client", async (importOriginal) => ({
   send,
 }));
 const selectedDaemon = vi.fn();
-vi.mock("./clients", () => ({ clientsStore: { selectedDaemon } }));
+const ensureLoaded = vi.fn();
+let loaded = true;
+vi.mock("./clients", () => ({
+  clientsStore: {
+    get state() {
+      return { loaded };
+    },
+    selectedDaemon,
+    ensureLoaded,
+  },
+}));
 
 const COMPLETE_TOML = `
 [customization.view]
@@ -45,6 +55,9 @@ describe("appearance projection", () => {
   beforeEach(() => {
     vi.resetModules();
     send.mockReset();
+    selectedDaemon.mockReset();
+    ensureLoaded.mockReset();
+    loaded = true;
     document.body.className = "";
     document.documentElement.removeAttribute("style");
   });
@@ -190,5 +203,69 @@ accent = "#111111"
       A: '[customization.view]\ntheme = "dark"\nui_font = "Georgia, serif"\n',
       B: '[customization.view]\ntheme = "light"\n',
     });
+  });
+
+  it("applies a saved accent_color through refresh even though effective settings carry a default accent", async () => {
+    send.mockImplementation(async (request: { type: string }) => {
+      if (request.type === "get_settings") {
+        const effective = COMPLETE_TOML
+          .replace('accent_color = "#123456"', 'accent_color = "green"')
+          .replace('accent = "#121212"', 'accent = "#5b9dff"');
+        return { type: "settings", scope: "global", toml: effective };
+      }
+      if (request.type === "get_settings_source") {
+        return { type: "settings_source", scope: "global", layer: "global", toml: '[customization.view]\naccent_color = "green"\n' };
+      }
+      return { type: "ack" };
+    });
+    const { ACCENT_PRESETS, appearanceStore } = await import("./appearance");
+
+    await appearanceStore.refresh();
+
+    expect(appearanceStore.state.colors.accent).toBe(ACCENT_PRESETS.find(([label]) => label === "Green")![1]);
+  });
+
+  it("waits for the client list before pinning a global appearance save", async () => {
+    loaded = false;
+    selectedDaemon.mockReturnValue({ kind: "local" });
+    ensureLoaded.mockImplementation(async () => {
+      loaded = true;
+      selectedDaemon.mockReturnValue({ kind: "client", clientId: "R" });
+    });
+    const targets: (string | null)[] = [];
+    window.archductor = {
+      request: vi.fn(async () => ({ type: "error", message: "unpinned request" })),
+      requestClient: vi.fn(async (clientId: string | null, request: { type: string }) => {
+        targets.push(clientId);
+        if (request.type === "get_settings_source") {
+          return { type: "settings_source", scope: "global", layer: "global", toml: "" };
+        }
+        return { type: "settings_saved", scope: "global", layer: "global" };
+      }),
+    } as unknown as typeof window.archductor;
+    send.mockResolvedValue({ type: "ack" });
+    const { updateGlobalAppearance } = await import("./appearance");
+
+    await updateGlobalAppearance([{ section: "customization.view", key: "theme", value: "light" }]);
+
+    expect(targets).toEqual(["R", "R"]);
+    expect(ensureLoaded).toHaveBeenCalled();
+  });
+
+  it("refuses a global appearance save when the client list cannot be loaded", async () => {
+    loaded = false;
+    selectedDaemon.mockReturnValue({ kind: "local" });
+    ensureLoaded.mockResolvedValue(undefined);
+    window.archductor = {
+      request: vi.fn(),
+      requestClient: vi.fn(),
+    } as unknown as typeof window.archductor;
+    const { updateGlobalAppearance } = await import("./appearance");
+
+    await expect(
+      updateGlobalAppearance([{ section: "customization.view", key: "theme", value: "light" }]),
+    ).rejects.toThrow();
+    expect(window.archductor.request).not.toHaveBeenCalled();
+    expect(window.archductor.requestClient).not.toHaveBeenCalled();
   });
 });

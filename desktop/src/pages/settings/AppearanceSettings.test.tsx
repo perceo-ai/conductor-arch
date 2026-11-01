@@ -241,4 +241,13 @@ accent = "#abcdef"
     expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="text"]')?.disabled).toBe(false);
     expect(host.textContent).not.toContain("inline table");
   });
+
+  it("locks color controls when the inline colors table uses a quoted key", async () => {
+    const host = await mount('[customization.view]\ntheme = "dark"\n"colors" = { accent = "#abcdef" }\n');
+
+    await vi.waitFor(() =>
+      expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="text"]')?.disabled).toBe(true),
+    );
+    expect(host.textContent).toContain("inline table");
+  });
 });
