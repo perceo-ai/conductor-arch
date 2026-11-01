@@ -14602,6 +14602,10 @@ pub(crate) mod tests {
         // the entry as racily clean and re-read it; a same-size edit in that
         // tick is then visible only if the copy kept the index's mtime.
         // Deterministic: no wall clock, no filesystem timestamp granularity.
+        // ctime checks are off in this repository: rewriting `f` gives it a new
+        // ctime, and when staging and the edit straddle a second boundary git
+        // sees that and reports the edit whatever the copy's mtime, so the test
+        // went green with the fix reverted.
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
         let db_path = temp.path().join("state.db");
@@ -14624,6 +14628,9 @@ pub(crate) mod tests {
                 base_ref: Some("main".to_owned()),
             })
             .unwrap();
+        // Only this test's repository: `init_repo` is shared, and other tests
+        // keep git's default.
+        git_output(&workspace.path, ["config", "core.trustctime", "false"]);
         let pin_mtime = |path: &Path, at: std::time::SystemTime| {
             fs::File::options()
                 .write(true)
@@ -14651,6 +14658,19 @@ pub(crate) mod tests {
         // A same-size edit inside the tick: the stat data still matches.
         fs::write(&file, b"cccc\n").unwrap();
         pin_mtime(&file, tick);
+
+        // The defect itself: a copy stamped later than the tick, as `fs::copy`
+        // stamps it, hides the edit. If this ever shows the edit, something
+        // other than the copy's mtime is surfacing it and the assertion below
+        // pins nothing.
+        let newer = temp.path().join("index-stamped-later");
+        fs::copy(&index, &newer).unwrap();
+        pin_mtime(&newer, tick + Duration::from_secs(1));
+        let hidden = git_with_index_output(&workspace.path, &newer, &["diff", "--stat"]).unwrap();
+        assert!(
+            hidden.trim().is_empty(),
+            "a copy with a newer mtime should hide the same-tick edit; got: {hidden:?}"
+        );
 
         let out = git_worktree_diff_output(&workspace.path, &["diff", "--stat"]).unwrap();
         assert!(
