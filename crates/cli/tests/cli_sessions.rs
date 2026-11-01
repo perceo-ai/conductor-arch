@@ -283,6 +283,20 @@ fn cli_archcar_shell_accepts_raw_terminal_pwd_and_stops() {
 fn cli_archcar_commit_fails_when_the_daemon_refuses_it() {
     let temp = tempfile::tempdir().unwrap();
     let repo_path = init_repo(temp.path().join("demo"));
+    // The daemon commits with whatever identity git finds, and CI runners have
+    // none; worktrees share the repository's config.
+    for (key, value) in [
+        ("user.name", "Archductor"),
+        ("user.email", "archductor@example.test"),
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .args(["config", key, value])
+            .status()
+            .unwrap()
+            .success());
+    }
     let workspace_parent = temp.path().join("workspaces/demo");
     let _archcar = ArchcarDaemon::start(temp.path(), &[]);
 
