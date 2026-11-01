@@ -1,6 +1,7 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
 import {
   actions,
+  nav,
   prefsStore,
 } from "@/store";
 import { send } from "@/bridge/client";
@@ -31,6 +32,9 @@ import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
 //             the raw source and the finished document are both reachable.
 //             Offered only when previewKind() recognises the path.
 function FileEditor(props: { workspace: string; path: string }) {
+  // The daemon realm this editor was opened under, read once: a cleanup or
+  // save after a daemon switch must still park/clear this daemon's draft.
+  const realm = nav.tabRealm();
   const [loaded] = createResource(
     () => [props.workspace, props.path] as const,
     async ([ws, path]) => {
@@ -51,13 +55,13 @@ function FileEditor(props: { workspace: string; path: string }) {
   // a split remounts the whole chat surface); those come back instead.
   createEffect(() => {
     const l = loaded();
-    if (l && !l.error) setDraft(editorDraftStash.take(props.workspace, props.path) ?? l.content);
+    if (l && !l.error) setDraft(editorDraftStash.take(realm, props.workspace, props.path) ?? l.content);
   });
   onCleanup(() => {
     const l = untrack(loaded);
     const text = untrack(draft);
     const dirtyText = l && !l.error && text != null && text !== l.content ? text : null;
-    editorDraftStash.park(untrack(() => props.workspace), untrack(() => props.path), dirtyText);
+    editorDraftStash.park(realm, untrack(() => props.workspace), untrack(() => props.path), dirtyText);
   });
   const dirty = () => {
     const l = loaded();
@@ -76,7 +80,7 @@ function FileEditor(props: { workspace: string; path: string }) {
         content: text
       });
       setStatus(res.type === "workspace_file_written" ? "Saved" : "Save failed");
-      if (res.type === "workspace_file_written") editorDraftStash.clear(props.workspace, props.path);
+      if (res.type === "workspace_file_written") editorDraftStash.clear(realm, props.workspace, props.path);
     } catch (err) {
       setStatus(`Save failed: ${(err as Error).message}`);
     }
