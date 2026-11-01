@@ -205,13 +205,19 @@ export const clientsStore = {
     // the daemon being left — pause persistence so the inventory pruning in
     // between cannot be saved over the old realm's entry.
     const restoreAlreadyOwed = nav.awaitingTabRestore();
+    const switchAlreadyPending = nav.daemonSwitchPending();
     nav.deferTabRestore({ daemonSwitch: true });
     const ok = await run("client switched", () => bridge.activate(id), resync);
-    // A failed switch never reaches resync's restore; lift the pause so the
+    // A failed switch never reaches resync's restore. Lift the pause so the
     // tabs still on screen keep saving — but only if this attempt introduced
-    // it. A restore already owed from an earlier, still-unresolved switch
-    // must survive this failure.
-    if (!ok && !restoreAlreadyOwed) nav.cancelTabRestore();
+    // it: a restore already owed from an earlier, still-unresolved switch must
+    // survive this failure. Even then, the daemonSwitch bit this attempt
+    // declared is its own to retract, or the next startup realm correction
+    // would read as a switch.
+    if (!ok) {
+      if (!restoreAlreadyOwed) nav.cancelTabRestore();
+      else if (!switchAlreadyPending) nav.undeclareDaemonSwitch();
+    }
     return ok;
   },
 
@@ -220,9 +226,13 @@ export const clientsStore = {
     logAction("add client", { address: opts.address });
     rememberCurrentWorkspace(state.activeId);
     const restoreAlreadyOwed = nav.awaitingTabRestore();
+    const switchAlreadyPending = nav.daemonSwitchPending();
     nav.deferTabRestore({ daemonSwitch: true });
     const ok = await run("client added", () => bridge.add(opts), resync);
-    if (!ok && !restoreAlreadyOwed) nav.cancelTabRestore();
+    if (!ok) {
+      if (!restoreAlreadyOwed) nav.cancelTabRestore();
+      else if (!switchAlreadyPending) nav.undeclareDaemonSwitch();
+    }
     return ok;
   },
 
@@ -230,9 +240,13 @@ export const clientsStore = {
     const wasActive = state.activeId === id;
     logAction("remove client", { id });
     const restoreAlreadyOwed = nav.awaitingTabRestore();
+    const switchAlreadyPending = nav.daemonSwitchPending();
     if (wasActive) nav.deferTabRestore({ daemonSwitch: true });
     const ok = await run("client removed", () => bridge.remove(id), wasActive ? resync : undefined);
-    if (!ok && wasActive && !restoreAlreadyOwed) nav.cancelTabRestore();
+    if (!ok && wasActive) {
+      if (!restoreAlreadyOwed) nav.cancelTabRestore();
+      else if (!switchAlreadyPending) nav.undeclareDaemonSwitch();
+    }
     return ok;
   },
 

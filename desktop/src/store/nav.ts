@@ -60,9 +60,20 @@ let realmKnown = false;
 let daemonSwitchPending = false;
 
 function assignTabRealm(realm: string) {
-  const isSwitch = daemonSwitchPending || realmKnown;
-  if (isSwitch && realm !== untrack(tabRealm)) setTabRealmSession({ realm });
-  else untrack(tabRealmSession).realm = realm;
+  // A declared switch always replaces the session — even when the realm key
+  // string matches the current one. Switching to "This machine" while the
+  // realm still held the unset "local" placeholder is a different daemon
+  // behind the same string, and views keyed on the session must remount or
+  // the old daemon's text saves to the new daemon's file. Without a
+  // declaration, a changed realm after the realm was known is still treated
+  // as a switch (defensive — every clientsStore switch declares); only the
+  // remaining case, correcting the placeholder to the daemon's real identity,
+  // edits in place so startup never remounts over unsaved state.
+  if (daemonSwitchPending || (realmKnown && realm !== untrack(tabRealm))) {
+    setTabRealmSession({ realm });
+  } else {
+    untrack(tabRealmSession).realm = realm;
+  }
   realmKnown = true;
   daemonSwitchPending = false;
   setTabRealmRaw(realm);
@@ -169,6 +180,17 @@ export const nav = {
   setTabRealm(realm: string) {
     assignTabRealm(realm);
     persistTabs();
+  },
+  /** True while a declared daemon switch is in flight (deferTabRestore's opt). */
+  daemonSwitchPending: () => daemonSwitchPending,
+  /**
+   * Drop the pending-switch bit this attempt introduced on failure, without
+   * disturbing an awaitingTabRestore owed by an earlier, still-unresolved
+   * switch. Left set, the next startup realm correction would read as a
+   * switch and remount the editor over its unsaved text.
+   */
+  undeclareDaemonSwitch() {
+    daemonSwitchPending = false;
   },
   /** Cancel an owed restore after a failed switch, without touching current tabs. */
   cancelTabRestore() {

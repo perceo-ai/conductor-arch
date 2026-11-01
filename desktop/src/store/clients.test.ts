@@ -178,6 +178,9 @@ describe("clientsStore failed switches", () => {
 
     expect(await clientsStore.activate("devbox")).toBe(false);
     expect(nav.awaitingTabRestore()).toBe(true);
+    // ...but the switch bit this attempt declared must not survive its failure:
+    // stuck true, the next startup correction would read as a daemon switch.
+    expect(nav.daemonSwitchPending()).toBe(false);
   });
 
   it("add: does not clear a restore already owed before this failed add", async () => {
@@ -187,6 +190,9 @@ describe("clientsStore failed switches", () => {
 
     expect(await clientsStore.add({ address: "new:7420", token: "t" })).toBe(false);
     expect(nav.awaitingTabRestore()).toBe(true);
+    // ...but the switch bit this attempt declared must not survive its failure:
+    // stuck true, the next startup correction would read as a daemon switch.
+    expect(nav.daemonSwitchPending()).toBe(false);
   });
 
   it("remove of the active client: does not clear a restore already owed before this failed remove", async () => {
@@ -198,6 +204,55 @@ describe("clientsStore failed switches", () => {
 
     expect(await clientsStore.remove("devbox")).toBe(false);
     expect(nav.awaitingTabRestore()).toBe(true);
+    // ...but the switch bit this attempt declared must not survive its failure:
+    // stuck true, the next startup correction would read as a daemon switch.
+    expect(nav.daemonSwitchPending()).toBe(false);
+  });
+});
+
+describe("clientsStore failed switches over an owed restore", () => {
+  /**
+   * The owed-restore guard skips cancelTabRestore(), which is also what used
+   * to clear the pending-switch bit — so a failed attempt left its own
+   * daemonSwitch declaration stuck, and the next startup realm correction
+   * replaced the session (remounting the editor over its unsaved text).
+   * Three-state matrix: nothing owed → full cancel; owed without a pending
+   * switch → undeclare only this attempt's bit; owed with a switch already
+   * pending → leave everything, the earlier switch is still completing.
+   */
+  it("activate: a failure over an earlier owed restore leaves the next startup correction in place", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore(); // earlier owed restore, no switch pending
+    const before = nav.tabRealmSession();
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+    expect(nav.daemonSwitchPending()).toBe(false);
+
+    // Startup's correction still edits the session in place — no remount.
+    nav.setTabRealm("client:laptop");
+    expect(nav.tabRealmSession()).toBe(before);
+    expect(before.realm).toBe("client:laptop");
+  });
+
+  it("activate: a failure does not undeclare an earlier switch still pending", async () => {
+    const { clientsStore, nav } = await import("./index");
+    nav.deferTabRestore({ daemonSwitch: true }); // an earlier genuine switch, restore still owed
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(true);
+    expect(nav.daemonSwitchPending()).toBe(true);
+  });
+
+  it("activate: a failure with nothing owed cancels the pause and the switch bit", async () => {
+    const { clientsStore, nav } = await import("./index");
+    api.clientsActivate.mockRejectedValueOnce(new Error("down"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(nav.daemonSwitchPending()).toBe(false);
   });
 });
 

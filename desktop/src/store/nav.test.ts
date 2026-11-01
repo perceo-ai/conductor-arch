@@ -195,6 +195,21 @@ describe("nav workspace tabs", () => {
     expect(tabsOf(back)).toEqual([{ tabs: ["remote-ws"], active: "remote-ws" }]);
   });
 
+  it("replaces the realm session on a declared switch even when the realm key matches the placeholder", async () => {
+    const nav = await freshNav();
+    // Startup never learned the realm (event subscription failed): still the
+    // "local" placeholder. The user explicitly switches to "This machine".
+    const before = nav.tabRealmSession();
+    expect(nav.tabRealm()).toBe("local");
+    nav.deferTabRestore({ daemonSwitch: true });
+    nav.restoreWorkspaceTabs("local", () => true);
+
+    // Same realm string, different daemon: views keyed on the session must
+    // still remount, or the old daemon's text saves to the new daemon's file.
+    expect(nav.tabRealm()).toBe("local");
+    expect(nav.tabRealmSession()).not.toBe(before);
+  });
+
   it("selects the restored realm's chat even when the workspace name matches", async () => {
     const local = await freshNav();
     local.selectWorkspace("shared-name");
