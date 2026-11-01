@@ -112,6 +112,64 @@ describe("clientsStore navigation", () => {
   });
 });
 
+describe("clientsStore failed switches", () => {
+  /**
+   * A switch pauses tab persistence until the new daemon's restore runs. When
+   * the switch itself fails there is no restore coming, so the pause has to be
+   * lifted — otherwise every later tab change silently stops being saved.
+   */
+  async function openLocalTab() {
+    const mod = await import("./index");
+    await mod.refreshInventory();
+    mod.nav.selectWorkspace("local-alpha");
+    return { ...mod, before: JSON.stringify(mod.nav.workspaceTabs()) };
+  }
+
+  it("activate: an error result lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, before } = await openLocalTab();
+    api.clientsActivate.mockResolvedValueOnce({ ok: false, error: "devbox unreachable" });
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+
+  it("activate: a thrown bridge call lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, before } = await openLocalTab();
+    api.clientsActivate.mockRejectedValueOnce(new Error("ipc closed"));
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+
+  it("add: a failed verify lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, before } = await openLocalTab();
+    api.clientsAdd.mockResolvedValueOnce({ ok: false, error: "bad token" });
+
+    expect(await clientsStore.add({ address: "new:7420", token: "t" })).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+
+  it("remove of the active client: a failure lifts the pause and leaves the tabs alone", async () => {
+    const { clientsStore, nav, refreshInventory } = await import("./index");
+    await refreshInventory();
+    expect(await clientsStore.activate("devbox")).toBe(true);
+    nav.selectWorkspace("remote-alpha");
+    const before = JSON.stringify(nav.workspaceTabs());
+    api.clientsRemove.mockResolvedValueOnce({ ok: false, error: "clients.json is read-only" });
+
+    expect(await clientsStore.remove("devbox")).toBe(false);
+
+    expect(nav.awaitingTabRestore()).toBe(false);
+    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+  });
+});
+
 describe("clientsStore.selectedDaemon", () => {
   /**
    * Everything that needs to *address* the selected daemon reads this, and

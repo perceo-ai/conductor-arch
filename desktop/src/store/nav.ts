@@ -40,8 +40,8 @@ let tabRealm = "local";
 // daemon switch in flight) until restoreWorkspaceTabs runs. While it holds,
 // nothing persists: the tabs on screen are the old realm's (or nothing), and
 // writing them — or an inventory-driven pruning of them — under whichever
-// realm key is current would corrupt saved state. restoreWorkspaceTabs is the
-// only thing that clears it.
+// realm key is current would corrupt saved state. restoreWorkspaceTabs clears
+// it, and so does cancelTabRestore when a switch fails and no restore is coming.
 const [awaitingTabRestore, setAwaitingTabRestore] = createSignal(false);
 
 function persistTabs() {
@@ -123,6 +123,10 @@ export const nav = {
   /** Pause tab persistence until the owed restoreWorkspaceTabs call. */
   deferTabRestore() {
     setAwaitingTabRestore(true);
+  },
+  /** Cancel an owed restore after a failed switch, without touching current tabs. */
+  cancelTabRestore() {
+    setAwaitingTabRestore(false);
   },
 
   setWindowFocused,
