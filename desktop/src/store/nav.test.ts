@@ -274,6 +274,23 @@ describe("nav workspace tabs", () => {
     });
   });
 
+  it("a cancelled restore saves what changed while the pause held", async () => {
+    const before = await freshLocalNav();
+    before.selectWorkspace("alpha");
+
+    const nav = await freshNav();
+    nav.restoreWorkspaceTabs("local", () => true); // this daemon, realm known
+    nav.deferTabRestore({ daemonSwitch: true }); // a switch attempt in flight
+    nav.selectWorkspace("beta"); // the user keeps working while it is checked
+    nav.cancelTabRestore(); // the switch failed: same daemon, same tabs
+
+    // Quit and relaunch: the tab opened during the attempt must still exist —
+    // the pause swallowed its write, so the cancel has to flush it.
+    const after = await freshNav();
+    after.restoreWorkspaceTabs("local", () => true);
+    expect(tabsOf(after)).toEqual([{ tabs: ["alpha", "beta"], active: "beta" }]);
+  });
+
   it("replaces the realm session on a declared switch out of the unassigned placeholder", async () => {
     // Startup never learned the realm (event subscription failed): still
     // unassigned. The user explicitly switches to "This machine".

@@ -227,6 +227,10 @@ export const nav = {
     // switch is still pending either: still on the same daemon.
     daemonSwitchPending = false;
     setAwaitingTabRestore(false);
+    // The pause swallowed any tab change made while the switch was checked —
+    // flush it, or quitting now would bring back the pre-switch tabs. Safe
+    // here: the switch failed, so the screen still belongs to this realm.
+    persistTabs();
   },
 
   setWindowFocused,
