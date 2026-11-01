@@ -12955,8 +12955,18 @@ fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Every read the daemon makes of a worktree goes through here, and the daemon
+/// reads often — a summary refresh after each agent turn runs `git status`
+/// several times. Plain `git status` takes `index.lock` to write back the
+/// index it refreshed, so a `git add` or `git commit` racing it (the agent's,
+/// the user's, or the daemon's own `CommitWorkspaceChanges`) failed with
+/// "index.lock: File exists". `--no-optional-locks` skips only that optional
+/// write-back; locks an operation actually needs are still taken.
 fn git_output_dynamic(cwd: &Path, args: &[&str]) -> Result<String> {
-    command_output(cwd, "git", args)
+    let mut with_flag = Vec::with_capacity(args.len() + 1);
+    with_flag.push("--no-optional-locks");
+    with_flag.extend_from_slice(args);
+    command_output(cwd, "git", &with_flag)
 }
 
 /// Render one untracked file as a new-file patch. `git diff` never reports
@@ -14200,6 +14210,72 @@ pub(crate) mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn reading_a_worktrees_status_never_takes_its_index_lock() {
+        // Regression: `changed_files` ran plain `git status`, which writes the
+        // refreshed index back under `index.lock`. The daemon runs it after
+        // every agent turn, so a commit racing that refresh failed with
+        // "index.lock: File exists". Whether the read wrote the index is the
+        // deterministic half of that race: a tracked file with stale stat data
+        // is exactly what plain `git status` rewrites the index for.
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let index = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        );
+        // A different mtime each time: one the index already recorded is not stale.
+        let make_stale = |secs: u64| {
+            fs::File::options()
+                .write(true)
+                .open(workspace.path.join("README.md"))
+                .unwrap()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        };
+
+        // The premise: plain `git status` does write the index here.
+        make_stale(1_000_000);
+        let before = fs::read(&index).unwrap();
+        git_output(&workspace.path, ["status", "--short"]);
+        assert!(
+            fs::read(&index).unwrap() != before,
+            "plain git status should have refreshed the index, or this test proves nothing"
+        );
+
+        make_stale(2_000_000);
+        let before = fs::read(&index).unwrap();
+        store.changed_files("berlin").unwrap();
+        store.git_status_short("berlin").unwrap();
+        assert!(
+            fs::read(&index).unwrap() == before,
+            "reading the worktree's status rewrote its index, so it held index.lock"
+        );
     }
 
     #[test]

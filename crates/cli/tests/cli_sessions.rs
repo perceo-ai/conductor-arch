@@ -276,6 +276,69 @@ fn cli_archcar_shell_accepts_raw_terminal_pwd_and_stops() {
     wait_for_session_exit(temp.path(), session_id);
 }
 
+/// A commit the daemon refuses must fail the command. It used to print the
+/// error and exit 0, so a script — the remote-transfer test among them — went
+/// on as if the commit had landed.
+#[test]
+fn cli_archcar_commit_fails_when_the_daemon_refuses_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_path = init_repo(temp.path().join("demo"));
+    let workspace_parent = temp.path().join("workspaces/demo");
+    let _archcar = ArchcarDaemon::start(temp.path(), &[]);
+
+    app(temp.path())
+        .args([
+            "repo",
+            "add",
+            repo_path.to_str().unwrap(),
+            "--name",
+            "demo",
+            "--default-branch",
+            "main",
+            "--workspace-parent",
+            workspace_parent.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    app(temp.path())
+        .args([
+            "workspace",
+            "create",
+            "demo",
+            "--name",
+            "berlin",
+            "--branch",
+            "lc/berlin",
+            "--base",
+            "main",
+        ])
+        .assert()
+        .success();
+
+    // Nothing staged, so the daemon refuses.
+    app(temp.path())
+        .args(["archcar", "commit", "berlin", "nothing to commit"])
+        .assert()
+        .failure()
+        .stderr(contains("stage at least one file before committing"));
+
+    fs::write(workspace_parent.join("berlin/parser.rs"), "fn parse() {}\n").unwrap();
+    app(temp.path())
+        .args(["archcar", "commit", "berlin", "add parser", "--stage-all"])
+        .assert()
+        .success();
+    let subject = Command::new("git")
+        .arg("-C")
+        .arg(workspace_parent.join("berlin"))
+        .args(["log", "-1", "--format=%s"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&subject.stdout).trim(),
+        "add parser"
+    );
+}
+
 #[test]
 fn cli_exports_and_imports_repository_settings() {
     let temp = tempfile::tempdir().unwrap();
