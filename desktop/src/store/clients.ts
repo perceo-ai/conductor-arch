@@ -47,12 +47,36 @@ function clientKey(id: string | null): string {
   return id ?? "local";
 }
 
+/** Storage realm for the active daemon's workspace tabs (see tabPersistence). */
+function tabRealmKey(): string {
+  if (state.envAddress) return `env:${state.envAddress}`;
+  return state.activeId != null ? `client:${state.activeId}` : "local";
+}
+
+/** A stored tab name is only kept when this daemon still has the workspace. */
+function liveWorkspace(name: string): boolean {
+  const row = workspacesStore.row(name);
+  return row != null && row.status !== "archived";
+}
+
+/** Bring back the active daemon's saved tabs, validated against the inventory. */
+export function restoreTabsForActiveDaemon(): void {
+  nav.restoreWorkspaceTabs(tabRealmKey(), liveWorkspace);
+}
+
 function rememberCurrentWorkspace(id: string | null): void {
   const selected = nav.selectedWorkspace();
   if (selected) lastWorkspaceByClient.set(clientKey(id), selected);
 }
 
 function restoreWorkspaceForClient(id: string | null): void {
+  // The old daemon's tabs are already saved under its own realm; what comes
+  // back is whatever this daemon's realm holds, checked against the inventory
+  // resync just pulled. Thread ids in it are this daemon's too.
+  restoreTabsForActiveDaemon();
+  if (nav.selectedWorkspace() != null) return;
+  // No saved tabs for this daemon: fall back to the workspace that was on
+  // screen the last time this session pointed at it, then the dashboard.
   const remembered = lastWorkspaceByClient.get(clientKey(id));
   if (remembered && workspacesStore.row(remembered)) {
     nav.selectWorkspace(remembered);
@@ -149,6 +173,20 @@ export const clientsStore = {
   },
 
   refresh: () => run("clients refreshed", () => bridge.list()),
+
+  /**
+   * Quiet one-shot load for boot: startStore needs the active daemon's id to
+   * pick the right tab realm before restoring, and must not toast when a build
+   * without client support says no.
+   */
+  async ensureLoaded(): Promise<void> {
+    if (state.loaded) return;
+    try {
+      applyResult(await bridge.list());
+    } catch {
+      // Leave defaults: this machine.
+    }
+  },
 
   /** Switch to a saved client, or to this machine with null. */
   async activate(id: string | null): Promise<boolean> {

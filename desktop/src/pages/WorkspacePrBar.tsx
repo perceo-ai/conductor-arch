@@ -119,7 +119,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
     const loaded = threadsStore.list(props.workspace);
     let threads = loaded.length > 0 ? loaded : await threadsStore.refresh(props.workspace);
     threads = threads.filter((thread) => thread.provider !== "shell");
-    const selected = nav.selectedChatThread();
+    const selected = nav.threadFor(props.workspace);
     const existing = threads.find((thread) => thread.id === selected) ?? threads[0];
     if (existing) return existing;
     const created = await send({
@@ -145,7 +145,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
     });
     if (prompt.type === "error") throw new Error(prompt.message);
     if (prompt.type !== "workspace_git_action_prompt") throw new Error("Unable to prepare agent prompt.");
-    nav.selectChatThread(thread.id);
+    nav.selectThreadFor(props.workspace, thread.id);
     await send({
       type: "ensure_chat_thread_session",
       workspace: props.workspace,

@@ -1,4 +1,4 @@
-import { Show, createEffect, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
+import { Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, untrack } from "solid-js";
 import {
   chatStore,
   interactionsStore,
@@ -41,6 +41,7 @@ import { inlineFileMentionAt } from "@/lib/chatAttachments";
 import { loadWorkspaceFiles } from "@/lib/workspaceFiles";
 import { openFileInCenter } from "@/pages/openFileBridge";
 import { fuzzyScore } from "@/lib/fuzzy";
+import { composerDrafts } from "@/lib/composerDrafts";
 import { providerToKind } from "./providerKind";
 import { applyApprovalMode, supportsApprovalMode } from "./approvalMode";
 import {
@@ -82,7 +83,7 @@ export function Composer(props: {
   // composer used to hold directly — so everything downstream of it is
   // unchanged; what a string cannot hold is a chip, which is why the document
   // is the source of truth now and the string is derived from it.
-  const [nodes, setNodes] = createSignal<ComposerNode[]>([]);
+  const [nodes, setNodes] = createSignal<ComposerNode[]>(composerDrafts.get(untrack(() => props.threadId)));
   const text = () => toVisible(nodes());
   let input: RichInputApi | undefined;
   const [fileMention, setFileMention] = createSignal<{ start: number; end: number; query: string } | null>(null);
@@ -247,14 +248,36 @@ export function Composer(props: {
     setSkillMentionCursor(0);
   }
 
-  function setEditorNodes(next: ComposerNode[], cursor?: number) {
+  function setEditorNodes(next: ComposerNode[], cursor?: number, focus = true) {
     const document_ = normalize(next);
     setNodes(document_);
     queueMicrotask(() => {
-      input?.setNodes(document_, cursor);
+      input?.setNodes(document_, cursor, focus);
       syncFileMention(toVisible(document_), cursor);
     });
   }
+
+  // Each chat keeps its own unsent draft: park this one, bring the next one back.
+  // The id is cached rather than read from props at cleanup: the parent's
+  // `threadId` getter dereferences the active thread, which is already gone
+  // by the time this composer is torn down, and a throw there aborts the
+  // whole update that unmounted it.
+  let draftThread = untrack(() => props.threadId);
+  createEffect(
+    on(
+      () => props.threadId,
+      (threadId) => {
+        if (threadId === draftThread) return;
+        composerDrafts.save(draftThread, untrack(nodes));
+        draftThread = threadId;
+        // No focus: switching chats or tabs must not pull focus into this
+        // composer — in a split it would also steal focus from the other pane.
+        setEditorNodes(composerDrafts.get(threadId), undefined, false);
+      },
+      { defer: true },
+    ),
+  );
+  onCleanup(() => composerDrafts.save(draftThread, untrack(nodes)));
 
   /**
    * Replace the typed `@query` (or `/query`) with a chip.

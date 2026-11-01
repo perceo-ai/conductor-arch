@@ -5,6 +5,7 @@ import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { threadsStore } from "./threads";
 import { layoutPresetsStore } from "./layoutPresets";
+import { clientsStore, restoreTabsForActiveDaemon } from "./clients";
 
 export { nav } from "./nav";
 export { chatStore } from "./chat";
@@ -87,7 +88,15 @@ export function startStore(): Promise<void> {
       focusWired = true;
     }
     await connectEvents((event) => applyEvent(event));
+    // The tab realm is the active daemon's, so its identity must be known
+    // before the restore — quietly, since the switcher will refresh again.
+    await clientsStore.ensureLoaded();
     await refreshInventory().catch(() => {});
+    // Bring back the tabs from last run — unless the user already opened
+    // something while we were loading, which wins.
+    if (nav.workspaceTabs().groups.every((group) => group.tabs.length === 0)) {
+      restoreTabsForActiveDaemon();
+    }
     const selected = nav.selectedWorkspace();
     const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
     await layoutPresetsStore.load(repository).catch(() => {});

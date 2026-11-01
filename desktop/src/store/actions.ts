@@ -1131,7 +1131,7 @@ export const actions = {
     logAction("rename_workspace", { workspace, newName });
     ensureOk(await send({ type: "rename_workspace", workspace, new_name: newName }));
     await refreshInventory();
-    if (nav.selectedWorkspace() === workspace) nav.selectWorkspace(newName);
+    nav.renameWorkspace(workspace, newName);
   },
 
   async duplicateWorkspace(workspace: string, newName: string, branch?: string): Promise<string | undefined> {
@@ -1157,6 +1157,7 @@ export const actions = {
           delete_branch: deleteBranch,
         }),
       );
+      nav.closeWorkspaceTab(workspace);
       if (nav.selectedWorkspace() === workspace) nav.goToPage("dashboard");
     } finally {
       // A failed branch step still deleted the workspace; a refused delete

@@ -5,6 +5,7 @@ import { actions, nav, threadsStore, toastsStore, workspacesStore } from "@/stor
 import Icon from "@/components/Icon";
 import { parsePrReadiness, type PrCheckRow, type PrGateTone } from "@/lib/prReadiness";
 import { configuredShortcut } from "@/lib/configuredShortcut";
+import { usePane } from "./paneContext";
 import type {
   WorkflowRun,
   WorkflowRunSummary,
@@ -465,7 +466,7 @@ async function activeWorkspaceChatThread(workspace: string): Promise<ArchcarChat
   const loaded = threadsStore.list(workspace);
   let threads = loaded.length > 0 ? loaded : await threadsStore.refresh(workspace);
   threads = threads.filter((thread) => thread.provider !== "shell");
-  const selected = nav.selectedChatThread();
+  const selected = nav.threadFor(workspace);
   const existing = threads.find((thread) => thread.id === selected) ?? threads[0];
   if (existing) return existing;
   const created = await send({
@@ -625,6 +626,7 @@ export function ChecksPanel(props: { workspace: string }) {
 // ---- Review (agent prompt) ------------------------------------------------
 
 export function ReviewPromptButton(props: { workspace: string }) {
+  const pane = usePane();
   const [busy, setBusy] = createSignal(false);
 
   async function queueReviewPrompt() {
@@ -642,7 +644,7 @@ export function ReviewPromptButton(props: { workspace: string }) {
       if (prompt.type === "error") throw new Error(prompt.message);
       if (prompt.type !== "workspace_git_action_prompt") throw new Error("Unable to prepare review prompt.");
       const kind = providerKind(thread.provider);
-      nav.selectChatThread(thread.id);
+      nav.selectThreadFor(props.workspace, thread.id);
       await send({
         type: "ensure_chat_thread_session",
         workspace: props.workspace,
@@ -666,7 +668,9 @@ export function ReviewPromptButton(props: { workspace: string }) {
   }
 
   onMount(() => {
-    const onStartReview = () => void queueReviewPrompt();
+    const onStartReview = () => {
+      if (pane.focused()) void queueReviewPrompt();
+    };
     window.addEventListener("archductor:start-review", onStartReview);
     onCleanup(() => window.removeEventListener("archductor:start-review", onStartReview));
   });

@@ -143,6 +143,44 @@ already holds clears the old binding rather than leaving the keymap ambiguous.
 it as a repository view default, but the Electron app does not read it yet;
 Settings is the working path today.
 
+## Workspace tabs and splits
+
+Every workspace you open stays open as a tab above the workspace view, like a
+browser. Clicking a workspace in the sidebar (or jumping with `mod+1`…) opens
+its tab, or focuses the tab it already has. Each tab comes back on the chat it
+was last on, and every chat keeps its own unsent draft.
+
+To see two workspaces at once, split:
+
+- Drag a tab onto the right or bottom edge of the workspace view, or
+- right-click a tab → **Split Right** / **Split Down**, or
+- right-click a workspace in the sidebar → **Open in Split Right** /
+  **Open in Split Down**.
+
+There are at most two panes. With two open, dragging a tab onto the other pane
+(or **Move to Other Pane**) moves it across. Closing a pane's last tab, or
+dragging it out, collapses the split. Middle-click closes a tab.
+
+One pane is focused at a time — its active tab has the accent underline and is
+the workspace the sidebar highlights. Clicking anywhere in a pane focuses it,
+and keyboard shortcuts (new chat, close chat, review, terminal, changes…) act on
+the focused pane only. Both panes stay live: a turn finishing in either one
+counts as on screen for the turn-finished sound and the unread dot.
+
+Tabs survive a restart: the app reopens with the same tabs, split, focused
+pane, and each workspace's last chat. They are saved per daemon in the
+renderer's local preferences — like pins and keybindings, which tabs you keep
+open is your view, not workspace state — so switching daemons in **Clients**
+swaps to that daemon's own saved tabs, and a workspace deleted in between
+simply does not come back. Unsent drafts do not survive a restart.
+
+In a split, the panels around the chat — Files, Changes, Checks, the
+terminal, the PR bar — show only in the focused pane; the other pane is a
+plain chat column, so neither conversation gets squeezed. Click a pane and the
+inspector (and, side by side, some extra width) follows. Both panes share one
+panel layout (see below), so edit layouts from the focused pane. The CLI has
+no tab equivalent: it has no long-lived view to put tabs in.
+
 ## Layouts
 
 Four built-in layouts, because "review three diffs" and "watch a long agent

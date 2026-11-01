@@ -168,6 +168,8 @@ export function workspaceMenuItems(name: string): ContextMenuItem[] {
   const archived = () => workspacesStore.row(name)?.status === "archived";
   return [
     { label: "Open", run: () => nav.selectWorkspace(name) },
+    { label: "Open in Split Right", icon: "panel-right", run: () => nav.openWorkspaceInSplit(name, "right") },
+    { label: "Open in Split Down", run: () => nav.openWorkspaceInSplit(name, "down") },
     // Only across a machine boundary: "copy to this machine" is meaningless
     // when this machine is already the one running it.
     ...(clientsStore.isRemote()

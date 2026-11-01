@@ -148,6 +148,15 @@ export type Drop =
 
 const MIN_RATIO = 0.1;
 
+/** The first leaf (tree order) whose tab set includes `panel`. */
+export function leafWithPanel(node: LayoutNode, panel: PanelId): LayoutLeaf | undefined {
+  let hit: LayoutLeaf | undefined;
+  eachLeaf(node, (candidate) => {
+    if (!hit && candidate.panels.includes(panel)) hit = candidate;
+  });
+  return hit;
+}
+
 export function leafCount(layout: Layout): number {
   let count = 0;
   eachLeaf(layout.root, () => (count += 1));

@@ -44,7 +44,7 @@ const send = vi.fn(async (request: { type: string }) => {
 vi.mock("@/bridge/client", () => ({ send, openExternal: vi.fn() }));
 vi.mock("@/store", () => ({
   actions: {},
-  nav: { selectedChatThread: () => null, selectedWorkspace: () => "demo" },
+  nav: { selectedChatThread: () => null, selectedWorkspace: () => "demo", threadFor: () => null },
   threadsStore: { list: () => [], refresh: async () => [] },
   toastsStore: { push: vi.fn(), error: vi.fn() },
   workspacesStore: { row: () => undefined, state: { order: [], byName: {} } },

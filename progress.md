@@ -27,6 +27,26 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Workspace tabs and splits (2026-10-31)
+
+Opened workspaces stay open as browser-style tabs above the workspace view, and
+a tab can be split right or down into a second pane (never more than two), so
+two workspaces' chats are on screen at once. The focused pane's active tab is
+the selected workspace, so the sidebar, shortcuts, and actions keep their old
+meaning; window-wide shortcuts reach only the focused pane. Each workspace
+remembers its last chat, and each chat its unsent draft. Tabs, split, focus,
+and chat memory survive a restart, stored per daemon in renderer localStorage
+and validated against the live inventory on restore (a workspace deleted while
+the app was closed stays gone); switching daemons swaps to that daemon's own
+saved tabs. In a split the inspector follows focus: the unfocused pane renders
+only the leaf holding the chat panel (a plain chat column), the focused pane
+keeps the full shared layout, and a side-by-side split gives the focused pane
+the larger share since it carries the inspector. Layout editing still assumes
+one full workbench on screen, so edit mode in a split is rough. Not yet:
+per-tab layout or scroll, drafts surviving a restart, and a CLI way to open a
+tab or split. The CLI has no channel into the desktop view today, so that
+needs a new daemon broadcast first.
+
 ## Turn-finished sound (2026-10-19)
 
 The desktop app chimes when a chat stops generating, in any chat, viewed or
