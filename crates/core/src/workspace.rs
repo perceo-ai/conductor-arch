@@ -12993,7 +12993,9 @@ fn git_worktree_diff_output(cwd: &Path, args: &[&str]) -> Result<String> {
         // No index yet means no entries and nothing to lock against.
         return git_output_dynamic(cwd, args);
     }
-    let copy = std::env::temp_dir().join(format!(
+    // Beside the live index, not in `$TMPDIR`: that directory always exists and
+    // git can write there, while a daemon's `$TMPDIR` may not exist at all.
+    let copy = live.with_file_name(format!(
         "archductor-read-index-{}-{}-{}",
         std::process::id(),
         timestamp_nanos(),
@@ -13001,8 +13003,13 @@ fn git_worktree_diff_output(cwd: &Path, args: &[&str]) -> Result<String> {
     ));
     // git replaces the index by renaming a finished file over it, so this copy
     // is one whole version, never a half-written one.
-    fs::copy(&live, &copy)
-        .with_context(|| format!("copy {} for a lock-free read", live.display()))?;
+    fs::copy(&live, &copy).map_err(|err| {
+        anyhow::anyhow!(
+            "copy {} to {} for a lock-free read: {err}",
+            live.display(),
+            copy.display()
+        )
+    })?;
     let output = git_with_index_output(cwd, &copy, args);
     let _ = fs::remove_file(&copy);
     output
