@@ -354,6 +354,16 @@ the keys shown above are supported. Font values are CSS font-family lists.
 `ui_font_size`, `code_font_size`, and `terminal_font_size` accept whole pixels
 from 9 through 32. `terminal_scrollback` accepts 100 through 100,000 lines.
 
+Settings > Appearance edits colors only in the `[customization.view.colors]`
+section form shown above. If `[customization.view]` defines `colors` as an
+inline table instead, such as `colors = { accent = "#abcdef" }` (quoted or
+not), the color controls are disabled with a notice: editing them would add a
+second `[customization.view.colors]` definition that the daemon rejects. To
+make those colors editable again, edit the settings file directly or convert
+the inline table to the section form. `accent_color` under
+`[customization.view]` is not part of the inline table and can still be set in
+the file or with the CLI.
+
 The CLI reads and writes the same values. For example:
 
 ```bash
