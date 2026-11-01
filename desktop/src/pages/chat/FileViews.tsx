@@ -1,6 +1,7 @@
 import { For, Match, Show, Switch, createEffect, createMemo, createResource, createSignal, onCleanup, untrack } from "solid-js";
 import {
   actions,
+  nav,
   prefsStore,
 } from "@/store";
 import { send } from "@/bridge/client";
@@ -31,6 +32,11 @@ import { parseKeybindingOverrides, resolveShortcut } from "@/lib/shortcuts";
 //             the raw source and the finished document are both reachable.
 //             Offered only when previewKind() recognises the path.
 function FileEditor(props: { workspace: string; path: string }) {
+  // The daemon this editor was opened under, captured once: a cleanup or save
+  // after a daemon switch must still park/clear this daemon's draft. Its
+  // `realm` is read at use time — startup learning the daemon's real realm
+  // corrects it in place (same daemon); a switch remounts this editor instead.
+  const session = nav.tabRealmSession();
   const [loaded] = createResource(
     () => [props.workspace, props.path] as const,
     async ([ws, path]) => {
@@ -51,13 +57,13 @@ function FileEditor(props: { workspace: string; path: string }) {
   // a split remounts the whole chat surface); those come back instead.
   createEffect(() => {
     const l = loaded();
-    if (l && !l.error) setDraft(editorDraftStash.take(props.workspace, props.path) ?? l.content);
+    if (l && !l.error) setDraft(editorDraftStash.take(session.realm, props.workspace, props.path) ?? l.content);
   });
   onCleanup(() => {
     const l = untrack(loaded);
     const text = untrack(draft);
     const dirtyText = l && !l.error && text != null && text !== l.content ? text : null;
-    editorDraftStash.park(untrack(() => props.workspace), untrack(() => props.path), dirtyText);
+    editorDraftStash.park(session.realm, untrack(() => props.workspace), untrack(() => props.path), dirtyText);
   });
   const dirty = () => {
     const l = loaded();
@@ -76,7 +82,7 @@ function FileEditor(props: { workspace: string; path: string }) {
         content: text
       });
       setStatus(res.type === "workspace_file_written" ? "Saved" : "Save failed");
-      if (res.type === "workspace_file_written") editorDraftStash.clear(props.workspace, props.path);
+      if (res.type === "workspace_file_written") editorDraftStash.clear(session.realm, props.workspace, props.path);
     } catch (err) {
       setStatus(`Save failed: ${(err as Error).message}`);
     }
@@ -325,7 +331,13 @@ export function FileView(props: { workspace: string; path: string; scope?: Works
       </div>
       <Switch>
         <Match when={active() === "edit"}>
-          <FileEditor workspace={props.workspace} path={props.path} />
+          {/* Keyed on the daemon session: a daemon switch that keeps this
+              view up (same workspace name on both) must replace the editor,
+              whose cleanup still parks under the realm it was opened in.
+              Startup's first realm assignment is not a switch and keeps it. */}
+          <Show when={nav.tabRealmSession()} keyed>
+            <FileEditor workspace={props.workspace} path={props.path} />
+          </Show>
         </Match>
         <Match when={active() === "preview"}>
           <FilePreview workspace={props.workspace} path={props.path} />

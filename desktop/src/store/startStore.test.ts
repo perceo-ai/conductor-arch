@@ -17,6 +17,15 @@ interface MockApi {
   window: { minimize: () => void; toggleMaximize: () => void; close: () => void };
 }
 
+// Node's own localStorage global is unusable in vitest; startup persists tabs
+// through it, so give the file a working in-memory one.
+const storage = new Map<string, string>();
+vi.stubGlobal("localStorage", {
+  getItem: (key: string) => storage.get(key) ?? null,
+  setItem: (key: string, value: string) => void storage.set(key, value),
+  removeItem: (key: string) => void storage.delete(key),
+});
+
 let offEvent: ReturnType<typeof vi.fn>;
 let api: MockApi;
 
@@ -39,6 +48,7 @@ const workspaceSummary = (id: number, name: string, status = "active") => ({
 
 beforeEach(() => {
   vi.resetModules();
+  storage.clear();
   offEvent = vi.fn();
   api = {
     request: vi.fn(async () => ({ type: "workspaces", workspaces: [] })),
@@ -102,6 +112,66 @@ describe("startStore", () => {
     // A subsequent call re-attempts (memo was cleared) and now succeeds.
     await expect(startStore()).resolves.toBeUndefined();
     expect(api.ensureEvents).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("startStore: tab realm when a workspace opens during startup", () => {
+  /**
+   * startStore awaits the saved-client list before deciding whether to restore
+   * tabs. A workspace the user opens in that gap wins over the saved tabs, so
+   * the restore is skipped — but persistence must still point at the active
+   * daemon's realm, not stay on the "local" default.
+   */
+  async function openTabWhileClientsLoad(result: Record<string, unknown>) {
+    let resolveList!: (value: unknown) => void;
+    const clientsList = vi.fn(
+      () => new Promise((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+    (api as unknown as { clientsList: typeof clientsList }).clientsList = clientsList;
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "get_inventory_snapshot") {
+        return {
+          type: "inventory_snapshot",
+          repositories: [],
+          workspaces: [workspaceSummary(1, "alpha")],
+          chat_threads: {},
+        };
+      }
+      if (req.type === "list_layout_presets") return { type: "layout_presets", presets: [] };
+      return { type: "ack" };
+    });
+    const { startStore, nav } = await import("./index");
+
+    const started = startStore();
+    // Startup is now parked on the client list: the user clicks a workspace.
+    await vi.waitFor(() => expect(clientsList).toHaveBeenCalled());
+    nav.selectWorkspace("alpha");
+    resolveList({ ok: true, clients: [], ...result });
+    await started;
+
+    // The user's tab survived (the restore was skipped)...
+    expect(nav.workspaceTabs().groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
+    return nav;
+  }
+
+  it("points persistence at the saved client's realm", async () => {
+    const nav = await openTabWhileClientsLoad({ activeId: "devbox" });
+    expect(nav.tabRealm()).toBe("client:devbox");
+    // ...and the tab already on screen is saved under it, not just future ones.
+    const { loadTabRealm } = await import("@/lib/tabPersistence");
+    expect(loadTabRealm("client:devbox")?.groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
+    // The click that landed before the realm was known wrote nothing under the
+    // real local machine's key (it used to, via the shared "local" string).
+    expect(loadTabRealm("local")).toBeNull();
+  });
+
+  it("points persistence at the environment-pinned daemon's realm", async () => {
+    const nav = await openTabWhileClientsLoad({ activeId: null, envAddress: "office:7420" });
+    expect(nav.tabRealm()).toBe("env:office:7420");
+    const { loadTabRealm } = await import("@/lib/tabPersistence");
+    expect(loadTabRealm("env:office:7420")?.groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
   });
 });
 

@@ -5,7 +5,7 @@ import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { threadsStore } from "./threads";
 import { layoutPresetsStore } from "./layoutPresets";
-import { clientsStore, restoreTabsForActiveDaemon } from "./clients";
+import { clientsStore, restoreTabsForActiveDaemon, tabRealmKey } from "./clients";
 import { appearanceStore } from "./appearance";
 
 export { nav } from "./nav";
@@ -108,6 +108,11 @@ export function startStore(): Promise<void> {
     if (nav.workspaceTabs().groups.every((group) => group.tabs.length === 0)) {
       if (inventoryOk && workspacesStore.loaded()) restoreTabsForActiveDaemon();
       else nav.deferTabRestore();
+    } else {
+      // A workspace was already opened while this was loading (it wins over the
+      // saved tabs) — still point future persistence at the right daemon's
+      // realm, independent of whether the restore itself ran.
+      nav.setTabRealm(tabRealmKey());
     }
     await appearanceReady;
     const selected = nav.selectedWorkspace();

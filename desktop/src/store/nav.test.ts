@@ -6,6 +6,17 @@ async function freshNav() {
   return (await import("./nav")).nav;
 }
 
+/**
+ * A fresh launch that will WRITE tab state for the local machine: nothing
+ * persists while the realm is unassigned, so stamp it the way startup does.
+ * Readers assign the realm through their own restoreWorkspaceTabs call.
+ */
+async function freshLocalNav() {
+  const nav = await freshNav();
+  nav.setTabRealm("local");
+  return nav;
+}
+
 // Node's own localStorage global is unusable in vitest; every nav mutation
 // persists tabs through it, so give the whole file a working in-memory one.
 const storage = new Map<string, string>();
@@ -144,7 +155,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("restores the saved tabs, chats, and page after a restart", async () => {
-    const before = await freshNav();
+    const before = await freshLocalNav();
     before.selectWorkspace("alpha");
     before.selectChatThread(11);
     before.selectWorkspace("beta");
@@ -165,7 +176,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("drops deleted workspaces on restore and stays on the dashboard when nothing survives", async () => {
-    const before = await freshNav();
+    const before = await freshLocalNav();
     before.selectWorkspace("alpha");
     before.selectWorkspace("beta");
 
@@ -180,7 +191,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("keeps each daemon realm's tabs apart", async () => {
-    const local = await freshNav();
+    const local = await freshLocalNav();
     local.selectWorkspace("alpha");
 
     const remote = await freshNav();
@@ -195,8 +206,124 @@ describe("nav workspace tabs", () => {
     expect(tabsOf(back)).toEqual([{ tabs: ["remote-ws"], active: "remote-ws" }]);
   });
 
+  describe("leaving the unassigned realm migrates parked drafts", () => {
+    /**
+     * Drafts parked while the realm was still unassigned belong to the daemon
+     * startup is about to identify. The migration must run where the
+     * correction happens — components that parked them may be long unmounted.
+     */
+    async function freshStores() {
+      vi.resetModules();
+      const { nav, UNASSIGNED_REALM } = await import("./nav");
+      const { composerDrafts, draftKey } = await import("@/lib/composerDrafts");
+      const { editorDraftStash } = await import("@/lib/editorDraftStash");
+      return { nav, UNASSIGNED_REALM, composerDrafts, draftKey, editorDraftStash };
+    }
+
+    it("moves a composer draft parked with no composer mounted", async () => {
+      const { nav, UNASSIGNED_REALM, composerDrafts, draftKey } = await freshStores();
+      composerDrafts.save(draftKey(UNASSIGNED_REALM, 5), [{ kind: "text", text: "early" }]);
+
+      nav.setTabRealm("client:a"); // startup's correction; nothing is mounted
+
+      expect(composerDrafts.get(draftKey("client:a", 5))).toEqual([{ kind: "text", text: "early" }]);
+      expect(composerDrafts.get(draftKey(UNASSIGNED_REALM, 5))).toEqual([]);
+    });
+
+    it("moves a file-editor draft parked with no editor mounted", async () => {
+      const { nav, UNASSIGNED_REALM, editorDraftStash } = await freshStores();
+      editorDraftStash.park(UNASSIGNED_REALM, "ws", "src/f.ts", "early edit");
+
+      nav.setTabRealm("client:a");
+
+      expect(editorDraftStash.take("client:a", "ws", "src/f.ts")).toBe("early edit");
+      expect(editorDraftStash.take(UNASSIGNED_REALM, "ws", "src/f.ts")).toBeNull();
+    });
+
+    it("does not migrate on a declared daemon switch, even from the unassigned realm", async () => {
+      const { nav, UNASSIGNED_REALM, composerDrafts, draftKey, editorDraftStash } = await freshStores();
+      composerDrafts.save(draftKey(UNASSIGNED_REALM, 5), [{ kind: "text", text: "early" }]);
+      editorDraftStash.park(UNASSIGNED_REALM, "ws", "src/f.ts", "early edit");
+
+      nav.deferTabRestore({ daemonSwitch: true });
+      nav.restoreWorkspaceTabs("local", () => true);
+
+      // The other daemon's drafts must not leak into this one.
+      expect(composerDrafts.get(draftKey("local", 5))).toEqual([]);
+      expect(editorDraftStash.take("local", "ws", "src/f.ts")).toBeNull();
+      expect(composerDrafts.get(draftKey(UNASSIGNED_REALM, 5))).toEqual([{ kind: "text", text: "early" }]);
+      expect(editorDraftStash.take(UNASSIGNED_REALM, "ws", "src/f.ts")).toBe("early edit");
+    });
+
+    it("migrates exactly once, on the assignment that leaves the sentinel", async () => {
+      const { nav, UNASSIGNED_REALM, composerDrafts, draftKey } = await freshStores();
+      nav.setTabRealm("local"); // the one sentinel -> real transition
+      // Anything that lands under the sentinel afterwards is a bug of its
+      // own, not something later assignments may quietly re-home.
+      composerDrafts.save(draftKey(UNASSIGNED_REALM, 7), [{ kind: "text", text: "stray" }]);
+      const kept = [{ kind: "text" as const, text: "mine" }];
+      composerDrafts.save(draftKey("local", 7), kept);
+
+      nav.setTabRealm("local"); // repeated correction, same realm
+      nav.deferTabRestore({ daemonSwitch: true });
+      nav.restoreWorkspaceTabs("client:b", () => true); // later genuine switch
+
+      expect(composerDrafts.get(draftKey(UNASSIGNED_REALM, 7))).toEqual([{ kind: "text", text: "stray" }]);
+      expect(composerDrafts.get(draftKey("local", 7))).toEqual(kept);
+      expect(composerDrafts.get(draftKey("client:b", 7))).toEqual([]);
+    });
+  });
+
+  it("a cancelled restore saves what changed while the pause held", async () => {
+    const before = await freshLocalNav();
+    before.selectWorkspace("alpha");
+
+    const nav = await freshNav();
+    nav.restoreWorkspaceTabs("local", () => true); // this daemon, realm known
+    nav.deferTabRestore({ daemonSwitch: true }); // a switch attempt in flight
+    nav.selectWorkspace("beta"); // the user keeps working while it is checked
+    nav.cancelTabRestore(); // the switch failed: same daemon, same tabs
+
+    // Quit and relaunch: the tab opened during the attempt must still exist —
+    // the pause swallowed its write, so the cancel has to flush it.
+    const after = await freshNav();
+    after.restoreWorkspaceTabs("local", () => true);
+    expect(tabsOf(after)).toEqual([{ tabs: ["alpha", "beta"], active: "beta" }]);
+  });
+
+  it("replaces the realm session on a declared switch out of the unassigned placeholder", async () => {
+    // Startup never learned the realm (event subscription failed): still
+    // unassigned. The user explicitly switches to "This machine".
+    vi.resetModules();
+    const { nav, UNASSIGNED_REALM } = await import("./nav");
+    const before = nav.tabRealmSession();
+    expect(nav.tabRealm()).toBe(UNASSIGNED_REALM);
+    nav.deferTabRestore({ daemonSwitch: true });
+    nav.restoreWorkspaceTabs("local", () => true);
+
+    // A declared switch replaces the session even from the unassigned state:
+    // views keyed on it must remount, or the old daemon's text saves to the
+    // new daemon's file.
+    expect(nav.tabRealm()).toBe("local");
+    expect(nav.tabRealmSession()).not.toBe(before);
+    expect(before.realm).toBe(UNASSIGNED_REALM);
+  });
+
+  it("persists nothing while the realm is unassigned, then saves the screen on assignment", async () => {
+    vi.resetModules();
+    const { nav } = await import("./nav");
+    nav.selectWorkspace("early");
+    // Nothing may land under the sentinel key, and "local" is untouched.
+    expect(storage.size).toBe(0);
+    nav.setTabRealm("local");
+    expect(storage.size).toBe(1);
+    const fresh = await freshNav();
+    fresh.restoreWorkspaceTabs("local", () => true);
+    expect(tabsOf(fresh)).toEqual([{ tabs: ["early"], active: "early" }]);
+  });
+
   it("selects the restored realm's chat even when the workspace name matches", async () => {
-    const local = await freshNav();
+    const local = await freshLocalNav();
     local.selectWorkspace("shared-name");
     local.selectChatThread(11);
 
@@ -214,7 +341,7 @@ describe("nav workspace tabs", () => {
   });
 
   it("pauses persistence while a restore is owed, so stale pruning cannot stick", async () => {
-    const before = await freshNav();
+    const before = await freshLocalNav();
     before.selectWorkspace("alpha");
     before.selectWorkspace("beta");
 
