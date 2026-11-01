@@ -297,10 +297,35 @@ accent = "#111111"
       expect(await refreshWith("#5b9dff", "#abcdef", source)).toBe("#abcdef");
     });
 
+    it.each([
+      ["a commented-out inline table in the colors section", '[customization.view]\naccent_color = "green"\n\n[customization.view.colors]\n# colors = { accent = "#abcdef" }\n'],
+      ["a commented-out inline table in the view section", '[customization.view]\naccent_color = "green"\n# colors = { accent = "#abcdef" }\n'],
+      ["a trailing comment after an inline table", '[customization.view]\naccent_color = "green"\ncolors = { surface = "#222222" } # was { accent = "#abcdef" }\n'],
+      ["a trailing comment after a section-form color", '[customization.view]\naccent_color = "green"\n\n[customization.view.colors]\nsurface = "#222222" # was { accent = "#abcdef" }\n'],
+    ])("ignores %s and falls back to accent_color", async (_shape, source) => {
+      const { ACCENT_PRESETS } = await import("./appearance");
+      expect(await refreshWith("green", "#5b9dff", source)).toBe(ACCENT_PRESETS.find(([label]) => label === "Green")![1]);
+    });
+
+    it.each([
+      ["an inline table with a trailing comment", '[customization.view]\ncolors = { accent = "#abcdef" } # saved here\n'],
+      ["a section-form accent with a trailing comment", '[customization.view.colors]\naccent = "#abcdef" # saved here\n'],
+    ])("still keeps a saved accent in %s", async (_shape, source) => {
+      expect(await refreshWith("#5b9dff", "#abcdef", source)).toBe("#abcdef");
+    });
+
     it("falls back to accent_color when no accent was saved in any form", async () => {
       const { ACCENT_PRESETS } = await import("./appearance");
       const source = '[customization.view]\naccent_color = "rose"\ncolors = { surface = "#222222" }\n';
       expect(await refreshWith("rose", "#5b9dff", source)).toBe(ACCENT_PRESETS.find(([label]) => label === "Rose")![1]);
     });
+  });
+
+  it("detects an inline colors table only when it is real TOML, not a comment", async () => {
+    const { hasInlineColorsTable } = await import("./appearance");
+    expect(hasInlineColorsTable('[customization.view]\ncolors = { accent = "#abcdef" }\n')).toBe(true);
+    expect(hasInlineColorsTable('[customization.view]\n\'colors\' = { accent = "#abcdef" } # note\n')).toBe(true);
+    expect(hasInlineColorsTable('[customization.view]\n# colors = { accent = "#abcdef" }\n')).toBe(false);
+    expect(hasInlineColorsTable('[customization.view]\ntheme = "dark" # colors = { accent = "#abcdef" }\n')).toBe(false);
   });
 });

@@ -121,22 +121,53 @@ const CSS_COLOR_ALIASES: Partial<Record<AppearanceColorKey, readonly string[]>> 
   danger: ["--lc-status-danger"],
 };
 
+/**
+ * Split `text` on `separator` wherever it is outside a TOML string, so the
+ * `#` in `"#abcdef"` or a `,` inside a value is never mistaken for syntax.
+ */
+function splitOutsideStrings(text: string, separator: string): string[] {
+  const parts: string[] = [];
+  let quote: string | undefined;
+  let from = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (char === "\\" && quote === '"') index += 1;
+      else if (char === quote) quote = undefined;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === separator) {
+      parts.push(text.slice(from, index));
+      from = index + 1;
+    }
+  }
+  parts.push(text.slice(from));
+  return parts;
+}
+
+/** The section's lines with comments removed. */
 function sectionLines(source: string, section: string): string[] {
   const lines = source.split("\n");
   const bounds = tomlSectionBounds(lines, section);
-  return bounds ? lines.slice(bounds[0] + 1, bounds[1]) : [];
+  if (!bounds) return [];
+  return lines.slice(bounds[0] + 1, bounds[1]).map((line) => splitOutsideStrings(line, "#")[0]);
 }
 
-// A bare or quoted key, as TOML allows: `colors`, `"colors"`, `'colors'`.
-const tomlKey = (name: string) => `["']?${name}["']?`;
-const INLINE_COLORS = new RegExp(`^\\s*${tomlKey("colors")}\\s*=\\s*\\{(.*)$`);
-const ACCENT_ASSIGNMENT = new RegExp(`(?:^|[{,])\\s*${tomlKey("accent")}\\s*=`);
+/** `key = value` split at the first `=` outside a string, with the key unquoted. */
+function assignment(entry: string): { key: string; value: string } | undefined {
+  const [rawKey, ...rest] = splitOutsideStrings(entry, "=");
+  if (rest.length === 0) return undefined;
+  const key = rawKey.trim().replace(/^(["'])(.*)\1$/, "$2");
+  return { key, value: rest.join("=").trim() };
+}
 
-/** Body of a `colors = { ... }` inline table under `[customization.view]`, if any. */
-function inlineColorsTable(source: string): string | undefined {
+/** Entries of a `colors = { ... }` inline table under `[customization.view]`, if any. */
+function inlineColorsEntries(source: string): string[] | undefined {
   for (const line of sectionLines(source, "customization.view")) {
-    const match = INLINE_COLORS.exec(line);
-    if (match) return `{${match[1]}`;
+    const pair = assignment(line);
+    if (pair?.key === "colors" && pair.value.startsWith("{")) {
+      return splitOutsideStrings(pair.value.replace(/^\{|\}$/g, ""), ",");
+    }
   }
   return undefined;
 }
@@ -147,20 +178,18 @@ function inlineColorsTable(source: string): string | undefined {
  * `[customization.view.colors]` table, which the daemon then rejects.
  */
 export function hasInlineColorsTable(source: string): boolean {
-  return inlineColorsTable(source) !== undefined;
+  return inlineColorsEntries(source) !== undefined;
 }
 
 /**
  * Whether the saved source sets `colors.accent` in any shape: the section
- * form, an inline table, or a quoted key. The scalar reader only sees the
- * first, so it cannot answer this on its own.
+ * form, an inline table, or a quoted key, ignoring comments. The scalar
+ * reader only sees the section form, so it cannot answer this on its own.
  */
 function hasSavedAccent(source: string): boolean {
-  if (sectionLines(source, "customization.view.colors").some((line) => ACCENT_ASSIGNMENT.test(line))) {
-    return true;
-  }
-  const inline = inlineColorsTable(source);
-  return inline !== undefined && ACCENT_ASSIGNMENT.test(inline);
+  const isAccent = (entry: string) => assignment(entry)?.key === "accent";
+  return sectionLines(source, "customization.view.colors").some(isAccent)
+    || (inlineColorsEntries(source)?.some(isAccent) ?? false);
 }
 
 function stringValue(toml: string, section: string, key: string, fallback: string): string {

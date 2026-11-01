@@ -250,4 +250,11 @@ accent = "#abcdef"
     );
     expect(host.textContent).toContain("inline table");
   });
+
+  it("does not lock color controls for a commented-out inline colors table", async () => {
+    const host = await mount('[customization.view]\ntheme = "dark"\n# colors = { accent = "#abcdef" }\n\n[customization.view.colors]\naccent = "#abcdef"\n');
+
+    expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="text"]')?.disabled).toBe(false);
+    expect(host.textContent).not.toContain("inline table");
+  });
 });
