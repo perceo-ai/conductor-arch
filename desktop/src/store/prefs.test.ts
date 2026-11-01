@@ -47,6 +47,27 @@ describe("prefsStore", () => {
     expect(prefsStore.state.density).toBe("compact");
   });
 
+  it("uses legacy appearance once without persisting it again", async () => {
+    const storage = new Map<string, string>([
+      ["archductor.prefs.v1", JSON.stringify({ theme: "light", accent: "rose", density: "comfortable" })],
+    ]);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+    });
+
+    const { prefsStore } = await import("./prefs");
+
+    expect(prefsStore.state.theme).toBe("light");
+    expect(prefsStore.state.accent).toBe("rose");
+    expect(prefsStore.state.density).toBe("comfortable");
+    expect(JSON.parse(storage.get("archductor.prefs.v1")!)).not.toMatchObject({
+      theme: expect.anything(),
+      accent: expect.anything(),
+      density: expect.anything(),
+    });
+  });
+
   it("tracks the sidebar-collapsed layout flag", async () => {
     const { prefsStore } = await import("./prefs");
     expect(prefsStore.state.sidebarCollapsed).toBe(false);

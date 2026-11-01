@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-09-30.
+Current as of 2026-10-31.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -46,6 +46,28 @@ one full workbench on screen, so edit mode in a split is rough. Not yet:
 per-tab layout or scroll, drafts surviving a restart, and a CLI way to open a
 tab or split. The CLI has no channel into the desktop view today, so that
 needs a new daemon broadcast first.
+
+## Complete appearance customization (2026-10-31)
+
+Settings now has a dedicated Appearance section backed by app-shared
+`customization.view` settings rather than renderer-local theme state. It edits
+system/dark/light mode, density, all 16 supported semantic colors, UI/code/
+terminal font families and sizes, and terminal scrollback. Saved values apply
+immediately, survive restart, and are visible and editable through `archductor
+archcar settings`, `settings-source`, and `save-settings`.
+
+One typed renderer projection owns CSS classes, CSS variables, and xterm
+options. The command palette's theme/accent actions use the same durable save
+path. Old localStorage theme/accent/density values are read only as startup
+fallback and removed on the next preferences write. Core validates color keys,
+hex syntax, non-empty font values, 9-32 pixel font sizes, and 100-100,000 line
+terminal scrollback. The editor fails closed if its editable source cannot be
+loaded, reset controls remove overrides cleanly, and daemon saves preserve
+comments and unknown future TOML keys.
+
+Remaining visual-system debt: many historical component rules still contain
+literal colors. The supported customization contract now covers the semantic
+tokens, but converting every historical literal is separate cleanup.
 
 ## Turn-finished sound (2026-10-19)
 

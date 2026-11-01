@@ -3,7 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { send } from "@/bridge/client";
-import { terminalStore } from "@/store";
+import { appearanceStore, terminalStore } from "@/store";
 import { createTerminalInputQueue } from "@/lib/terminalInput";
 
 // A single terminal tab — port of terminal.rs. The shell session (archcar
@@ -59,18 +59,9 @@ export default function TerminalPanel(props: { workspace: string; tabId: string 
 
   onMount(() => {
     term = new Terminal({
-      // xterm measures character cells against this exact string. A `var(...)`
-      // reference resolves for the DOM renderer but not in canvas measurement,
-      // and a mismatch there puts every glyph fractionally off its cell — so
-      // resolve the token to a concrete font stack up front.
-      fontFamily:
-        getComputedStyle(document.documentElement).getPropertyValue("--ui-font-mono").trim() ||
-        "ui-monospace, monospace",
-      fontSize: 13,
-      theme: { background: "#151515", foreground: "#d4d4d4" },
+      ...appearanceStore.terminalOptions(),
       cursorBlink: true,
       convertEol: true,
-      scrollback: 5000,
     });
     fit = new FitAddon();
     term.loadAddon(fit);

@@ -6,6 +6,7 @@ import { repositoriesStore } from "./repositories";
 import { threadsStore } from "./threads";
 import { layoutPresetsStore } from "./layoutPresets";
 import { clientsStore, restoreTabsForActiveDaemon } from "./clients";
+import { appearanceStore } from "./appearance";
 
 export { nav } from "./nav";
 export { chatStore } from "./chat";
@@ -29,6 +30,8 @@ export { updateStore } from "./update";
 export type { Toast } from "./toasts";
 export { prefsStore } from "./prefs";
 export type { Prefs } from "./prefs";
+export { appearanceStore } from "./appearance";
+export type { Appearance } from "./appearance";
 export { layoutStore } from "./layout";
 export { layoutPresetsStore } from "./layoutPresets";
 export { updateMetrics, metricsEnabled } from "./metrics";
@@ -89,6 +92,7 @@ export function startStore(): Promise<void> {
       focusWired = true;
     }
     await connectEvents((event) => applyEvent(event));
+    const appearanceReady = appearanceStore.refresh().catch(() => appearanceStore.apply());
     // The tab realm is the active daemon's, so its identity must be known
     // before the restore — quietly, since the switcher will refresh again.
     await clientsStore.ensureLoaded();
@@ -105,6 +109,7 @@ export function startStore(): Promise<void> {
       if (inventoryOk && workspacesStore.loaded()) restoreTabsForActiveDaemon();
       else nav.deferTabRestore();
     }
+    await appearanceReady;
     const selected = nav.selectedWorkspace();
     const repository = selected ? workspacesStore.row(selected)?.repository : undefined;
     await layoutPresetsStore.load(repository).catch(() => {});

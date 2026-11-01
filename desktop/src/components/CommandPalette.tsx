@@ -8,8 +8,8 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
-import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore, actions } from "@/store";
-import type { Accent } from "@/store/prefs";
+import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore, actions, appearanceStore, toastsStore } from "@/store";
+import { updateGlobalAppearance } from "@/store/appearance";
 import { workspacePanels } from "@/lib/panelRegistry";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
@@ -52,6 +52,12 @@ export default function CommandPalette() {
   let inputRef: HTMLInputElement | undefined;
   let panelRef: HTMLDivElement | undefined;
   let previousFocus: HTMLElement | undefined;
+
+  function updateAppearance(updates: Parameters<typeof updateGlobalAppearance>[0]) {
+    void updateGlobalAppearance(updates).catch((error) => {
+      toastsStore.error(`Could not update appearance: ${(error as Error).message}`);
+    });
+  }
 
   function close() {
     const restore = previousFocus;
@@ -186,20 +192,33 @@ export default function CommandPalette() {
     // Appearance + help — make the palette a real control surface.
     list.push({
       id: "appearance:theme",
-      label: `Switch to ${prefsStore.state.theme === "dark" ? "light" : "dark"} theme`,
+      label: `Switch to ${appearanceStore.resolvedTheme() === "dark" ? "light" : "dark"} theme`,
       hint: "Appearance",
       group: "Appearance",
       shortcut: "toggle-theme",
-      run: () => prefsStore.setTheme(prefsStore.state.theme === "dark" ? "light" : "dark"),
+      run: () => updateAppearance([{
+        section: "customization.view",
+        key: "theme",
+        value: appearanceStore.resolvedTheme() === "dark" ? "light" : "dark",
+      }]),
     });
-    const ACCENTS: Accent[] = ["amber", "blue", "green", "rose"];
-    const nextAccent = ACCENTS[(ACCENTS.indexOf(prefsStore.state.accent) + 1) % ACCENTS.length];
+    const accents = [
+      ["amber", "#c39b50"],
+      ["blue", "#5b8def"],
+      ["green", "#3fb27f"],
+      ["rose", "#e0567b"],
+    ] as const;
+    const currentAccent = accents.findIndex(([, color]) => color === appearanceStore.state.colors.accent.toLowerCase());
+    const [nextAccent, nextAccentColor] = accents[(currentAccent + 1) % accents.length];
     list.push({
       id: "appearance:accent",
       label: `Cycle accent → ${nextAccent}`,
       hint: "Appearance",
       group: "Appearance",
-      run: () => prefsStore.setAccent(nextAccent),
+      run: () => updateAppearance([
+        { section: "customization.view", key: "accent_color", value: nextAccentColor },
+        { section: "customization.view.colors", key: "accent", value: nextAccentColor },
+      ]),
     });
     list.push({
       id: "help:shortcuts",

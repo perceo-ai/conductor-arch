@@ -64,9 +64,6 @@ function persistedPrefs(prefs: Prefs) {
   return {
     defaultProvider: prefs.defaultProvider,
     defaultModel: prefs.defaultModel,
-    theme: prefs.theme,
-    accent: prefs.accent,
-    density: prefs.density,
     sidebarCollapsed: prefs.sidebarCollapsed,
     activePresetId: prefs.activePresetId,
     keybindings: prefs.keybindings,

@@ -255,7 +255,12 @@ pub struct ViewSettings {
     pub density: Option<String>,
     pub sidebar_layout: Option<String>,
     pub diff_preference: Option<String>,
+    pub ui_font: Option<String>,
+    pub ui_font_size: Option<u16>,
+    pub code_font: Option<String>,
+    pub code_font_size: Option<u16>,
     pub terminal_font: Option<String>,
+    pub terminal_font_size: Option<u16>,
     pub terminal_scrollback: Option<u32>,
     pub transcript_display: Option<String>,
     pub dashboard_columns: Vec<String>,
@@ -332,15 +337,13 @@ pub fn save_app_shared_settings_with_collection_intent(
 
 /// Imports app-shared settings TOML and preserves collection presence semantics.
 pub fn save_app_shared_settings_from_toml(path: &Path, contents: &str) -> Result<()> {
-    let raw = validated_raw_repository_settings_from_toml(contents)?;
-    let settings = raw.clone().into_settings();
+    validated_raw_repository_settings_from_toml(contents)?;
     let parent = path
         .parent()
         .with_context(|| format!("resolve parent for {}", path.display()))?;
     fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     ensure_real_directory(parent)?;
     reject_symlink_file(path)?;
-    let contents = repository_settings_to_toml_preserving_presence(&settings, &raw)?;
     atomic_write_no_symlink(path, contents.as_bytes())
 }
 
@@ -372,7 +375,34 @@ pub fn load_effective_repository_settings(
 fn default_app_shared_settings() -> RepositorySettings {
     RepositorySettings {
         prompts: Some(default_prompt_settings()),
+        customization: CustomizationSettings {
+            view: default_view_settings(),
+            ..CustomizationSettings::default()
+        },
         ..RepositorySettings::default()
+    }
+}
+
+fn default_view_settings() -> ViewSettings {
+    ViewSettings {
+        theme: Some("system".to_owned()),
+        accent_color: Some("#5b9dff".to_owned()),
+        colors: default_view_colors(),
+        density: Some("compact".to_owned()),
+        diff_preference: Some("unified".to_owned()),
+        ui_font: Some("Mona Sans, Inter, SF Pro Text, Segoe UI, sans-serif".to_owned()),
+        ui_font_size: Some(13),
+        code_font: Some(
+            "Commit Mono, JetBrains Mono, SF Mono, Cascadia Mono, Menlo, monospace".to_owned(),
+        ),
+        code_font_size: Some(13),
+        terminal_font: Some(
+            "Commit Mono, JetBrains Mono, SF Mono, Cascadia Mono, Menlo, monospace".to_owned(),
+        ),
+        terminal_font_size: Some(13),
+        terminal_scrollback: Some(5000),
+        transcript_display: Some("structured".to_owned()),
+        ..ViewSettings::default()
     }
 }
 
@@ -956,15 +986,7 @@ pub fn default_repository_settings_toml() -> Result<String> {
                 default_visible_tab: Some("changes".to_owned()),
                 ..WorkspaceDefaultSettings::default()
             },
-            view: ViewSettings {
-                theme: Some("system".to_owned()),
-                accent_color: Some("blue".to_owned()),
-                colors: default_view_colors(),
-                density: Some("compact".to_owned()),
-                diff_preference: Some("unified".to_owned()),
-                transcript_display: Some("structured".to_owned()),
-                ..ViewSettings::default()
-            },
+            view: default_view_settings(),
             ..CustomizationSettings::default()
         },
         ..RepositorySettings::default()
@@ -1219,6 +1241,45 @@ pub fn validate_repository_settings(settings: &RepositorySettings) -> Result<()>
         anyhow::ensure!(
             is_valid_hex_color(value),
             "customization.view.colors.{key} must be a hex color like #5b9dff"
+        );
+    }
+    for (key, value) in [
+        ("ui_font", settings.customization.view.ui_font.as_deref()),
+        (
+            "code_font",
+            settings.customization.view.code_font.as_deref(),
+        ),
+        (
+            "terminal_font",
+            settings.customization.view.terminal_font.as_deref(),
+        ),
+    ] {
+        if let Some(value) = value {
+            anyhow::ensure!(
+                !value.trim().is_empty() && !value.contains('\0'),
+                "customization.view.{key} must not be empty or contain NUL bytes"
+            );
+        }
+    }
+    for (key, value) in [
+        ("ui_font_size", settings.customization.view.ui_font_size),
+        ("code_font_size", settings.customization.view.code_font_size),
+        (
+            "terminal_font_size",
+            settings.customization.view.terminal_font_size,
+        ),
+    ] {
+        if let Some(value) = value {
+            anyhow::ensure!(
+                (9..=32).contains(&value),
+                "customization.view.{key} must be between 9 and 32"
+            );
+        }
+    }
+    if let Some(value) = settings.customization.view.terminal_scrollback {
+        anyhow::ensure!(
+            (100..=100_000).contains(&value),
+            "customization.view.terminal_scrollback must be between 100 and 100000"
         );
     }
     if let Some(preset) = settings.customization.view.default_layout_preset.as_deref() {
@@ -1510,7 +1571,17 @@ struct RawViewSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     diff_preference: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ui_font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ui_font_size: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_font_size: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     terminal_font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_font_size: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     terminal_scrollback: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2596,7 +2667,12 @@ impl RawViewSettings {
             density: local.density.or(self.density),
             sidebar_layout: local.sidebar_layout.or(self.sidebar_layout),
             diff_preference: local.diff_preference.or(self.diff_preference),
+            ui_font: local.ui_font.or(self.ui_font),
+            ui_font_size: local.ui_font_size.or(self.ui_font_size),
+            code_font: local.code_font.or(self.code_font),
+            code_font_size: local.code_font_size.or(self.code_font_size),
             terminal_font: local.terminal_font.or(self.terminal_font),
+            terminal_font_size: local.terminal_font_size.or(self.terminal_font_size),
             terminal_scrollback: local.terminal_scrollback.or(self.terminal_scrollback),
             transcript_display: local.transcript_display.or(self.transcript_display),
             dashboard_columns: local.dashboard_columns.or(self.dashboard_columns),
@@ -2618,7 +2694,12 @@ impl RawViewSettings {
             density: self.density,
             sidebar_layout: self.sidebar_layout,
             diff_preference: self.diff_preference,
+            ui_font: self.ui_font,
+            ui_font_size: self.ui_font_size,
+            code_font: self.code_font,
+            code_font_size: self.code_font_size,
             terminal_font: self.terminal_font,
+            terminal_font_size: self.terminal_font_size,
             terminal_scrollback: self.terminal_scrollback,
             transcript_display: self.transcript_display,
             dashboard_columns: self.dashboard_columns.unwrap_or_default(),
@@ -2638,7 +2719,12 @@ impl RawViewSettings {
             density: settings.density.clone(),
             sidebar_layout: settings.sidebar_layout.clone(),
             diff_preference: settings.diff_preference.clone(),
+            ui_font: settings.ui_font.clone(),
+            ui_font_size: settings.ui_font_size,
+            code_font: settings.code_font.clone(),
+            code_font_size: settings.code_font_size,
             terminal_font: settings.terminal_font.clone(),
+            terminal_font_size: settings.terminal_font_size,
             terminal_scrollback: settings.terminal_scrollback,
             transcript_display: settings.transcript_display.clone(),
             dashboard_columns: (!settings.dashboard_columns.is_empty())
@@ -4036,6 +4122,21 @@ command_palette_presets = []
     }
 
     #[test]
+    fn app_shared_toml_save_preserves_source_comments_and_unknown_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config/settings.toml");
+        let input = r#"# Keep this operator note.
+[customization.view]
+theme = "dark"
+future_visual_setting = "keep-me"
+"#;
+
+        save_app_shared_settings_from_toml(&path, input).unwrap();
+
+        assert_eq!(fs::read_to_string(path).unwrap(), input);
+    }
+
+    #[test]
     fn repository_toml_import_preserves_explicit_empty_collection_presence() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
@@ -5241,9 +5342,14 @@ default_visible_tab = "changes"
 theme = "system"
 accent_color = "blue"
 density = "compact"
+ui_font = "Inter, sans-serif"
+ui_font_size = 14
+code_font = "JetBrains Mono, monospace"
+code_font_size = 13
 sidebar_layout = "grouped"
 diff_preference = "unified"
 terminal_font = "JetBrains Mono 12"
+terminal_font_size = 15
 terminal_scrollback = 5000
 transcript_display = "structured"
 dashboard_columns = ["repo", "workspace", "status"]
@@ -5339,6 +5445,17 @@ surface = "#102030"
             settings.customization.view.density,
             Some("comfortable".to_owned())
         );
+        assert_eq!(
+            settings.customization.view.ui_font.as_deref(),
+            Some("Inter, sans-serif")
+        );
+        assert_eq!(settings.customization.view.ui_font_size, Some(14));
+        assert_eq!(
+            settings.customization.view.code_font.as_deref(),
+            Some("JetBrains Mono, monospace")
+        );
+        assert_eq!(settings.customization.view.code_font_size, Some(13));
+        assert_eq!(settings.customization.view.terminal_font_size, Some(15));
         assert_eq!(
             settings.customization.view.colors.get("accent"),
             Some(&"#0ea5e9".to_owned())
@@ -5535,6 +5652,73 @@ totally_custom = "#ffffff"
         assert!(invalid_key
             .to_string()
             .contains("customization.view.colors.totally_custom is not a supported color key"));
+    }
+
+    #[test]
+    fn effective_app_shared_settings_supply_typography_defaults() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings =
+            load_effective_app_shared_settings(&temp.path().join("missing.toml")).unwrap();
+        let view = settings.customization.view;
+
+        assert_eq!(view.accent_color.as_deref(), Some("#5b9dff"));
+        assert_eq!(
+            view.ui_font.as_deref(),
+            Some("Mona Sans, Inter, SF Pro Text, Segoe UI, sans-serif")
+        );
+        assert_eq!(view.ui_font_size, Some(13));
+        assert_eq!(
+            view.code_font.as_deref(),
+            Some("Commit Mono, JetBrains Mono, SF Mono, Cascadia Mono, Menlo, monospace")
+        );
+        assert_eq!(view.code_font_size, Some(13));
+        assert_eq!(
+            view.terminal_font.as_deref(),
+            Some("Commit Mono, JetBrains Mono, SF Mono, Cascadia Mono, Menlo, monospace")
+        );
+        assert_eq!(view.terminal_font_size, Some(13));
+        assert_eq!(view.terminal_scrollback, Some(5000));
+    }
+
+    #[test]
+    fn validates_view_typography_and_terminal_ranges() {
+        for (key, value, expected) in [
+            (
+                "ui_font",
+                "\"\"",
+                "customization.view.ui_font must not be empty or contain NUL bytes",
+            ),
+            (
+                "ui_font_size",
+                "8",
+                "customization.view.ui_font_size must be between 9 and 32",
+            ),
+            (
+                "code_font_size",
+                "33",
+                "customization.view.code_font_size must be between 9 and 32",
+            ),
+            (
+                "terminal_font_size",
+                "0",
+                "customization.view.terminal_font_size must be between 9 and 32",
+            ),
+            (
+                "terminal_scrollback",
+                "99",
+                "customization.view.terminal_scrollback must be between 100 and 100000",
+            ),
+        ] {
+            let toml = format!("[customization.view]\n{key} = {value}\n");
+            let error = repository_settings_from_toml(&toml).unwrap_err();
+            assert!(error.to_string().contains(expected), "{key}: {error:#}");
+        }
+
+        let nul_font = "[customization.view]\ncode_font = \"bad\\u0000font\"\n";
+        let error = repository_settings_from_toml(nul_font).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("customization.view.code_font must not be empty or contain NUL bytes"));
     }
 
     #[test]
