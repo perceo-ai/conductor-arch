@@ -261,7 +261,7 @@ describe("nav workspace tabs", () => {
       // Anything that lands under the sentinel afterwards is a bug of its
       // own, not something later assignments may quietly re-home.
       composerDrafts.save(draftKey(UNASSIGNED_REALM, 7), [{ kind: "text", text: "stray" }]);
-      const kept = [{ kind: "text", text: "mine" }];
+      const kept = [{ kind: "text" as const, text: "mine" }];
       composerDrafts.save(draftKey("local", 7), kept);
 
       nav.setTabRealm("local"); // repeated correction, same realm
