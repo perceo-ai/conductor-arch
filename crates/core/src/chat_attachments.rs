@@ -1,11 +1,16 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use uuid::Uuid;
 
+pub const MAX_CHAT_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_STEM_BYTES: usize = 120;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentKind {
+    File,
     Image,
     Text,
 }
@@ -13,13 +18,15 @@ pub enum AttachmentKind {
 impl AttachmentKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::File => "file",
             Self::Image => "image",
             Self::Text => "text",
         }
     }
 
-    fn extension(self) -> &'static str {
+    fn fallback_extension(self) -> &'static str {
         match self {
+            Self::File => "bin",
             Self::Image => "png",
             Self::Text => "md",
         }
@@ -27,6 +34,7 @@ impl AttachmentKind {
 
     fn from_str(value: &str) -> Option<Self> {
         match value {
+            "file" => Some(Self::File),
             "image" => Some(Self::Image),
             "text" => Some(Self::Text),
             _ => None,
@@ -83,20 +91,34 @@ pub fn save_chat_attachment(
     label: &str,
     bytes: &[u8],
 ) -> Result<SavedChatAttachment> {
+    if bytes.len() > MAX_CHAT_ATTACHMENT_BYTES {
+        return Err(anyhow!("chat attachment is larger than 25 MiB"));
+    }
     let chat_id = sanitize_chat_attachment_id(chat_id)?;
-    let safe_label = sanitize_attachment_label(label);
+    let extension = attachment_extension(kind, label);
+    let safe_label = sanitize_attachment_stem(label);
     let suffix = short_unique_suffix();
-    let filename = format!("{safe_label}-{suffix}.{}", kind.extension());
+    let filename = format!("{safe_label}-{suffix}.{extension}");
     let relative_path = format!(".context/archductor/{chat_id}/{filename}");
-    let target_dir = workspace_root
-        .join(".context")
-        .join("archductor")
-        .join(&chat_id);
+    let context_dir = workspace_root.join(".context");
+    let archductor_dir = context_dir.join("archductor");
+    let target_dir = archductor_dir.join(&chat_id);
     let target_path = target_dir.join(&filename);
 
+    reject_symlink(&context_dir)?;
+    reject_symlink(&archductor_dir)?;
+    reject_symlink(&target_dir)?;
     fs::create_dir_all(&target_dir)
         .map_err(|err| anyhow!("create chat attachment directory: {err}"))?;
-    fs::write(&target_path, bytes).map_err(|err| {
+    reject_symlink(&context_dir)?;
+    reject_symlink(&archductor_dir)?;
+    reject_symlink(&target_dir)?;
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target_path)
+        .map_err(|err| anyhow!("create chat attachment {}: {err}", target_path.display()))?;
+    target.write_all(bytes).map_err(|err| {
         anyhow!(
             "write chat attachment {}: {err}",
             target_path.to_string_lossy()
@@ -149,10 +171,15 @@ fn sanitize_chat_attachment_id(chat_id: &str) -> Result<String> {
     Ok(trimmed.to_ascii_lowercase())
 }
 
-fn sanitize_attachment_label(label: &str) -> String {
+fn sanitize_attachment_stem(label: &str) -> String {
+    let file_name = label.rsplit(['/', '\\']).next().unwrap_or(label).trim();
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name);
     let mut out = String::new();
     let mut last_dash = false;
-    for byte in label.bytes() {
+    for byte in stem.bytes() {
         let next = if byte.is_ascii_alphanumeric() {
             last_dash = false;
             Some((byte as char).to_ascii_lowercase())
@@ -164,6 +191,9 @@ fn sanitize_attachment_label(label: &str) -> String {
         };
         if let Some(next) = next {
             out.push(next);
+            if out.len() == MAX_ATTACHMENT_STEM_BYTES {
+                break;
+            }
         }
     }
     let out = out.trim_matches('-');
@@ -172,6 +202,40 @@ fn sanitize_attachment_label(label: &str) -> String {
     } else {
         out.to_owned()
     }
+}
+
+fn reject_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow!(
+            "chat attachment path contains a symlink: {}",
+            path.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(anyhow!(
+            "inspect chat attachment path {}: {err}",
+            path.display()
+        )),
+    }
+}
+
+fn attachment_extension(kind: AttachmentKind, label: &str) -> String {
+    if kind == AttachmentKind::Text {
+        return kind.fallback_extension().to_owned();
+    }
+    let ext = label
+        .rsplit(['/', '\\'])
+        .next()
+        .and_then(|file_name| file_name.rsplit_once('.').map(|(_, ext)| ext))
+        .map(|ext| ext.trim().to_ascii_lowercase())
+        .filter(|ext| {
+            !ext.is_empty()
+                && ext.len() <= 16
+                && ext
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-'))
+        });
+    ext.unwrap_or_else(|| kind.fallback_extension().to_owned())
 }
 
 fn short_unique_suffix() -> String {
@@ -257,6 +321,79 @@ mod tests {
             "hello from paste"
         );
         assert!(saved.token.contains("kind=\"text\""));
+    }
+
+    #[test]
+    fn saves_binary_file_with_safe_original_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let saved = save_chat_attachment(
+            temp.path(),
+            "42",
+            AttachmentKind::File,
+            "../Screen Shot 1.PDF",
+            b"%PDF",
+        )
+        .unwrap();
+
+        assert!(saved
+            .relative_path
+            .starts_with(".context/archductor/42/screen-shot-1-"));
+        assert!(saved.relative_path.ends_with(".pdf"));
+        assert_eq!(
+            std::fs::read(temp.path().join(&saved.relative_path)).unwrap(),
+            b"%PDF"
+        );
+        assert!(saved.token.contains("kind=\"file\""));
+    }
+
+    #[test]
+    fn rejects_attachment_larger_than_transport_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let bytes = vec![0_u8; 25 * 1024 * 1024 + 1];
+
+        let err = save_chat_attachment(temp.path(), "42", AttachmentKind::File, "huge.zip", &bytes)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("25 MiB"), "{err:#}");
+    }
+
+    #[test]
+    fn bounds_generated_filename_length() {
+        let temp = tempfile::tempdir().unwrap();
+        let label = format!("{}.txt", "a".repeat(250));
+        let saved =
+            save_chat_attachment(temp.path(), "42", AttachmentKind::File, &label, b"content")
+                .unwrap();
+        let filename = saved.relative_path.rsplit('/').next().unwrap();
+
+        assert!(filename.len() <= 255, "{} bytes", filename.len());
+        assert_eq!(
+            fs::read(temp.path().join(saved.relative_path)).unwrap(),
+            b"content"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_attachment_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join(".context")).unwrap();
+        symlink(outside.path(), temp.path().join(".context/archductor")).unwrap();
+
+        let err = save_chat_attachment(
+            temp.path(),
+            "42",
+            AttachmentKind::File,
+            "secret.txt",
+            b"do not escape",
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("symlink"), "{err:#}");
+        assert!(!outside.path().join("42").exists());
     }
 
     #[test]

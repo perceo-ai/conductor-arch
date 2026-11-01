@@ -93,6 +93,52 @@ export function normalize(nodes: ComposerNode[]): ComposerNode[] {
   return out;
 }
 
+function visiblePrefix(nodes: ComposerNode[], offset: number): ComposerNode[] {
+  const out: ComposerNode[] = [];
+  let cursor = 0;
+  for (const node of nodes) {
+    const width = nodeText(node).length;
+    if (node.kind === "text") {
+      const take = Math.max(0, Math.min(width, offset - cursor));
+      if (take > 0) out.push({ kind: "text", text: node.text.slice(0, take) });
+    } else if (cursor + width <= offset) {
+      out.push(node);
+    }
+    cursor += width;
+    if (cursor >= offset) break;
+  }
+  return out;
+}
+
+function visibleSuffix(nodes: ComposerNode[], offset: number): ComposerNode[] {
+  const out: ComposerNode[] = [];
+  let cursor = 0;
+  for (const node of nodes) {
+    const width = nodeText(node).length;
+    if (node.kind === "text") {
+      const skip = Math.max(0, Math.min(width, offset - cursor));
+      if (skip < width) out.push({ kind: "text", text: node.text.slice(skip) });
+    } else if (cursor >= offset) {
+      out.push(node);
+    }
+    cursor += width;
+  }
+  return out;
+}
+
+/** Replace a range measured in visible characters without flattening chips. */
+export function replaceVisibleRange(
+  nodes: ComposerNode[],
+  range: { start: number; end: number },
+  replacement: ComposerNode[],
+): ComposerNode[] {
+  return normalize([
+    ...visiblePrefix(nodes, range.start),
+    ...replacement,
+    ...visibleSuffix(nodes, range.end),
+  ]);
+}
+
 /**
  * Marks a chip element. Defined in `fileChip` so the composer and the
  * transcript cannot disagree about it; re-exported here because this module's

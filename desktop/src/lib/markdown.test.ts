@@ -42,6 +42,20 @@ describe("renderMarkdownWithInlineFileChips", () => {
     expect(html).toContain('data-label="pasted-text-a1b2c3d4.md"');
   });
 
+  it("renders a saved attachment with any extension as a chip", () => {
+    // A pasted archive, and the `.bin` fallback, are not in the source-file
+    // extension list; the `-<8 hex>` stamp is what identifies them.
+    const html = renderMarkdownWithInlineFileChips("abc {archive-11223344.zip} abc");
+    expect(html).toContain('data-label="archive-11223344.zip"');
+    expect(renderMarkdownWithInlineFileChips("{pasted-file-aabbccdd.bin}")).toContain(
+      'data-label="pasted-file-aabbccdd.bin"',
+    );
+  });
+
+  it("leaves ordinary braced prose alone", () => {
+    expect(renderMarkdownWithInlineFileChips("set {a.b} to 1")).not.toContain('data-chip="file"');
+  });
+
   it("draws the same chip the composer draws", () => {
     // These two used to build their own markup and had drifted: the composer's
     // chip had the file's type icon and the accent treatment, this one was a

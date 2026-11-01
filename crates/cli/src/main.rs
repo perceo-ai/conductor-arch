@@ -12,6 +12,7 @@ use archductor_core::archcar::protocol::{
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
 use archductor_core::background_tasks::{BackgroundAgentSpec, StartBackgroundTask};
+use archductor_core::chat_attachments::MAX_CHAT_ATTACHMENT_BYTES;
 use archductor_core::doctor;
 use archductor_core::import::{default_conductor_app_database, import_conductor_app_database};
 use archductor_core::paths::AppPaths;
@@ -29,6 +30,7 @@ use archductor_core::workspace::{
     WorkspaceStore, WorkspaceTimelineEvent,
 };
 use archductor_core::workspace_intel::TaskUpdate;
+use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -509,6 +511,16 @@ enum ArchcarCommand {
     /// Show the plan a chat is working from.
     Plan {
         thread_id: i64,
+    },
+    /// Save a local file into a chat's attachment directory and print its
+    /// repo-relative @ path.
+    SaveAttachment {
+        thread_id: i64,
+        file: PathBuf,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, value_parser = ["file", "image"])]
+        kind: Option<String>,
     },
     /// List all workspaces with status counts.
     Workspaces,
@@ -1835,6 +1847,40 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Plan { thread_id } => {
                     match client.send(ArchcarRequest::GetChatPlan { thread_id })? {
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        response => print_archcar_response(response),
+                    }
+                }
+                ArchcarCommand::SaveAttachment {
+                    thread_id,
+                    file,
+                    label,
+                    kind,
+                } => {
+                    let size = std::fs::metadata(&file)
+                        .with_context(|| format!("inspect attachment {}", file.display()))?
+                        .len();
+                    if size > MAX_CHAT_ATTACHMENT_BYTES as u64 {
+                        anyhow::bail!("attachment {} is larger than 25 MiB", file.display());
+                    }
+                    let bytes = std::fs::read(&file)
+                        .with_context(|| format!("read attachment {}", file.display()))?;
+                    let label = label.unwrap_or_else(|| {
+                        file.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("attachment.bin")
+                            .to_owned()
+                    });
+                    let kind = kind.unwrap_or_else(|| attachment_kind_from_label(&label));
+                    match client.send(ArchcarRequest::SaveChatAttachment {
+                        thread_id,
+                        label,
+                        kind,
+                        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+                    })? {
+                        ArchcarResponse::ChatPasteSaved { relative_path, .. } => {
+                            println!("@{relative_path}");
+                        }
                         ArchcarResponse::Error { message } => anyhow::bail!(message),
                         response => print_archcar_response(response),
                     }
@@ -4093,6 +4139,17 @@ fn local_store_command_name(command: &Command) -> Option<&'static str> {
         Command::Conflicts { .. } => Some("conflicts"),
         Command::Discard { .. } => Some("discard"),
         _ => None,
+    }
+}
+
+fn attachment_kind_from_label(label: &str) -> String {
+    let ext = label
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "gif" | "jpeg" | "jpg" | "png" | "webp" => "image".to_owned(),
+        _ => "file".to_owned(),
     }
 }
 

@@ -1,6 +1,14 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
-import { type ComposerNode, fromVisible, nodeText, normalize, toInput, toVisible } from "./composerDocument";
+import {
+  type ComposerNode,
+  fromVisible,
+  nodeText,
+  normalize,
+  replaceVisibleRange,
+  toInput,
+  toVisible,
+} from "./composerDocument";
 
 const FILE: ComposerNode = { kind: "file", path: "src/lib/markdown.ts", label: "markdown.ts" };
 const CMD: ComposerNode = { kind: "command", name: "review" };
@@ -64,5 +72,26 @@ describe("normalize", () => {
 
   it("drops empty text nodes left behind by editing", () => {
     expect(normalize([{ kind: "text", text: "" }, CMD, { kind: "text", text: "" }])).toEqual([CMD]);
+  });
+});
+
+describe("replaceVisibleRange", () => {
+  it("preserves an arbitrary file chip while replacing later visible text", () => {
+    const archive: ComposerNode = {
+      kind: "file",
+      path: ".context/archductor/42/export-a1b2c3d4.zip",
+      label: "export-a1b2c3d4.zip",
+    };
+    const nodes: ComposerNode[] = [archive, { kind: "text", text: " @next" }];
+
+    expect(
+      replaceVisibleRange(nodes, { start: 22, end: 27 }, [
+        { kind: "file", path: "src/next.rs", label: "next.rs" },
+      ]),
+    ).toEqual([
+      archive,
+      { kind: "text", text: " " },
+      { kind: "file", path: "src/next.rs", label: "next.rs" },
+    ]);
   });
 });

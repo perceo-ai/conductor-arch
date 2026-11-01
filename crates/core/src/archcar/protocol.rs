@@ -240,6 +240,16 @@ pub enum ArchcarRequest {
         thread_id: i64,
         text: String,
     },
+    /// Save pasted file/image bytes under the thread's workspace
+    /// (.context/archductor/{thread_id}/) so the composer can reference the
+    /// stored file with an @ path.
+    SaveChatAttachment {
+        thread_id: i64,
+        label: String,
+        /// `image` for pasted image blobs, `file` for other pasted files.
+        kind: String,
+        data_base64: String,
+    },
     KillSession {
         session_id: i64,
     },
@@ -1951,6 +1961,15 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::SaveChatPaste { thread_id, text } => {
             format!("save_chat_paste thread_id={thread_id} chars={}", text.chars().count())
         }
+        ArchcarRequest::SaveChatAttachment {
+            thread_id,
+            label,
+            kind,
+            data_base64,
+        } => format!(
+            "save_chat_attachment thread_id={thread_id} kind={kind} label={label} bytes_base64={}",
+            data_base64.len()
+        ),
         ArchcarRequest::KillSession { session_id } => {
             format!("kill_session session_id={session_id}")
         }

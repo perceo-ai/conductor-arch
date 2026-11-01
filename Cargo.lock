@@ -85,6 +85,7 @@ dependencies = [
  "anyhow",
  "archductor-core",
  "assert_cmd",
+ "base64",
  "clap",
  "predicates",
  "serde_json",

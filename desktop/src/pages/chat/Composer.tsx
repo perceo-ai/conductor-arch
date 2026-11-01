@@ -5,6 +5,7 @@ import {
   actions,
   prefsStore,
   newChatContextStore,
+  toastsStore,
 } from "@/store";
 import { EFFORTS, agentModelOptions, agentModelValue, firstModel, providerForModel } from "@/lib/models";
 import {
@@ -19,8 +20,8 @@ import { titleCaseWorkspace } from "@/lib/text";
 import CompactSelect from "@/components/CompactSelect";
 import RichInput, { type RichInputApi } from "@/components/RichInput";
 import {
-  fromVisible,
   normalize,
+  replaceVisibleRange,
   toInput,
   toVisible,
   type ComposerNode,
@@ -41,6 +42,7 @@ import { inlineFileMentionAt } from "@/lib/chatAttachments";
 import { loadWorkspaceFiles } from "@/lib/workspaceFiles";
 import { openFileInCenter } from "@/pages/openFileBridge";
 import { fuzzyScore } from "@/lib/fuzzy";
+import { pastedAttachmentsFromClipboard } from "@/lib/pasteAttachments";
 import { providerToKind } from "./providerKind";
 import { applyApprovalMode, supportsApprovalMode } from "./approvalMode";
 import {
@@ -263,13 +265,15 @@ export function Composer(props: {
    * re-reads as a chip: it is the thing itself from the moment it is picked.
    */
   function insertChip(range: { start: number; end: number }, chip: ComposerNode, trailing = " ") {
+    insertChips(range, [chip], trailing);
+  }
+
+  function insertChips(range: { start: number; end: number }, chips: ComposerNode[], trailing = " ") {
     const value = text();
-    const before = value.slice(0, range.start);
-    const after = value.slice(range.end);
-    const head = fromVisible(before);
-    const tail = fromVisible(after.startsWith(" ") ? after.slice(1) : after);
-    const next = normalize([...head, chip, { kind: "text", text: trailing }, ...tail]);
-    setEditorNodes(next, toVisible([...head, chip]).length + trailing.length);
+    const inserted = chips.flatMap((chip) => [chip, { kind: "text" as const, text: trailing }]);
+    const end = range.end + (value.slice(range.end).startsWith(" ") ? 1 : 0);
+    const next = replaceVisibleRange(nodes(), { start: range.start, end }, inserted);
+    setEditorNodes(next, range.start + toVisible(inserted).length);
   }
 
   function insertFileAttachment(path: string, range = fileMention()) {
@@ -320,6 +324,50 @@ export function Composer(props: {
   // dumping thousands of characters into the input. `insert` is RichInput's
   // plain-text insertion, used for everything that is not a big paste.
   async function onPaste(e: ClipboardEvent, insert: (value: string) => void) {
+    let files;
+    let failed: string[];
+    try {
+      const clipboard = await pastedAttachmentsFromClipboard(e.clipboardData);
+      files = clipboard.attachments;
+      failed = clipboard.failed;
+    } catch (err) {
+      toastsStore.error(`Could not paste attachment: ${sendErrorText(err)}`);
+      return;
+    }
+    if (files.length > 0 || failed.length > 0) {
+      // The composer stays mounted across chat switches, so a save that lands
+      // after a switch must not file the attachment under the new chat.
+      const threadId = props.threadId;
+      const caret = input?.caret() ?? text().length;
+      const chips: ComposerNode[] = [];
+      for (const file of files) {
+        try {
+          const res = await send({
+            type: "save_chat_attachment",
+            thread_id: threadId,
+            label: file.label,
+            kind: file.kind,
+            data_base64: file.dataBase64,
+          });
+          if (res.type !== "chat_paste_saved") {
+            failed.push(file.label);
+            continue;
+          }
+          chips.push({
+            kind: "file",
+            path: res.relative_path,
+            label: fileNameFromMention(res.relative_path),
+          });
+        } catch {
+          failed.push(file.label);
+        }
+      }
+      if (props.threadId !== threadId) return;
+      if (chips.length > 0) insertChips({ start: caret, end: caret }, chips);
+      if (failed.length > 0) toastsStore.error(`Could not paste ${failed.join(", ")}.`);
+      return;
+    }
+
     const pasted = e.clipboardData?.getData("text") ?? "";
     if (pasted.length <= PASTE_TO_FILE_CHARS) {
       insert(pasted);
@@ -332,7 +380,7 @@ export function Composer(props: {
         insertChip({ start: caret, end: caret }, {
           kind: "file",
           path: res.relative_path,
-          label: res.label,
+          label: fileNameFromMention(res.relative_path),
         });
       } else {
         insert(pasted);
@@ -758,4 +806,3 @@ export function Composer(props: {
     </div>
   );
 }
-

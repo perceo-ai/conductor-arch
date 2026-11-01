@@ -105,6 +105,8 @@ describe("isChatAttachmentFilename", () => {
     expect(isChatAttachmentFilename("pasted-text-a1b2c3d4.md")).toBe(true);
     expect(isChatAttachmentFilename("create-pr-prompt-0f9e8d7c.md")).toBe(true);
     expect(isChatAttachmentFilename("screenshot-00112233.png")).toBe(true);
+    expect(isChatAttachmentFilename("archive-11223344.zip")).toBe(true);
+    expect(isChatAttachmentFilename("photo-aabbccdd.jpg")).toBe(true);
   });
 
   it("does not mistake an ordinary source file for one", () => {
