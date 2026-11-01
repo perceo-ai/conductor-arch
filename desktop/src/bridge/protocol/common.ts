@@ -9,6 +9,18 @@
 // keys are kept for editor completion.
 export type SessionKind = "shell" | "codex" | "claude" | (string & {});
 
+export type SessionHarnessOptions = {
+  plan_mode?: boolean;
+  fast_mode?: boolean;
+  model?: string | null;
+  approval_mode?: string | null;
+  reasoning_mode?: string | null;
+  effort_mode?: string | null;
+  codex_personality?: string | null;
+  codex_goals?: string | null;
+  codex_skills?: string | null;
+};
+
 /** A GitHub Actions run for a workspace's branch. */
 export type WorkflowRun = {
   name: string;
