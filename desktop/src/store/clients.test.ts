@@ -201,6 +201,40 @@ describe("clientsStore failed switches", () => {
   });
 });
 
+describe("clientsStore switches replace the tab realm session", () => {
+  /**
+   * A switch must replace nav's tab realm session, even when it is the first
+   * realm assignment of the run (startup failed before learning the realm).
+   * Views keyed on the session — the file editor — remount on it; an in-place
+   * correction would keep the old daemon's unsaved text in front of the new
+   * daemon's file.
+   */
+  it("activate from a never-assigned realm replaces the session", async () => {
+    const { clientsStore, nav, refreshInventory } = await import("./index");
+    await refreshInventory();
+    const before = nav.tabRealmSession();
+    expect(before.realm).toBe("local");
+
+    expect(await clientsStore.activate("devbox")).toBe(true);
+
+    expect(nav.tabRealm()).toBe("client:devbox");
+    expect(nav.tabRealmSession()).not.toBe(before);
+    expect(before.realm).toBe("local");
+  });
+
+  it("a failed switch leaves the next startup correction in place", async () => {
+    const { clientsStore, nav } = await import("./index");
+    const before = nav.tabRealmSession();
+    api.clientsActivate.mockResolvedValueOnce({ ok: false, error: "devbox unreachable" });
+
+    expect(await clientsStore.activate("devbox")).toBe(false);
+    nav.setTabRealm("client:laptop");
+
+    expect(nav.tabRealmSession()).toBe(before);
+    expect(before.realm).toBe("client:laptop");
+  });
+});
+
 describe("clientsStore.selectedDaemon", () => {
   /**
    * Everything that needs to *address* the selected daemon reads this, and

@@ -110,4 +110,29 @@ describe("FileEditor draft stash", () => {
     expect(editorDraftStash.take("local", "ws", "src/f.ts")).toBeNull();
     expect(editorDraftStash.take("client:devbox", "ws", "src/f.ts")).toBe("unsaved edit\n");
   });
+
+  it("still remounts on a daemon switch that is the first realm assignment (startup never learned the realm)", async () => {
+    const { render, FileView, nav, editorDraftStash } = await launch();
+    // Startup failed before learning the daemon; a focus refresh still loaded
+    // workspaces, and the user is editing under the "local" placeholder.
+    expect(nav.tabRealm()).toBe("local");
+    const { host, area } = await openEditorAndEdit(render, FileView);
+
+    // Then they switch daemons (what clientsStore.activate/add/remove do), and
+    // the new daemon restores a workspace with the same name.
+    nav.deferTabRestore({ daemonSwitch: true });
+    nav.restoreWorkspaceTabs("client:devbox", () => true);
+
+    const fresh = await vi.waitFor(() => {
+      const el = host.querySelector<HTMLTextAreaElement>("textarea.ws-file-editor-area");
+      expect(el).toBeTruthy();
+      expect(el).not.toBe(area);
+      expect(el!.value).toBe("saved text\n");
+      return el!;
+    });
+    expect(fresh.isConnected).toBe(true);
+    // The old daemon's text stayed with the old daemon's editor.
+    expect(editorDraftStash.take("local", "ws", "src/f.ts")).toBe("unsaved edit\n");
+    expect(editorDraftStash.take("client:devbox", "ws", "src/f.ts")).toBeNull();
+  });
 });

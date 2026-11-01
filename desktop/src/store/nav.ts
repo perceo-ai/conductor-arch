@@ -53,11 +53,18 @@ export interface TabRealmSession {
 const [tabRealmSession, setTabRealmSession] = createSignal<TabRealmSession>({ realm: "local" });
 // False until a restore or startup first assigns the active daemon's realm.
 let realmKnown = false;
+// True while an explicit daemon switch (clientsStore) is in flight. A switch is
+// declared, never inferred: it can be the run's first realm assignment too
+// (startup failed before learning the realm), and treating that as a
+// correction would keep the old daemon's editor in front of the new one.
+let daemonSwitchPending = false;
 
 function assignTabRealm(realm: string) {
-  if (realmKnown && realm !== untrack(tabRealm)) setTabRealmSession({ realm });
+  const isSwitch = daemonSwitchPending || realmKnown;
+  if (isSwitch && realm !== untrack(tabRealm)) setTabRealmSession({ realm });
   else untrack(tabRealmSession).realm = realm;
   realmKnown = true;
+  daemonSwitchPending = false;
   setTabRealmRaw(realm);
 }
 // True from "a restore is owed" (boot before the inventory arrived, or a
@@ -145,8 +152,13 @@ export const nav = {
   /** Storage realm of the tabs currently on screen (drafts key off it too). */
   tabRealm,
   tabRealmSession,
-  /** Pause tab persistence until the owed restoreWorkspaceTabs call. */
-  deferTabRestore() {
+  /**
+   * Pause tab persistence until the owed restoreWorkspaceTabs call.
+   * `daemonSwitch` declares that the restore will land on a different daemon,
+   * so it replaces the tab realm session even if no realm was assigned yet.
+   */
+  deferTabRestore(opts?: { daemonSwitch?: boolean }) {
+    if (opts?.daemonSwitch) daemonSwitchPending = true;
     setAwaitingTabRestore(true);
   },
   /**
@@ -160,6 +172,9 @@ export const nav = {
   },
   /** Cancel an owed restore after a failed switch, without touching current tabs. */
   cancelTabRestore() {
+    // Only called by the attempt that introduced the pause, so no earlier
+    // switch is still pending either: still on the same daemon.
+    daemonSwitchPending = false;
     setAwaitingTabRestore(false);
   },
 

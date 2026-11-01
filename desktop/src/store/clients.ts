@@ -205,7 +205,7 @@ export const clientsStore = {
     // the daemon being left — pause persistence so the inventory pruning in
     // between cannot be saved over the old realm's entry.
     const restoreAlreadyOwed = nav.awaitingTabRestore();
-    nav.deferTabRestore();
+    nav.deferTabRestore({ daemonSwitch: true });
     const ok = await run("client switched", () => bridge.activate(id), resync);
     // A failed switch never reaches resync's restore; lift the pause so the
     // tabs still on screen keep saving — but only if this attempt introduced
@@ -220,7 +220,7 @@ export const clientsStore = {
     logAction("add client", { address: opts.address });
     rememberCurrentWorkspace(state.activeId);
     const restoreAlreadyOwed = nav.awaitingTabRestore();
-    nav.deferTabRestore();
+    nav.deferTabRestore({ daemonSwitch: true });
     const ok = await run("client added", () => bridge.add(opts), resync);
     if (!ok && !restoreAlreadyOwed) nav.cancelTabRestore();
     return ok;
@@ -230,7 +230,7 @@ export const clientsStore = {
     const wasActive = state.activeId === id;
     logAction("remove client", { id });
     const restoreAlreadyOwed = nav.awaitingTabRestore();
-    if (wasActive) nav.deferTabRestore();
+    if (wasActive) nav.deferTabRestore({ daemonSwitch: true });
     const ok = await run("client removed", () => bridge.remove(id), wasActive ? resync : undefined);
     if (!ok && wasActive && !restoreAlreadyOwed) nav.cancelTabRestore();
     return ok;
