@@ -22,4 +22,19 @@ export const composerDrafts = {
     if (nodes.length === 0) drafts.delete(key);
     else drafts.set(key, nodes);
   },
+  /**
+   * Startup correcting the provisional realm renames the realm, not the
+   * daemon: every draft parked under it — not just the mounted composer's —
+   * belongs to the corrected key. No real realm is a prefix of another
+   * ("local", "client:<id>", "env:<address>"), so the prefix match is exact.
+   */
+  retargetRealm(from: string, to: string): void {
+    if (from === to) return;
+    const prefix = `${from}:`;
+    for (const [key, nodes] of [...drafts]) {
+      if (!key.startsWith(prefix)) continue;
+      drafts.delete(key);
+      drafts.set(`${to}:${key.slice(prefix.length)}`, nodes);
+    }
+  },
 };
