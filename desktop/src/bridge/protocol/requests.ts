@@ -6,6 +6,7 @@ import type {
   ArchcarInputDelivery,
   ArchcarInputKind,
   SessionKind,
+  SessionHarnessOptions,
   LayoutPresetRecord,
   SyncSelection,
   WorkspaceGitAction,
@@ -14,8 +15,14 @@ import type { ProviderInteractionResolution } from "./events";
 import type { ContextKind, ContextSource, SummaryRefreshScopeType, SummaryScope, TaskUpdate } from "./tasks";
 
 export type ArchcarRequest =
-  | { type: "ensure_chat_thread_session"; workspace: string; thread_id: number; kind: SessionKind }
-  | { type: "spawn_session"; workspace: string; kind: SessionKind }
+  | {
+      type: "ensure_chat_thread_session";
+      workspace: string;
+      thread_id: number;
+      kind: SessionKind;
+      harness?: SessionHarnessOptions;
+    }
+  | { type: "spawn_session"; workspace: string; kind: SessionKind; harness?: SessionHarnessOptions }
   | {
       type: "send_input";
       session_id: number;
@@ -47,6 +54,13 @@ export type ArchcarRequest =
   | { type: "remove_queued_chat_input"; queue_id: number }
   | { type: "move_queued_chat_input"; queue_id: number; up: boolean }
   | { type: "save_chat_paste"; thread_id: number; text: string }
+  | {
+      type: "save_chat_attachment";
+      thread_id: number;
+      label: string;
+      kind: "file" | "image";
+      data_base64: string;
+    }
   | { type: "resolve_provider_interaction"; interaction_id: string; resolution: ProviderInteractionResolution }
   | { type: "list_provider_interactions"; thread_id?: number; pending_only: boolean }
   | { type: "set_chat_plan_mode"; thread_id: number; plan_mode: boolean }

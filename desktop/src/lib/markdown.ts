@@ -65,8 +65,14 @@ export function renderMarkdownDocument(md: string): string {
   }
 }
 
+/**
+ * Source files are matched by a known-extension list, because `{a.b}` in prose
+ * must stay prose. Saved chat attachments carry their own `-<8 hex>` stamp,
+ * which is specific enough to accept with any extension — a pasted `.zip` or a
+ * `.bin` fallback has to render as a chip too.
+ */
 const INLINE_FILE_MARKER =
-  /\{([A-Za-z0-9_.@+ -]+\.(?:c|cc|cpp|css|gif|go|h|hpp|html|jpeg|jpg|js|jsx|json|md|pdf|png|py|rs|scss|sh|sql|toml|ts|tsx|txt|webp|ya?ml))\}/g;
+  /\{((?:[A-Za-z0-9_.@+ -]+\.(?:c|cc|cpp|css|gif|go|h|hpp|html|jpeg|jpg|js|jsx|json|md|pdf|png|py|rs|scss|sh|sql|toml|ts|tsx|txt|webp|ya?ml))|(?:[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}\.[a-z0-9+-]{1,16}))\}/g;
 
 /**
  * Render a sent message, turning `{file.md}` markers back into the same chips

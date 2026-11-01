@@ -504,7 +504,11 @@ impl SessionLaunch {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SessionHarnessOptions {
+    // Clients may omit the bools (the desktop prompt tab once sent only
+    // `model`); `Option` fields already decode as `None` when missing.
+    #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
     pub fast_mode: bool,
     pub model: Option<String>,
     pub approval_mode: Option<String>,
@@ -8033,12 +8037,13 @@ mutation($threadId: ID!) {{
         self.save_thread_text_attachment(thread_id, "pasted text", text)
     }
 
-    /// Write a text attachment into a chat thread's attachment directory.
-    fn save_thread_text_attachment(
+    /// Write a pasted file or image into a chat thread's attachment directory.
+    pub fn save_thread_file_attachment(
         &self,
         thread_id: i64,
         label: &str,
-        text: &str,
+        kind: crate::chat_attachments::AttachmentKind,
+        bytes: &[u8],
     ) -> Result<crate::chat_attachments::SavedChatAttachment> {
         let root: String = self.conn.query_row(
             "SELECT w.path
@@ -8051,8 +8056,23 @@ mutation($threadId: ID!) {{
         crate::chat_attachments::save_chat_attachment(
             Path::new(&root),
             &thread_id.to_string(),
-            crate::chat_attachments::AttachmentKind::Text,
+            kind,
             label,
+            bytes,
+        )
+    }
+
+    /// Write a text attachment into a chat thread's attachment directory.
+    fn save_thread_text_attachment(
+        &self,
+        thread_id: i64,
+        label: &str,
+        text: &str,
+    ) -> Result<crate::chat_attachments::SavedChatAttachment> {
+        self.save_thread_file_attachment(
+            thread_id,
+            label,
+            crate::chat_attachments::AttachmentKind::Text,
             text.as_bytes(),
         )
     }
@@ -14118,6 +14138,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn session_harness_options_decode_model_only_payload() {
+        // The desktop prompt tab used to send just `{ model }`; a missing
+        // bool must decode as false rather than reject the whole request.
+        let harness: SessionHarnessOptions =
+            serde_json::from_str(r#"{"model":"claude-opus-4"}"#).unwrap();
+
+        assert!(!harness.plan_mode);
+        assert!(!harness.fast_mode);
+        assert_eq!(harness.model, Some("claude-opus-4".to_string()));
+    }
+
+    #[test]
     fn create_workspace_adds_git_worktree_context_dir_and_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let repo_path = init_repo(temp.path().join("demo"));
@@ -15585,6 +15617,38 @@ branch_prefix = "team"
             .unwrap();
         let full = Path::new(&ws_path).join(&saved.relative_path);
         assert_eq!(fs::read_to_string(full).unwrap(), "a very long pasted blob");
+    }
+
+    #[test]
+    fn save_thread_file_attachment_preserves_binary_bytes_under_workspace() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "codex", "New Chat", None)
+            .unwrap();
+        let saved = store
+            .save_thread_file_attachment(
+                thread.id,
+                "mockup.png",
+                crate::chat_attachments::AttachmentKind::Image,
+                &[0x89, b'P', b'N', b'G'],
+            )
+            .unwrap();
+        assert!(saved
+            .relative_path
+            .starts_with(&format!(".context/archductor/{}/mockup-", thread.id)));
+        assert!(saved.relative_path.ends_with(".png"));
+        assert!(saved.token.contains("kind=\"image\""));
+
+        let ws_path: String = store
+            .conn
+            .query_row(
+                "SELECT path FROM workspaces WHERE name = 'berlin'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let full = Path::new(&ws_path).join(&saved.relative_path);
+        assert_eq!(fs::read(full).unwrap(), [0x89, b'P', b'N', b'G']);
     }
 
     #[test]

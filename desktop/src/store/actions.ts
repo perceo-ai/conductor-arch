@@ -16,6 +16,7 @@ import type {
 import { workspacesStore } from "./workspaces";
 import { repositoriesStore } from "./repositories";
 import { nav } from "./nav";
+import { prefsStore } from "./prefs";
 import { layoutStore } from "./layout";
 import { visiblePanelIds, type PanelId } from "@/lib/layout";
 import { panelDescriptor } from "@/lib/panelRegistry";
@@ -556,18 +557,22 @@ export const actions = {
 
     let threadId: number | undefined;
     if (prompt) {
+      const provider = prefsStore.state.defaultProvider;
+      const model = prefsStore.state.defaultModel.trim();
+      // Send the bools explicitly: older daemons reject a harness without them.
+      const harness = { plan_mode: false, fast_mode: false, model: model || undefined };
       const thread = ensureOk(
-        await send({ type: "create_chat_thread", workspace: name, provider: "codex", title: "New chat" }),
+        await send({ type: "create_chat_thread", workspace: name, provider, title: "New chat" }),
       );
       threadId = thread.type === "chat_thread_created" ? thread.thread.id : undefined;
       if (threadId != null) {
-        await send({ type: "ensure_chat_thread_session", workspace: name, thread_id: threadId, kind: "codex" });
+        await send({ type: "ensure_chat_thread_session", workspace: name, thread_id: threadId, kind: provider, harness });
         await send({
           type: "queue_chat_input",
           thread_id: threadId,
           input: prompt,
           kind: "user",
-          session_kind: "codex",
+          session_kind: provider,
         });
       }
     }
