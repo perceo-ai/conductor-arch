@@ -3,15 +3,14 @@ import { nav, workspacesStore, repositoriesStore } from "@/store";
 import { layoutStore } from "@/store/layout";
 import { layoutPresetsStore } from "@/store/layoutPresets";
 import { toastsStore } from "@/store/toasts";
-import { openExternal, openWorkspaceApp } from "@/bridge/client";
+import { openExternal } from "@/bridge/client";
 import { titleCaseWorkspace } from "@/lib/text";
-import { runShellAction } from "@/lib/shellAction";
 import Icon from "@/components/Icon";
 import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
 import WorkspaceWorkbench from "@/components/WorkspaceWorkbench";
 import LayoutControls from "@/components/LayoutControls";
 import PanelDnd from "@/components/PanelDnd";
-import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
+import { openWithItems, workspaceOpenRoot } from "@/lib/openWith";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 import { usePane } from "./paneContext";
 
@@ -20,30 +19,14 @@ function TopBar(props: { workspace: string; compact?: boolean }) {
   let openButton: HTMLButtonElement | undefined;
   const row = () => workspacesStore.row(props.workspace);
   const rightCollapsed = () => layoutStore.sidePanelCollapsed();
-  const repoRoot = () => {
+  const workspaceRoot = () => {
     const repo = row()?.repository;
-    return repo ? repositoriesStore.row(repo)?.rootPath : undefined;
+    return workspaceOpenRoot(row()?.path, repo ? repositoriesStore.row(repo)?.rootPath : undefined);
   };
   const openItems = (): ContextMenuItem[] => {
     const items: ContextMenuItem[] = [];
-    const root = repoRoot();
-    if (root) {
-      const defaultOpener = workspaceDefaultOpener();
-      items.push({
-        label: `Open in ${defaultOpener.label}`,
-        iconSrc: defaultOpener.logoSrc,
-        iconAlt: defaultOpener.label,
-        run: () => runShellAction(`Open in ${defaultOpener.label}`, openExternal(root)),
-      });
-      for (const app of WORKSPACE_OPEN_APPS) {
-        items.push({
-          label: `Open in ${app.label}`,
-          iconSrc: app.logoSrc,
-          iconAlt: app.label,
-          run: () => runShellAction(`Open in ${app.label}`, openWorkspaceApp({ rootPath: root, appId: app.id })),
-        });
-      }
-    }
+    const root = workspaceRoot();
+    if (root) items.push(...openWithItems(root));
     const prUrl = row()?.prUrl;
     if (prUrl) items.push({ label: "Open pull request", icon: "external", run: () => void openExternal(prUrl) });
     return items;
