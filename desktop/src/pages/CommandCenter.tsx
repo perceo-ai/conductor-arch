@@ -14,6 +14,7 @@ import PanelDnd from "@/components/PanelDnd";
 import { WORKSPACE_OPEN_APPS, workspaceDefaultOpener } from "@/lib/workspaceOpenApps";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 import { usePane } from "./paneContext";
+import PaneChrome from "./PaneChrome";
 
 function TopBar(props: { workspace: string; compact?: boolean }) {
   const pane = usePane();
@@ -74,6 +75,7 @@ function TopBar(props: { workspace: string; compact?: boolean }) {
         <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
       </div>
       <div class="ws-topbar-actions">
+        <PaneChrome workspace={props.workspace} />
         {/* Layout and right-panel controls drive the shared workbench, which a
             compact (unfocused) pane does not show — offering them here would
             visibly change the other pane. */}
@@ -112,7 +114,7 @@ export default function CommandCenter(props: { workspace: string }) {
   // With the view split, the unfocused pane is a plain chat column: the
   // inspector, terminal, and the rest of the layout follow the focused pane,
   // so neither chat is squeezed by a second full workbench.
-  const compact = () => nav.workspaceTabs().groups.length > 1 && !pane.focused();
+  const compact = () => nav.workspacePanes().panes.length > 1 && !pane.focused();
 
   // Layout presets are per repository but the layout itself is shared, so only
   // the focused pane decides which repository's presets are loaded; two panes

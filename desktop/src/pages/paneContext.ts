@@ -8,6 +8,8 @@ import { nav } from "@/store";
 // knows about the focused workspace.
 
 export interface Pane {
+  /** Position in the split, so a pane's own controls can act on it. */
+  index: () => number;
   /** True for the pane the sidebar and keyboard shortcuts act on. */
   focused: () => boolean;
   /** The chat thread this pane's workspace shows. */
@@ -27,6 +29,7 @@ export const PaneProvider = PaneContext.Provider;
 export function usePane(): Pane {
   return (
     useContext(PaneContext) ?? {
+      index: () => 0,
       focused: () => true,
       threadId: () => nav.selectedChatThread(),
       selectThread: (threadId) => nav.selectChatThread(threadId),
@@ -35,8 +38,13 @@ export function usePane(): Pane {
 }
 
 /** The pane bound to `workspace()`, focused while `focused()` holds. */
-export function paneFor(workspace: () => string, focused: () => boolean): Pane {
+export function paneFor(
+  workspace: () => string,
+  focused: () => boolean,
+  index: () => number,
+): Pane {
   return {
+    index,
     focused,
     threadId: () => nav.threadFor(workspace()),
     selectThread: (threadId) => nav.selectThreadFor(workspace(), threadId),

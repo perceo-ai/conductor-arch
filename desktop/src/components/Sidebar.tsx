@@ -1,6 +1,7 @@
 import { createResource, createSignal, For, Show } from "solid-js";
 import {
   nav,
+  workspaceAwaitingAcknowledgement,
   workspacesStore,
   repositoriesStore,
   dialogs,
@@ -18,6 +19,7 @@ import { createPersistedWidth } from "@/lib/persistedWidth";
 import { SIDEBAR_MAX, SIDEBAR_MIN, panelDragMax } from "@/lib/panelWidths";
 import Icon from "./Icon";
 import { workspaceRowActivity } from "@/lib/workspaceStatus";
+import { workspaceDragProps } from "@/lib/workspaceDrag";
 import {
   WORKSPACE_PR_STATE_ICON,
   WORKSPACE_PR_STATE_MOTION,
@@ -170,6 +172,9 @@ export function workspaceMenuItems(name: string): ContextMenuItem[] {
     { label: "Open", run: () => nav.selectWorkspace(name) },
     { label: "Open in Split Right", icon: "panel-right", run: () => nav.openWorkspaceInSplit(name, "right") },
     { label: "Open in Split Down", run: () => nav.openWorkspaceInSplit(name, "down") },
+    ...(nav.workspacePanes().panes.some((pane) => pane.workspace === name)
+      ? [{ label: "Close", icon: "x" as const, run: () => nav.closeWorkspacePane(name) }]
+      : []),
     // Only across a machine boundary: "copy to this machine" is meaningless
     // when this machine is already the one running it.
     ...(clientsStore.isRemote()
@@ -307,6 +312,7 @@ function WorkspaceRow(props: { name: string }) {
   const gitState = () => deriveWorkspacePrAction(workspacePrActionInput(row(), undefined));
   const hasDiffStats = () => ((row()?.additions ?? 0) > 0 || (row()?.deletions ?? 0) > 0);
   const activity = () => workspaceRowActivity(row() ?? {});
+  const awaitingAcknowledgement = () => workspaceAwaitingAcknowledgement(props.name);
   return (
     <PeekCard
       content={<Show when={row()}>{(details) => <WorkspacePeek row={details()} />}</Show>}
@@ -316,6 +322,7 @@ function WorkspaceRow(props: { name: string }) {
           {...peek}
           class="workspace-row-shell"
           classList={{ selected: selected() }}
+          {...workspaceDragProps(() => props.name)}
           data-shortcut={workspaceShortcut(props.name) ? keyHint(workspaceShortcut(props.name)!) : undefined}
           onClick={() => nav.selectWorkspace(props.name)}
           onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.name))}
@@ -330,16 +337,27 @@ function WorkspaceRow(props: { name: string }) {
         {/* Icon keys off `state`, not `action`: six situations share the
             `view` action and used to share one glyph, which made a merged PR
             indistinguishable from failing checks at a glance. */}
-        <span
-          class={`workspace-git-state workspace-git-state-${gitState().state}`}
-          classList={{
-            [`workspace-git-state-motion-${WORKSPACE_PR_STATE_MOTION[gitState().state]}`]:
-              WORKSPACE_PR_STATE_MOTION[gitState().state] != null,
-          }}
-          title={gitState().detail ? `${gitState().title} · ${gitState().detail}` : gitState().title}
+        {/* A finished chat nobody has read outranks the git state until it is
+            seen; the state is one click away, the reply is what is waiting. */}
+        <Show
+          when={!awaitingAcknowledgement()}
+          fallback={
+            <span class="workspace-git-state workspace-turn-unread" title="A chat finished and is waiting to be read">
+              <span class="workspace-row-live-dot" />
+            </span>
+          }
         >
-          <Icon name={WORKSPACE_PR_STATE_ICON[gitState().state]} />
-        </span>
+          <span
+            class={`workspace-git-state workspace-git-state-${gitState().state}`}
+            classList={{
+              [`workspace-git-state-motion-${WORKSPACE_PR_STATE_MOTION[gitState().state]}`]:
+                WORKSPACE_PR_STATE_MOTION[gitState().state] != null,
+            }}
+            title={gitState().detail ? `${gitState().title} · ${gitState().detail}` : gitState().title}
+          >
+            <Icon name={WORKSPACE_PR_STATE_ICON[gitState().state]} />
+          </span>
+        </Show>
         <span class="row-name" title={props.name}>{titleCaseWorkspace(props.name)}</span>
         {/* A blocked agent is otherwise indistinguishable from a working one
             in this list, which is how a session sits parked for minutes. */}

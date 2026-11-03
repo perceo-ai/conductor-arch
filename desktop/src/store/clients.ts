@@ -61,7 +61,7 @@ function liveWorkspace(name: string): boolean {
 
 /** Bring back the active daemon's saved tabs, validated against the inventory. */
 export function restoreTabsForActiveDaemon(): void {
-  nav.restoreWorkspaceTabs(tabRealmKey(), liveWorkspace);
+  nav.restoreWorkspacePanes(tabRealmKey(), liveWorkspace);
 }
 
 function rememberCurrentWorkspace(id: string | null): void {

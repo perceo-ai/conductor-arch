@@ -83,7 +83,7 @@ describe("composer draft lifecycle", () => {
     // An explicit switch replaces the realm session: nothing is retargeted,
     // and the unmounting composer parks under the realm it was opened in.
     l.nav.deferTabRestore({ daemonSwitch: true });
-    l.nav.restoreWorkspaceTabs("client:b", () => true);
+    l.nav.restoreWorkspacePanes("client:b", () => true);
     first.dispose();
 
     // Daemon B's same-numbered thread starts empty; A's draft stays A's.

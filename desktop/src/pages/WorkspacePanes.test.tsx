@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render } from "solid-js/web";
-import type { ContextMenuItem } from "@/components/ContextMenu";
 
 // The workspace view itself is heavy and covered elsewhere; a stub that shows
 // what its pane hands it is what these tests are about.
 vi.mock("./CommandCenter", async () => {
   const { usePane } = await import("./paneContext");
+  const { default: PaneChrome } = await import("./PaneChrome");
   return {
     default: (props: { workspace: string }) => {
       const pane = usePane();
@@ -16,27 +16,27 @@ vi.mock("./CommandCenter", async () => {
           data-workspace={props.workspace}
           data-thread={String(pane.threadId())}
           data-focused={String(pane.focused())}
-        />
+          data-index={String(pane.index())}
+        >
+          {/* The real CommandCenter puts this in its topbar; the pane's close
+              button is only reachable through it. */}
+          <PaneChrome workspace={props.workspace} />
+        </div>
       );
     },
   };
 });
 
-const menus: ContextMenuItem[][] = [];
-vi.mock("@/components/ContextMenu", () => ({
-  openContextMenuAt: (_x: number, _y: number, items: ContextMenuItem[]) => menus.push(items),
-}));
-
 const { nav } = await import("@/store");
 const { default: WorkspacePanes } = await import("./WorkspacePanes");
+const { WORKSPACE_MIME, workspaceDragProps } = await import("@/lib/workspaceDrag");
 
 let dispose: (() => void) | undefined;
 
 afterEach(() => {
   dispose?.();
   dispose = undefined;
-  menus.length = 0;
-  nav.resetWorkspaceTabs();
+  nav.resetWorkspacePanes();
 });
 
 function mount() {
@@ -54,51 +54,106 @@ function centers(host: HTMLElement) {
   }));
 }
 
-function tabLabels(host: HTMLElement) {
-  return [...host.querySelectorAll<HTMLElement>(".ws-pane")].map((pane) =>
-    [...pane.querySelectorAll<HTMLElement>("[data-workspace-tab]")].map((tab) => tab.dataset.workspaceTab),
+/** jsdom has no DataTransfer; the handlers only need setData/getData. */
+function dataTransfer() {
+  const store: Record<string, string> = {};
+  return {
+    effectAllowed: "",
+    dropEffect: "",
+    setData: (type: string, value: string) => {
+      store[type] = value;
+    },
+    getData: (type: string) => store[type] ?? "",
+  };
+}
+
+function fire(target: EventTarget, type: string, transfer: ReturnType<typeof dataTransfer>) {
+  const event = new Event(type, { bubbles: true, cancelable: true }) as Event & { dataTransfer: unknown };
+  event.dataTransfer = transfer;
+  target.dispatchEvent(event);
+  return event;
+}
+
+/**
+ * Drag `name` (as the sidebar does, via the shared drag props) and drop it on
+ * `zone` of pane `paneIndex`.
+ */
+function dragOnto(host: HTMLElement, name: string, paneIndex: number, zone: string) {
+  const transfer = dataTransfer();
+  workspaceDragProps(() => name).onDragStart(
+    Object.assign(new Event("dragstart"), { dataTransfer: transfer }) as unknown as DragEvent,
   );
+  expect(transfer.getData(WORKSPACE_MIME)).toBe(name);
+  const pane = host.querySelectorAll<HTMLElement>(".ws-pane")[paneIndex];
+  const target = pane.querySelector<HTMLElement>(`.ws-pane-dropzone-${zone}`);
+  expect(target, `pane ${paneIndex} offers a ${zone} drop zone`).not.toBeNull();
+  fire(target!, "dragover", transfer);
+  fire(target!, "drop", transfer);
 }
 
 describe("WorkspacePanes", () => {
-  it("shows one tab per open workspace and the active one's view", () => {
+  it("shows the selected workspace with no tab strip", () => {
     nav.selectWorkspace("alpha");
     nav.selectWorkspace("beta");
     const host = mount();
-    expect(tabLabels(host)).toEqual([["alpha", "beta"]]);
+    expect(host.querySelector(".ws-pane-tabbar")).toBeNull();
+    // Selecting replaces what the pane holds rather than stacking tabs.
     expect(centers(host)).toEqual([{ workspace: "beta", thread: "null", focused: "true" }]);
-
-    host.querySelector<HTMLElement>("[data-workspace-tab='alpha']")!.click();
-    expect(centers(host)[0].workspace).toBe("alpha");
-    expect(nav.selectedWorkspace()).toBe("alpha");
+    expect(host.querySelectorAll(".ws-pane")).toHaveLength(1);
   });
 
-  it("splits from the tab menu and gives each pane its own chat", () => {
+  it("splits when a workspace is dropped on a lone pane's edge", () => {
     nav.selectWorkspace("alpha");
     nav.selectChatThread(11);
-    nav.selectWorkspace("beta");
-    nav.selectChatThread(22);
     const host = mount();
 
-    host
-      .querySelector<HTMLElement>("[data-workspace-tab='beta']")!
-      .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 1, clientY: 1 }));
-    const split = menus.at(-1)!.find((item) => item.label === "Split Right");
-    expect(split).toBeDefined();
-    split!.run();
+    dragOnto(host, "beta", 0, "right");
 
-    expect(tabLabels(host)).toEqual([["alpha"], ["beta"]]);
+    expect(host.querySelector(".ws-panes-split")).not.toBeNull();
     expect(centers(host)).toEqual([
       { workspace: "alpha", thread: "11", focused: "false" },
-      { workspace: "beta", thread: "22", focused: "true" },
+      { workspace: "beta", thread: "null", focused: "true" },
     ]);
+  });
+
+  it("drops on the middle of a pane to replace what it holds", () => {
+    nav.selectWorkspace("alpha");
+    const host = mount();
+    dragOnto(host, "beta", 0, "right");
+
+    // Onto the other (unfocused) pane: it takes gamma, the split stays.
+    dragOnto(host, "gamma", 0, "here");
+    expect(centers(host).map((center) => center.workspace)).toEqual(["gamma", "beta"]);
+    expect(nav.selectedWorkspace()).toBe("gamma");
+  });
+
+  it("swaps the panes when one pane's workspace is dropped on the other", () => {
+    nav.selectWorkspace("alpha");
+    const host = mount();
+    dragOnto(host, "beta", 0, "right");
+
+    dragOnto(host, "beta", 0, "here");
+    expect(centers(host).map((center) => center.workspace)).toEqual(["beta", "alpha"]);
+    expect(host.querySelector(".ws-panes-split")).not.toBeNull();
+  });
+
+  it("offers no split zones once the view is split", () => {
+    nav.selectWorkspace("alpha");
+    const host = mount();
+    dragOnto(host, "beta", 0, "right");
+
+    const transfer = dataTransfer();
+    workspaceDragProps(() => "gamma").onDragStart(
+      Object.assign(new Event("dragstart"), { dataTransfer: transfer }) as unknown as DragEvent,
+    );
+    expect(host.querySelectorAll(".ws-pane-dropzone-right")).toHaveLength(0);
+    expect(host.querySelectorAll(".ws-pane-dropzone-here")).toHaveLength(2);
   });
 
   it("focuses a pane on pointerdown inside it", () => {
     nav.selectWorkspace("alpha");
-    nav.selectWorkspace("beta");
-    nav.splitWorkspaceTab("beta", "down");
     const host = mount();
+    nav.openWorkspaceInSplit("beta", "down");
     expect(host.querySelector(".ws-panes-down")).not.toBeNull();
 
     host.querySelectorAll<HTMLElement>(".stub-center")[0].dispatchEvent(new Event("pointerdown", { bubbles: true }));
@@ -106,15 +161,19 @@ describe("WorkspacePanes", () => {
     expect(centers(host).map((center) => center.focused)).toEqual(["true", "false"]);
   });
 
-  it("closes a tab from its close button and collapses an emptied split", () => {
+  it("unsplits from a pane's close button, which only exists when split", () => {
     nav.selectWorkspace("alpha");
-    nav.selectWorkspace("beta");
-    nav.splitWorkspaceTab("beta", "right");
     const host = mount();
+    expect(host.querySelector(".ws-pane-close")).toBeNull();
 
-    host.querySelector<HTMLElement>("[data-workspace-tab='beta'] .ws-pane-tab-close")!.click();
-    expect(tabLabels(host)).toEqual([["alpha"]]);
+    nav.openWorkspaceInSplit("beta", "right");
+    const panes = [...host.querySelectorAll<HTMLElement>(".ws-pane")];
+    expect(panes[1].querySelector<HTMLElement>(".stub-center")!.dataset.index).toBe("1");
+    const close = panes[1].querySelector<HTMLElement>(".ws-pane-close");
+    close!.click();
+
     expect(host.querySelector(".ws-panes-split")).toBeNull();
+    expect(centers(host).map((center) => center.workspace)).toEqual(["alpha"]);
     expect(nav.selectedWorkspace()).toBe("alpha");
   });
 });

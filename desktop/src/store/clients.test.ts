@@ -122,7 +122,7 @@ describe("clientsStore failed switches", () => {
     const mod = await import("./index");
     await mod.refreshInventory();
     mod.nav.selectWorkspace("local-alpha");
-    return { ...mod, before: JSON.stringify(mod.nav.workspaceTabs()) };
+    return { ...mod, before: JSON.stringify(mod.nav.workspacePanes()) };
   }
 
   it("activate: an error result lifts the pause and leaves the tabs alone", async () => {
@@ -132,7 +132,7 @@ describe("clientsStore failed switches", () => {
     expect(await clientsStore.activate("devbox")).toBe(false);
 
     expect(nav.awaitingTabRestore()).toBe(false);
-    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+    expect(JSON.stringify(nav.workspacePanes())).toBe(before);
   });
 
   it("activate: a thrown bridge call lifts the pause and leaves the tabs alone", async () => {
@@ -142,7 +142,7 @@ describe("clientsStore failed switches", () => {
     expect(await clientsStore.activate("devbox")).toBe(false);
 
     expect(nav.awaitingTabRestore()).toBe(false);
-    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+    expect(JSON.stringify(nav.workspacePanes())).toBe(before);
   });
 
   it("add: a failed verify lifts the pause and leaves the tabs alone", async () => {
@@ -152,7 +152,7 @@ describe("clientsStore failed switches", () => {
     expect(await clientsStore.add({ address: "new:7420", token: "t" })).toBe(false);
 
     expect(nav.awaitingTabRestore()).toBe(false);
-    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+    expect(JSON.stringify(nav.workspacePanes())).toBe(before);
   });
 
   it("remove of the active client: a failure lifts the pause and leaves the tabs alone", async () => {
@@ -160,13 +160,13 @@ describe("clientsStore failed switches", () => {
     await refreshInventory();
     expect(await clientsStore.activate("devbox")).toBe(true);
     nav.selectWorkspace("remote-alpha");
-    const before = JSON.stringify(nav.workspaceTabs());
+    const before = JSON.stringify(nav.workspacePanes());
     api.clientsRemove.mockResolvedValueOnce({ ok: false, error: "clients.json is read-only" });
 
     expect(await clientsStore.remove("devbox")).toBe(false);
 
     expect(nav.awaitingTabRestore()).toBe(false);
-    expect(JSON.stringify(nav.workspaceTabs())).toBe(before);
+    expect(JSON.stringify(nav.workspacePanes())).toBe(before);
   });
   // A restore can already be owed when a switch starts: an earlier switch
   // succeeded but its inventory pull failed, so the old tabs are on screen and

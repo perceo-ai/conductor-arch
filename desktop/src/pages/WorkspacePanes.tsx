@@ -1,187 +1,35 @@
-import { For, Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
+import { Index, Show, createEffect, createSignal, on, onCleanup, onMount } from "solid-js";
 import { nav, restoreTabsForActiveDaemon, workspacesStore } from "@/store";
-import type { TabGroup, SplitDirection } from "@/lib/workspaceTabs";
-import { titleCaseWorkspace } from "@/lib/text";
-import Icon from "@/components/Icon";
-import { openContextMenuAt, type ContextMenuItem } from "@/components/ContextMenu";
+import type { Pane, SplitDirection } from "@/lib/workspacePanes";
+import { draggingWorkspace, droppedWorkspace, endWorkspaceDrag } from "@/lib/workspaceDrag";
 import CommandCenter from "./CommandCenter";
 import { PaneProvider, paneFor } from "./paneContext";
 
-// The workspace page: a browser-style tab strip over the workspace view, split
-// into at most two panes. Each pane is a tab group with its own active
-// workspace; the focused one is the app's selected workspace, so the sidebar,
-// shortcuts, and every action keep acting on "the workspace on screen".
+// The workspace page: at most two panes, each showing exactly one workspace.
+// There is no tab strip — the sidebar is the workspace list, and what a pane
+// holds is all it holds. The focused pane's workspace is the app's selected
+// workspace, so the sidebar, shortcuts, and every action keep acting on "the
+// workspace on screen".
 //
-// Tabs move by drag: onto another strip to move, onto the right or bottom edge
-// of a lone pane to split. The tab menu offers the same moves for keyboard and
-// trackpad users.
-
-const TAB_MIME = "application/x-archductor-workspace-tab";
-
-// The tab being dragged. dataTransfer cannot be read during dragover, so the
-// drop zones learn what is in flight from here.
-const [draggingTab, setDraggingTab] = createSignal<string | null>(null);
-
-function tabMenu(name: string, groupIndex: number): ContextMenuItem[] {
-  const tabs = nav.workspaceTabs();
-  const group = tabs.groups[groupIndex];
-  const items: ContextMenuItem[] = [];
-  if (tabs.groups.length > 1) {
-    items.push({
-      label: "Move to Other Pane",
-      icon: "arrow-right",
-      run: () => nav.splitWorkspaceTab(name, tabs.direction),
-    });
-  } else if (group && group.tabs.length > 1) {
-    items.push(
-      { label: "Split Right", icon: "panel-right", run: () => nav.splitWorkspaceTab(name, "right") },
-      { label: "Split Down", run: () => nav.splitWorkspaceTab(name, "down") },
-    );
-  }
-  items.push({ label: "Close Tab", icon: "x", run: () => nav.closeWorkspaceTab(name) });
-  if (group && group.tabs.length > 1) {
-    items.push({ label: "Close Other Tabs", run: () => nav.closeOtherWorkspaceTabs(name) });
-  }
-  return items;
-}
-
-function WorkspaceTab(props: { name: string; groupIndex: number; active: boolean; focusedPane: boolean }) {
-  const row = () => workspacesStore.row(props.name);
-  const working = () => (row()?.activeSessions ?? 0) > 0;
-  function activate() {
-    nav.selectWorkspace(props.name);
-  }
-  return (
-    <div
-      class="ws-pane-tab"
-      classList={{ "ws-pane-tab-active": props.active, "ws-pane-tab-focused": props.active && props.focusedPane }}
-      role="tab"
-      aria-selected={props.active}
-      tabIndex={0}
-      draggable={true}
-      data-workspace-tab={props.name}
-      title={row()?.branch ? `${titleCaseWorkspace(props.name)} · ${row()!.branch}` : titleCaseWorkspace(props.name)}
-      onClick={activate}
-      onAuxClick={(e) => {
-        // Middle-click closes, as in a browser.
-        if (e.button !== 1) return;
-        e.preventDefault();
-        nav.closeWorkspaceTab(props.name);
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          activate();
-        } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
-          e.preventDefault();
-          const rect = e.currentTarget.getBoundingClientRect();
-          openContextMenuAt(rect.left, rect.bottom + 4, tabMenu(props.name, props.groupIndex));
-        }
-      }}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        openContextMenuAt(e.clientX, e.clientY, tabMenu(props.name, props.groupIndex));
-      }}
-      onDragStart={(e) => {
-        e.dataTransfer?.setData(TAB_MIME, props.name);
-        e.dataTransfer?.setData("text/plain", props.name);
-        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-        setDraggingTab(props.name);
-      }}
-      onDragEnd={() => setDraggingTab(null)}
-    >
-      <Show when={working()}>
-        <span class="ws-pane-tab-dot" aria-label="Agent running" />
-      </Show>
-      <span class="ws-pane-tab-label">{titleCaseWorkspace(props.name)}</span>
-      <button
-        class="ws-pane-tab-close"
-        title="Close tab"
-        aria-label={`Close ${titleCaseWorkspace(props.name)}`}
-        draggable={false}
-        onClick={(e) => {
-          e.stopPropagation();
-          nav.closeWorkspaceTab(props.name);
-        }}
-      >
-        <Icon name="x" />
-      </button>
-    </div>
-  );
-}
+// Layout changes by drag: drop a workspace from the sidebar (or the other pane)
+// on a pane's middle to load it there, or on the right or bottom edge of a lone
+// pane to split. The sidebar's context menu offers the same splits for keyboard
+// and trackpad users.
 
 /**
- * Index a drop lands at: before the tab under the pointer, or at the end.
- * Counted without the dragged tab itself — moveTab inserts into the list with
- * that tab already removed, so counting it put a rightward drop one past
- * where the pointer sat.
+ * Drop targets over a pane while a workspace is dragged. A lone pane offers its
+ * right and bottom edges to split and its middle to load in place; with the
+ * view already split there is no room for a third pane, so the whole pane is
+ * one "show it here" target.
  */
-export function dropIndex(strip: HTMLElement, clientX: number, dragged: string): number {
-  const tabs = [...strip.querySelectorAll<HTMLElement>("[data-workspace-tab]")].filter(
-    (tab) => tab.dataset.workspaceTab !== dragged,
-  );
-  const at = tabs.findIndex((tab) => {
-    const rect = tab.getBoundingClientRect();
-    return clientX < rect.left + rect.width / 2;
-  });
-  return at < 0 ? tabs.length : at;
-}
-
-function TabStrip(props: { group: TabGroup; index: number; focused: boolean }) {
-  let strip: HTMLDivElement | undefined;
-  const [dropOver, setDropOver] = createSignal(false);
-  return (
-    <div
-      class="ws-pane-tabbar"
-      classList={{ "ws-pane-tabbar-drop": dropOver() }}
-      onDragOver={(e) => {
-        if (!draggingTab()) return;
-        e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-        setDropOver(true);
-      }}
-      onDragLeave={() => setDropOver(false)}
-      onDrop={(e) => {
-        setDropOver(false);
-        const name = e.dataTransfer?.getData(TAB_MIME) || draggingTab();
-        setDraggingTab(null);
-        if (!name || !strip) return;
-        e.preventDefault();
-        nav.moveWorkspaceTab(name, props.index, dropIndex(strip, e.clientX, name));
-      }}
-    >
-      <div class="ws-pane-tabs" role="tablist" ref={strip}>
-        <For each={props.group.tabs}>
-          {(name) => (
-            <WorkspaceTab
-              name={name}
-              groupIndex={props.index}
-              active={props.group.active === name}
-              focusedPane={props.focused}
-            />
-          )}
-        </For>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Drop targets over a pane while a tab is dragged. A lone pane offers its right
- * and bottom edges to split; with the view already split, the other pane takes
- * the tab whole.
- */
-function DropZones(props: { group: TabGroup; index: number }) {
-  const [over, setOver] = createSignal<SplitDirection | "move" | null>(null);
-  const split = () => nav.workspaceTabs().groups.length > 1;
+function DropZones(props: { pane: Pane; index: number }) {
+  const [over, setOver] = createSignal<SplitDirection | "here" | null>(null);
+  const split = () => nav.workspacePanes().panes.length > 1;
   const show = () => {
-    const name = draggingTab();
-    if (!name) return false;
-    if (split()) return !props.group.tabs.includes(name);
-    // Splitting off a pane's only tab would leave nothing behind.
-    return props.group.tabs.length > 1;
+    const name = draggingWorkspace();
+    return name != null && name !== props.pane.workspace;
   };
-  function zone(kind: SplitDirection | "move") {
+  function zone(kind: SplitDirection | "here") {
     return {
       onDragOver: (e: DragEvent) => {
         e.preventDefault();
@@ -191,33 +39,29 @@ function DropZones(props: { group: TabGroup; index: number }) {
       onDragLeave: () => setOver((current) => (current === kind ? null : current)),
       onDrop: (e: DragEvent) => {
         e.preventDefault();
-        const name = e.dataTransfer?.getData(TAB_MIME) || draggingTab();
+        const name = droppedWorkspace(e);
         setOver(null);
-        setDraggingTab(null);
+        endWorkspaceDrag();
         if (!name) return;
-        if (kind === "move") nav.moveWorkspaceTab(name, props.index, props.group.tabs.length);
-        else nav.splitWorkspaceTab(name, kind);
+        if (kind === "here") nav.openWorkspaceInPane(name, props.index);
+        else nav.openWorkspaceInSplit(name, kind);
       },
     };
   }
   return (
     <Show when={show()}>
       <div class="ws-pane-dropzones">
-        <Show
-          when={split()}
-          fallback={
-            <>
-              <div class="ws-pane-dropzone ws-pane-dropzone-right" classList={{ "is-over": over() === "right" }} {...zone("right")}>
-                <span>Split Right</span>
-              </div>
-              <div class="ws-pane-dropzone ws-pane-dropzone-down" classList={{ "is-over": over() === "down" }} {...zone("down")}>
-                <span>Split Down</span>
-              </div>
-            </>
-          }
-        >
-          <div class="ws-pane-dropzone ws-pane-dropzone-all" classList={{ "is-over": over() === "move" }} {...zone("move")}>
-            <span>Move Here</span>
+        <div class="ws-pane-dropzone ws-pane-dropzone-here" classList={{ "is-over": over() === "here" }} {...zone("here")}>
+          <span>Show Here</span>
+        </div>
+        {/* Splitting needs a pane to split off from: a lone pane with a
+            workspace in it, since an empty one has nothing to leave behind. */}
+        <Show when={!split() && props.pane.workspace != null}>
+          <div class="ws-pane-dropzone ws-pane-dropzone-right" classList={{ "is-over": over() === "right" }} {...zone("right")}>
+            <span>Split Right</span>
+          </div>
+          <div class="ws-pane-dropzone ws-pane-dropzone-down" classList={{ "is-over": over() === "down" }} {...zone("down")}>
+            <span>Split Down</span>
           </div>
         </Show>
       </div>
@@ -225,15 +69,15 @@ function DropZones(props: { group: TabGroup; index: number }) {
   );
 }
 
-function WorkspacePane(props: { group: TabGroup; index: number }) {
+function WorkspacePane(props: { pane: Pane; index: number }) {
   let root: HTMLDivElement | undefined;
-  const focused = () => nav.workspaceTabs().focused === props.index;
-  const split = () => nav.workspaceTabs().groups.length > 1;
+  const focused = () => nav.workspacePanes().focused === props.index;
+  const split = () => nav.workspacePanes().panes.length > 1;
   // Any click or keyboard focus inside a pane makes it the focused one, so the
   // sidebar highlight, shortcuts, and actions follow where the user is working.
   onMount(() => {
     const claim = () => {
-      if (!focused()) nav.focusTabGroup(props.index);
+      if (!focused()) nav.focusPane(props.index);
     };
     root?.addEventListener("pointerdown", claim, true);
     root?.addEventListener("focusin", claim, true);
@@ -249,30 +93,29 @@ function WorkspacePane(props: { group: TabGroup; index: number }) {
       classList={{ "ws-pane-focused": focused(), "ws-pane-split": split() }}
       data-pane-index={props.index}
     >
-      <TabStrip group={props.group} index={props.index} focused={focused()} />
       <div class="ws-pane-body">
         <Show
-          when={props.group.active}
+          when={props.pane.workspace}
           fallback={<div class="empty-state">Select a workspace from the sidebar.</div>}
         >
           {(workspace) => (
-            <PaneProvider value={paneFor(workspace, focused)}>
+            <PaneProvider value={paneFor(workspace, focused, () => props.index)}>
               <CommandCenter workspace={workspace()} />
             </PaneProvider>
           )}
         </Show>
-        <DropZones group={props.group} index={props.index} />
+        <DropZones pane={props.pane} index={props.index} />
       </div>
     </div>
   );
 }
 
 export default function WorkspacePanes() {
-  const tabs = nav.workspaceTabs;
+  const panes = nav.workspacePanes;
 
-  // Close tabs whose workspace was archived or deleted, or that the daemon no
-  // longer knows. Tracks the inventory only: re-running on tab changes would
-  // drop a just-created workspace's tab before its row arrives.
+  // Close panes whose workspace was archived or deleted, or that the daemon no
+  // longer knows. Tracks the inventory only: re-running on pane changes would
+  // drop a just-created workspace before its row arrives.
   createEffect(
     on(
       () => {
@@ -283,7 +126,7 @@ export default function WorkspacePanes() {
         if (inventory == null) return;
         // A restore still owed (boot or daemon switch that could not validate
         // yet) is retried here instead: this effect fires exactly when a good
-        // inventory lands, and pruning the stale tabs would be wrong anyway.
+        // inventory lands, and pruning the stale panes would be wrong anyway.
         if (nav.awaitingTabRestore()) {
           const selected = nav.selectedWorkspace();
           restoreTabsForActiveDaemon();
@@ -293,7 +136,7 @@ export default function WorkspacePanes() {
           }
           return;
         }
-        nav.retainWorkspaceTabs((name) => {
+        nav.retainWorkspacePanes((name) => {
           const row = workspacesStore.row(name);
           return row != null && row.status !== "archived";
         });
@@ -304,9 +147,9 @@ export default function WorkspacePanes() {
   return (
     <div
       class="ws-panes"
-      classList={{ "ws-panes-split": tabs().groups.length > 1, "ws-panes-down": tabs().direction === "down" }}
+      classList={{ "ws-panes-split": panes().panes.length > 1, "ws-panes-down": panes().direction === "down" }}
     >
-      <Index each={tabs().groups}>{(group, index) => <WorkspacePane group={group()} index={index} />}</Index>
+      <Index each={panes().panes}>{(pane, index) => <WorkspacePane pane={pane()} index={index} />}</Index>
     </div>
   );
 }
