@@ -75,7 +75,6 @@ function TopBar(props: { workspace: string; compact?: boolean }) {
         <span class="ws-topbar-branch">{row()?.branch ?? "branch loading"}</span>
       </div>
       <div class="ws-topbar-actions">
-        <PaneChrome workspace={props.workspace} />
         {/* Layout and right-panel controls drive the shared workbench, which a
             compact (unfocused) pane does not show — offering them here would
             visibly change the other pane. */}
@@ -104,6 +103,11 @@ function TopBar(props: { workspace: string; compact?: boolean }) {
             <Icon name={rightCollapsed() ? "panel-left" : "panel-right"} />
           </button>
         </Show>
+        {/* Last, so it is anchored to the row's right edge: clicking an
+            unfocused pane focuses it mid-click, which adds the controls above
+            — anywhere earlier and the close button slides out from under the
+            pointer before the release. */}
+        <PaneChrome workspace={props.workspace} />
       </div>
     </div>
   );

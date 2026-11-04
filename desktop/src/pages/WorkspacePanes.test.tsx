@@ -5,6 +5,7 @@ import { render } from "solid-js/web";
 // The workspace view itself is heavy and covered elsewhere; a stub that shows
 // what its pane hands it is what these tests are about.
 vi.mock("./CommandCenter", async () => {
+  const { Show } = await import("solid-js");
   const { usePane } = await import("./paneContext");
   const { default: PaneChrome } = await import("./PaneChrome");
   return {
@@ -18,9 +19,16 @@ vi.mock("./CommandCenter", async () => {
           data-focused={String(pane.focused())}
           data-index={String(pane.index())}
         >
-          {/* The real CommandCenter puts this in its topbar; the pane's close
-              button is only reachable through it. */}
-          <PaneChrome workspace={props.workspace} />
+          {/* The real CommandCenter puts this at the end of its topbar
+              actions, behind the controls only a focused pane shows — the
+              order that keeps the close button still while a click on an
+              unfocused pane focuses it. */}
+          <div class="stub-topbar-actions">
+            <Show when={pane.focused()}>
+              <button class="stub-focused-only" />
+            </Show>
+            <PaneChrome workspace={props.workspace} />
+          </div>
         </div>
       );
     },
@@ -159,6 +167,24 @@ describe("WorkspacePanes", () => {
     host.querySelectorAll<HTMLElement>(".stub-center")[0].dispatchEvent(new Event("pointerdown", { bubbles: true }));
     expect(nav.selectedWorkspace()).toBe("alpha");
     expect(centers(host).map((center) => center.focused)).toEqual(["true", "false"]);
+  });
+
+  it("closes an unfocused pane without the press moving its controls", () => {
+    nav.selectWorkspace("alpha");
+    const host = mount();
+    nav.openWorkspaceInSplit("beta", "right");
+    // Focus is on the new pane; press the close button on the other one. That
+    // press must not focus the pane: focusing widens it and adds the
+    // focused-pane controls, which would move the button before the release.
+    const first = [...host.querySelectorAll<HTMLElement>(".ws-pane")][0];
+    const close = first.querySelector<HTMLElement>(".ws-pane-close")!;
+    close.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    expect(first.querySelector(".stub-focused-only")).toBeNull();
+    expect(centers(host).map((center) => center.focused)).toEqual(["false", "true"]);
+    close.click();
+
+    expect(centers(host).map((center) => center.workspace)).toEqual(["beta"]);
+    expect(host.querySelector(".ws-panes-split")).toBeNull();
   });
 
   it("unsplits from a pane's close button, which only exists when split", () => {

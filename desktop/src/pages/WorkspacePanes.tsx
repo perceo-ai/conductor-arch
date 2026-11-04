@@ -76,7 +76,12 @@ function WorkspacePane(props: { pane: Pane; index: number }) {
   // Any click or keyboard focus inside a pane makes it the focused one, so the
   // sidebar highlight, shortcuts, and actions follow where the user is working.
   onMount(() => {
-    const claim = () => {
+    const claim = (event: Event) => {
+      // A pane's own grip and close button do not focus it: focusing resizes
+      // the pane, which would move the control out from under the pointer
+      // mid-click. Closing a pane makes its focus moot anyway.
+      const target = event.target;
+      if (target instanceof Element && target.closest("[data-pane-chrome]")) return;
       if (!focused()) nav.focusPane(props.index);
     };
     root?.addEventListener("pointerdown", claim, true);

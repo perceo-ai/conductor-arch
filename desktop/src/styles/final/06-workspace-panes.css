@@ -48,6 +48,11 @@
 /* Pane chrome: the grip that drags this workspace to the other pane and the
    close button that unsplits. Both live at the head of the pane's own topbar
    actions, and only exist while the view is split. */
+.ws-pane-chrome {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
 .ws-pane-grip {
   display: inline-flex;
   align-items: center;
