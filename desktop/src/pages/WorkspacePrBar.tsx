@@ -1,7 +1,7 @@
 import { Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
 import { send, openExternal } from "@/bridge/client";
 import { nav, threadsStore, workspacesStore, toastsStore } from "@/store";
-import type { ArchcarChatThread, ArchcarChecksSummary, SessionKind, WorkspaceGitAction } from "@/bridge/protocol";
+import type { ArchcarChatThread, ArchcarChecksSummary, WorkspaceGitAction } from "@/bridge/protocol";
 import {
   WORKSPACE_PR_STATE_ICON,
   WORKSPACE_PR_STATE_MOTION,
@@ -12,6 +12,7 @@ import {
 import Icon from "@/components/Icon";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 import type { ShortcutAction } from "@/lib/shortcuts";
+import { providerToKind } from "./chat/providerKind";
 
 // Compact top-nav PR control. This keeps PR management present without making
 // it a peer surface beside chat. Data comes from the workspace summary
@@ -99,13 +100,6 @@ export default function WorkspacePrBar(props: { workspace: string }) {
     return undefined;
   };
 
-  function providerKind(provider: string): SessionKind {
-    const p = provider.toLowerCase();
-    if (p.includes("claude")) return "claude";
-    if (p.includes("shell")) return "shell";
-    return "codex";
-  }
-
   function gitAction(): WorkspaceGitAction | null {
     const action = st().action;
     if (action === "create") return "create_pr";
@@ -150,7 +144,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
       type: "ensure_chat_thread_session",
       workspace: props.workspace,
       thread_id: thread.id,
-      kind: providerKind(thread.provider),
+      kind: providerToKind(thread.provider),
     });
     await send({
       type: "queue_chat_input",
@@ -158,7 +152,7 @@ export default function WorkspacePrBar(props: { workspace: string }) {
       input: prompt.prompt,
       visible_input: prompt.visible_input,
       kind: "control_command",
-      session_kind: providerKind(thread.provider),
+      session_kind: providerToKind(thread.provider),
     });
     toastsStore.push(`${prompt.visible_input} queued in chat.`);
   }

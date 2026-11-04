@@ -498,7 +498,12 @@ fn setup_feedback(readiness: &SetupReadiness) -> String {
 /// when none is.
 fn agent_check(readiness: &SetupReadiness) -> SetupCheck {
     if let Some(provider) = readiness.first_ready_launchable_provider() {
-        return SetupCheck::ready(format!("{provider} will be selected for new chats."));
+        // The agent's own name, not its registry key: "Devin CLI" reads as a
+        // product, "devin" reads as a config value.
+        let name = crate::agent_tools::tool_by_provider(provider)
+            .map(|tool| tool.display_name)
+            .unwrap_or(provider);
+        return SetupCheck::ready(format!("{name} will be selected for new chats."));
     }
     // An agent that is installed and authenticated but that this build cannot
     // drive is the most confusing possible state, so say so by name rather
@@ -1279,7 +1284,7 @@ ID_LIKE=arch
 
         assert_eq!(
             setup_feedback(&readiness),
-            "Install and sign in to Codex, Claude Code, or Gemini CLI, then press Recheck."
+            "Install and sign in to Codex, Claude Code, Gemini CLI, or Devin CLI, then press Recheck."
         );
     }
 
@@ -1319,7 +1324,9 @@ ID_LIKE=arch
         let agent = &report.rows[1];
         assert_eq!(agent.name, "Coding agent");
         assert_eq!(agent.state, SetupRowState::Ready);
-        assert!(agent.detail.contains("claude"));
+        // The agent's display name, not its registry key.
+        assert!(agent.detail.contains("Claude Code"), "{}", agent.detail);
+        assert_eq!(agent.provider_key.as_deref(), Some("claude"));
     }
 
     /// The gate asks for one agent, not for every agent. A growing registry

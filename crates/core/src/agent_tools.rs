@@ -3,6 +3,7 @@ pub enum ToolId {
     Codex,
     Claude,
     Gemini,
+    Devin,
     OpenCode,
     Aider,
     Amp,
@@ -89,6 +90,21 @@ const TOOL_SPECS: &[ToolSpec] = &[
         readiness_probe: &["gemini", "--version"],
         auth_guidance: "Run `gemini` once to sign in.",
         acp_args: &["--experimental-acp"],
+    },
+    ToolSpec {
+        id: ToolId::Devin,
+        provider_key: "devin",
+        display_name: "Devin CLI",
+        default_command: "devin",
+        aliases: &["devin", "devin-cli", "devincli"],
+        kind: ToolKind::ChatAgent,
+        chat_launchable: true,
+        launch_owner: LaunchOwner::ArchcarManaged,
+        readiness_probe: &["devin", "auth", "status"],
+        auth_guidance: "Run `devin auth login`.",
+        // `devin acp` speaks JSON-RPC over stdio for ACP clients; without it
+        // the binary comes up as an interactive TUI.
+        acp_args: &["acp"],
     },
     ToolSpec {
         id: ToolId::OpenCode,
@@ -258,7 +274,7 @@ mod tests {
 
         // Gemini joins them through the shared ACP adapter rather than a
         // vendor-specific one.
-        assert_eq!(launchable, ["codex", "claude", "gemini"]);
+        assert_eq!(launchable, ["codex", "claude", "gemini", "devin"]);
         assert!(
             launchable_agent_tools().all(|tool| tool.launch_owner == LaunchOwner::ArchcarManaged)
         );
@@ -284,6 +300,9 @@ mod tests {
         );
         assert!(!tool_by_provider("codex").unwrap().speaks_acp());
         assert!(!tool_by_provider("aider").unwrap().speaks_acp());
+        // Devin joins the same way: a registry entry, no adapter module.
+        assert!(tool_by_provider("devin-cli").unwrap().speaks_acp());
+        assert_eq!(tool_by_provider("devin").unwrap().acp_args, ["acp"]);
     }
 
     #[test]

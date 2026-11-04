@@ -5959,9 +5959,14 @@ fn ensure_default_session(
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
-    if !matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE) {
+    // Auto-spawn is a harness capability, not a vendor list: every managed
+    // agent (including ACP ones) answers for itself.
+    if !crate::archcar::harness::controller_for_kind(kind).supports_auto_spawn() {
         return ArchcarResponse::Error {
-            message: "only codex and claude auto-spawn are implemented".to_owned(),
+            message: format!(
+                "{} sessions do not auto-spawn; start one explicitly",
+                kind.as_str()
+            ),
         };
     }
     let mut guard = state.lock().unwrap();
@@ -6097,9 +6102,12 @@ fn ensure_chat_thread_session(
     kind: SessionKind,
     harness: crate::workspace::SessionHarnessOptions,
 ) -> ArchcarResponse {
-    if !matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE) {
+    if !crate::archcar::harness::controller_for_kind(kind).supports_auto_spawn() {
         return ArchcarResponse::Error {
-            message: "only codex and claude chat-thread auto-spawn are implemented".to_owned(),
+            message: format!(
+                "{} chat threads do not auto-spawn a session; start one explicitly",
+                kind.as_str()
+            ),
         };
     }
     let mut guard = state.lock().unwrap();

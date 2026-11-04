@@ -3436,9 +3436,13 @@ fn run_cli() -> Result<()> {
                     message,
                 } => {
                     let kind = resolve_send_kind(&store, &workspace, kind, thread_id)?;
+                    // Structured send needs a managed transport, not a specific
+                    // vendor: any ACP-speaking agent in the registry qualifies.
                     anyhow::ensure!(
-                        matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE),
-                        "session send supports codex and claude"
+                        archductor_core::archcar::harness::managed_harness_for_kind(kind)
+                            .is_some(),
+                        "session send needs an agent with a managed transport; `{}` runs as a plain terminal in this build",
+                        kind.as_str()
                     );
                     let input = message_text_or_stdin(message)?;
                     let client = ArchcarClient::from_paths(&paths);
@@ -8064,17 +8068,20 @@ fn session_kind_label(kind: SessionKind) -> &'static str {
     kind.as_str()
 }
 
+/// The provider a session row's command belongs to, resolved through the agent
+/// registry rather than a hardcoded pair, so a row running any registered agent
+/// is recognised as that agent instead of as a shell.
 fn command_session_kind_label(command: &str) -> &'static str {
     let executable = command.split_whitespace().next().unwrap_or("").trim();
-    match PathBuf::from(executable)
+    let file_name = PathBuf::from(executable)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("")
-    {
-        "codex" => "codex",
-        "claude" => "claude",
-        _ => "shell",
-    }
+        .to_owned();
+    archductor_core::agent_tools::agent_tools()
+        .find(|tool| tool.default_command == file_name)
+        .map(|tool| tool.provider_key)
+        .unwrap_or("shell")
 }
 
 fn wait_for_session_process(
@@ -8152,6 +8159,15 @@ fn latest_running_session(sessions: &[ProcessRecord]) -> Option<&ProcessRecord> 
         .max_by_key(|session| session.id)
 }
 
+/// A registered agent's kind, or shell for anything else. Identity is open, so
+/// an unknown provider string is not an agent this build can address.
+fn registered_agent_kind(provider: &str) -> SessionKind {
+    match archductor_core::agent_tools::supported_agent_provider_key(provider) {
+        Some(key) => SessionKind::new(key),
+        None => SessionKind::SHELL,
+    }
+}
+
 fn session_record_matches_kind(
     store: &WorkspaceStore,
     record: &ProcessRecord,
@@ -8166,18 +8182,12 @@ fn session_kind_from_process_record(
 ) -> Result<SessionKind> {
     if let Some(thread_id) = record.chat_thread_id {
         let thread = store.get_chat_thread_record(thread_id)?;
-        return Ok(match thread.provider.as_str() {
-            "codex" => SessionKind::CODEX,
-            "claude" => SessionKind::CLAUDE,
-            _ => SessionKind::SHELL,
-        });
+        return Ok(registered_agent_kind(&thread.provider));
     }
 
-    Ok(match command_session_kind_label(&record.command) {
-        "codex" => SessionKind::CODEX,
-        "claude" => SessionKind::CLAUDE,
-        _ => SessionKind::SHELL,
-    })
+    Ok(registered_agent_kind(command_session_kind_label(
+        &record.command,
+    )))
 }
 
 fn ensure_session_send_target(
@@ -8615,6 +8625,24 @@ mod tests {
             parent_id: parent_id.map(ToOwned::to_owned),
             background_agent: false,
         }
+    }
+
+    /// `session send` resolves a row's agent from the registry, so a session
+    /// running a newly registered agent is addressable instead of being
+    /// misread as a shell and waited on forever.
+    #[test]
+    fn session_kinds_resolve_through_the_agent_registry() {
+        assert_eq!(registered_agent_kind("devin"), SessionKind::new("devin"));
+        assert_eq!(registered_agent_kind("gemini"), SessionKind::new("gemini"));
+        assert_eq!(registered_agent_kind("codex"), SessionKind::CODEX);
+        assert_eq!(registered_agent_kind("not-an-agent"), SessionKind::SHELL);
+
+        assert_eq!(
+            command_session_kind_label("/usr/local/bin/devin acp"),
+            "devin"
+        );
+        assert_eq!(command_session_kind_label("claude -p"), "claude");
+        assert_eq!(command_session_kind_label("/bin/zsh -l"), "shell");
     }
 
     #[test]

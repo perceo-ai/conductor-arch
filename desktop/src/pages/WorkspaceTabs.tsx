@@ -6,6 +6,7 @@ import Icon from "@/components/Icon";
 import { parsePrReadiness, type PrCheckRow, type PrGateTone } from "@/lib/prReadiness";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 import { usePane } from "./paneContext";
+import { providerToKind } from "./chat/providerKind";
 import type {
   WorkflowRun,
   WorkflowRunSummary,
@@ -14,7 +15,6 @@ import type {
   ArchcarConfiguredCheck,
   ArchcarTimelineEvent,
   Checkpoint,
-  SessionKind,
   Todo,
 } from "@/bridge/protocol";
 
@@ -455,13 +455,6 @@ function LocalCheckRow(props: { check: ArchcarConfiguredCheck }) {
   );
 }
 
-function providerKind(provider: string): SessionKind {
-  const p = provider.toLowerCase();
-  if (p.includes("claude")) return "claude";
-  if (p.includes("shell")) return "shell";
-  return "codex";
-}
-
 async function activeWorkspaceChatThread(workspace: string): Promise<ArchcarChatThread> {
   const loaded = threadsStore.list(workspace);
   let threads = loaded.length > 0 ? loaded : await threadsStore.refresh(workspace);
@@ -643,7 +636,7 @@ export function ReviewPromptButton(props: { workspace: string }) {
       });
       if (prompt.type === "error") throw new Error(prompt.message);
       if (prompt.type !== "workspace_git_action_prompt") throw new Error("Unable to prepare review prompt.");
-      const kind = providerKind(thread.provider);
+      const kind = providerToKind(thread.provider);
       nav.selectThreadFor(props.workspace, thread.id);
       await send({
         type: "ensure_chat_thread_session",

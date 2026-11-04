@@ -24,6 +24,7 @@ for a second workspace when what you want is a second chat.
 | Codex | Yes | Default for `session send` when the workspace has no chat yet |
 | Claude Code | Yes | |
 | Gemini CLI | Yes | Driven over the Agent Client Protocol |
+| Devin CLI | Yes | Driven over the Agent Client Protocol (`devin acp`) |
 | Shell | Yes | No agent, just a PTY in the workspace |
 | Aider, Amp, Copilot CLI, Cursor Agent, Grok, OpenCode | Detected only | Listed by `archcar providers`, not launchable as sessions in this build |
 | Cursor, VS Code | Editor launch only | |
