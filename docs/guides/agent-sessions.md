@@ -92,6 +92,15 @@ to add a nice-to-have wastes the turn.
 `archductor archcar interrupt <session-id>` stops the turn without sending
 anything.
 
+Steering needs an agent that can take input mid-turn, and Codex and Claude can.
+ACP agents such as Devin and Gemini take one prompt at a time, so for them
+`--immediate` does not reach the running turn: the message is held and sent as
+soon as that turn ends, ahead of the queue. To stop an ACP agent going the wrong
+way, send the message with `--immediate` and then interrupt the turn; ending the
+turn is what lets the message through. If the session ends first, the message
+moves to the chat's queue, where you can see or remove it, and is delivered when
+that chat next has a ready session.
+
 Input kinds — `user`, `review-prompt`, `control-command`, `raw-terminal` —
 control how the input is framed. You rarely set them by hand; the app uses them
 when staging a review comment or a failing check into a session, which is the

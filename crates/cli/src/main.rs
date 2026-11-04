@@ -1469,7 +1469,8 @@ enum SessionCommand {
     },
     /// Send a message to an agent. A session busy mid-turn gets the message
     /// queued and delivered at its next turn boundary; `--immediate` steers the
-    /// running turn instead.
+    /// running turn instead, or goes next for an ACP agent, which cannot be
+    /// steered.
     Send {
         workspace: String,
         /// Agent to message. Default: the provider of `--thread-id`, else of the
@@ -8329,7 +8330,14 @@ fn resolve_send_kind(
             .list_chat_threads(workspace)?
             .into_iter()
             .map(|thread| thread.provider)
-            .find(|provider| provider == "claude" || provider == "codex"),
+            // Newest first: the chat to continue is the latest one with an
+            // agent `session send` can drive, whichever agent that is.
+            .find(|provider| {
+                archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::new(
+                    provider,
+                ))
+                .is_some()
+            }),
     };
     Ok(provider.map_or(SessionKind::CODEX, |provider| SessionKind::new(&provider)))
 }
@@ -8643,6 +8651,93 @@ mod tests {
         );
         assert_eq!(command_session_kind_label("claude -p"), "claude");
         assert_eq!(command_session_kind_label("/bin/zsh -l"), "shell");
+    }
+
+    fn send_kind_store(root: &std::path::Path) -> super::WorkspaceStore {
+        let repo = root.join("demo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "--initial-branch", "main"]);
+        std::fs::write(repo.join("README.md"), "demo\n").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=Archductor",
+            "-c",
+            "user.email=archductor@example.test",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "init",
+        ]);
+        let db_path = root.join("state.db");
+        super::RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(super::AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(root.join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = super::WorkspaceStore::open_with_logs(&db_path, root.join("logs")).unwrap();
+        store
+            .create(archductor_core::workspace::CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        store
+    }
+
+    /// With neither `--kind` nor `--thread-id`, a follow-up goes to the agent
+    /// the workspace is actually chatting with. A Devin or Gemini chat started
+    /// after a Codex one must not have its follow-up sent to Codex.
+    #[test]
+    fn send_without_kind_or_thread_continues_the_latest_acp_chat() {
+        for provider in ["devin", "gemini"] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = send_kind_store(temp.path());
+            store
+                .create_chat_thread("berlin", "codex", "Older Codex chat", None)
+                .unwrap();
+            store
+                .create_chat_thread("berlin", provider, "Newer chat", None)
+                .unwrap();
+
+            let kind = super::resolve_send_kind(&store, "berlin", None, None).unwrap();
+
+            assert_eq!(kind, SessionKind::new(provider), "{provider} chat");
+        }
+    }
+
+    /// A workspace whose only chat is with an ACP agent must not fall back to
+    /// Codex, which would start a brand-new chat with the wrong agent.
+    #[test]
+    fn send_without_kind_or_thread_does_not_default_an_acp_only_workspace_to_codex() {
+        for provider in ["devin", "gemini"] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = send_kind_store(temp.path());
+            store
+                .create_chat_thread("berlin", provider, "Only chat", None)
+                .unwrap();
+
+            let kind = super::resolve_send_kind(&store, "berlin", None, None).unwrap();
+
+            assert_eq!(kind, SessionKind::new(provider), "{provider} chat");
+        }
     }
 
     #[test]

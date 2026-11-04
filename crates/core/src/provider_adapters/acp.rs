@@ -23,6 +23,7 @@ use crate::archcar::harness_contract::{
 use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
 use crate::session_kind::SessionKind;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unix_millis() -> u64 {
@@ -139,15 +140,39 @@ struct PendingTurn {
     completed: bool,
 }
 
+/// One choice an agent offered on a permission ask. The reply has to name
+/// `id` exactly as offered, while the user picks by `label` or by what `kind`
+/// means, so all three are kept until the ask is answered.
+#[derive(Debug, Clone)]
+struct OfferedOption {
+    id: String,
+    label: String,
+    kind: String,
+}
+
+/// The first offered option of the first kind listed, so preferences read in
+/// order. `None` means the agent offered nothing that says what was chosen.
+fn option_of_kind<'a>(offered: &'a [OfferedOption], kinds: &[&str]) -> Option<&'a OfferedOption> {
+    kinds
+        .iter()
+        .find_map(|kind| offered.iter().find(|option| option.kind == *kind))
+}
+
 pub struct AcpAdapter {
     kind: SessionKind,
     /// The chat thread and session row these events belong to. Without them the
     /// events persist unattached and nothing renders them in a chat.
     chat_thread_id: i64,
     process_id: i64,
+    /// Carried onto permission asks: the chat lists them by workspace and
+    /// thread, and answers are routed back by session id.
+    workspace: String,
     session_id: Option<String>,
     next_request_id: i64,
     pending: Option<PendingTurn>,
+    /// What each unanswered permission ask offered, by its native id. Held in
+    /// memory because an ask cannot outlive the connection it arrived on.
+    offered_options: HashMap<String, Vec<OfferedOption>>,
     initialized: bool,
     sequence: i64,
 }
@@ -158,10 +183,12 @@ impl AcpAdapter {
             kind,
             chat_thread_id: context.thread_id,
             process_id: context.session_id,
+            workspace: context.workspace.clone(),
             session_id: context.native_session_id.clone(),
             // 1 and 2 are reserved for the initialize / session_new handshake.
             next_request_id: 3,
             pending: None,
+            offered_options: HashMap::new(),
             initialized: false,
             sequence: 0,
         }
@@ -185,6 +212,22 @@ impl AcpAdapter {
     /// `session/new` may be sent.
     pub fn is_initialized(&self) -> bool {
         self.initialized
+    }
+
+    /// True once `session/new` has returned a session id. Before that there
+    /// is no ACP session, so a fatal error leaves nothing worth keeping alive.
+    pub fn is_established(&self) -> bool {
+        self.session_id.is_some()
+    }
+
+    /// ACP allows one prompt in flight per session. A prompt is only writable
+    /// once the session exists and the previous turn has been answered.
+    pub fn can_accept_prompt(&self) -> bool {
+        self.is_established()
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.completed)
     }
 
     /// The opening `initialize` request. Emitted by the session layer before
@@ -236,7 +279,16 @@ impl AcpAdapter {
         self.sequence += 1;
         ProviderEventDraft {
             provider: self.kind.as_str().to_owned(),
-            provider_event_id: Some(format!("{}-{}", self.kind.as_str(), self.sequence)),
+            // The sequence restarts with every adapter, so the event id is
+            // scoped to the session row: two chats on one provider would
+            // otherwise both write `{provider}-1` and overwrite each other's
+            // standalone records.
+            provider_event_id: Some(format!(
+                "{}-{}-{}",
+                self.kind.as_str(),
+                self.process_id,
+                self.sequence
+            )),
             provider_item_id: item_id,
             provider_thread_id: self.session_id.clone(),
             provider_turn_id: self
@@ -342,6 +394,19 @@ impl AcpAdapter {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let offered = params["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .zip(&options)
+            .filter_map(|(option, shown)| {
+                Some(OfferedOption {
+                    id: option["optionId"].as_str()?.to_owned(),
+                    label: shown.label.clone(),
+                    kind: shown.description.clone(),
+                })
+            })
+            .collect();
         let title = params["toolCall"]["title"]
             .as_str()
             .unwrap_or("Permission requested")
@@ -349,13 +414,14 @@ impl AcpAdapter {
         // The JSON-RPC id is the only handle back to this ask; an answer
         // without it cannot be routed, so it is carried as the native id.
         let native_id = id.to_string();
+        self.offered_options.insert(native_id.clone(), offered);
 
         vec![HarnessEffect::InteractionRequested(
             ProviderInteractionDraft {
                 provider_key: self.kind.as_str().to_owned(),
-                workspace: String::new(),
-                thread_id: 0,
-                session_id: 0,
+                workspace: self.workspace.clone(),
+                thread_id: self.chat_thread_id,
+                session_id: self.process_id,
                 native_session_id: self.session_id.clone(),
                 native_id: native_id.clone(),
                 kind: ProviderInteractionKind::Permission,
@@ -386,15 +452,30 @@ impl AcpAdapter {
         }
         pending.completed = true;
         let local_input_id = pending.local_input_id.clone();
+        let turn_id = pending.request_id;
 
         if let Some(error) = message.get("error") {
             let text = error["message"].as_str().unwrap_or("ACP request failed");
+            // A failed prompt ends its turn like any other: the transcript
+            // needs the `Turn` record to stop showing it as running, and the
+            // session is still there for the next message.
             return vec![
                 HarnessEffect::TurnCompleted {
                     local_input_id,
                     status: HarnessTurnStatus::Failed,
                 },
+                HarnessEffect::ProviderEvent(self.event(
+                    ProviderEventKind::Turn,
+                    ProviderEventPhase::Failed,
+                    json!({"title": "Turn", "body": text}),
+                    message.clone(),
+                    Some(format!("turn-{turn_id}")),
+                )),
                 HarnessEffect::Fatal(text.to_owned()),
+                HarnessEffect::TurnSettled {
+                    status: HarnessTurnStatus::Failed,
+                },
+                HarnessEffect::Ready,
             ];
         }
 
@@ -406,7 +487,6 @@ impl AcpAdapter {
             "refusal" => HarnessTurnStatus::Failed,
             _ => HarnessTurnStatus::Success,
         };
-        let turn_id = pending.request_id;
         let turn_phase = match status {
             HarnessTurnStatus::Success => ProviderEventPhase::Completed,
             HarnessTurnStatus::Interrupted => ProviderEventPhase::Interrupted,
@@ -454,9 +534,11 @@ impl AcpAdapter {
 
     fn handle_session_new_response(&mut self, message: &Value) -> Vec<HarnessEffect> {
         let Some(session_id) = message["result"]["sessionId"].as_str() else {
-            return vec![HarnessEffect::Fatal(
-                "ACP session/new returned no sessionId".to_owned(),
-            )];
+            let reason = message["error"]["message"]
+                .as_str()
+                .map(|reason| format!("ACP session/new failed: {reason}"))
+                .unwrap_or_else(|| "ACP session/new returned no sessionId".to_owned());
+            return vec![HarnessEffect::Fatal(reason)];
         };
         self.session_id = Some(session_id.to_owned());
         vec![
@@ -475,6 +557,12 @@ impl ManagedHarnessAdapter for AcpAdapter {
             .session_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("ACP session is not established yet"))?;
+        // Replacing an open turn would orphan its response, and with it the
+        // turn's completion; the session layer holds a second prompt back.
+        anyhow::ensure!(
+            self.can_accept_prompt(),
+            "an ACP turn is already running; the next prompt must wait for it"
+        );
         let request_id = self.take_request_id();
         self.pending = Some(PendingTurn {
             request_id,
@@ -561,24 +649,34 @@ impl ManagedHarnessAdapter for AcpAdapter {
                 native_id,
                 resolution,
             } => {
+                let offered = self.offered_options.remove(&native_id).unwrap_or_default();
                 let id: Value =
                     serde_json::from_str(&native_id).unwrap_or(Value::String(native_id));
-                let outcome = match resolution {
-                    ProviderInteractionResolution::Approve
-                    | ProviderInteractionResolution::ApproveForSession => {
-                        json!({"outcome": "selected", "optionId": "allow"})
+                let selected = match resolution {
+                    ProviderInteractionResolution::Approve => {
+                        option_of_kind(&offered, &["allow_once", "allow_always"])
+                    }
+                    ProviderInteractionResolution::ApproveForSession => {
+                        option_of_kind(&offered, &["allow_always", "allow_once"])
                     }
                     ProviderInteractionResolution::Deny { .. } => {
-                        json!({"outcome": "selected", "optionId": "reject"})
+                        option_of_kind(&offered, &["reject_once", "reject_always"])
                     }
-                    ProviderInteractionResolution::Answer { ref answers } => {
-                        let option = answers
-                            .first()
-                            .and_then(|answer| answer.values.first().cloned())
-                            .unwrap_or_else(|| "allow".to_owned());
-                        json!({"outcome": "selected", "optionId": option})
-                    }
-                    ProviderInteractionResolution::Defer => json!({"outcome": "cancelled"}),
+                    ProviderInteractionResolution::Answer { ref answers } => answers
+                        .first()
+                        .and_then(|answer| answer.values.first())
+                        .and_then(|value| {
+                            offered
+                                .iter()
+                                .find(|option| option.label == *value || option.id == *value)
+                        }),
+                    ProviderInteractionResolution::Defer => None,
+                };
+                // `cancelled` is the protocol's answer when no offered option
+                // fits; an id the agent never advertised is not an answer.
+                let outcome = match selected {
+                    Some(option) => json!({"outcome": "selected", "optionId": option.id}),
+                    None => json!({"outcome": "cancelled"}),
                 };
                 HarnessControlPlan::NativeWrite(self.write(
                     json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": outcome}}),
@@ -1074,5 +1172,162 @@ mod tests {
             effect,
             HarnessEffect::Fatal(message) if message.contains("context length exceeded")
         )));
+    }
+
+    /// The interaction surface shows and answers an ask through the chat and
+    /// session that raised it, so the draft has to carry them.
+    #[test]
+    fn permission_requests_name_the_workspace_thread_and_session_that_asked() {
+        let mut adapter = established();
+        let effects = adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"title":"Write src/main.rs"},"options":[]}}"#,
+            ))
+            .unwrap();
+
+        let HarnessEffect::InteractionRequested(draft) = &effects[0] else {
+            panic!("expected an interaction request");
+        };
+        assert_eq!(draft.workspace, "berlin");
+        assert_eq!(draft.thread_id, 11);
+        assert_eq!(draft.session_id, 7);
+        assert_eq!(draft.native_session_id.as_deref(), Some("sess-1"));
+    }
+
+    /// A prompt answered with a JSON-RPC error still gets its `Turn` record:
+    /// the transcript reads a turn's outcome off that record, so without it
+    /// the failed turn renders as running forever.
+    #[test]
+    fn a_failed_prompt_writes_a_failed_turn_record() {
+        let mut adapter = established();
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "input-1".to_owned(),
+                content: "hi".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"context length exceeded"}}"#,
+            ))
+            .unwrap();
+
+        let turn = effects
+            .iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::ProviderEvent(draft) if draft.kind == ProviderEventKind::Turn => {
+                    Some(draft)
+                }
+                _ => None,
+            })
+            .expect("a failed prompt still records its turn");
+        assert_eq!(turn.phase, ProviderEventPhase::Failed);
+        assert_eq!(turn.provider_item_id.as_deref(), Some("turn-3"));
+    }
+
+    /// ACP allows one prompt in flight; a second encode while the first turn
+    /// is open must be refused, not replace the turn whose response is still
+    /// coming.
+    #[test]
+    fn a_second_prompt_is_refused_while_a_turn_is_open() {
+        let mut adapter = established();
+        let input = |id: &str| HarnessInput {
+            local_input_id: id.to_owned(),
+            content: "hi".to_owned(),
+            visible_content: None,
+            kind: crate::archcar::protocol::ArchcarInputKind::User,
+            delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+        };
+        adapter.encode_input(input("input-1")).unwrap();
+        assert!(!adapter.can_accept_prompt());
+        assert!(adapter.encode_input(input("input-2")).is_err());
+
+        let effects = adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#,
+            ))
+            .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted { local_input_id, .. } if local_input_id == "input-1"
+        )));
+        assert!(adapter.can_accept_prompt());
+    }
+
+    /// The optionId in a permission reply has to be one the agent offered.
+    /// Agents name their options freely, so a literal "allow" is an id most of
+    /// them never advertised.
+    #[test]
+    fn permission_replies_carry_the_option_id_the_agent_offered() {
+        let ask = r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"title":"Write src/main.rs"},"options":[{"optionId":"proceed_once","name":"Yes","kind":"allow_once"},{"optionId":"proceed_always","name":"Always","kind":"allow_always"},{"optionId":"decline","name":"No","kind":"reject_once"}]}}"#;
+        for (resolution, expected) in [
+            (ProviderInteractionResolution::Approve, "proceed_once"),
+            (
+                ProviderInteractionResolution::ApproveForSession,
+                "proceed_always",
+            ),
+            (
+                ProviderInteractionResolution::Deny { reason: None },
+                "decline",
+            ),
+            (
+                ProviderInteractionResolution::Answer {
+                    answers: vec![crate::archcar::harness_contract::InteractionAnswer {
+                        question_id: "42".to_owned(),
+                        values: vec!["Always".to_owned()],
+                    }],
+                },
+                "proceed_always",
+            ),
+        ] {
+            let mut adapter = established();
+            adapter.observe_native(record(ask)).unwrap();
+
+            let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+                native_id: "42".to_owned(),
+                resolution: resolution.clone(),
+            });
+
+            let HarnessControlPlan::NativeWrite(write) = plan else {
+                panic!("a permission answer must go back over the live session");
+            };
+            let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+            assert_eq!(payload["id"], 42);
+            assert_eq!(
+                payload["result"]["outcome"],
+                json!({"outcome": "selected", "optionId": expected}),
+                "{resolution:?}"
+            );
+        }
+    }
+
+    /// When the agent offered nothing that means what the user chose, the
+    /// honest reply is a cancellation, not an id it never advertised.
+    #[test]
+    fn permission_replies_never_invent_an_option_the_agent_did_not_offer() {
+        let mut adapter = established();
+        adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"title":"Write src/main.rs"},"options":[{"optionId":"proceed_once","name":"Yes","kind":"allow_once"}]}}"#,
+            ))
+            .unwrap();
+
+        let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+            native_id: "42".to_owned(),
+            resolution: ProviderInteractionResolution::Deny { reason: None },
+        });
+
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("a permission answer must go back over the live session");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+        assert_eq!(
+            payload["result"]["outcome"],
+            json!({"outcome": "cancelled"})
+        );
     }
 }

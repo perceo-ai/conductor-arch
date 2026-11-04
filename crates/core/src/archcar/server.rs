@@ -4021,6 +4021,13 @@ fn with_store(
     }
 }
 
+/// Whether the session reports turn boundaries, and so has a readiness that
+/// sends must respect. Every managed harness does — ACP agents included, which
+/// take one prompt at a time — so this follows the registry, not a vendor list.
+fn kind_tracks_turns(kind: SessionKind) -> bool {
+    managed_harness_for_kind(kind).is_some()
+}
+
 fn validate_send_input_delivery(
     handle: &SessionHandle,
     kind: &crate::archcar::protocol::ArchcarInputKind,
@@ -4035,9 +4042,9 @@ fn validate_send_input_delivery(
     if delivery == crate::archcar::protocol::ArchcarInputDelivery::Immediate {
         return Ok(());
     }
-    if matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) && !snapshot.ready {
+    if kind_tracks_turns(snapshot.kind) && !snapshot.ready {
         anyhow::bail!(
-            "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn",
+            "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn, or, for an agent that cannot be steered, to send right after it",
             provider_name(snapshot.kind),
             snapshot.session_id
         );
@@ -4678,11 +4685,11 @@ fn start_session_for_queued_thread(
     });
 }
 
-/// Marks a codex/claude session busy and returns the readiness it replaced,
-/// for [`restore_session_readiness`] if the input then fails to send.
+/// Marks a managed session busy and returns the readiness it replaced, for
+/// [`restore_session_readiness`] if the input then fails to send.
 fn note_session_not_ready_for_queue(handle: &SessionHandle) -> Option<(bool, AgentSessionState)> {
     let mut snapshot = handle.snapshot.lock().ok()?;
-    if !matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
+    if !kind_tracks_turns(snapshot.kind) {
         return None;
     }
     let before = (snapshot.ready, snapshot.runtime_state);
@@ -9128,6 +9135,163 @@ exit 1
                     ..
                 }
             )) if native_id == "req-1"
+        ));
+    }
+
+    /// An ACP agent takes one prompt at a time, so a busy ACP session refuses
+    /// an automatic send exactly as a busy Codex or Claude one does, instead
+    /// of letting it through to clobber the running turn.
+    #[test]
+    fn busy_acp_sessions_refuse_automatic_input_like_codex_and_claude() {
+        let busy = |kind: SessionKind| {
+            let (command_tx, _command_rx) = mpsc::channel();
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
+                    session_id: 9,
+                    thread_id: 1,
+                    workspace: "berlin".to_owned(),
+                    kind,
+                    pid: 12345,
+                    status: ProcessStatus::Running,
+                    runtime_state: crate::session_state::AgentSessionState::Running,
+                    ready: false,
+                    capabilities: None,
+                    screen: String::new(),
+                    turns: Default::default(),
+                })),
+                command_tx,
+            }
+        };
+        for kind in [
+            SessionKind::CLAUDE,
+            SessionKind::new("gemini"),
+            SessionKind::new("devin"),
+        ] {
+            let handle = busy(kind);
+            assert!(
+                validate_send_input_delivery(
+                    &handle,
+                    &ArchcarInputKind::User,
+                    crate::archcar::protocol::ArchcarInputDelivery::Auto,
+                )
+                .is_err(),
+                "{kind} accepted an automatic send mid-turn"
+            );
+            assert!(note_session_not_ready_for_queue(&handle).is_some());
+        }
+    }
+
+    /// An ACP permission ask is registered from the adapter's own draft, so
+    /// the draft has to name the chat and the session that asked: the chat
+    /// lists pending asks by thread, and the answer is routed by session id.
+    #[test]
+    fn acp_permission_requests_reach_the_chat_and_are_answered_by_the_owning_session() {
+        use crate::archcar::harness_contract::{
+            HarnessAdapterContext, HarnessEffect, ManagedHarnessAdapter, NativeRecord,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "gemini", "Gemini", None)
+            .unwrap();
+        let session_id = 9;
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::new("gemini"),
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+            turns: Default::default(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+        let mut adapter = crate::provider_adapters::acp::AcpAdapter::new(
+            SessionKind::new("gemini"),
+            &HarnessAdapterContext {
+                session_id,
+                thread_id: thread.id,
+                workspace: "berlin".to_owned(),
+                native_session_id: None,
+                controls: Default::default(),
+            },
+        );
+        let mut observe = |line: &str| {
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: "gemini",
+                    payload: line.as_bytes().to_vec(),
+                })
+                .unwrap()
+        };
+        observe(r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1"}}"#);
+        let effects = observe(
+            r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"title":"Write src/main.rs"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}"#,
+        );
+        let Some(HarnessEffect::InteractionRequested(draft)) = effects.into_iter().next() else {
+            panic!("expected an interaction request");
+        };
+        let registered = ProviderInteractionStore::new(db_path.clone()).register(draft);
+
+        let pending = ProviderInteractionStore::new(db_path.clone())
+            .list(Some(thread.id), true)
+            .unwrap_or_default();
+        assert!(
+            registered.is_ok(),
+            "the ACP permission ask could not be registered: {registered:?}"
+        );
+        let interaction = registered.unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>(),
+            vec![interaction.id.clone()],
+            "the ask must be listed on the chat that raised it"
+        );
+
+        dispatch_request(
+            ArchcarRequest::ResolveProviderInteraction {
+                interaction_id: interaction.id.clone(),
+                resolution: InteractionResolution::Approve,
+            },
+            &state,
+        );
+
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(SessionCommand::ApplyControl(
+                crate::archcar::harness_contract::HarnessControl::ResolveInteraction {
+                    native_id,
+                    ..
+                }
+            )) if native_id == "42"
         ));
     }
 
