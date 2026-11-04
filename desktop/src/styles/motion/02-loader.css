@@ -98,6 +98,19 @@
     -webkit-text-fill-color: currentColor;
 }
 
+/* ── Running tool card ──
+   The card's own spinner. Infinite motion is deliberate here (unlike the
+   sidebar's scarce-motion rule): the row says a command is in flight right
+   now, and `showsRunning` drops the class the moment the turn goes idle, so
+   nothing is left spinning after the work stops.
+   Reduced motion needs no opt-out here: the app-wide override in 99-reduced
+   collapses the spin, and the circle still marks the row as in flight by
+   presence (plus its "Running" title), the way the dot loader does. */
+.chat-inline-event-spinner {
+    animation: mo-spin var(--mo-loop) linear infinite;
+    transform-origin: 50% 50%;
+}
+
 /* ── Streaming reveal ──
  *
  * Streamed text is one text node rewritten in place, so there is no per-token

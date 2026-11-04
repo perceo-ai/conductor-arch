@@ -19,7 +19,10 @@ const PLAN_BODY = "## Step one\n\nDo the thing.";
 
 let items: ArchcarProjectionItem[] = [];
 let pending: ProviderInteractionRecord | null = null;
-let session = { runtime_state: "ready", ready: true };
+// Reactive, not a plain variable: a test that reassigns a captured object can
+// only prove what the card renders at mount, and the bug worth catching here is
+// a spinner that keeps spinning after the state it reads has changed.
+const [session, setSession] = createSignal({ runtime_state: "ready", ready: true });
 // A reactive feed for tests that change the thread after it is mounted, the
 // way the store does while an agent streams. Null falls back to `items`.
 const [liveItems, setLiveItems] = createSignal<ArchcarProjectionItem[] | null>(null);
@@ -55,7 +58,15 @@ function planRecord(detail: string): ProviderInteractionRecord {
 }
 
 vi.mock("@/store", () => ({
-  chatStore: { slice: () => ({ session, phase: { kind: "ready" }, queue: [] }) },
+  chatStore: {
+    slice: () => ({
+      get session() {
+        return session();
+      },
+      phase: { kind: "ready" },
+      queue: [],
+    }),
+  },
   interactionsStore: { pending: () => pending },
   actions: { resolveInteraction: vi.fn(() => Promise.resolve()), revealPanel: vi.fn() },
 }));
@@ -91,7 +102,7 @@ afterEach(() => {
   items = [];
   setLiveItems(null);
   pending = null;
-  session = { runtime_state: "ready", ready: true };
+  setSession({ runtime_state: "ready", ready: true });
 });
 
 describe("Timeline", () => {
@@ -156,7 +167,7 @@ describe("Timeline", () => {
   });
 
   it("withholds the current turn fork control until generation finishes", () => {
-    session = { runtime_state: "running", ready: false };
+    setSession({ runtime_state: "running", ready: false });
     items = [
       projectionItem({ id: "u1", render_class: "user_chat", body: "first", timeline_seq: 1 }),
       projectionItem({ id: "a1", body: "first done", timeline_seq: 2 }),
@@ -202,7 +213,7 @@ describe("Timeline", () => {
   });
 
   it("nests a subagent's rows inside its Agent card until the card is opened", () => {
-    session = { runtime_state: "running", ready: false };
+    setSession({ runtime_state: "running", ready: false });
     items = [
       projectionItem({
         id: "agent",
@@ -319,7 +330,7 @@ describe("Timeline", () => {
   });
 
   it("follows a running subagent's new action into an open, capped card", () => {
-    session = { runtime_state: "running", ready: false };
+    setSession({ runtime_state: "running", ready: false });
     const call = (i: number) =>
       projectionItem({
         id: `call-${i}`,
@@ -378,10 +389,11 @@ describe("Timeline", () => {
     const card = mount().querySelector(".chat-inline-event")!;
     expect(card.classList.contains("chat-inline-event-running")).toBe(true);
     expect(card.textContent).toContain("Background");
+    expect(card.querySelector(".chat-inline-event-spinner")).not.toBeNull();
   });
 
   it("marks a running command without attaching the looping loader", () => {
-    session = { runtime_state: "running", ready: false };
+    setSession({ runtime_state: "running", ready: false });
     items = [
       projectionItem({
         id: "cmd",
@@ -395,5 +407,52 @@ describe("Timeline", () => {
     const command = mount().querySelector(".chat-inline-event");
     expect(command?.classList.contains("chat-inline-event-running")).toBe(true);
     expect(command?.classList.contains("chat-inline-event-loading")).toBe(false);
+    // The visible signal, not just the class: a tint alone left a running
+    // command looking the same as a finished one.
+    expect(command?.querySelector(".chat-inline-event-spinner")).not.toBeNull();
+  });
+
+  // An interrupted or crashed turn leaves its cards marked "running" forever,
+  // so the spinner has to come off the card that is already on screen. Asserted
+  // across the transition, without remounting: a card that read the state once
+  // at mount would pass a static check and still spin for the rest of the
+  // session in the real app.
+  it("stops spinning a card on screen once the agent goes idle", () => {
+    setSession({ runtime_state: "running", ready: false });
+    items = [
+      projectionItem({
+        id: "cmd",
+        render_class: "command_card",
+        title: "Ran cargo test",
+        body: "",
+        status: "running",
+      }),
+    ];
+
+    const el = mount();
+    const command = el.querySelector(".chat-inline-event")!;
+    expect(command.querySelector(".chat-inline-event-spinner")).not.toBeNull();
+
+    setSession({ runtime_state: "ready", ready: true });
+
+    // Same node, not a re-render of a fresh one.
+    expect(el.querySelector(".chat-inline-event")).toBe(command);
+    expect(command.querySelector(".chat-inline-event-spinner")).toBeNull();
+    expect(command.classList.contains("chat-inline-event-running")).toBe(false);
+  });
+
+  it("leaves a finished command without a spinner", () => {
+    setSession({ runtime_state: "running", ready: false });
+    items = [
+      projectionItem({
+        id: "cmd",
+        render_class: "command_card",
+        title: "Ran cargo test",
+        body: "",
+        status: "complete",
+      }),
+    ];
+
+    expect(mount().querySelector(".chat-inline-event-spinner")).toBeNull();
   });
 });
