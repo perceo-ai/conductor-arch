@@ -75,6 +75,18 @@ export default function ChatSurface(props: { workspace: string }) {
     if (pane.focused()) nav.setChatSurfaceShowsChat(true);
   });
 
+  // A finished chat is acknowledged by being seen: on screen here, in either
+  // pane, with the window focused. Coming back to it any other way than its tab
+  // (workspace switch, window focus, closing a file) counts the same.
+  createEffect(() => {
+    const threadId = pane.threadId();
+    if (threadId == null || view().kind !== "chat") return;
+    if (!nav.windowFocused() || nav.activePage() !== "workspace") return;
+    if (chatStore.slice(threadId).completedTurnAttention) {
+      chatStore.setCompletedTurnAttention(threadId, false);
+    }
+  });
+
   // Let the right-panel Browse/Changes open files, and the recent-commits
   // list open a commit's diff, into this workspace's center. Registered per
   // workspace (and re-registered when the pane's tab switches workspace) so
@@ -134,7 +146,6 @@ export default function ChatSurface(props: { workspace: string }) {
     const seed = seedForSelectedThread(thread, pendingSeed(), prefsStore.seedModelFor);
     if (seed) setPendingSeed((p) => ({ ...p, [thread.id]: seed }));
     pane.selectThread(thread.id);
-    chatStore.setCompletedTurnAttention(thread.id, false);
     setView({ kind: "chat" });
     loadThread(thread.id);
   }

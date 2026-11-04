@@ -29,6 +29,7 @@ export type IconName =
   | "file-code"
   | "file-text"
   | "folder"
+  | "grip-vertical"
   | "git-merge"
   | "git-compare"
   | "git-pull-request"
@@ -110,6 +111,7 @@ const PATHS: Record<IconName, () => JSX.Element> = {
   "layout-dashboard": () => <><rect width="7" height="9" x="3" y="3" rx="1" /><rect width="7" height="5" x="14" y="3" rx="1" /><rect width="7" height="9" x="14" y="12" rx="1" /><rect width="7" height="5" x="3" y="16" rx="1" /></>,
   monitor: () => <><rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" /></>,
   "panel-left": () => <><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" /></>,
+  "grip-vertical": () => <><circle cx="9" cy="6" r="1" /><circle cx="9" cy="12" r="1" /><circle cx="9" cy="18" r="1" /><circle cx="15" cy="6" r="1" /><circle cx="15" cy="12" r="1" /><circle cx="15" cy="18" r="1" /></>,
   "panel-right": () => <><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M15 3v18" /></>,
   paperclip: () => <path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551" />,
   pencil: () => <><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></>,

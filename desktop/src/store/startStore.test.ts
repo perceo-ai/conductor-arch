@@ -151,27 +151,27 @@ describe("startStore: tab realm when a workspace opens during startup", () => {
     resolveList({ ok: true, clients: [], ...result });
     await started;
 
-    // The user's tab survived (the restore was skipped)...
-    expect(nav.workspaceTabs().groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
+    // The user's workspace survived (the restore was skipped)...
+    expect(nav.workspacePanes().panes.map((pane) => pane.workspace)).toEqual(["alpha"]);
     return nav;
   }
 
   it("points persistence at the saved client's realm", async () => {
     const nav = await openTabWhileClientsLoad({ activeId: "devbox" });
     expect(nav.tabRealm()).toBe("client:devbox");
-    // ...and the tab already on screen is saved under it, not just future ones.
-    const { loadTabRealm } = await import("@/lib/tabPersistence");
-    expect(loadTabRealm("client:devbox")?.groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
+    // ...and what is already on screen is saved under it, not just future panes.
+    const { loadPaneRealm } = await import("@/lib/panePersistence");
+    expect(loadPaneRealm("client:devbox")?.panes.map((pane) => pane.workspace)).toEqual(["alpha"]);
     // The click that landed before the realm was known wrote nothing under the
     // real local machine's key (it used to, via the shared "local" string).
-    expect(loadTabRealm("local")).toBeNull();
+    expect(loadPaneRealm("local")).toBeNull();
   });
 
   it("points persistence at the environment-pinned daemon's realm", async () => {
     const nav = await openTabWhileClientsLoad({ activeId: null, envAddress: "office:7420" });
     expect(nav.tabRealm()).toBe("env:office:7420");
-    const { loadTabRealm } = await import("@/lib/tabPersistence");
-    expect(loadTabRealm("env:office:7420")?.groups.flatMap((g) => g.tabs)).toEqual(["alpha"]);
+    const { loadPaneRealm } = await import("@/lib/panePersistence");
+    expect(loadPaneRealm("env:office:7420")?.panes.map((pane) => pane.workspace)).toEqual(["alpha"]);
   });
 });
 

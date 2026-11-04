@@ -260,13 +260,19 @@ chime back. An agent stopping to ask you something also chimes, because the
 chat is waiting on you. Each chat chimes once per stop: reconnecting, switching
 chats, or refreshing does not repeat it.
 
+A finished chat you have not seen also changes its workspace's sidebar row: the
+git status icon is replaced by a blinking circle while any chat in that
+workspace is waiting to be read. Having the chat on screen in a focused window
+acknowledges it, and the git status comes back once none are left. A chat that
+is working again, or waiting on your answer, does not count.
+
 Two settings live under **Settings → General → Sounds**. Both are stored per
 machine with the app's other preferences:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
 | Sound when a chat finishes | On | Turns the chime off entirely. |
-| Quiet for the chat on screen | Off | Skips the chime for the chat you are looking at while Archductor is focused. |
+| Quiet for the chat on screen | Off | Skips the chime for the focused chat while Archductor is focused. Chats in the other pane still chime. |
 
 The chime respects the OS's do-not-disturb where the platform exposes it:
 GNOME (and desktops built on its notification settings) on Linux. macOS Focus

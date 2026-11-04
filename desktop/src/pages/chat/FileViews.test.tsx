@@ -63,13 +63,13 @@ describe("FileEditor draft stash", () => {
   it("remounts the editor on a daemon switch, parking the old editor's draft under its own realm", async () => {
     const { render, FileView, nav, editorDraftStash } = await launch();
     // Opened while pointed at daemon-a.
-    nav.restoreWorkspaceTabs("daemon-a", () => true);
+    nav.restoreWorkspacePanes("daemon-a", () => true);
     const { host, area } = await openEditorAndEdit(render, FileView);
 
     // A daemon switch that lands on a workspace with the same name keeps the
     // file view mounted. The editor itself must not survive it: its cached
     // realm would hand the new daemon the old daemon's drafts.
-    nav.restoreWorkspaceTabs("daemon-b", () => true);
+    nav.restoreWorkspacePanes("daemon-b", () => true);
     expect(nav.tabRealm()).toBe("daemon-b");
 
     const fresh = await vi.waitFor(() => {
@@ -121,7 +121,7 @@ describe("FileEditor draft stash", () => {
     // Then they switch daemons (what clientsStore.activate/add/remove do), and
     // the new daemon restores a workspace with the same name.
     nav.deferTabRestore({ daemonSwitch: true });
-    nav.restoreWorkspaceTabs("client:devbox", () => true);
+    nav.restoreWorkspacePanes("client:devbox", () => true);
 
     const fresh = await vi.waitFor(() => {
       const el = host.querySelector<HTMLTextAreaElement>("textarea.ws-file-editor-area");
@@ -148,7 +148,7 @@ describe("FileEditor draft stash", () => {
     // the real local realm share a key string, the fresh editor immediately
     // re-adopts the old daemon's parked draft and can save it here.
     nav.deferTabRestore({ daemonSwitch: true });
-    nav.restoreWorkspaceTabs("local", () => true);
+    nav.restoreWorkspacePanes("local", () => true);
 
     const fresh = await vi.waitFor(() => {
       const el = host.querySelector<HTMLTextAreaElement>("textarea.ws-file-editor-area");

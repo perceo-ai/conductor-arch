@@ -1165,7 +1165,7 @@ export const actions = {
           delete_branch: deleteBranch,
         }),
       );
-      nav.closeWorkspaceTab(workspace);
+      nav.closeWorkspacePane(workspace);
       if (nav.selectedWorkspace() === workspace) nav.goToPage("dashboard");
     } finally {
       // A failed branch step still deleted the workspace; a refused delete

@@ -6,6 +6,7 @@ import { daemonEpoch } from "./daemonEpoch";
 import { interactionsStore } from "./interactions";
 import { nav } from "./nav";
 import { prefsStore } from "./prefs";
+import { threadsStore } from "./threads";
 
 // The "a chat needs you" sound. One selector says whether a chat is still
 // working (main agent OR any subagent); one detector turns that into a single
@@ -24,10 +25,27 @@ export function chatGenerating(threadId: number): boolean {
   });
 }
 
+/**
+ * This chat finished and the operator has not seen it yet. Reactive. A chat
+ * that went back to work, or is parked on a question, says so itself.
+ */
+export function chatAwaitingAcknowledgement(threadId: number): boolean {
+  return (
+    chatStore.slice(threadId).completedTurnAttention &&
+    !chatGenerating(threadId) &&
+    interactionsStore.pending(threadId) == null
+  );
+}
+
+/** Any chat in this workspace is waiting to be acknowledged. Reactive. */
+export function workspaceAwaitingAcknowledgement(workspace: string): boolean {
+  return threadsStore.list(workspace).some((thread) => chatAwaitingAcknowledgement(thread.id));
+}
+
 export interface TurnSoundGate {
   enabled: boolean;
   suppressWhenViewing: boolean;
-  /** The operator is looking at this chat in a focused window. */
+  /** This is the focused pane's chat, in a focused window. */
   viewing: boolean;
 }
 
@@ -46,10 +64,7 @@ function currentGate(threadId: number): TurnSoundGate {
   return {
     enabled: prefsStore.state.turnSound,
     suppressWhenViewing: prefsStore.state.turnSoundSuppressWhenViewing,
-    viewing:
-      nav.windowFocused() &&
-      nav.activePage() === "workspace" &&
-      nav.chatThreadInView(threadId),
+    viewing: nav.chatThreadFocused(threadId),
   };
 }
 
@@ -62,15 +77,35 @@ export interface ObserveOptions {
   canFinish?: boolean;
 }
 
-/** Re-evaluate one chat; plays the sound if it just stopped generating. */
-export function observeChatGeneration(threadId: number, opts: ObserveOptions = {}): void {
+function syncEdgesEpoch(): void {
   if (daemonEpoch() !== edgesEpoch) {
     edges.reset();
     edgesEpoch = daemonEpoch();
   }
+}
+
+/**
+ * The daemon says a turn ended, so this chat was busy whatever the pulls saw: a
+ * short turn on a session already up has no `session_started` and can fall
+ * between two pulls, and nothing here sent it when it came from the queue. The
+ * settled pull that follows judges the finish. A chat with no session has
+ * already had its edge from `session_exited`.
+ */
+export function noteTurnCompleted(threadId: number): void {
+  syncEdgesEpoch();
+  if (chatStore.slice(threadId).session == null) return;
+  edges.observe(threadId, true);
+}
+
+/** Re-evaluate one chat; flags it and plays the sound if it just stopped generating. */
+export function observeChatGeneration(threadId: number, opts: ObserveOptions = {}): void {
+  syncEdgesEpoch();
   const generating = chatGenerating(threadId);
   if (!generating && opts.canFinish === false) return;
   if (!edges.observe(threadId, generating)) return;
+  // Set even for the chat on screen: the surface showing it clears the flag
+  // the moment the operator can see it, which is the one place that knows.
+  chatStore.setCompletedTurnAttention(threadId, true);
   if (!shouldPlayTurnSound(currentGate(threadId))) return;
   void (async () => {
     // Do-not-disturb is asked at play time, not cached: it is the operator's

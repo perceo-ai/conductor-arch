@@ -143,43 +143,47 @@ already holds clears the old binding rather than leaving the keymap ambiguous.
 it as a repository view default, but the Electron app does not read it yet;
 Settings is the working path today.
 
-## Workspace tabs and splits
+## Workspace panes and splits
 
-Every workspace you open stays open as a tab above the workspace view, like a
-browser. Clicking a workspace in the sidebar (or jumping with `mod+1`…) opens
-its tab, or focuses the tab it already has. Each tab comes back on the chat it
+The workspace view is one or two panes, and a pane shows exactly one
+workspace. There is no tab strip: the sidebar is the workspace list. Clicking a
+workspace there (or jumping with `mod+1`…) shows it in the focused pane, or
+focuses the pane that already has it. Each workspace comes back on the chat it
 was last on, and every chat keeps its own unsent draft.
 
 To see two workspaces at once, split:
 
-- Drag a tab onto the right or bottom edge of the workspace view, or
-- right-click a tab → **Split Right** / **Split Down**, or
+- Drag a workspace from the sidebar onto the right or bottom edge of the
+  workspace view, or
 - right-click a workspace in the sidebar → **Open in Split Right** /
   **Open in Split Down**.
 
-There are at most two panes. With two open, dragging a tab onto the other pane
-(or **Move to Other Pane**) moves it across. Closing a pane's last tab, or
-dragging it out, collapses the split. Middle-click closes a tab.
+There are at most two panes. With two open, dropping a workspace on the middle
+of a pane shows it there; dragging one pane's workspace (by the grip in its
+header) onto the other pane swaps them. The **✕** beside that grip closes the
+pane and collapses the split, as does **Close** in the sidebar's right-click
+menu.
 
-One pane is focused at a time — its active tab has the accent underline and is
-the workspace the sidebar highlights. Clicking anywhere in a pane focuses it,
-and keyboard shortcuts (new chat, close chat, review, terminal, changes…) act on
-the focused pane only. Both panes stay live: a turn finishing in either one
-counts as on screen for the turn-finished sound and the unread dot.
+One pane is focused at a time — it is the workspace the sidebar highlights.
+Clicking anywhere in a pane focuses it, and keyboard shortcuts (new chat, close
+chat, review, terminal, changes…) act on the focused pane only. Both panes stay
+live: a chat on screen in either pane counts as read, and a turn finishing in
+the pane that is not focused still chimes, even with **Quiet for the chat on
+screen** on.
 
-Tabs survive a restart: the app reopens with the same tabs, split, focused
-pane, and each workspace's last chat. They are saved per daemon in the
-renderer's local preferences — like pins and keybindings, which tabs you keep
-open is your view, not workspace state — so switching daemons in **Clients**
-swaps to that daemon's own saved tabs, and a workspace deleted in between
+Panes survive a restart: the app reopens with the same workspaces, split,
+focused pane, and each workspace's last chat. They are saved per daemon in the
+renderer's local preferences — like pins and keybindings, what you keep on
+screen is your view, not workspace state — so switching daemons in **Clients**
+swaps to that daemon's own saved panes, and a workspace deleted in between
 simply does not come back. Unsent drafts do not survive a restart.
 
 In a split, the panels around the chat — Files, Changes, Checks, the
 terminal, the PR bar — show only in the focused pane; the other pane is a
 plain chat column, so neither conversation gets squeezed. Click a pane and the
 inspector (and, side by side, some extra width) follows. Both panes share one
-panel layout (see below), so edit layouts from the focused pane. The CLI has
-no tab equivalent: it has no long-lived view to put tabs in.
+panel layout (see below), so edit layouts from the focused pane. The CLI has no
+pane equivalent: it has no long-lived view to split.
 
 ## Layouts
 

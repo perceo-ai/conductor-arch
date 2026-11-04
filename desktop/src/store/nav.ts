@@ -1,19 +1,19 @@
 import { batch, createSignal, untrack } from "solid-js";
 import {
   activeWorkspace,
-  closeTab,
-  emptyTabs,
-  focusGroup,
-  groupIndexOf,
-  moveTab,
-  openTab,
-  renameTab,
-  retainTabs,
-  splitTab,
+  closePane,
+  closeWorkspace,
+  emptyPanes,
+  focusPane,
+  openWorkspace,
+  openWorkspaceIn,
+  renameWorkspace as renamePaneWorkspace,
+  retainWorkspaces,
+  splitWorkspace,
   type SplitDirection,
-  type WorkspaceTabsState,
-} from "@/lib/workspaceTabs";
-import { loadTabRealm, materializeTabs, saveTabRealm, serializeTabs } from "@/lib/tabPersistence";
+  type WorkspacePanesState,
+} from "@/lib/workspacePanes";
+import { loadPaneRealm, materializePanes, savePaneRealm, serializePanes } from "@/lib/panePersistence";
 import { composerDrafts } from "@/lib/composerDrafts";
 import { editorDraftStash } from "@/lib/editorDraftStash";
 
@@ -31,9 +31,9 @@ const [windowFocused, setWindowFocused] = createSignal(true);
 // False while the chat surface shows a file or commit over the selected chat:
 // the chat tab stays selected underneath, but it is not what is on screen.
 const [chatSurfaceShowsChat, setChatSurfaceShowsChat] = createSignal(true);
-// Open workspace tabs. The focused group's active tab is `selectedWorkspace`;
-// every other tab remembers the chat it was on so coming back lands there.
-const [workspaceTabs, setWorkspaceTabs] = createSignal<WorkspaceTabsState>(emptyTabs());
+// The split view's panes. The focused pane's workspace is `selectedWorkspace`;
+// the other remembers the chat it was on so coming back lands there.
+const [workspacePanes, setWorkspacePanes] = createSignal<WorkspacePanesState>(emptyPanes());
 const [threadByWorkspace, setThreadByWorkspace] = createSignal<Record<string, number>>({});
 /**
  * The realm before any daemon identity is known. Deliberately a different
@@ -117,7 +117,7 @@ function persistTabs() {
   // The first real assignment (setTabRealm, restoreWorkspaceTabs) persists
   // whatever is on screen then — same shape as the awaitingTabRestore gate.
   if (realm === UNASSIGNED_REALM) return;
-  saveTabRealm(realm, serializeTabs(workspaceTabs(), threadByWorkspace()));
+  savePaneRealm(realm, serializePanes(workspacePanes(), threadByWorkspace()));
 }
 
 interface NavEntry {
@@ -156,12 +156,12 @@ function selectRaw(name: string | null) {
 }
 
 /**
- * Commit a new tab state and follow its focused tab. When the last tab closes
+ * Commit new pane state and follow the focused pane. When the last pane empties
  * on the workspace page there is nothing left to show, so the dashboard takes
  * over rather than an empty "select a workspace" screen.
  */
-function commitTabs(next: WorkspaceTabsState) {
-  setWorkspaceTabs(next);
+function commitPanes(next: WorkspacePanesState) {
+  setWorkspacePanes(next);
   persistTabs();
   const name = activeWorkspace(next);
   selectRaw(name);
@@ -172,7 +172,7 @@ function commitTabs(next: WorkspaceTabsState) {
 
 function apply(entry: NavEntry) {
   if (entry.selectedWorkspace != null) {
-    setWorkspaceTabs(openTab(workspaceTabs(), entry.selectedWorkspace));
+    setWorkspacePanes(openWorkspace(workspacePanes(), entry.selectedWorkspace));
     persistTabs();
   }
   selectRaw(entry.selectedWorkspace);
@@ -187,7 +187,7 @@ export const nav = {
   chatSurfaceShowsChat,
   canBack,
   canForward,
-  workspaceTabs,
+  workspacePanes,
   awaitingTabRestore,
   /** Storage realm of the tabs currently on screen (drafts key off it too). */
   tabRealm,
@@ -237,14 +237,14 @@ export const nav = {
   setChatSurfaceShowsChat,
   /** Select a workspace and switch to its page (clears per-workspace selections). */
   /**
-   * Select a workspace and switch to its page. The workspace opens as a tab, or
-   * its existing tab (in either pane) takes focus.
+   * Select a workspace and switch to its page. It loads into the focused pane,
+   * or the pane that already shows it takes focus.
    */
   selectWorkspace(name: string | null) {
     if (selectedWorkspace() === name && activePage() === "workspace") return;
     pushHistory();
     if (name != null) {
-      setWorkspaceTabs(openTab(workspaceTabs(), name));
+      setWorkspacePanes(openWorkspace(workspacePanes(), name));
       persistTabs();
     }
     selectRaw(name);
@@ -301,90 +301,90 @@ export const nav = {
    */
   chatThreadInView(threadId: number): boolean {
     if (selectedChatThread() === threadId) return chatSurfaceShowsChat();
-    const tabs = workspaceTabs();
-    return tabs.groups.some(
-      (group, i) => i !== tabs.focused && group.active != null && rememberedThread(group.active) === threadId,
+    const panes = workspacePanes();
+    return panes.panes.some(
+      (pane, i) => i !== panes.focused && pane.workspace != null && rememberedThread(pane.workspace) === threadId,
     );
   },
 
-  /** Focus a pane: its active tab becomes the selected workspace. */
-  focusTabGroup(index: number) {
-    const next = focusGroup(workspaceTabs(), index);
-    if (next !== workspaceTabs()) commitTabs(next);
+  /** True when this chat is the one the focused pane shows, in a focused window. */
+  chatThreadFocused(threadId: number): boolean {
+    return (
+      windowFocused() &&
+      activePage() === "workspace" &&
+      selectedChatThread() === threadId &&
+      chatSurfaceShowsChat()
+    );
   },
 
-  closeWorkspaceTab(name: string) {
-    commitTabs(closeTab(workspaceTabs(), name));
+  /** Focus a pane: its workspace becomes the selected workspace. */
+  focusPane(index: number) {
+    const next = focusPane(workspacePanes(), index);
+    if (next !== workspacePanes()) commitPanes(next);
   },
 
-  /** Close every tab in `name`'s pane except `name`. */
-  closeOtherWorkspaceTabs(name: string) {
-    const group = workspaceTabs().groups.find((candidate) => candidate.tabs.includes(name));
-    if (!group) return;
-    let next = workspaceTabs();
-    for (const tab of group.tabs) if (tab !== name) next = closeTab(next, tab);
-    commitTabs(openTab(next, name));
+  /** Close pane `index`; the last pane empties instead of disappearing. */
+  closePane(index: number) {
+    commitPanes(closePane(workspacePanes(), index));
   },
 
-  splitWorkspaceTab(name: string, direction: SplitDirection) {
-    commitTabs(splitTab(workspaceTabs(), name, direction));
+  /** Close whichever pane shows `name` (archive, delete, sidebar menu). */
+  closeWorkspacePane(name: string) {
+    commitPanes(closeWorkspace(workspacePanes(), name));
   },
 
   /**
-   * Open `name` beside what is on screen: into a new split, or into the other
-   * pane when the view is already split. With nothing else open there is no
-   * second pane to make, so it simply opens.
+   * Open `name` beside what is on screen: in a new split, or in the other pane
+   * when the view is already split. With nothing else open there is no second
+   * pane to make, so it simply opens.
    */
   openWorkspaceInSplit(name: string, direction: SplitDirection) {
     pushHistory();
-    const tabs = workspaceTabs();
-    const at = groupIndexOf(tabs, name);
-    let next = openTab(tabs, name);
-    // Already beside the focused pane: focusing it is the whole job.
-    const alreadyBeside = tabs.groups.length > 1 && at >= 0 && at !== tabs.focused;
-    if (!alreadyBeside) next = splitTab(next, name, direction);
-    commitTabs(next);
+    commitPanes(splitWorkspace(workspacePanes(), name, direction));
     setActivePage("workspace");
   },
 
-  moveWorkspaceTab(name: string, group: number, index: number) {
-    commitTabs(moveTab(workspaceTabs(), name, group, index));
+  /** Load `name` into pane `index` (a drop onto that pane), focusing it there. */
+  openWorkspaceInPane(name: string, index: number) {
+    pushHistory();
+    commitPanes(openWorkspaceIn(workspacePanes(), name, index));
+    setActivePage("workspace");
   },
 
-  /** Follow a server-side rename: the tab, its chat memory, and the selection. */
+  /** Follow a server-side rename: the pane, its chat memory, and the selection. */
   renameWorkspace(from: string, to: string) {
     const memory = threadByWorkspace();
     if (from in memory) {
       const { [from]: thread, ...rest } = memory;
       setThreadByWorkspace({ ...rest, [to]: thread });
     }
-    setWorkspaceTabs(renameTab(workspaceTabs(), from, to));
+    setWorkspacePanes(renamePaneWorkspace(workspacePanes(), from, to));
     persistTabs();
     if (selectedWorkspace() === from) setSelectedWorkspaceRaw(to);
   },
 
-  resetWorkspaceTabs() {
+  resetWorkspacePanes() {
     setThreadByWorkspace({});
-    commitTabs(emptyTabs());
+    commitPanes(emptyPanes());
   },
 
   /**
-   * Swap to `realm`'s saved tabs (boot, or a daemon switch). The old realm's
+   * Swap to `realm`'s saved panes (boot, or a daemon switch). The old realm's
    * state is already on disk — every mutation persists — so this only loads.
    * Stored names are checked against `keep` (the live inventory); whatever
    * survives is committed, and landing on a restored tab switches to the
    * workspace page so the app opens where it was closed.
    */
-  restoreWorkspaceTabs(realm: string, keep: (name: string) => boolean) {
+  restoreWorkspacePanes(realm: string, keep: (name: string) => boolean) {
     // One batch: views keyed on the realm remount once, against the restored
-    // selection, not against the old realm's tabs in between.
+    // selection, not against the old realm's panes in between.
     batch(() => {
       assignTabRealm(realm);
       setAwaitingTabRestore(false);
-      const { state, threads } = materializeTabs(loadTabRealm(realm), keep);
+      const { state, threads } = materializePanes(loadPaneRealm(realm), keep);
       setThreadByWorkspace(threads);
-      commitTabs(state);
-      // commitTabs's selection short-circuits when the focused workspace kept
+      commitPanes(state);
+      // commitPanes's selection short-circuits when the focused workspace kept
       // its name across realms, but the thread ids under it are the new
       // daemon's — point the selection at the restored memory explicitly.
       const active = activeWorkspace(state);
@@ -393,10 +393,10 @@ export const nav = {
     });
   },
 
-  /** Drop tabs for workspaces that were archived, deleted, or are not on this daemon. */
-  retainWorkspaceTabs(keep: (name: string) => boolean) {
-    const next = retainTabs(workspaceTabs(), keep);
-    if (next !== workspaceTabs()) commitTabs(next);
+  /** Drop panes for workspaces that were archived, deleted, or are not on this daemon. */
+  retainWorkspacePanes(keep: (name: string) => boolean) {
+    const next = retainWorkspaces(workspacePanes(), keep);
+    if (next !== workspacePanes()) commitPanes(next);
   },
 
   back() {

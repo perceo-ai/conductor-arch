@@ -22,6 +22,7 @@ export type { DialogSpec, ConfirmSpec } from "./dialogs";
 export { setupStore } from "./setup";
 export { clientsStore } from "./clients";
 export { threadsStore } from "./threads";
+export { workspaceAwaitingAcknowledgement } from "./turnSound";
 export { terminalStore } from "./terminal";
 export { interactionsStore } from "./interactions";
 export { newChatContextStore } from "./newChatContext";
@@ -100,17 +101,17 @@ export function startStore(): Promise<void> {
     await refreshInventory().catch(() => {
       inventoryOk = false;
     });
-    // Bring back the tabs from last run — unless the user already opened
+    // Bring back the panes from last run — unless the user already opened
     // something while we were loading, which wins. A failed inventory pull
     // leaves the restore owed instead: restoring against an empty store would
-    // drop every saved tab and persist the loss. WorkspacePanes retries once
+    // drop every saved pane and persist the loss. WorkspacePanes retries once
     // a good inventory lands (the on-focus refresh, typically).
-    if (nav.workspaceTabs().groups.every((group) => group.tabs.length === 0)) {
+    if (nav.workspacePanes().panes.every((pane) => pane.workspace == null)) {
       if (inventoryOk && workspacesStore.loaded()) restoreTabsForActiveDaemon();
       else nav.deferTabRestore();
     } else {
       // A workspace was already opened while this was loading (it wins over the
-      // saved tabs) — still point future persistence at the right daemon's
+      // saved panes) — still point future persistence at the right daemon's
       // realm, independent of whether the restore itself ran.
       nav.setTabRealm(tabRealmKey());
     }

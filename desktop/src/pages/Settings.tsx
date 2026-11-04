@@ -301,7 +301,7 @@ export function SettingsPage() {
               />
               <SettingsRow
                 title="Quiet for the chat on screen"
-                description="Skip the chime for the chat you are looking at while Archductor is focused."
+                description="Skip the chime for the focused chat while Archductor is focused. Other panes still ring."
                 control={
                   <OnOffSegmented
                     value={prefsStore.state.turnSoundSuppressWhenViewing}

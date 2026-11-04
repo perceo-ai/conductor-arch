@@ -149,17 +149,21 @@ describe("applyEvent session failures", () => {
 });
 
 describe("applyEvent chat attention", () => {
-  it("marks a completed turn as attention only when its chat is not selected", async () => {
+  it("flags a finished turn whichever chat is selected; seeing it is what clears the flag", async () => {
     const { applyEvent } = await import("./reducer");
     const { chatStore } = await import("./chat");
     const { nav } = await import("./nav");
+    const live = { session_id: 11, status: "running", runtime_state: "streaming", ready: false };
 
     nav.selectChatThread(1);
+    chatStore.setSession(1, live);
+    chatStore.setSession(2, live);
     applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "success" });
-    expect(chatStore.slice(2).completedTurnAttention).toBe(true);
-
-    applyEvent({ type: "turn_completed", session_id: 12, thread_id: 1, status: "success" });
-    expect(chatStore.slice(1).completedTurnAttention).toBe(false);
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 1, status: "success" });
+    await vi.waitFor(() => {
+      expect(chatStore.slice(2).completedTurnAttention).toBe(true);
+      expect(chatStore.slice(1).completedTurnAttention).toBe(true);
+    });
   });
 });
 

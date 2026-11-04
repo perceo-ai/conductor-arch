@@ -103,10 +103,16 @@ async function setup() {
   /** Set the daemon's state for a chat and let the renderer pull it. */
   const daemonSays = async (threadId: number, chat: FakeChat) => {
     daemon[threadId] = chat;
+    reducer.loadThread(threadId);
+    await settle();
+  };
+  /** The daemon reports a turn over; `chat` is what the pull it causes reads. */
+  const turnEnds = async (threadId: number, chat: FakeChat) => {
+    daemon[threadId] = chat;
     reducer.applyEvent({ type: "turn_completed", session_id: 10, thread_id: threadId, status: "completed" });
     await settle();
   };
-  return { ...reducer, nav, prefsStore, play, daemonSays };
+  return { ...reducer, nav, prefsStore, play, daemonSays, turnEnds };
 }
 
 describe("turn-finished sound", () => {
@@ -189,6 +195,26 @@ describe("turn-finished sound", () => {
     } as never);
     // By the time the pull resolves the turn has already finished.
     await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires for a turn no pull saw busy on a session that was already running", async () => {
+    const { daemonSays, turnEnds, play } = await setup();
+    // A queued input or another client ran the turn: nothing here sent it, and
+    // the session stayed up, so no session_started recorded busy either.
+    await daemonSays(1, { live_session: READY, items: [] });
+    await turnEnds(1, { live_session: READY, items: [] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not ring twice when a session exits and then reports its turn over", async () => {
+    const { applyEvent, daemonSays, turnEnds, play } = await setup();
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    daemon[1] = { items: [] };
+    applyEvent({ type: "session_exited", session_id: 10 } as never);
+    await settle();
+    expect(play).toHaveBeenCalledTimes(1);
+    await turnEnds(1, { items: [] });
     expect(play).toHaveBeenCalledTimes(1);
   });
 
@@ -310,6 +336,21 @@ describe("turn-finished sound", () => {
     nav.setWindowFocused(false);
     await daemonSays(1, { live_session: STREAMING, items: [] });
     await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("still rings in quiet mode for a chat in the pane that is not focused", async () => {
+    const { daemonSays, play, nav, prefsStore } = await setup();
+    prefsStore.setTurnSoundSuppressWhenViewing(true);
+    nav.selectWorkspace("alpha");
+    nav.selectChatThread(1);
+    nav.openWorkspaceInSplit("beta", "right");
+    nav.selectChatThread(2);
+    nav.focusPane(0);
+    nav.setWindowFocused(true);
+    expect(nav.chatThreadInView(2)).toBe(true);
+    await daemonSays(2, { live_session: STREAMING, items: [] });
+    await daemonSays(2, { live_session: READY, items: [] });
     expect(play).toHaveBeenCalledTimes(1);
   });
 
@@ -473,5 +514,73 @@ describe("turn-finished sound", () => {
     answer();
     await settle();
     expect(play).not.toHaveBeenCalled();
+  });
+});
+
+describe("finished chats waiting to be acknowledged", () => {
+  async function setupWorkspace() {
+    const base = await setup();
+    const { threadsStore } = await import("./threads");
+    const { chatStore } = await import("./chat");
+    const { workspaceAwaitingAcknowledgement } = await import("./turnSound");
+    threadsStore.setThreads("berlin", [{ id: 1 }, { id: 2 }] as never);
+    const unread = () => workspaceAwaitingAcknowledgement("berlin");
+    return { ...base, chatStore, unread };
+  }
+
+  it("flags the workspace when any of its chats finishes, until that chat is acknowledged", async () => {
+    const { daemonSays, chatStore, unread } = await setupWorkspace();
+    await daemonSays(1, { live_session: READY, items: [] });
+    await daemonSays(2, { live_session: STREAMING, items: [] });
+    expect(unread()).toBe(false);
+    await daemonSays(2, { live_session: READY, items: [] });
+    expect(unread()).toBe(true);
+    chatStore.setCompletedTurnAttention(2, false);
+    expect(unread()).toBe(false);
+  });
+
+  it("flags a turn nothing saw busy", async () => {
+    const { daemonSays, turnEnds, unread } = await setupWorkspace();
+    await daemonSays(1, { live_session: READY, items: [] });
+    await turnEnds(1, { live_session: READY, items: [] });
+    expect(unread()).toBe(true);
+  });
+
+  it("flags a chat whose session died mid-turn", async () => {
+    const { applyEvent, daemonSays, unread } = await setupWorkspace();
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    daemon[1] = { items: [] };
+    applyEvent({ type: "session_exited", session_id: 10 } as never);
+    await settle();
+    expect(unread()).toBe(true);
+  });
+
+  it("does not flag a chat whose subagent is still working", async () => {
+    const { daemonSays, turnEnds, unread } = await setupWorkspace();
+    await daemonSays(1, { live_session: STREAMING, items: [subagent("running")] });
+    await turnEnds(1, { live_session: READY, items: [subagent("running")] });
+    expect(unread()).toBe(false);
+    await daemonSays(1, { live_session: READY, items: [subagent("complete")] });
+    expect(unread()).toBe(true);
+  });
+
+  it("goes quiet while the chat starts another turn and returns when it ends unread", async () => {
+    const { daemonSays, unread } = await setupWorkspace();
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(unread()).toBe(true);
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    expect(unread()).toBe(false);
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(unread()).toBe(true);
+  });
+
+  it("flags finished chats even when the sound is off", async () => {
+    const { daemonSays, prefsStore, play, unread } = await setupWorkspace();
+    prefsStore.setTurnSound(false);
+    await daemonSays(1, { live_session: STREAMING, items: [] });
+    await daemonSays(1, { live_session: READY, items: [] });
+    expect(play).not.toHaveBeenCalled();
+    expect(unread()).toBe(true);
   });
 });
