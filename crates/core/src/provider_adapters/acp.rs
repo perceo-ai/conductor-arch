@@ -23,6 +23,7 @@ use crate::archcar::harness_contract::{
 use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
 use crate::session_kind::SessionKind;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn unix_millis() -> u64 {
@@ -139,6 +140,24 @@ struct PendingTurn {
     completed: bool,
 }
 
+/// One choice an agent offered on a permission ask. The reply has to name
+/// `id` exactly as offered, while the user picks by `label` or by what `kind`
+/// means, so all three are kept until the ask is answered.
+#[derive(Debug, Clone)]
+struct OfferedOption {
+    id: String,
+    label: String,
+    kind: String,
+}
+
+/// The first offered option of the first kind listed, so preferences read in
+/// order. `None` means the agent offered nothing that says what was chosen.
+fn option_of_kind<'a>(offered: &'a [OfferedOption], kinds: &[&str]) -> Option<&'a OfferedOption> {
+    kinds
+        .iter()
+        .find_map(|kind| offered.iter().find(|option| option.kind == *kind))
+}
+
 pub struct AcpAdapter {
     kind: SessionKind,
     /// The chat thread and session row these events belong to. Without them the
@@ -151,6 +170,9 @@ pub struct AcpAdapter {
     session_id: Option<String>,
     next_request_id: i64,
     pending: Option<PendingTurn>,
+    /// What each unanswered permission ask offered, by its native id. Held in
+    /// memory because an ask cannot outlive the connection it arrived on.
+    offered_options: HashMap<String, Vec<OfferedOption>>,
     initialized: bool,
     sequence: i64,
 }
@@ -166,6 +188,7 @@ impl AcpAdapter {
             // 1 and 2 are reserved for the initialize / session_new handshake.
             next_request_id: 3,
             pending: None,
+            offered_options: HashMap::new(),
             initialized: false,
             sequence: 0,
         }
@@ -371,6 +394,19 @@ impl AcpAdapter {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        let offered = params["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .zip(&options)
+            .filter_map(|(option, shown)| {
+                Some(OfferedOption {
+                    id: option["optionId"].as_str()?.to_owned(),
+                    label: shown.label.clone(),
+                    kind: shown.description.clone(),
+                })
+            })
+            .collect();
         let title = params["toolCall"]["title"]
             .as_str()
             .unwrap_or("Permission requested")
@@ -378,6 +414,7 @@ impl AcpAdapter {
         // The JSON-RPC id is the only handle back to this ask; an answer
         // without it cannot be routed, so it is carried as the native id.
         let native_id = id.to_string();
+        self.offered_options.insert(native_id.clone(), offered);
 
         vec![HarnessEffect::InteractionRequested(
             ProviderInteractionDraft {
@@ -612,24 +649,34 @@ impl ManagedHarnessAdapter for AcpAdapter {
                 native_id,
                 resolution,
             } => {
+                let offered = self.offered_options.remove(&native_id).unwrap_or_default();
                 let id: Value =
                     serde_json::from_str(&native_id).unwrap_or(Value::String(native_id));
-                let outcome = match resolution {
-                    ProviderInteractionResolution::Approve
-                    | ProviderInteractionResolution::ApproveForSession => {
-                        json!({"outcome": "selected", "optionId": "allow"})
+                let selected = match resolution {
+                    ProviderInteractionResolution::Approve => {
+                        option_of_kind(&offered, &["allow_once", "allow_always"])
+                    }
+                    ProviderInteractionResolution::ApproveForSession => {
+                        option_of_kind(&offered, &["allow_always", "allow_once"])
                     }
                     ProviderInteractionResolution::Deny { .. } => {
-                        json!({"outcome": "selected", "optionId": "reject"})
+                        option_of_kind(&offered, &["reject_once", "reject_always"])
                     }
-                    ProviderInteractionResolution::Answer { ref answers } => {
-                        let option = answers
-                            .first()
-                            .and_then(|answer| answer.values.first().cloned())
-                            .unwrap_or_else(|| "allow".to_owned());
-                        json!({"outcome": "selected", "optionId": option})
-                    }
-                    ProviderInteractionResolution::Defer => json!({"outcome": "cancelled"}),
+                    ProviderInteractionResolution::Answer { ref answers } => answers
+                        .first()
+                        .and_then(|answer| answer.values.first())
+                        .and_then(|value| {
+                            offered
+                                .iter()
+                                .find(|option| option.label == *value || option.id == *value)
+                        }),
+                    ProviderInteractionResolution::Defer => None,
+                };
+                // `cancelled` is the protocol's answer when no offered option
+                // fits; an id the agent never advertised is not an answer.
+                let outcome = match selected {
+                    Some(option) => json!({"outcome": "selected", "optionId": option.id}),
+                    None => json!({"outcome": "cancelled"}),
                 };
                 HarnessControlPlan::NativeWrite(self.write(
                     json!({"jsonrpc": "2.0", "id": id, "result": {"outcome": outcome}}),
