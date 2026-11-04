@@ -117,7 +117,7 @@ Keyboard, in the app. These are the ones worth learning:
 | `mod+k` | Command palette |
 | `mod+n` | New workspace |
 | `mod+l` | Focus the chat input |
-| `mod+enter` | Send immediately (steer the running turn) |
+| `mod+enter` | Send immediately (steer the running turn; ACP agents get it next, when the turn ends) |
 | `mod+shift+d` | Changes / diff |
 | `mod+shift+p` | Create or refresh the pull request |
 | `mod+j` | Toggle the terminal panel |

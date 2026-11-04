@@ -4044,7 +4044,7 @@ fn validate_send_input_delivery(
     }
     if kind_tracks_turns(snapshot.kind) && !snapshot.ready {
         anyhow::bail!(
-            "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn",
+            "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn, or, for an agent that cannot be steered, to send right after it",
             provider_name(snapshot.kind),
             snapshot.session_id
         );

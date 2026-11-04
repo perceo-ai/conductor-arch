@@ -1469,7 +1469,8 @@ enum SessionCommand {
     },
     /// Send a message to an agent. A session busy mid-turn gets the message
     /// queued and delivered at its next turn boundary; `--immediate` steers the
-    /// running turn instead.
+    /// running turn instead, or goes next for an ACP agent, which cannot be
+    /// steered.
     Send {
         workspace: String,
         /// Agent to message. Default: the provider of `--thread-id`, else of the
