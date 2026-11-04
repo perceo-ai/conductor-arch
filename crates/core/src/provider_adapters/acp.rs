@@ -145,6 +145,9 @@ pub struct AcpAdapter {
     /// events persist unattached and nothing renders them in a chat.
     chat_thread_id: i64,
     process_id: i64,
+    /// Carried onto permission asks: the chat lists them by workspace and
+    /// thread, and answers are routed back by session id.
+    workspace: String,
     session_id: Option<String>,
     next_request_id: i64,
     pending: Option<PendingTurn>,
@@ -158,6 +161,7 @@ impl AcpAdapter {
             kind,
             chat_thread_id: context.thread_id,
             process_id: context.session_id,
+            workspace: context.workspace.clone(),
             session_id: context.native_session_id.clone(),
             // 1 and 2 are reserved for the initialize / session_new handshake.
             next_request_id: 3,
@@ -185,6 +189,22 @@ impl AcpAdapter {
     /// `session/new` may be sent.
     pub fn is_initialized(&self) -> bool {
         self.initialized
+    }
+
+    /// True once `session/new` has returned a session id. Before that there
+    /// is no ACP session, so a fatal error leaves nothing worth keeping alive.
+    pub fn is_established(&self) -> bool {
+        self.session_id.is_some()
+    }
+
+    /// ACP allows one prompt in flight per session. A prompt is only writable
+    /// once the session exists and the previous turn has been answered.
+    pub fn can_accept_prompt(&self) -> bool {
+        self.is_established()
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.completed)
     }
 
     /// The opening `initialize` request. Emitted by the session layer before
@@ -236,7 +256,16 @@ impl AcpAdapter {
         self.sequence += 1;
         ProviderEventDraft {
             provider: self.kind.as_str().to_owned(),
-            provider_event_id: Some(format!("{}-{}", self.kind.as_str(), self.sequence)),
+            // The sequence restarts with every adapter, so the event id is
+            // scoped to the session row: two chats on one provider would
+            // otherwise both write `{provider}-1` and overwrite each other's
+            // standalone records.
+            provider_event_id: Some(format!(
+                "{}-{}-{}",
+                self.kind.as_str(),
+                self.process_id,
+                self.sequence
+            )),
             provider_item_id: item_id,
             provider_thread_id: self.session_id.clone(),
             provider_turn_id: self
@@ -353,9 +382,9 @@ impl AcpAdapter {
         vec![HarnessEffect::InteractionRequested(
             ProviderInteractionDraft {
                 provider_key: self.kind.as_str().to_owned(),
-                workspace: String::new(),
-                thread_id: 0,
-                session_id: 0,
+                workspace: self.workspace.clone(),
+                thread_id: self.chat_thread_id,
+                session_id: self.process_id,
                 native_session_id: self.session_id.clone(),
                 native_id: native_id.clone(),
                 kind: ProviderInteractionKind::Permission,
@@ -386,15 +415,30 @@ impl AcpAdapter {
         }
         pending.completed = true;
         let local_input_id = pending.local_input_id.clone();
+        let turn_id = pending.request_id;
 
         if let Some(error) = message.get("error") {
             let text = error["message"].as_str().unwrap_or("ACP request failed");
+            // A failed prompt ends its turn like any other: the transcript
+            // needs the `Turn` record to stop showing it as running, and the
+            // session is still there for the next message.
             return vec![
                 HarnessEffect::TurnCompleted {
                     local_input_id,
                     status: HarnessTurnStatus::Failed,
                 },
+                HarnessEffect::ProviderEvent(self.event(
+                    ProviderEventKind::Turn,
+                    ProviderEventPhase::Failed,
+                    json!({"title": "Turn", "body": text}),
+                    message.clone(),
+                    Some(format!("turn-{turn_id}")),
+                )),
                 HarnessEffect::Fatal(text.to_owned()),
+                HarnessEffect::TurnSettled {
+                    status: HarnessTurnStatus::Failed,
+                },
+                HarnessEffect::Ready,
             ];
         }
 
@@ -406,7 +450,6 @@ impl AcpAdapter {
             "refusal" => HarnessTurnStatus::Failed,
             _ => HarnessTurnStatus::Success,
         };
-        let turn_id = pending.request_id;
         let turn_phase = match status {
             HarnessTurnStatus::Success => ProviderEventPhase::Completed,
             HarnessTurnStatus::Interrupted => ProviderEventPhase::Interrupted,
@@ -454,9 +497,11 @@ impl AcpAdapter {
 
     fn handle_session_new_response(&mut self, message: &Value) -> Vec<HarnessEffect> {
         let Some(session_id) = message["result"]["sessionId"].as_str() else {
-            return vec![HarnessEffect::Fatal(
-                "ACP session/new returned no sessionId".to_owned(),
-            )];
+            let reason = message["error"]["message"]
+                .as_str()
+                .map(|reason| format!("ACP session/new failed: {reason}"))
+                .unwrap_or_else(|| "ACP session/new returned no sessionId".to_owned());
+            return vec![HarnessEffect::Fatal(reason)];
         };
         self.session_id = Some(session_id.to_owned());
         vec![
@@ -475,6 +520,12 @@ impl ManagedHarnessAdapter for AcpAdapter {
             .session_id
             .clone()
             .ok_or_else(|| anyhow::anyhow!("ACP session is not established yet"))?;
+        // Replacing an open turn would orphan its response, and with it the
+        // turn's completion; the session layer holds a second prompt back.
+        anyhow::ensure!(
+            self.can_accept_prompt(),
+            "an ACP turn is already running; the next prompt must wait for it"
+        );
         let request_id = self.take_request_id();
         self.pending = Some(PendingTurn {
             request_id,
@@ -1129,5 +1180,34 @@ mod tests {
             .expect("a failed prompt still records its turn");
         assert_eq!(turn.phase, ProviderEventPhase::Failed);
         assert_eq!(turn.provider_item_id.as_deref(), Some("turn-3"));
+    }
+
+    /// ACP allows one prompt in flight; a second encode while the first turn
+    /// is open must be refused, not replace the turn whose response is still
+    /// coming.
+    #[test]
+    fn a_second_prompt_is_refused_while_a_turn_is_open() {
+        let mut adapter = established();
+        let input = |id: &str| HarnessInput {
+            local_input_id: id.to_owned(),
+            content: "hi".to_owned(),
+            visible_content: None,
+            kind: crate::archcar::protocol::ArchcarInputKind::User,
+            delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+        };
+        adapter.encode_input(input("input-1")).unwrap();
+        assert!(!adapter.can_accept_prompt());
+        assert!(adapter.encode_input(input("input-2")).is_err());
+
+        let effects = adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#,
+            ))
+            .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::TurnCompleted { local_input_id, .. } if local_input_id == "input-1"
+        )));
+        assert!(adapter.can_accept_prompt());
     }
 }

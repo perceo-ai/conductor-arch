@@ -3688,9 +3688,13 @@ fn run_acp_session_loop(
     // `session/new` is the second half of the handshake and cannot be sent
     // before the agent has answered `initialize`.
     let mut session_new_sent = false;
+    // Prompts that arrived while a turn was open, or before `session/new`
+    // answered. ACP takes one prompt at a time, so each waits here for the
+    // turn ahead of it rather than replacing it.
+    let mut held_inputs = VecDeque::new();
 
     loop {
-        drain_acp_stdout(
+        if drain_acp_stdout(
             &runtime_store,
             &snapshot,
             &event_tx,
@@ -3698,7 +3702,17 @@ fn run_acp_session_loop(
             &harness_name,
             &mut connection,
             &mut adapter,
-        );
+        ) {
+            end_failed_acp_session(
+                &runtime_store,
+                &snapshot,
+                &event_tx,
+                &started,
+                &mut connection,
+            );
+            release_held_acp_inputs(&db_path, &event_tx, held_inputs);
+            return;
+        }
 
         if !session_new_sent && adapter.is_initialized() {
             let cwd = connection.cwd.to_string_lossy().to_string();
@@ -3719,9 +3733,23 @@ fn run_acp_session_loop(
             }
         }
 
-        while let Ok(command) = command_rx.try_recv() {
-            let (command, queued_handoff) = command.split_queued_claim();
+        loop {
+            let held = adapter
+                .can_accept_prompt()
+                .then(|| held_inputs.pop_front())
+                .flatten();
+            let Some((command, queued_handoff)) = held.or_else(|| {
+                command_rx
+                    .try_recv()
+                    .ok()
+                    .map(SessionCommand::split_queued_claim)
+            }) else {
+                break;
+            };
             match command {
+                command @ SessionCommand::SendInput { .. } if !adapter.can_accept_prompt() => {
+                    held_inputs.push_back((command, queued_handoff));
+                }
                 SessionCommand::SendInput {
                     input,
                     visible_input,
@@ -3915,6 +3943,49 @@ fn run_acp_session_loop(
 
         thread::sleep(Duration::from_millis(50));
     }
+    release_held_acp_inputs(&db_path, &event_tx, held_inputs);
+}
+
+/// A prompt held back behind an open turn never reached the agent; a queued
+/// one goes back on its thread's queue rather than vanishing with the session.
+fn release_held_acp_inputs(
+    db_path: &std::path::Path,
+    event_tx: &Sender<ArchcarEvent>,
+    held_inputs: VecDeque<(SessionCommand, Option<QueuedChatInputRecord>)>,
+) {
+    for (_, queued_handoff) in held_inputs {
+        requeue_failed_queued_handoff(db_path, event_tx, queued_handoff);
+    }
+}
+
+/// The agent failed before an ACP session existed (it rejected `session/new`,
+/// say), so nothing it could do next is usable. Stop it and end the session
+/// rather than leave a child and a polling loop behind a running process row.
+/// The session was already marked failed when the fatal effect applied; the
+/// exit keeps that reason rather than reading as a clean exit.
+fn end_failed_acp_session(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    connection: &mut ProviderProcessConnection,
+) {
+    let _ = connection.child.kill();
+    let code = connection
+        .child
+        .wait()
+        .ok()
+        .and_then(|status| status.code());
+    let _ = runtime_store.mark_session_process_exited(started.session_id, code);
+    if let Ok(mut state) = snapshot.lock() {
+        state.status = ProcessStatus::Exited;
+        state.ready = false;
+        state.runtime_state = AgentSessionState::Failed;
+    }
+    let _ = event_tx.send(ArchcarEvent::SessionExited {
+        session_id: started.session_id,
+        exit_code: code,
+    });
 }
 
 fn write_acp_request(connection: &mut ProviderProcessConnection, payload: &[u8]) -> Result<()> {
@@ -3923,6 +3994,9 @@ fn write_acp_request(connection: &mut ProviderProcessConnection, payload: &[u8])
     Ok(())
 }
 
+/// Applies everything the agent has written. Returns true when a fatal error
+/// arrived before an ACP session existed: there is then no session to keep,
+/// and the caller ends it.
 fn drain_acp_stdout(
     runtime_store: &RuntimeSessionStore,
     snapshot: &Arc<Mutex<SessionSnapshot>>,
@@ -3931,7 +4005,8 @@ fn drain_acp_stdout(
     harness_name: &str,
     connection: &mut ProviderProcessConnection,
     adapter: &mut AcpAdapter,
-) {
+) -> bool {
+    let mut failed_before_session = false;
     while let Ok(line) = connection.stdout_rx.try_recv() {
         let _ =
             runtime_store.append_provider_native_output(started.session_id, harness_name, &line);
@@ -3946,6 +4021,9 @@ fn drain_acp_stdout(
                     // read as awaiting input rather than mid-turn.
                     if matches!(effect, HarnessEffect::InteractionRequested(_)) {
                         mark_snapshot_awaiting_input(snapshot);
+                    }
+                    if matches!(effect, HarnessEffect::Fatal(_)) && !adapter.is_established() {
+                        failed_before_session = true;
                     }
                     apply_harness_effect(
                         runtime_store,
@@ -3963,7 +4041,11 @@ fn drain_acp_stdout(
                 "failed to parse an ACP message"
             ),
         }
+        if failed_before_session {
+            break;
+        }
     }
+    failed_before_session
 }
 
 fn start_codex_app_server_lifecycle(

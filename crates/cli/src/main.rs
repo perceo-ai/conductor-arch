@@ -8329,7 +8329,14 @@ fn resolve_send_kind(
             .list_chat_threads(workspace)?
             .into_iter()
             .map(|thread| thread.provider)
-            .find(|provider| provider == "claude" || provider == "codex"),
+            // Newest first: the chat to continue is the latest one with an
+            // agent `session send` can drive, whichever agent that is.
+            .find(|provider| {
+                archductor_core::archcar::harness::managed_harness_for_kind(SessionKind::new(
+                    provider,
+                ))
+                .is_some()
+            }),
     };
     Ok(provider.map_or(SessionKind::CODEX, |provider| SessionKind::new(&provider)))
 }

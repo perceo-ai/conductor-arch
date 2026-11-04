@@ -4021,6 +4021,13 @@ fn with_store(
     }
 }
 
+/// Whether the session reports turn boundaries, and so has a readiness that
+/// sends must respect. Every managed harness does — ACP agents included, which
+/// take one prompt at a time — so this follows the registry, not a vendor list.
+fn kind_tracks_turns(kind: SessionKind) -> bool {
+    managed_harness_for_kind(kind).is_some()
+}
+
 fn validate_send_input_delivery(
     handle: &SessionHandle,
     kind: &crate::archcar::protocol::ArchcarInputKind,
@@ -4035,7 +4042,7 @@ fn validate_send_input_delivery(
     if delivery == crate::archcar::protocol::ArchcarInputDelivery::Immediate {
         return Ok(());
     }
-    if matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) && !snapshot.ready {
+    if kind_tracks_turns(snapshot.kind) && !snapshot.ready {
         anyhow::bail!(
             "{} session {} is not ready for automatic input; use immediate delivery to steer the active turn",
             provider_name(snapshot.kind),
@@ -4678,11 +4685,11 @@ fn start_session_for_queued_thread(
     });
 }
 
-/// Marks a codex/claude session busy and returns the readiness it replaced,
-/// for [`restore_session_readiness`] if the input then fails to send.
+/// Marks a managed session busy and returns the readiness it replaced, for
+/// [`restore_session_readiness`] if the input then fails to send.
 fn note_session_not_ready_for_queue(handle: &SessionHandle) -> Option<(bool, AgentSessionState)> {
     let mut snapshot = handle.snapshot.lock().ok()?;
-    if !matches!(snapshot.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
+    if !kind_tracks_turns(snapshot.kind) {
         return None;
     }
     let before = (snapshot.ready, snapshot.runtime_state);
@@ -9129,6 +9136,49 @@ exit 1
                 }
             )) if native_id == "req-1"
         ));
+    }
+
+    /// An ACP agent takes one prompt at a time, so a busy ACP session refuses
+    /// an automatic send exactly as a busy Codex or Claude one does, instead
+    /// of letting it through to clobber the running turn.
+    #[test]
+    fn busy_acp_sessions_refuse_automatic_input_like_codex_and_claude() {
+        let busy = |kind: SessionKind| {
+            let (command_tx, _command_rx) = mpsc::channel();
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(crate::archcar::session::SessionSnapshot {
+                    session_id: 9,
+                    thread_id: 1,
+                    workspace: "berlin".to_owned(),
+                    kind,
+                    pid: 12345,
+                    status: ProcessStatus::Running,
+                    runtime_state: crate::session_state::AgentSessionState::Running,
+                    ready: false,
+                    capabilities: None,
+                    screen: String::new(),
+                    turns: Default::default(),
+                })),
+                command_tx,
+            }
+        };
+        for kind in [
+            SessionKind::CLAUDE,
+            SessionKind::new("gemini"),
+            SessionKind::new("devin"),
+        ] {
+            let handle = busy(kind);
+            assert!(
+                validate_send_input_delivery(
+                    &handle,
+                    &ArchcarInputKind::User,
+                    crate::archcar::protocol::ArchcarInputDelivery::Auto,
+                )
+                .is_err(),
+                "{kind} accepted an automatic send mid-turn"
+            );
+            assert!(note_session_not_ready_for_queue(&handle).is_some());
+        }
     }
 
     /// An ACP permission ask is registered from the adapter's own draft, so
