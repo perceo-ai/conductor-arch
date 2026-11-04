@@ -7585,4 +7585,75 @@ while True:
                 && row.normalized_payload["body"] == format!("from {native_session}")));
         }
     }
+
+    fn send_immediate_acp_input(session: &FakeAcpSession, input: &str) {
+        session
+            .command_tx
+            .send(SessionCommand::SendInput {
+                input: input.to_owned(),
+                visible_input: Some(format!("visible {input}")),
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+            })
+            .unwrap();
+    }
+
+    /// `--immediate` is acknowledged before the loop sees it and carries no
+    /// queue claim, so nothing else remembers it. A session that ends while
+    /// holding one must put it on the thread's queue, not drop it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acp_immediate_input_held_behind_a_turn_survives_the_session_ending() {
+        let session = start_fake_acp_session("ok");
+        recv_archcar_event_until(
+            &session.event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == session.process.id),
+        );
+
+        // One channel, so the loop takes these in order within one pass: the
+        // first opens a turn, the second is held behind it, the kill ends the
+        // session before that turn can answer.
+        send_acp_input(&session, "first question");
+        send_immediate_acp_input(&session, "second question");
+        session.command_tx.send(SessionCommand::Kill).unwrap();
+        let store = WorkspaceStore::open_app(&session.db_path).unwrap();
+        let thread_id = session.thread.id;
+        stop_fake_acp_session(session);
+
+        let queued = store.list_queued_chat_inputs(thread_id).unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|item| (item.input.as_str(), item.visible_input.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("second question", Some("visible second question"))],
+            "the acknowledged message vanished with the session"
+        );
+    }
+
+    /// The same promise on the failed-handshake exit: a message held waiting
+    /// for `session/new` outlives the agent that rejected it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acp_immediate_input_held_through_a_rejected_handshake_is_queued() {
+        let session = start_fake_acp_session("reject_new");
+        send_immediate_acp_input(&session, "early question");
+        let store = WorkspaceStore::open_app(&session.db_path).unwrap();
+        let thread_id = session.thread.id;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !session.loop_thread.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        stop_fake_acp_session(session);
+
+        let queued = store.list_queued_chat_inputs(thread_id).unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|item| item.input.as_str())
+                .collect::<Vec<_>>(),
+            vec!["early question"],
+            "the acknowledged message vanished with the session"
+        );
+    }
 }

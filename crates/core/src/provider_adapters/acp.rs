@@ -1210,4 +1210,77 @@ mod tests {
         )));
         assert!(adapter.can_accept_prompt());
     }
+
+    /// The optionId in a permission reply has to be one the agent offered.
+    /// Agents name their options freely, so a literal "allow" is an id most of
+    /// them never advertised.
+    #[test]
+    fn permission_replies_carry_the_option_id_the_agent_offered() {
+        let ask = r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"title":"Write src/main.rs"},"options":[{"optionId":"proceed_once","name":"Yes","kind":"allow_once"},{"optionId":"proceed_always","name":"Always","kind":"allow_always"},{"optionId":"decline","name":"No","kind":"reject_once"}]}}"#;
+        for (resolution, expected) in [
+            (ProviderInteractionResolution::Approve, "proceed_once"),
+            (
+                ProviderInteractionResolution::ApproveForSession,
+                "proceed_always",
+            ),
+            (
+                ProviderInteractionResolution::Deny { reason: None },
+                "decline",
+            ),
+            (
+                ProviderInteractionResolution::Answer {
+                    answers: vec![crate::archcar::harness_contract::InteractionAnswer {
+                        question_id: "42".to_owned(),
+                        values: vec!["Always".to_owned()],
+                    }],
+                },
+                "proceed_always",
+            ),
+        ] {
+            let mut adapter = established();
+            adapter.observe_native(record(ask)).unwrap();
+
+            let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+                native_id: "42".to_owned(),
+                resolution: resolution.clone(),
+            });
+
+            let HarnessControlPlan::NativeWrite(write) = plan else {
+                panic!("a permission answer must go back over the live session");
+            };
+            let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+            assert_eq!(payload["id"], 42);
+            assert_eq!(
+                payload["result"]["outcome"],
+                json!({"outcome": "selected", "optionId": expected}),
+                "{resolution:?}"
+            );
+        }
+    }
+
+    /// When the agent offered nothing that means what the user chose, the
+    /// honest reply is a cancellation, not an id it never advertised.
+    #[test]
+    fn permission_replies_never_invent_an_option_the_agent_did_not_offer() {
+        let mut adapter = established();
+        adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"title":"Write src/main.rs"},"options":[{"optionId":"proceed_once","name":"Yes","kind":"allow_once"}]}}"#,
+            ))
+            .unwrap();
+
+        let plan = adapter.plan_control(HarnessControl::ResolveInteraction {
+            native_id: "42".to_owned(),
+            resolution: ProviderInteractionResolution::Deny { reason: None },
+        });
+
+        let HarnessControlPlan::NativeWrite(write) = plan else {
+            panic!("a permission answer must go back over the live session");
+        };
+        let payload: Value = serde_json::from_slice(&write.payload).unwrap();
+        assert_eq!(
+            payload["result"]["outcome"],
+            json!({"outcome": "cancelled"})
+        );
+    }
 }
