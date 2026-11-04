@@ -123,6 +123,13 @@ function InlineCard(props: {
             <span class="chat-inline-event-chip-label">{chip()}</span>
           </span>
         </Show>
+        {/* A running card has to look like it is running, not merely read as a
+            tinted label: mobile spins a circle on the card, the desktop only
+            changed the text colour. Sits before the action count and the
+            latest-step text so a long step label cannot push it off the row. */}
+        <Show when={props.running}>
+          <Icon name="loader-circle" class="chat-inline-event-spinner" title="Running" />
+        </Show>
         <Show when={actionCount() > 0}>
           <span class="chat-inline-event-count">{formatActionCount(actionCount())}</span>
         </Show>

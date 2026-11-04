@@ -378,6 +378,7 @@ describe("Timeline", () => {
     const card = mount().querySelector(".chat-inline-event")!;
     expect(card.classList.contains("chat-inline-event-running")).toBe(true);
     expect(card.textContent).toContain("Background");
+    expect(card.querySelector(".chat-inline-event-spinner")).not.toBeNull();
   });
 
   it("marks a running command without attaching the looping loader", () => {
@@ -395,5 +396,40 @@ describe("Timeline", () => {
     const command = mount().querySelector(".chat-inline-event");
     expect(command?.classList.contains("chat-inline-event-running")).toBe(true);
     expect(command?.classList.contains("chat-inline-event-loading")).toBe(false);
+    // The visible signal, not just the class: a tint alone left a running
+    // command looking the same as a finished one.
+    expect(command?.querySelector(".chat-inline-event-spinner")).not.toBeNull();
+  });
+
+  it("stops spinning a running card once the agent goes idle", () => {
+    session = { runtime_state: "ready", ready: true };
+    items = [
+      projectionItem({
+        id: "cmd",
+        render_class: "command_card",
+        title: "Ran cargo test",
+        body: "",
+        status: "running",
+      }),
+    ];
+
+    const command = mount().querySelector(".chat-inline-event");
+    expect(command?.classList.contains("chat-inline-event-running")).toBe(false);
+    expect(command?.querySelector(".chat-inline-event-spinner")).toBeNull();
+  });
+
+  it("leaves a finished command without a spinner", () => {
+    session = { runtime_state: "running", ready: false };
+    items = [
+      projectionItem({
+        id: "cmd",
+        render_class: "command_card",
+        title: "Ran cargo test",
+        body: "",
+        status: "complete",
+      }),
+    ];
+
+    expect(mount().querySelector(".chat-inline-event-spinner")).toBeNull();
   });
 });
