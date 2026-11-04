@@ -3683,6 +3683,7 @@ fn run_acp_session_loop(
             &started,
             format!("ACP initialize failed: {err:#}"),
         );
+        release_held_acp_inputs(&db_path, &event_tx, &started, VecDeque::new(), &command_rx);
         return;
     }
     // `session/new` is the second half of the handshake and cannot be sent
@@ -3710,7 +3711,7 @@ fn run_acp_session_loop(
                 &started,
                 &mut connection,
             );
-            release_held_acp_inputs(&db_path, &event_tx, held_inputs);
+            release_held_acp_inputs(&db_path, &event_tx, &started, held_inputs, &command_rx);
             return;
         }
 
@@ -3727,6 +3728,13 @@ fn run_acp_session_loop(
                         &event_tx,
                         &started,
                         format!("ACP session/new failed: {err:#}"),
+                    );
+                    release_held_acp_inputs(
+                        &db_path,
+                        &event_tx,
+                        &started,
+                        held_inputs,
+                        &command_rx,
                     );
                     return;
                 }
@@ -3943,18 +3951,69 @@ fn run_acp_session_loop(
 
         thread::sleep(Duration::from_millis(50));
     }
-    release_held_acp_inputs(&db_path, &event_tx, held_inputs);
+    release_held_acp_inputs(&db_path, &event_tx, &started, held_inputs, &command_rx);
 }
 
-/// A prompt held back behind an open turn never reached the agent; a queued
-/// one goes back on its thread's queue rather than vanishing with the session.
+/// Every send here was acknowledged and none reached the agent, whether it was
+/// held behind a turn or still unread in the channel when the session ended.
+/// A queued input goes back to the head of its queue. A direct send (always
+/// `--immediate`: automatic sends are refused while busy) has no row to return
+/// to, so it gets one; it must never just vanish after that acknowledgement.
 fn release_held_acp_inputs(
     db_path: &std::path::Path,
     event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
     held_inputs: VecDeque<(SessionCommand, Option<QueuedChatInputRecord>)>,
+    command_rx: &Receiver<SessionCommand>,
 ) {
-    for (_, queued_handoff) in held_inputs {
-        requeue_failed_queued_handoff(db_path, event_tx, queued_handoff);
+    let unread = command_rx
+        .try_iter()
+        .map(SessionCommand::split_queued_claim);
+    for (command, queued_handoff) in held_inputs.into_iter().chain(unread) {
+        if queued_handoff.is_some() {
+            requeue_failed_queued_handoff(db_path, event_tx, queued_handoff);
+            continue;
+        }
+        let SessionCommand::SendInput {
+            input,
+            visible_input,
+            kind,
+            ..
+        } = command
+        else {
+            continue;
+        };
+        let queued = WorkspaceStore::open_app(db_path).and_then(|store| {
+            store.enqueue_chat_input(
+                started.thread_id,
+                &input,
+                visible_input.as_deref(),
+                kind,
+                started.kind,
+            )
+        });
+        match queued {
+            Ok(_) => {
+                let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
+                    thread_id: started.thread_id,
+                });
+            }
+            Err(err) => {
+                warn!(
+                    session_id = started.session_id,
+                    thread_id = started.thread_id,
+                    error = %format!("{err:#}"),
+                    "archcar lost an ACP input it could not deliver or queue"
+                );
+                let _ = event_tx.send(ArchcarEvent::SessionError {
+                    session_id: Some(started.session_id),
+                    thread_id: Some(started.thread_id),
+                    message: format!(
+                        "A message was not delivered: the session ended and it could not be queued: {err:#}"
+                    ),
+                });
+            }
+        }
     }
 }
 
