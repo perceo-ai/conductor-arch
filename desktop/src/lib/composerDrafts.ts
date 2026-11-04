@@ -22,4 +22,20 @@ export const composerDrafts = {
     if (nodes.length === 0) drafts.delete(key);
     else drafts.set(key, nodes);
   },
+  /**
+   * Startup correcting the provisional realm renames the realm, not the
+   * daemon: every draft parked under it belongs to the corrected key. Called
+   * from nav's assignTabRealm so it runs whether or not any composer is still
+   * mounted. No real realm is a prefix of another ("local", "client:<id>",
+   * "env:<address>"), so the prefix match is exact.
+   */
+  migrateRealm(from: string, to: string): void {
+    if (from === to) return;
+    const prefix = `${from}:`;
+    for (const [key, nodes] of [...drafts]) {
+      if (!key.startsWith(prefix)) continue;
+      drafts.delete(key);
+      drafts.set(`${to}:${key.slice(prefix.length)}`, nodes);
+    }
+  },
 };

@@ -192,4 +192,69 @@ accent = "#abcdef"
     expect((request as { toml: string }).toml).not.toContain("ui_font");
     expect(host.textContent).toContain("Saved");
   });
+
+  it("replays only this screen's edits onto fresh source so an out-of-band save survives", async () => {
+    let backendSource = '[customization.view]\ntheme = "dark"\n';
+    const host = await mount(backendSource);
+    send.mockImplementation(async (request) => {
+      if (request.type === "get_settings") return { type: "settings", scope: "global", toml: EFFECTIVE };
+      if (request.type === "get_settings_source") {
+        return { type: "settings_source", scope: "global", layer: "global", toml: backendSource };
+      }
+      if (request.type === "save_settings") {
+        backendSource = request.toml;
+        return { type: "settings_saved", scope: "global", layer: "global" };
+      }
+      return { type: "ack" };
+    });
+    const uiFont = host.querySelector<HTMLInputElement>('[name="ui_font"]')!;
+    uiFont.value = "Georgia, serif";
+    uiFont.dispatchEvent(new Event("change", { bubbles: true }));
+
+    backendSource = '[customization.view]\ntheme = "light"\n';
+    host.querySelector<HTMLButtonElement>('[data-action="save-appearance"]')!.click();
+
+    await vi.waitFor(() =>
+      expect(send.mock.calls.some(([request]) => request.type === "save_settings")).toBe(true),
+    );
+    const request = send.mock.calls.map(([value]) => value).find((value) => value.type === "save_settings");
+    const toml = (request as { toml: string }).toml;
+    expect(toml).toContain('ui_font = "Georgia, serif"');
+    expect(toml).toContain('theme = "light"');
+    expect(toml).not.toContain('theme = "dark"');
+  });
+
+  it("locks color controls when the source defines colors as an inline table", async () => {
+    const host = await mount('[customization.view]\ntheme = "dark"\ncolors = { accent = "#abcdef" }\n');
+
+    await vi.waitFor(() =>
+      expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="text"]')?.disabled).toBe(true),
+    );
+    expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="color"]')?.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Blue accent"]')?.disabled).toBe(true);
+    expect(host.textContent).toContain("inline table");
+  });
+
+  it("keeps color controls editable for a normal colors section", async () => {
+    const host = await mount('[customization.view]\ntheme = "dark"\n\n[customization.view.colors]\naccent = "#abcdef"\n');
+
+    expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="text"]')?.disabled).toBe(false);
+    expect(host.textContent).not.toContain("inline table");
+  });
+
+  it("locks color controls when the inline colors table uses a quoted key", async () => {
+    const host = await mount('[customization.view]\ntheme = "dark"\n"colors" = { accent = "#abcdef" }\n');
+
+    await vi.waitFor(() =>
+      expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="text"]')?.disabled).toBe(true),
+    );
+    expect(host.textContent).toContain("inline table");
+  });
+
+  it("does not lock color controls for a commented-out inline colors table", async () => {
+    const host = await mount('[customization.view]\ntheme = "dark"\n# colors = { accent = "#abcdef" }\n\n[customization.view.colors]\naccent = "#abcdef"\n');
+
+    expect(host.querySelector<HTMLInputElement>('[data-color-key="accent"] input[type="text"]')?.disabled).toBe(false);
+    expect(host.textContent).not.toContain("inline table");
+  });
 });

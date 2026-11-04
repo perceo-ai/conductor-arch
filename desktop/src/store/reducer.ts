@@ -14,7 +14,7 @@ import { workspacesStore } from "./workspaces";
 import { threadsStore } from "./threads";
 import { intelStore } from "./intel";
 import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
-import { observeChatGeneration } from "./turnSound";
+import { noteTurnCompleted, observeChatGeneration } from "./turnSound";
 
 async function refreshWorkspaceInventoryAndChats() {
   try {
@@ -278,7 +278,7 @@ export function applyEvent(event: ArchcarEvent) {
 
     case "turn_completed": {
       const e = event as { thread_id: number };
-      chatStore.setCompletedTurnAttention(e.thread_id, !nav.chatThreadInView(e.thread_id));
+      noteTurnCompleted(e.thread_id);
       // The end of a turn is the state the user reads; never sit on it.
       chatRefresh.flush(e.thread_id);
       void refreshThreadWorkspace(e.thread_id);

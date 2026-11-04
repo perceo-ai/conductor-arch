@@ -1,6 +1,9 @@
 import { For, Show, createEffect, createMemo, createResource, createSignal } from "solid-js";
 import { listWorkspaceFiles, send } from "@/bridge/client";
+import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "@/components/ContextMenu";
+import { openWithItems, workspaceFilePath } from "@/lib/openWith";
 import { materialFileIcon, materialFolderIcon } from "@/lib/materialFileIcons";
+import { workspacesStore } from "@/store";
 import { openFileInCenter } from "./openFileBridge";
 
 // Right-panel "Browse" file tree — port of ws_simple_file_list. Core returns a
@@ -65,20 +68,42 @@ function Row(props: {
   collapsed: () => Set<string>;
   toggle: (path: string) => void;
   openFile: (path: string) => void;
+  menuItems: (node: TreeNode) => ContextMenuItem[];
 }) {
   const isCollapsed = () => props.collapsed().has(props.node.path);
   const indent = () => ({ "padding-left": `${8 + props.depth * 14}px` });
+  const items = () => props.menuItems(props.node);
   return (
     <Show
       when={props.node.dir}
       fallback={
-        <button class="ws-file-row" style={indent()} onClick={() => props.openFile(props.node.path)}>
+        <button
+          class="ws-file-row"
+          style={indent()}
+          onClick={() => props.openFile(props.node.path)}
+          onContextMenu={(event) => openContextMenu(event, items())}
+          onKeyDown={(event) => {
+            if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+              openContextMenuFromKeyboard(event, items());
+            }
+          }}
+        >
           <MaterialIcon icon={() => materialFileIcon(props.node.path)} class="ws-file-kind-icon" />
           <span class="ws-file-name">{props.node.name}</span>
         </button>
       }
     >
-      <button class="ws-dir-row" style={indent()} onClick={() => props.toggle(props.node.path)}>
+      <button
+        class="ws-dir-row"
+        style={indent()}
+        onClick={() => props.toggle(props.node.path)}
+        onContextMenu={(event) => openContextMenu(event, items())}
+        onKeyDown={(event) => {
+          if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+            openContextMenuFromKeyboard(event, items());
+          }
+        }}
+      >
         <MaterialIcon
           icon={() => materialFolderIcon(props.node.path, !isCollapsed())}
           class="ws-folder-kind-icon"
@@ -94,6 +119,7 @@ function Row(props: {
               collapsed={props.collapsed}
               toggle={props.toggle}
               openFile={props.openFile}
+              menuItems={props.menuItems}
             />
           )}
         </For>
@@ -131,6 +157,14 @@ export default function WorkspaceFiles(props: { workspace: string; rootPath?: st
     collapseSeed = nextSeed;
     setCollapsed(collectDirPaths(tree()));
   });
+  // Right-click "Open in …" needs the real path on disk; the tree only carries
+  // worktree-relative ones. Falls back to the store's worktree path when the
+  // panel was mounted without an explicit root.
+  const root = () => props.rootPath ?? workspacesStore.row(props.workspace)?.path;
+  const menuItems = (node: TreeNode): ContextMenuItem[] => {
+    const abs = workspaceFilePath(root(), node.path);
+    return abs ? openWithItems(abs, node.dir ? "folder" : "file") : [];
+  };
   const toggle = (path: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
@@ -152,6 +186,7 @@ export default function WorkspaceFiles(props: { workspace: string; rootPath?: st
               collapsed={collapsed}
               toggle={toggle}
               openFile={openFile}
+              menuItems={menuItems}
             />
           )}
         </For>

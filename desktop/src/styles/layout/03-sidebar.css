@@ -133,6 +133,13 @@
   height: 14px;
   stroke-width: 2;
 }
+.workspace-turn-unread {
+  color: var(--lc-accent, #c39b50);
+}
+.workspace-turn-unread .workspace-row-live-dot {
+  width: 8px;
+  height: 8px;
+}
 .workspace-row-shell .row-name {
   color: var(--lc-text-strong);
   font-weight: 500;

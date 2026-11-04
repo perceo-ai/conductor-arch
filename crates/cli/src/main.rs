@@ -2267,13 +2267,19 @@ fn run_cli() -> Result<()> {
                     message,
                     stage_all,
                 } => {
-                    print_archcar_response(client.send(
-                        ArchcarRequest::CommitWorkspaceChanges {
-                            workspace,
-                            message,
-                            stage_all,
-                        },
-                    )?);
+                    // A refused commit has to fail the command: printing the
+                    // error and exiting 0 let a script carry on as if the
+                    // commit had landed.
+                    match client.send(ArchcarRequest::CommitWorkspaceChanges {
+                        workspace: workspace.clone(),
+                        message,
+                        stage_all,
+                    })? {
+                        ArchcarResponse::Error { message } => {
+                            anyhow::bail!("could not commit `{workspace}`: {message}")
+                        }
+                        response => print_archcar_response(response),
+                    }
                 }
                 ArchcarCommand::CreateFromLinear { repository, issue } => {
                     print_archcar_response(client.send(

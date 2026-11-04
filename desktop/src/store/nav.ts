@@ -1,19 +1,21 @@
-import { createSignal } from "solid-js";
+import { batch, createSignal, untrack } from "solid-js";
 import {
   activeWorkspace,
-  closeTab,
-  emptyTabs,
-  focusGroup,
-  groupIndexOf,
-  moveTab,
-  openTab,
-  renameTab,
-  retainTabs,
-  splitTab,
+  closePane,
+  closeWorkspace,
+  emptyPanes,
+  focusPane,
+  openWorkspace,
+  openWorkspaceIn,
+  renameWorkspace as renamePaneWorkspace,
+  retainWorkspaces,
+  splitWorkspace,
   type SplitDirection,
-  type WorkspaceTabsState,
-} from "@/lib/workspaceTabs";
-import { loadTabRealm, materializeTabs, saveTabRealm, serializeTabs } from "@/lib/tabPersistence";
+  type WorkspacePanesState,
+} from "@/lib/workspacePanes";
+import { loadPaneRealm, materializePanes, savePaneRealm, serializePanes } from "@/lib/panePersistence";
+import { composerDrafts } from "@/lib/composerDrafts";
+import { editorDraftStash } from "@/lib/editorDraftStash";
 
 // Navigation state — mirrors the navigation fields of
 // crates/gtk-app/src/state.rs::AppStateSnapshot. Each field is its own signal so
@@ -29,24 +31,93 @@ const [windowFocused, setWindowFocused] = createSignal(true);
 // False while the chat surface shows a file or commit over the selected chat:
 // the chat tab stays selected underneath, but it is not what is on screen.
 const [chatSurfaceShowsChat, setChatSurfaceShowsChat] = createSignal(true);
-// Open workspace tabs. The focused group's active tab is `selectedWorkspace`;
-// every other tab remembers the chat it was on so coming back lands there.
-const [workspaceTabs, setWorkspaceTabs] = createSignal<WorkspaceTabsState>(emptyTabs());
+// The split view's panes. The focused pane's workspace is `selectedWorkspace`;
+// the other remembers the chat it was on so coming back lands there.
+const [workspacePanes, setWorkspacePanes] = createSignal<WorkspacePanesState>(emptyPanes());
 const [threadByWorkspace, setThreadByWorkspace] = createSignal<Record<string, number>>({});
+/**
+ * The realm before any daemon identity is known. Deliberately a different
+ * string from every real tabRealmKey() value ("local", "client:<id>",
+ * "env:<address>"): "no realm assigned yet" and "this machine" must never
+ * share a storage or draft-stash key, or state from the unassigned window
+ * leaks into the local daemon's (and vice versa) the moment they meet.
+ */
+export const UNASSIGNED_REALM = "__unassigned__";
+
 // Which daemon's tabs these are. Saved continuously under this key, so a
-// daemon switch or an app quit never has a "flush on exit" step to miss.
-let tabRealm = "local";
+// daemon switch or an app quit never has a "flush on exit" step to miss. A
+// signal so views that cache it (the file editor) can be remounted when it
+// changes; persistence reads it untracked.
+const [tabRealm, setTabRealmRaw] = createSignal(UNASSIGNED_REALM);
+
+/**
+ * The daemon the views on screen belong to. A real daemon switch replaces the
+ * object, so views keyed on it (the file editor) remount and anything holding
+ * the old object keeps the old realm for its cleanup. Startup learning the
+ * daemon's identity for the first time is not a switch — same daemon, the
+ * realm was just the unassigned placeholder — so it corrects `realm` in place
+ * and nothing remounts or loses unsaved state.
+ */
+export interface TabRealmSession {
+  realm: string;
+}
+const [tabRealmSession, setTabRealmSession] = createSignal<TabRealmSession>({
+  realm: UNASSIGNED_REALM,
+});
+// False until a restore or startup first assigns the active daemon's realm.
+let realmKnown = false;
+// True while an explicit daemon switch (clientsStore) is in flight. A switch is
+// declared, never inferred: it can be the run's first realm assignment too
+// (startup failed before learning the realm), and treating that as a
+// correction would keep the old daemon's editor in front of the new one.
+let daemonSwitchPending = false;
+
+function assignTabRealm(realm: string) {
+  const prev = untrack(tabRealm);
+  // A declared switch always replaces the session, with no realm-string
+  // comparison: switching daemons must remount the views keyed on it, or the
+  // old daemon's text saves to the new daemon's file. (The distinct
+  // UNASSIGNED_REALM makes the strings differ too, but the declaration is
+  // what makes it a switch.) Without a declaration, a changed realm after the
+  // realm was known is still treated as a switch (defensive — every
+  // clientsStore switch declares); only the remaining case, correcting the
+  // placeholder to the daemon's real identity, edits in place so startup
+  // never remounts over unsaved state.
+  if (daemonSwitchPending || (realmKnown && realm !== prev)) {
+    setTabRealmSession({ realm });
+  } else {
+    untrack(tabRealmSession).realm = realm;
+    // The one moment the daemon behind the placeholder gets its real name:
+    // everything parked under the sentinel belongs to it, whether or not the
+    // component that parked it is still mounted. A declared switch never
+    // migrates — the other branch — so another daemon's sentinel-era drafts
+    // cannot leak across. Runs once: `prev` is never the sentinel again.
+    if (prev === UNASSIGNED_REALM && realm !== UNASSIGNED_REALM) {
+      composerDrafts.migrateRealm(prev, realm);
+      editorDraftStash.migrateRealm(prev, realm);
+    }
+  }
+  realmKnown = true;
+  daemonSwitchPending = false;
+  setTabRealmRaw(realm);
+}
 // True from "a restore is owed" (boot before the inventory arrived, or a
 // daemon switch in flight) until restoreWorkspaceTabs runs. While it holds,
 // nothing persists: the tabs on screen are the old realm's (or nothing), and
 // writing them — or an inventory-driven pruning of them — under whichever
-// realm key is current would corrupt saved state. restoreWorkspaceTabs is the
-// only thing that clears it.
+// realm key is current would corrupt saved state. restoreWorkspaceTabs clears
+// it, and so does cancelTabRestore when a switch fails and no restore is coming.
 const [awaitingTabRestore, setAwaitingTabRestore] = createSignal(false);
 
 function persistTabs() {
   if (awaitingTabRestore()) return;
-  saveTabRealm(tabRealm, serializeTabs(workspaceTabs(), threadByWorkspace()));
+  const realm = untrack(tabRealm);
+  // Nothing valid can be stored for "no realm assigned yet": an entry under
+  // the sentinel is never restored, so the write would just lose the tabs.
+  // The first real assignment (setTabRealm, restoreWorkspaceTabs) persists
+  // whatever is on screen then — same shape as the awaitingTabRestore gate.
+  if (realm === UNASSIGNED_REALM) return;
+  savePaneRealm(realm, serializePanes(workspacePanes(), threadByWorkspace()));
 }
 
 interface NavEntry {
@@ -85,12 +156,12 @@ function selectRaw(name: string | null) {
 }
 
 /**
- * Commit a new tab state and follow its focused tab. When the last tab closes
+ * Commit new pane state and follow the focused pane. When the last pane empties
  * on the workspace page there is nothing left to show, so the dashboard takes
  * over rather than an empty "select a workspace" screen.
  */
-function commitTabs(next: WorkspaceTabsState) {
-  setWorkspaceTabs(next);
+function commitPanes(next: WorkspacePanesState) {
+  setWorkspacePanes(next);
   persistTabs();
   const name = activeWorkspace(next);
   selectRaw(name);
@@ -101,7 +172,7 @@ function commitTabs(next: WorkspaceTabsState) {
 
 function apply(entry: NavEntry) {
   if (entry.selectedWorkspace != null) {
-    setWorkspaceTabs(openTab(workspaceTabs(), entry.selectedWorkspace));
+    setWorkspacePanes(openWorkspace(workspacePanes(), entry.selectedWorkspace));
     persistTabs();
   }
   selectRaw(entry.selectedWorkspace);
@@ -116,27 +187,64 @@ export const nav = {
   chatSurfaceShowsChat,
   canBack,
   canForward,
-  workspaceTabs,
+  workspacePanes,
   awaitingTabRestore,
   /** Storage realm of the tabs currently on screen (drafts key off it too). */
-  tabRealm: () => tabRealm,
-  /** Pause tab persistence until the owed restoreWorkspaceTabs call. */
-  deferTabRestore() {
+  tabRealm,
+  tabRealmSession,
+  /**
+   * Pause tab persistence until the owed restoreWorkspaceTabs call.
+   * `daemonSwitch` declares that the restore will land on a different daemon,
+   * so it replaces the tab realm session even if no realm was assigned yet.
+   */
+  deferTabRestore(opts?: { daemonSwitch?: boolean }) {
+    if (opts?.daemonSwitch) daemonSwitchPending = true;
     setAwaitingTabRestore(true);
+  },
+  /**
+   * Point persistence at `realm` without touching the tabs on screen, and save
+   * them under it now (the startup case: a workspace opened before the realm
+   * was known would otherwise never reach this realm's entry).
+   */
+  setTabRealm(realm: string) {
+    assignTabRealm(realm);
+    persistTabs();
+  },
+  /** True while a declared daemon switch is in flight (deferTabRestore's opt). */
+  daemonSwitchPending: () => daemonSwitchPending,
+  /**
+   * Drop the pending-switch bit this attempt introduced on failure, without
+   * disturbing an awaitingTabRestore owed by an earlier, still-unresolved
+   * switch. Left set, the next startup realm correction would read as a
+   * switch and remount the editor over its unsaved text.
+   */
+  undeclareDaemonSwitch() {
+    daemonSwitchPending = false;
+  },
+  /** Cancel an owed restore after a failed switch, without touching current tabs. */
+  cancelTabRestore() {
+    // Only called by the attempt that introduced the pause, so no earlier
+    // switch is still pending either: still on the same daemon.
+    daemonSwitchPending = false;
+    setAwaitingTabRestore(false);
+    // The pause swallowed any tab change made while the switch was checked —
+    // flush it, or quitting now would bring back the pre-switch tabs. Safe
+    // here: the switch failed, so the screen still belongs to this realm.
+    persistTabs();
   },
 
   setWindowFocused,
   setChatSurfaceShowsChat,
   /** Select a workspace and switch to its page (clears per-workspace selections). */
   /**
-   * Select a workspace and switch to its page. The workspace opens as a tab, or
-   * its existing tab (in either pane) takes focus.
+   * Select a workspace and switch to its page. It loads into the focused pane,
+   * or the pane that already shows it takes focus.
    */
   selectWorkspace(name: string | null) {
     if (selectedWorkspace() === name && activePage() === "workspace") return;
     pushHistory();
     if (name != null) {
-      setWorkspaceTabs(openTab(workspaceTabs(), name));
+      setWorkspacePanes(openWorkspace(workspacePanes(), name));
       persistTabs();
     }
     selectRaw(name);
@@ -193,98 +301,102 @@ export const nav = {
    */
   chatThreadInView(threadId: number): boolean {
     if (selectedChatThread() === threadId) return chatSurfaceShowsChat();
-    const tabs = workspaceTabs();
-    return tabs.groups.some(
-      (group, i) => i !== tabs.focused && group.active != null && rememberedThread(group.active) === threadId,
+    const panes = workspacePanes();
+    return panes.panes.some(
+      (pane, i) => i !== panes.focused && pane.workspace != null && rememberedThread(pane.workspace) === threadId,
     );
   },
 
-  /** Focus a pane: its active tab becomes the selected workspace. */
-  focusTabGroup(index: number) {
-    const next = focusGroup(workspaceTabs(), index);
-    if (next !== workspaceTabs()) commitTabs(next);
+  /** True when this chat is the one the focused pane shows, in a focused window. */
+  chatThreadFocused(threadId: number): boolean {
+    return (
+      windowFocused() &&
+      activePage() === "workspace" &&
+      selectedChatThread() === threadId &&
+      chatSurfaceShowsChat()
+    );
   },
 
-  closeWorkspaceTab(name: string) {
-    commitTabs(closeTab(workspaceTabs(), name));
+  /** Focus a pane: its workspace becomes the selected workspace. */
+  focusPane(index: number) {
+    const next = focusPane(workspacePanes(), index);
+    if (next !== workspacePanes()) commitPanes(next);
   },
 
-  /** Close every tab in `name`'s pane except `name`. */
-  closeOtherWorkspaceTabs(name: string) {
-    const group = workspaceTabs().groups.find((candidate) => candidate.tabs.includes(name));
-    if (!group) return;
-    let next = workspaceTabs();
-    for (const tab of group.tabs) if (tab !== name) next = closeTab(next, tab);
-    commitTabs(openTab(next, name));
+  /** Close pane `index`; the last pane empties instead of disappearing. */
+  closePane(index: number) {
+    commitPanes(closePane(workspacePanes(), index));
   },
 
-  splitWorkspaceTab(name: string, direction: SplitDirection) {
-    commitTabs(splitTab(workspaceTabs(), name, direction));
+  /** Close whichever pane shows `name` (archive, delete, sidebar menu). */
+  closeWorkspacePane(name: string) {
+    commitPanes(closeWorkspace(workspacePanes(), name));
   },
 
   /**
-   * Open `name` beside what is on screen: into a new split, or into the other
-   * pane when the view is already split. With nothing else open there is no
-   * second pane to make, so it simply opens.
+   * Open `name` beside what is on screen: in a new split, or in the other pane
+   * when the view is already split. With nothing else open there is no second
+   * pane to make, so it simply opens.
    */
   openWorkspaceInSplit(name: string, direction: SplitDirection) {
     pushHistory();
-    const tabs = workspaceTabs();
-    const at = groupIndexOf(tabs, name);
-    let next = openTab(tabs, name);
-    // Already beside the focused pane: focusing it is the whole job.
-    const alreadyBeside = tabs.groups.length > 1 && at >= 0 && at !== tabs.focused;
-    if (!alreadyBeside) next = splitTab(next, name, direction);
-    commitTabs(next);
+    commitPanes(splitWorkspace(workspacePanes(), name, direction));
     setActivePage("workspace");
   },
 
-  moveWorkspaceTab(name: string, group: number, index: number) {
-    commitTabs(moveTab(workspaceTabs(), name, group, index));
+  /** Load `name` into pane `index` (a drop onto that pane), focusing it there. */
+  openWorkspaceInPane(name: string, index: number) {
+    pushHistory();
+    commitPanes(openWorkspaceIn(workspacePanes(), name, index));
+    setActivePage("workspace");
   },
 
-  /** Follow a server-side rename: the tab, its chat memory, and the selection. */
+  /** Follow a server-side rename: the pane, its chat memory, and the selection. */
   renameWorkspace(from: string, to: string) {
     const memory = threadByWorkspace();
     if (from in memory) {
       const { [from]: thread, ...rest } = memory;
       setThreadByWorkspace({ ...rest, [to]: thread });
     }
-    setWorkspaceTabs(renameTab(workspaceTabs(), from, to));
+    setWorkspacePanes(renamePaneWorkspace(workspacePanes(), from, to));
     persistTabs();
     if (selectedWorkspace() === from) setSelectedWorkspaceRaw(to);
   },
 
-  resetWorkspaceTabs() {
+  resetWorkspacePanes() {
     setThreadByWorkspace({});
-    commitTabs(emptyTabs());
+    commitPanes(emptyPanes());
   },
 
   /**
-   * Swap to `realm`'s saved tabs (boot, or a daemon switch). The old realm's
+   * Swap to `realm`'s saved panes (boot, or a daemon switch). The old realm's
    * state is already on disk — every mutation persists — so this only loads.
    * Stored names are checked against `keep` (the live inventory); whatever
    * survives is committed, and landing on a restored tab switches to the
    * workspace page so the app opens where it was closed.
    */
-  restoreWorkspaceTabs(realm: string, keep: (name: string) => boolean) {
-    tabRealm = realm;
-    setAwaitingTabRestore(false);
-    const { state, threads } = materializeTabs(loadTabRealm(realm), keep);
-    setThreadByWorkspace(threads);
-    commitTabs(state);
-    // commitTabs's selection short-circuits when the focused workspace kept
-    // its name across realms, but the thread ids under it are the new
-    // daemon's — point the selection at the restored memory explicitly.
-    const active = activeWorkspace(state);
-    setSelectedChatThread(active != null ? (threads[active] ?? null) : null);
-    if (active != null) setActivePage("workspace");
+  restoreWorkspacePanes(realm: string, keep: (name: string) => boolean) {
+    // One batch: views keyed on the realm remount once, against the restored
+    // selection, not against the old realm's panes in between.
+    batch(() => {
+      assignTabRealm(realm);
+      setAwaitingTabRestore(false);
+      const { state, threads } = materializePanes(loadPaneRealm(realm), keep);
+      setThreadByWorkspace(threads);
+      commitPanes(state);
+      // commitPanes's selection short-circuits when the focused workspace kept
+      // its name across realms, but the thread ids under it are the new
+      // daemon's — point the selection at the restored memory explicitly.
+      const active = activeWorkspace(state);
+      setSelectedChatThread(active != null ? (threads[active] ?? null) : null);
+      if (active != null) setActivePage("workspace");
+    });
   },
 
-  /** Drop tabs for workspaces that were archived, deleted, or are not on this daemon. */
-  retainWorkspaceTabs(keep: (name: string) => boolean) {
-    const next = retainTabs(workspaceTabs(), keep);
-    if (next !== workspaceTabs()) commitTabs(next);
+  /** Drop panes for workspaces that were archived, deleted, or are not on this daemon. */
+  retainWorkspacePanes(keep: (name: string) => boolean) {
+    const next = retainWorkspaces(workspacePanes(), keep);
+    if (next !== workspacePanes()) commitPanes(next);
   },
 
   back() {

@@ -2,7 +2,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const send = vi.fn();
-vi.mock("@/bridge/client", () => ({ send }));
+vi.mock("@/bridge/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/bridge/client")>()),
+  send,
+}));
+const selectedDaemon = vi.fn();
+const ensureLoaded = vi.fn();
+let loaded = true;
+vi.mock("./clients", () => ({
+  clientsStore: {
+    get state() {
+      return { loaded };
+    },
+    selectedDaemon,
+    ensureLoaded,
+  },
+}));
 
 const COMPLETE_TOML = `
 [customization.view]
@@ -40,6 +55,9 @@ describe("appearance projection", () => {
   beforeEach(() => {
     vi.resetModules();
     send.mockReset();
+    selectedDaemon.mockReset();
+    ensureLoaded.mockReset();
+    loaded = true;
     document.body.className = "";
     document.documentElement.removeAttribute("style");
   });
@@ -137,5 +155,177 @@ surface = "#fedcba"
     expect(send).toHaveBeenCalledWith({ type: "get_settings" });
     expect(appearanceStore.state.uiFont).toBe("Inter, sans-serif");
     expect(document.documentElement.style.getPropertyValue("--lc-danger")).toBe("#161616");
+  });
+
+  it("resolves a saved accent_color when no explicit colors.accent exists", async () => {
+    const { ACCENT_PRESETS, parseAppearance } = await import("./appearance");
+    expect(parseAppearance('[customization.view]\naccent_color = "#abcdef"\n').colors.accent).toBe("#abcdef");
+    const blue = ACCENT_PRESETS.find(([label]) => label === "Blue")![1];
+    expect(parseAppearance('[customization.view]\naccent_color = "blue"\n').colors.accent).toBe(blue);
+    expect(parseAppearance(`[customization.view]
+accent_color = "#abcdef"
+
+[customization.view.colors]
+accent = "#111111"
+`).colors.accent).toBe("#111111");
+  });
+
+  it("saves global appearance to the daemon it read from even if the selection switches mid-flight", async () => {
+    const stores: Record<string, string> = {
+      A: '[customization.view]\ntheme = "dark"\n',
+      B: '[customization.view]\ntheme = "light"\n',
+    };
+    let active = "A";
+    const handle = async (daemonId: string, request: { type: string; toml?: string }) => {
+      if (request.type === "get_settings_source") {
+        const toml = stores[daemonId];
+        active = "B";
+        return { type: "settings_source", scope: "global", layer: "global", toml };
+      }
+      if (request.type === "save_settings") {
+        stores[daemonId] = request.toml!;
+        return { type: "settings_saved", scope: "global", layer: "global" };
+      }
+      if (request.type === "get_settings") return { type: "settings", scope: "global", toml: stores[daemonId] };
+      return { type: "ack" };
+    };
+    window.archductor = {
+      request: vi.fn((request) => handle(active, request)),
+      requestClient: vi.fn((clientId, request) => handle(clientId ?? "local", request)),
+    } as unknown as typeof window.archductor;
+    send.mockImplementation((request) => window.archductor.request(request));
+    selectedDaemon.mockReturnValue({ kind: "client", clientId: "A" });
+    const { updateGlobalAppearance } = await import("./appearance");
+
+    await updateGlobalAppearance([{ section: "customization.view", key: "ui_font", value: "Georgia, serif" }]);
+
+    expect(stores).toEqual({
+      A: '[customization.view]\ntheme = "dark"\nui_font = "Georgia, serif"\n',
+      B: '[customization.view]\ntheme = "light"\n',
+    });
+  });
+
+  it("applies a saved accent_color through refresh even though effective settings carry a default accent", async () => {
+    send.mockImplementation(async (request: { type: string }) => {
+      if (request.type === "get_settings") {
+        const effective = COMPLETE_TOML
+          .replace('accent_color = "#123456"', 'accent_color = "green"')
+          .replace('accent = "#121212"', 'accent = "#5b9dff"');
+        return { type: "settings", scope: "global", toml: effective };
+      }
+      if (request.type === "get_settings_source") {
+        return { type: "settings_source", scope: "global", layer: "global", toml: '[customization.view]\naccent_color = "green"\n' };
+      }
+      return { type: "ack" };
+    });
+    const { ACCENT_PRESETS, appearanceStore } = await import("./appearance");
+
+    await appearanceStore.refresh();
+
+    expect(appearanceStore.state.colors.accent).toBe(ACCENT_PRESETS.find(([label]) => label === "Green")![1]);
+  });
+
+  it("waits for the client list before pinning a global appearance save", async () => {
+    loaded = false;
+    selectedDaemon.mockReturnValue({ kind: "local" });
+    ensureLoaded.mockImplementation(async () => {
+      loaded = true;
+      selectedDaemon.mockReturnValue({ kind: "client", clientId: "R" });
+    });
+    const targets: (string | null)[] = [];
+    window.archductor = {
+      request: vi.fn(async () => ({ type: "error", message: "unpinned request" })),
+      requestClient: vi.fn(async (clientId: string | null, request: { type: string }) => {
+        targets.push(clientId);
+        if (request.type === "get_settings_source") {
+          return { type: "settings_source", scope: "global", layer: "global", toml: "" };
+        }
+        return { type: "settings_saved", scope: "global", layer: "global" };
+      }),
+    } as unknown as typeof window.archductor;
+    send.mockResolvedValue({ type: "ack" });
+    const { updateGlobalAppearance } = await import("./appearance");
+
+    await updateGlobalAppearance([{ section: "customization.view", key: "theme", value: "light" }]);
+
+    expect(targets).toEqual(["R", "R"]);
+    expect(ensureLoaded).toHaveBeenCalled();
+  });
+
+  it("refuses a global appearance save when the client list cannot be loaded", async () => {
+    loaded = false;
+    selectedDaemon.mockReturnValue({ kind: "local" });
+    ensureLoaded.mockResolvedValue(undefined);
+    window.archductor = {
+      request: vi.fn(),
+      requestClient: vi.fn(),
+    } as unknown as typeof window.archductor;
+    const { updateGlobalAppearance } = await import("./appearance");
+
+    await expect(
+      updateGlobalAppearance([{ section: "customization.view", key: "theme", value: "light" }]),
+    ).rejects.toThrow();
+    expect(window.archductor.request).not.toHaveBeenCalled();
+    expect(window.archductor.requestClient).not.toHaveBeenCalled();
+  });
+
+  describe("saved accent through refresh", () => {
+    async function refreshWith(effectiveAccentColor: string, effectiveAccent: string, source: string) {
+      send.mockImplementation(async (request: { type: string }) => {
+        if (request.type === "get_settings") {
+          const effective = COMPLETE_TOML
+            .replace('accent_color = "#123456"', `accent_color = "${effectiveAccentColor}"`)
+            .replace('accent = "#121212"', `accent = "${effectiveAccent}"`);
+          return { type: "settings", scope: "global", toml: effective };
+        }
+        if (request.type === "get_settings_source") {
+          return { type: "settings_source", scope: "global", layer: "global", toml: source };
+        }
+        return { type: "ack" };
+      });
+      const { appearanceStore } = await import("./appearance");
+      await appearanceStore.refresh();
+      return appearanceStore.state.colors.accent;
+    }
+
+    it.each([
+      ["section form", '[customization.view]\n\n[customization.view.colors]\naccent = "#abcdef"\n'],
+      ["inline table", '[customization.view]\ncolors = { accent = "#abcdef" }\n'],
+      ["quoted key in an inline table", '[customization.view]\ncolors = { "accent" = "#abcdef" }\n'],
+      ["quoted inline table key", '[customization.view]\n"colors" = { surface = "#222222", \'accent\' = "#abcdef" }\n'],
+    ])("keeps a saved accent in %s instead of the accent_color default", async (_shape, source) => {
+      expect(await refreshWith("#5b9dff", "#abcdef", source)).toBe("#abcdef");
+    });
+
+    it.each([
+      ["a commented-out inline table in the colors section", '[customization.view]\naccent_color = "green"\n\n[customization.view.colors]\n# colors = { accent = "#abcdef" }\n'],
+      ["a commented-out inline table in the view section", '[customization.view]\naccent_color = "green"\n# colors = { accent = "#abcdef" }\n'],
+      ["a trailing comment after an inline table", '[customization.view]\naccent_color = "green"\ncolors = { surface = "#222222" } # was { accent = "#abcdef" }\n'],
+      ["a trailing comment after a section-form color", '[customization.view]\naccent_color = "green"\n\n[customization.view.colors]\nsurface = "#222222" # was { accent = "#abcdef" }\n'],
+    ])("ignores %s and falls back to accent_color", async (_shape, source) => {
+      const { ACCENT_PRESETS } = await import("./appearance");
+      expect(await refreshWith("green", "#5b9dff", source)).toBe(ACCENT_PRESETS.find(([label]) => label === "Green")![1]);
+    });
+
+    it.each([
+      ["an inline table with a trailing comment", '[customization.view]\ncolors = { accent = "#abcdef" } # saved here\n'],
+      ["a section-form accent with a trailing comment", '[customization.view.colors]\naccent = "#abcdef" # saved here\n'],
+    ])("still keeps a saved accent in %s", async (_shape, source) => {
+      expect(await refreshWith("#5b9dff", "#abcdef", source)).toBe("#abcdef");
+    });
+
+    it("falls back to accent_color when no accent was saved in any form", async () => {
+      const { ACCENT_PRESETS } = await import("./appearance");
+      const source = '[customization.view]\naccent_color = "rose"\ncolors = { surface = "#222222" }\n';
+      expect(await refreshWith("rose", "#5b9dff", source)).toBe(ACCENT_PRESETS.find(([label]) => label === "Rose")![1]);
+    });
+  });
+
+  it("detects an inline colors table only when it is real TOML, not a comment", async () => {
+    const { hasInlineColorsTable } = await import("./appearance");
+    expect(hasInlineColorsTable('[customization.view]\ncolors = { accent = "#abcdef" }\n')).toBe(true);
+    expect(hasInlineColorsTable('[customization.view]\n\'colors\' = { accent = "#abcdef" } # note\n')).toBe(true);
+    expect(hasInlineColorsTable('[customization.view]\n# colors = { accent = "#abcdef" }\n')).toBe(false);
+    expect(hasInlineColorsTable('[customization.view]\ntheme = "dark" # colors = { accent = "#abcdef" }\n')).toBe(false);
   });
 });

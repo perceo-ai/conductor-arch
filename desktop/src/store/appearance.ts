@@ -1,6 +1,12 @@
 import { createStore } from "solid-js/store";
-import { send } from "@/bridge/client";
-import { readTomlValue, writeTomlValue, type TomlValueKind } from "@/pages/settings/toml";
+import { send, sendToDaemon } from "@/bridge/client";
+import {
+  readTomlValue,
+  tomlSectionBounds,
+  writeTomlValue,
+  type TomlValueKind,
+} from "@/pages/settings/toml";
+import { clientsStore } from "./clients";
 
 export const COLOR_KEYS = [
   "background",
@@ -20,6 +26,18 @@ export const COLOR_KEYS = [
   "warning",
   "danger",
 ] as const;
+
+export const ACCENT_PRESETS = [
+  ["Amber", "#c39b50"], ["Blue", "#5b8def"], ["Green", "#3fb27f"], ["Rose", "#e0567b"],
+] as const;
+
+export const HEX_COLOR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+
+/** `accent_color` holds either a hex color or a preset name such as "blue". */
+function resolveAccentColor(value: string): string | undefined {
+  if (HEX_COLOR.test(value)) return value.toLowerCase();
+  return ACCENT_PRESETS.find(([label]) => label.toLowerCase() === value.trim().toLowerCase())?.[1];
+}
 
 export type AppearanceColorKey = (typeof COLOR_KEYS)[number];
 export type AppearanceTheme = "system" | "dark" | "light";
@@ -103,6 +121,77 @@ const CSS_COLOR_ALIASES: Partial<Record<AppearanceColorKey, readonly string[]>> 
   danger: ["--lc-status-danger"],
 };
 
+/**
+ * Split `text` on `separator` wherever it is outside a TOML string, so the
+ * `#` in `"#abcdef"` or a `,` inside a value is never mistaken for syntax.
+ */
+function splitOutsideStrings(text: string, separator: string): string[] {
+  const parts: string[] = [];
+  let quote: string | undefined;
+  let from = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (char === "\\" && quote === '"') index += 1;
+      else if (char === quote) quote = undefined;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === separator) {
+      parts.push(text.slice(from, index));
+      from = index + 1;
+    }
+  }
+  parts.push(text.slice(from));
+  return parts;
+}
+
+/** The section's lines with comments removed. */
+function sectionLines(source: string, section: string): string[] {
+  const lines = source.split("\n");
+  const bounds = tomlSectionBounds(lines, section);
+  if (!bounds) return [];
+  return lines.slice(bounds[0] + 1, bounds[1]).map((line) => splitOutsideStrings(line, "#")[0]);
+}
+
+/** `key = value` split at the first `=` outside a string, with the key unquoted. */
+function assignment(entry: string): { key: string; value: string } | undefined {
+  const [rawKey, ...rest] = splitOutsideStrings(entry, "=");
+  if (rest.length === 0) return undefined;
+  const key = rawKey.trim().replace(/^(["'])(.*)\1$/, "$2");
+  return { key, value: rest.join("=").trim() };
+}
+
+/** Entries of a `colors = { ... }` inline table under `[customization.view]`, if any. */
+function inlineColorsEntries(source: string): string[] | undefined {
+  for (const line of sectionLines(source, "customization.view")) {
+    const pair = assignment(line);
+    if (pair?.key === "colors" && pair.value.startsWith("{")) {
+      return splitOutsideStrings(pair.value.replace(/^\{|\}$/g, ""), ",");
+    }
+  }
+  return undefined;
+}
+
+/**
+ * `colors = { ... }` inside `[customization.view]` is valid TOML the daemon
+ * keeps, but the line-based writer cannot edit it: it would add a second
+ * `[customization.view.colors]` table, which the daemon then rejects.
+ */
+export function hasInlineColorsTable(source: string): boolean {
+  return inlineColorsEntries(source) !== undefined;
+}
+
+/**
+ * Whether the saved source sets `colors.accent` in any shape: the section
+ * form, an inline table, or a quoted key, ignoring comments. The scalar
+ * reader only sees the section form, so it cannot answer this on its own.
+ */
+function hasSavedAccent(source: string): boolean {
+  const isAccent = (entry: string) => assignment(entry)?.key === "accent";
+  return sectionLines(source, "customization.view.colors").some(isAccent)
+    || (inlineColorsEntries(source)?.some(isAccent) ?? false);
+}
+
 function stringValue(toml: string, section: string, key: string, fallback: string): string {
   return readTomlValue(toml, section, key) || fallback;
 }
@@ -112,7 +201,13 @@ function numberValue(toml: string, key: string, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
-export function parseAppearance(toml: string): Appearance {
+/**
+ * `toml` is the document values are read from (usually the effective view).
+ * `source` is what was actually saved; the daemon fills built-in colors into
+ * the effective view, so only the source can say whether `colors.accent` was
+ * set on purpose. It defaults to `toml` when the caller has one document.
+ */
+export function parseAppearance(toml: string, source: string = toml): Appearance {
   const rawTheme = readTomlValue(toml, "customization.view", "theme");
   const theme: AppearanceTheme = ["system", "dark", "light"].includes(rawTheme)
     ? (rawTheme as AppearanceTheme)
@@ -124,6 +219,11 @@ export function parseAppearance(toml: string): Appearance {
   const colors = { ...DEFAULT_APPEARANCE.colors };
   for (const key of COLOR_KEYS) {
     colors[key] = stringValue(toml, "customization.view.colors", key, colors[key]);
+  }
+  // An explicit colors.accent wins; otherwise a saved accent_color drives the token.
+  if (!hasSavedAccent(source)) {
+    const accent = resolveAccentColor(readTomlValue(toml, "customization.view", "accent_color"));
+    if (accent) colors.accent = accent;
   }
   return {
     theme,
@@ -255,7 +355,10 @@ export const appearanceStore = {
         key,
       ) !== "")
       : [];
-    setState({ ...parseAppearance(response.toml), loaded: true });
+    setState({
+      ...parseAppearance(response.toml, source.type === "settings_source" ? source.toml : undefined),
+      loaded: true,
+    });
     applyCurrent();
   },
   apply: applyCurrent,
@@ -276,7 +379,15 @@ export interface AppearanceUpdate {
 }
 
 export async function updateGlobalAppearance(updates: AppearanceUpdate[]): Promise<void> {
-  const source = await send({ type: "get_settings_source" });
+  // Before the client list loads, selectedDaemon() reports this machine even
+  // when a remote is configured; never guess which daemon owns the settings.
+  if (!clientsStore.state.loaded) await clientsStore.ensureLoaded();
+  if (!clientsStore.state.loaded) {
+    throw new Error("Could not determine the selected daemon; appearance not saved");
+  }
+  // Read and save on the same daemon even if the selection switches in between.
+  const daemon = clientsStore.selectedDaemon();
+  const source = await sendToDaemon(daemon, { type: "get_settings_source" });
   if (source.type !== "settings_source") {
     throw new Error(source.type === "error" ? source.message : "Could not load app-shared settings");
   }
@@ -285,7 +396,7 @@ export async function updateGlobalAppearance(updates: AppearanceUpdate[]): Promi
       writeTomlValue(current, update.section, update.key, update.value, update.kind ?? "string"),
     source.toml,
   );
-  const saved = await send({ type: "save_settings", toml });
+  const saved = await sendToDaemon(daemon, { type: "save_settings", toml });
   if (saved.type !== "settings_saved") {
     throw new Error(saved.type === "error" ? saved.message : "Could not save app-shared settings");
   }

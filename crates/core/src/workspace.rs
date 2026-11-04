@@ -52,6 +52,7 @@ use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
@@ -4098,9 +4099,9 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            return git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()]);
+            return git_worktree_diff_output(&workspace.path, &["diff", "--", path_value.as_str()]);
         }
-        git_output(&workspace.path, ["diff", "--"])
+        git_worktree_diff_output(&workspace.path, &["diff", "--"])
     }
 
     pub fn staged_diff(&self, name: &str, path: Option<&Path>) -> Result<String> {
@@ -4130,7 +4131,7 @@ impl WorkspaceStore {
                 &["diff", "--cached", "--", path_value.as_str()],
             )?
         } else {
-            git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()])?
+            git_worktree_diff_output(&workspace.path, &["diff", "--", path_value.as_str()])?
         };
         Ok(diff_hunk_summaries(&diff, staged))
     }
@@ -4144,7 +4145,7 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let validated = validate_workspace_relative_path(relative_path)?;
         let path_value = validated.to_string_lossy().to_string();
-        let diff = git_output_dynamic(&workspace.path, &["diff", "--", path_value.as_str()])?;
+        let diff = git_worktree_diff_output(&workspace.path, &["diff", "--", path_value.as_str()])?;
         let patch = diff_hunk_patch(&diff, hunk_index)?;
         validate_hunk_patch_supported(&patch)?;
         git_patch(&workspace.path, &["apply", "--cached", "-"], &patch)?;
@@ -4194,12 +4195,12 @@ impl WorkspaceStore {
         let base_ref = workspace_base_ref(&workspace);
         let mut diff = if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            git_output_dynamic(
+            git_worktree_diff_output(
                 &workspace.path,
                 &["diff", base_ref, "--", path_value.as_str()],
             )?
         } else {
-            git_output_dynamic(&workspace.path, &["diff", base_ref, "--"])?
+            git_worktree_diff_output(&workspace.path, &["diff", base_ref, "--"])?
         };
         diff.push_str(&untracked_patch(&workspace.path, path)?);
         Ok(diff)
@@ -4214,12 +4215,12 @@ impl WorkspaceStore {
         let workspace = self.get_by_name(name)?;
         let mut diff = if let Some(path) = path {
             let path_value = path.to_string_lossy().to_string();
-            git_output_dynamic(
+            git_worktree_diff_output(
                 &workspace.path,
                 &["diff", "HEAD", "--", path_value.as_str()],
             )?
         } else {
-            git_output_dynamic(&workspace.path, &["diff", "HEAD", "--"])?
+            git_worktree_diff_output(&workspace.path, &["diff", "HEAD", "--"])?
         };
         diff.push_str(&untracked_patch(&workspace.path, path)?);
         Ok(diff)
@@ -4422,7 +4423,7 @@ impl WorkspaceStore {
 
     pub fn diff_file_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
-        let unstaged = git_output(&workspace.path, ["diff", "--numstat", "--"])?;
+        let unstaged = git_worktree_diff_output(&workspace.path, &["diff", "--numstat", "--"])?;
         let staged = git_output(&workspace.path, ["diff", "--cached", "--numstat", "--"])?;
         file_change_summaries_from_numstat(
             &workspace.path,
@@ -4437,7 +4438,8 @@ impl WorkspaceStore {
     pub fn all_file_change_summaries(&self, name: &str) -> Result<Vec<DiffFileSummary>> {
         let workspace = self.get_by_name(name)?;
         let base_ref = workspace_base_ref(&workspace);
-        let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
+        let diff =
+            git_worktree_diff_output(&workspace.path, &["diff", "--numstat", base_ref, "--"])?;
         file_change_summaries_from_numstat(&workspace.path, parse_diff_numstat(&diff))
     }
 
@@ -11721,7 +11723,8 @@ fn workspace_diff_stats_against_resolved_ref(
     workspace: &Workspace,
     base_commit: &str,
 ) -> Result<(usize, usize)> {
-    let diff = git_output_dynamic(&workspace.path, &["diff", "--numstat", base_commit, "--"])?;
+    let diff =
+        git_worktree_diff_output(&workspace.path, &["diff", "--numstat", base_commit, "--"])?;
     let mut additions = 0;
     let mut deletions = 0;
     for summary in parse_diff_numstat(&diff) {
@@ -12955,8 +12958,95 @@ fn git_dynamic(cwd: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// Runs git with `--no-optional-locks`. The daemon reads worktrees often — a
+/// summary refresh after each agent turn runs `git status` several times — and
+/// plain `git status` takes `index.lock` to write back the index it refreshed,
+/// so a `git add` or `git commit` racing it (the agent's, the user's, or the
+/// daemon's own `CommitWorkspaceChanges`) failed with "index.lock: File
+/// exists". The flag stops that for `status`, and for reads that never look at
+/// the working tree (`diff --cached`, tree-to-tree `diff`, `log`, `rev-parse`)
+/// there is no lock to take.
+///
+/// It does *not* stop a `git diff` that compares the working tree: that still
+/// refreshes and writes the index under `index.lock`, flag or not. Those go
+/// through [`git_worktree_diff_output`] instead. Some writes (`commit`) also
+/// come through here; the flag never drops a lock an operation needs.
 fn git_output_dynamic(cwd: &Path, args: &[&str]) -> Result<String> {
-    command_output(cwd, "git", args)
+    let mut with_flag = Vec::with_capacity(args.len() + 1);
+    with_flag.push("--no-optional-locks");
+    with_flag.extend_from_slice(args);
+    command_output(cwd, "git", &with_flag)
+}
+
+/// A `git diff` that compares the working tree (`diff`, `diff <ref>`,
+/// `diff HEAD`, with or without `--numstat`/`--binary`/a path), read against a
+/// throwaway copy of the live index — the same `GIT_INDEX_FILE` approach
+/// `root_tracked_patch` uses. Such a diff refreshes stat data and writes the
+/// index back under `index.lock` even with `--no-optional-locks`, so run on the
+/// live index it made a concurrent `git add`/`git commit` fail. Against the
+/// copy, the only lock it can take is the copy's. The output is the same: the
+/// copy holds the same entries the live index did when it was read.
+fn git_worktree_diff_output(cwd: &Path, args: &[&str]) -> Result<String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let live = cwd.join(git_output_dynamic(cwd, &["rev-parse", "--git-path", "index"])?.trim());
+    if !live.exists() {
+        // No index yet means no entries and nothing to lock against.
+        return git_output_dynamic(cwd, args);
+    }
+    // Beside the live index, not in `$TMPDIR`: that directory always exists and
+    // git can write there, while a daemon's `$TMPDIR` may not exist at all.
+    let copy = live.with_file_name(format!(
+        "archductor-read-index-{}-{}-{}",
+        std::process::id(),
+        timestamp_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    // git replaces the index by renaming a finished file over it, so this copy
+    // is one whole version, never a half-written one.
+    copy_index_preserving_mtime(&live, &copy)?;
+    let output = git_with_index_output(cwd, &copy, args);
+    let _ = fs::remove_file(&copy);
+    output
+}
+
+/// Copy the live index for [`git_worktree_diff_output`] and give the copy the
+/// live index's mtime.
+///
+/// git trusts an entry's cached stat data only when the entry is strictly
+/// older than the index file it came from: in `read-cache.c`, once
+/// `ce_match_stat_basic()` finds the stat data unchanged, `ie_match_stat()`
+/// asks `is_racy_timestamp()` whether the entry's mtime is at or after the
+/// index file's mtime, and if so re-reads the content
+/// (`ce_modified_check_fs()`). That is what catches a same-size edit made in
+/// the same timestamp tick as the staging write. A copy stamped "now" moves
+/// the index's mtime forward, so those entries stop looking racy and the edit
+/// reads as unmodified. The mtime comes from the handle the bytes are read
+/// through, so a concurrent index write between a separate `stat` and the
+/// copy cannot pair one version's bytes with another's mtime.
+fn copy_index_preserving_mtime(live: &Path, copy: &Path) -> Result<()> {
+    let mut source = fs::File::open(live)
+        .map_err(|err| anyhow::anyhow!("open {} for a lock-free read: {err}", live.display()))?;
+    let source_mtime = source
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .map_err(|err| anyhow::anyhow!("read mtime of {}: {err}", live.display()))?;
+    let mut dest = fs::File::create(copy)
+        .map_err(|err| anyhow::anyhow!("create {} for a lock-free read: {err}", copy.display()))?;
+    std::io::copy(&mut source, &mut dest).map_err(|err| {
+        anyhow::anyhow!(
+            "copy {} to {} for a lock-free read: {err}",
+            live.display(),
+            copy.display()
+        )
+    })?;
+    dest.set_modified(source_mtime).map_err(|err| {
+        anyhow::anyhow!(
+            "preserve mtime of {} on {}: {err}",
+            live.display(),
+            copy.display()
+        )
+    })?;
+    Ok(())
 }
 
 /// Render one untracked file as a new-file patch. `git diff` never reports
@@ -13031,7 +13121,10 @@ fn workspace_tracked_patch(workspace: &Workspace) -> Result<String> {
         &workspace.path,
         &["diff", "--binary", "--cached", "HEAD"],
     )?);
-    patch.push_str(&git_output_dynamic(&workspace.path, &["diff", "--binary"])?);
+    patch.push_str(&git_worktree_diff_output(
+        &workspace.path,
+        &["diff", "--binary"],
+    )?);
     Ok(patch)
 }
 
@@ -14200,6 +14293,390 @@ pub(crate) mod tests {
 
         let workspaces = store.list().unwrap();
         assert_eq!(workspaces, vec![workspace]);
+    }
+
+    #[test]
+    fn reading_a_worktrees_status_never_takes_its_index_lock() {
+        // Regression: `changed_files` ran plain `git status`, which writes the
+        // refreshed index back under `index.lock`. The daemon runs it after
+        // every agent turn, so a commit racing that refresh failed with
+        // "index.lock: File exists". Whether the read wrote the index is the
+        // deterministic half of that race: a tracked file with stale stat data
+        // is exactly what plain `git status` rewrites the index for.
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let index = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        );
+        // A different mtime each time: one the index already recorded is not stale.
+        let make_stale = |secs: u64| {
+            fs::File::options()
+                .write(true)
+                .open(workspace.path.join("README.md"))
+                .unwrap()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+                .unwrap();
+        };
+
+        // The premise: plain `git status` does write the index here.
+        make_stale(1_000_000);
+        let before = fs::read(&index).unwrap();
+        git_output(&workspace.path, ["status", "--short"]);
+        assert!(
+            fs::read(&index).unwrap() != before,
+            "plain git status should have refreshed the index, or this test proves nothing"
+        );
+
+        make_stale(2_000_000);
+        let before = fs::read(&index).unwrap();
+        store.changed_files("berlin").unwrap();
+        store.git_status_short("berlin").unwrap();
+        assert!(
+            fs::read(&index).unwrap() == before,
+            "reading the worktree's status rewrote its index, so it held index.lock"
+        );
+    }
+
+    #[test]
+    fn reading_a_worktrees_diffs_never_takes_its_index_lock() {
+        // Follow-up to the status regression above: a `git diff` that compares
+        // the working tree refreshes and writes the index under `index.lock`
+        // even with `--no-optional-locks`, so the changes panel, diff stats on
+        // every `ListWorkspaces`, and the handoff patch could each make a
+        // concurrent commit fail. Same deterministic check: with stale stat
+        // data, did the read rewrite the live index?
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        let workspace = store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        // Real content in every diff, so the reads are checked doing real work.
+        fs::write(workspace.path.join("notes.txt"), "first\n").unwrap();
+        git(&workspace.path, ["add", "notes.txt"]).unwrap();
+        git(
+            &workspace.path,
+            [
+                "-c",
+                "user.name=Archductor",
+                "-c",
+                "user.email=archductor@example.test",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "add notes",
+            ],
+        )
+        .unwrap();
+        fs::write(workspace.path.join("notes.txt"), "first\nsecond\n").unwrap();
+        let index = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        );
+        let mut stale_at = 1_000_000;
+        let mut make_stale = || {
+            stale_at += 1_000;
+            fs::File::options()
+                .write(true)
+                .open(workspace.path.join("README.md"))
+                .unwrap()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(stale_at))
+                .unwrap();
+        };
+
+        // The premise: the flag alone does not stop `git diff` writing the index.
+        make_stale();
+        let before = fs::read(&index).unwrap();
+        git_output(&workspace.path, ["--no-optional-locks", "diff", "--"]);
+        assert!(
+            fs::read(&index).unwrap() != before,
+            "git --no-optional-locks diff should have refreshed the index, or this test proves nothing"
+        );
+
+        // (what is read, text it must show, the read itself)
+        type Read<'a> = (&'a str, &'a str, Box<dyn Fn() -> String + 'a>);
+        let reads: Vec<Read<'_>> = vec![
+            (
+                "unified_diff",
+                "+second",
+                Box::new(|| store.unified_diff("berlin", None).unwrap()),
+            ),
+            (
+                // Path-limited reads only refresh entries inside the pathspec,
+                // so these two name the stale file; it has no diff to show.
+                "unified_diff for one path",
+                "",
+                Box::new(|| {
+                    store
+                        .unified_diff("berlin", Some(Path::new("README.md")))
+                        .unwrap()
+                }),
+            ),
+            (
+                "diff_hunks (unstaged)",
+                "[]",
+                Box::new(|| {
+                    format!(
+                        "{:?}",
+                        store.diff_hunks("berlin", "README.md", false).unwrap()
+                    )
+                }),
+            ),
+            (
+                "unified_diff_against_base",
+                "+second",
+                Box::new(|| store.unified_diff_against_base("berlin", None).unwrap()),
+            ),
+            (
+                "uncommitted_diff",
+                "+second",
+                Box::new(|| store.uncommitted_diff("berlin", None).unwrap()),
+            ),
+            (
+                "diff_file_summaries",
+                "notes.txt",
+                Box::new(|| format!("{:?}", store.diff_file_summaries("berlin").unwrap())),
+            ),
+            (
+                "all_file_change_summaries",
+                "notes.txt",
+                Box::new(|| format!("{:?}", store.all_file_change_summaries("berlin").unwrap())),
+            ),
+            (
+                "diff_stats_against_base (every ListWorkspaces)",
+                "(2, 0)",
+                Box::new(|| format!("{:?}", store.diff_stats_against_base("berlin").unwrap())),
+            ),
+            (
+                "workspace_tracked_patch",
+                "+second",
+                Box::new(|| workspace_tracked_patch(&workspace).unwrap()),
+            ),
+        ];
+        let mut took_the_lock = Vec::new();
+        for (label, expected, read) in reads {
+            make_stale();
+            let before = fs::read(&index).unwrap();
+            let output = read();
+            assert!(
+                output.contains(expected),
+                "{label} should show {expected:?}; got:\n{output}"
+            );
+            if fs::read(&index).unwrap() != before {
+                took_the_lock.push(label);
+            }
+        }
+        assert!(
+            took_the_lock.is_empty(),
+            "these reads rewrote the worktree's index, so they held index.lock: {took_the_lock:?}"
+        );
+    }
+
+    #[test]
+    fn index_copy_for_a_lock_free_read_keeps_the_live_mtime_and_leaves_nothing_behind() {
+        // (a) The copy must carry the live index's mtime: git decides which
+        // entries are racily clean by comparing them with the index file's own
+        // mtime, so a copy stamped "now" made a same-tick, same-size edit read
+        // as unmodified.
+        let temp = tempfile::tempdir().unwrap();
+        let live = temp.path().join("index");
+        let copy = temp.path().join("index-copy");
+        fs::write(&live, b"not a real index; only the mtime matters here").unwrap();
+        let live_mtime = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&live)
+            .unwrap()
+            .set_modified(live_mtime)
+            .unwrap();
+        copy_index_preserving_mtime(&live, &copy).unwrap();
+        assert_eq!(fs::read(&copy).unwrap(), fs::read(&live).unwrap());
+        assert_eq!(
+            fs::metadata(&copy).unwrap().modified().unwrap(),
+            live_mtime,
+            "the copy's mtime must be the live index's, or git's racy-clean check reads it wrong"
+        );
+
+        // (b) The copy is removed whether git succeeds or fails.
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let index_dir = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        )
+        .parent()
+        .unwrap()
+        .to_path_buf();
+        let leftovers = || -> Vec<String> {
+            fs::read_dir(&index_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("archductor-read-index-"))
+                .collect()
+        };
+        git_worktree_diff_output(&workspace.path, &["diff", "--"]).unwrap();
+        assert!(
+            leftovers().is_empty(),
+            "a successful read left {:?}",
+            leftovers()
+        );
+        assert!(git_worktree_diff_output(&workspace.path, &["diff", "--not-a-real-flag"]).is_err());
+        assert!(
+            leftovers().is_empty(),
+            "a failed read left {:?}",
+            leftovers()
+        );
+    }
+
+    #[test]
+    fn git_worktree_diff_output_reads_an_edit_made_in_the_same_tick_as_staging() {
+        // End to end through the read path, so it fails whether the copy loses
+        // the mtime inside the helper or the call site stops using the helper.
+        // The entry and the index are pinned to one instant, so git must treat
+        // the entry as racily clean and re-read it; a same-size edit in that
+        // tick is then visible only if the copy kept the index's mtime.
+        // Deterministic: no wall clock, no filesystem timestamp granularity.
+        // ctime checks are off in this repository: rewriting `f` gives it a new
+        // ctime, and when staging and the edit straddle a second boundary git
+        // sees that and reports the edit whatever the copy's mtime, so the test
+        // went green with the fix reverted.
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path.clone(),
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let workspace = WorkspaceStore::open(&db_path)
+            .unwrap()
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        // Only this test's repository: `init_repo` is shared, and other tests
+        // keep git's default.
+        git_output(&workspace.path, ["config", "core.trustctime", "false"]);
+        let pin_mtime = |path: &Path, at: std::time::SystemTime| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        let tick = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let file = workspace.path.join("f");
+
+        // Staged with its mtime at the tick, so `git add` records the tick.
+        fs::write(&file, b"bbbb\n").unwrap();
+        pin_mtime(&file, tick);
+        git_output(&workspace.path, ["add", "f"]);
+        // The index written in that same tick.
+        let index = PathBuf::from(
+            git_output(
+                &workspace.path,
+                ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            )
+            .trim(),
+        );
+        pin_mtime(&index, tick);
+        // A same-size edit inside the tick: the stat data still matches.
+        fs::write(&file, b"cccc\n").unwrap();
+        pin_mtime(&file, tick);
+
+        // The defect itself: a copy stamped later than the tick, as `fs::copy`
+        // stamps it, hides the edit. If this ever shows the edit, something
+        // other than the copy's mtime is surfacing it and the assertion below
+        // pins nothing.
+        let newer = temp.path().join("index-stamped-later");
+        fs::copy(&index, &newer).unwrap();
+        pin_mtime(&newer, tick + Duration::from_secs(1));
+        let hidden = git_with_index_output(&workspace.path, &newer, &["diff", "--stat"]).unwrap();
+        assert!(
+            hidden.trim().is_empty(),
+            "a copy with a newer mtime should hide the same-tick edit; got: {hidden:?}"
+        );
+
+        let out = git_worktree_diff_output(&workspace.path, &["diff", "--stat"]).unwrap();
+        assert!(
+            out.contains("f |"),
+            "a same-tick, same-size edit vanished from the worktree diff: {out:?}"
+        );
     }
 
     #[test]
