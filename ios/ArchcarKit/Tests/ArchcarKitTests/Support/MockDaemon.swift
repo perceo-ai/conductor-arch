@@ -125,13 +125,16 @@ actor MockDaemon {
         let box = UncheckedBox<MockDaemon>(self)
         let connectionBox = UncheckedBox<NWConnection>(connection)
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
-            if let data, !data.isEmpty {
-                Task { await box.value.ingest(data, on: connectionBox.value) }
-            }
             // A cancelled connection (see `endEventConnection`) reports an
             // error; asking it again would only spin.
-            if !isComplete && error == nil {
-                Task { await box.value.receive(on: connectionBox.value) }
+            let more = !isComplete && error == nil
+            // One task that ingests this chunk before asking for the next.
+            // Separate tasks can reach the actor out of order, and a request
+            // line ingested before its connection's token line is taken for
+            // the token and never answered.
+            Task {
+                if let data, !data.isEmpty { await box.value.ingest(data, on: connectionBox.value) }
+                if more { await box.value.receive(on: connectionBox.value) }
             }
         }
     }
