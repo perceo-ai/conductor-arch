@@ -15,6 +15,20 @@ private func replyID(_ line: String) -> String? {
     return object["id"] as? String
 }
 
+/// How long a test waits for a reconnect's resync to reach the signal it is
+/// after, counted from the moment `connectionState == .connected` was seen —
+/// the handshake gets its own wait first, so the two do not share one clock.
+///
+/// `resync()` awaits its refetches one after another, each on a fresh
+/// connection of its own: threads, then status (only when a session is
+/// known), plan, queue and interactions, so up to five round trips land
+/// before the timeline, refetched last, is even sent. Against the local mock
+/// each is well under a millisecond, but on a contended CI runner each can
+/// stall; a second apiece — the `requestTimeout` the shortest-timeout test
+/// here sets — is 5 s, plus 3 s of scheduler slack for the actor hops in
+/// between. Still a hard ceiling, so a resync that hangs fails the test.
+private let resyncBudget: Duration = .seconds(8)
+
 /// A mock that answers the chat RPCs a store issues.
 private func chatResponder(
     projectionBody: String = "on it",
@@ -371,9 +385,11 @@ private func connectedStore(
     #expect(store.isDisconnected)
 
     await session.reconnectNow()
+    // The handshake has its own round trip; wait it out before the resync's clock starts.
+    #expect(await eventually { await session.connectionState == .connected })
 
     // Everything on screen is refetched once the stream is back.
-    #expect(await eventually {
+    #expect(await eventually(within: resyncBudget) {
         await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("get_chat_projection")
     })
     let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
@@ -409,10 +425,12 @@ private func connectedStore(
     let before = await daemon.receivedLines.count
 
     await session.reconnectNow()
+    // The handshake has its own round trip; wait it out before the resync's clock starts.
+    #expect(await eventually { await session.connectionState == .connected })
 
     // It must not sit on a subscription taken while disconnected: the
     // reconnect refetches what is on screen.
-    #expect(await eventually {
+    #expect(await eventually(within: resyncBudget) {
         await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("get_chat_projection")
     })
     #expect(await eventually { @MainActor in !store.isStale })
@@ -448,8 +466,9 @@ private func connectedStore(
     #expect(await eventually { @MainActor in store.isStale })
     // The reconnect's replay does not name session 3: it is gone.
     await session.reconnectNow()
-
-    #expect(await eventually { @MainActor in !store.hasLiveSession })
+    // The handshake has its own round trip; wait it out before the resync's clock starts.
+    #expect(await eventually { await session.connectionState == .connected })
+    #expect(await eventually(within: resyncBudget) { @MainActor in !store.hasLiveSession })
     #expect(store.isTurnRunning == false)
 
     observing.cancel()
@@ -513,9 +532,11 @@ private func connectedStore(
     await daemon.endEventConnection()
     #expect(await eventually { @MainActor in store.isStale })
     await session.reconnectNow()
+    // The handshake has its own round trip; wait it out before the resync's clock starts.
+    #expect(await eventually { await session.connectionState == .connected })
 
     // The resync's last refetch, the timeline, has landed.
-    #expect(await eventually { @MainActor in store.items.map(\.body) == ["caught up"] })
+    #expect(await eventually(within: resyncBudget) { @MainActor in store.items.map(\.body) == ["caught up"] })
     try await Task.sleep(for: .milliseconds(200))
     #expect(await daemon.receivedLines.compactMap(requestType).filter { $0 == "list_chat_threads" }.count >= 2)
     // The timeline succeeding says nothing about the thread list that failed
@@ -554,8 +575,9 @@ private func connectedStore(
     await daemon.endEventConnection()
     #expect(await eventually { @MainActor in store.isStale })
     await session.reconnectNow()
-
-    #expect(await eventually {
+    // The handshake has its own round trip; wait it out before the resync's clock starts.
+    #expect(await eventually { await session.connectionState == .connected })
+    #expect(await eventually(within: resyncBudget) {
         await daemon.receivedLines.dropFirst(before).compactMap(requestType).contains("get_chat_projection")
     })
     let sent = await daemon.receivedLines.dropFirst(before).compactMap(requestType)
