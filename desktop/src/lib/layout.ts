@@ -157,6 +157,15 @@ export function leafWithPanel(node: LayoutNode, panel: PanelId): LayoutLeaf | un
   return hit;
 }
 
+/** True when `leafId` names a leaf inside `node` (or `node` itself). */
+export function containsLeaf(node: LayoutNode, leafId: NodeId): boolean {
+  let hit = false;
+  eachLeaf(node, (candidate) => {
+    if (candidate.id === leafId) hit = true;
+  });
+  return hit;
+}
+
 export function leafCount(layout: Layout): number {
   let count = 0;
   eachLeaf(layout.root, () => (count += 1));

@@ -1,15 +1,18 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { leaf, split } from "@/lib/layout";
 import { registerPanel, unregisterPanel } from "@/lib/panelRegistry";
 import { layoutStore } from "@/store/layout";
 import WorkspaceWorkbench from "./WorkspaceWorkbench";
 
-// The thing the split shipped: an unfocused pane renders the chat leaf alone,
-// so the inspector half of the tree exists only in the focused pane. Driven
-// through the real workbench + layout store with stub panels standing in for
-// the lazy-loaded real ones.
+// The thing the split shipped: an unfocused pane shows the chat column alone,
+// so the inspector half of the tree exists only in the focused pane. The chat
+// half must survive the switch untouched — compacting used to swap in a
+// different tree, which remounted chat and scrolled the transcript from the
+// top on every switch between panes. Driven through the real workbench +
+// layout store with stub panels standing in for the lazy-loaded real ones.
 
 const CHAT_ID = "workbench-test-chat";
 const SIDE_ID = "workbench-test-side";
@@ -67,6 +70,17 @@ function mount(compact: boolean) {
   return host;
 }
 
+function mountToggleable(initial: boolean) {
+  const [compact, setCompact] = createSignal(initial);
+  const host = document.createElement("div");
+  document.body.append(host);
+  dispose = render(
+    () => <WorkspaceWorkbench workspace="demo" compact={compact()} topbar={<div data-test-topbar />} />,
+    host,
+  );
+  return { host, setCompact };
+}
+
 describe("WorkspaceWorkbench compact", () => {
   it("renders the full tree, side leaf included, when not compact", () => {
     const host = mount(false);
@@ -75,10 +89,28 @@ describe("WorkspaceWorkbench compact", () => {
     expect(host.querySelector(".workbench-split")).not.toBeNull();
   });
 
-  it("renders only the chat leaf when compact", () => {
+  it("renders only the chat leaf's content when compact", () => {
     const host = mount(true);
     expect(host.querySelector(`[data-test-panel='${CHAT_ID}']`)).not.toBeNull();
     expect(host.querySelector(`[data-test-panel='${SIDE_ID}']`)).toBeNull();
-    expect(host.querySelector(".workbench-split")).toBeNull();
+  });
+
+  it("gives the chat half the whole split and hides the other", () => {
+    const host = mount(true);
+    const children = host.querySelectorAll<HTMLElement>(".workbench-split-child");
+    expect(children.length).toBe(2);
+    expect(children[0]!.style.flex).toBe("1 1 0%");
+    expect(children[1]!.style.display).toBe("none");
+  });
+
+  it("keeps the chat panel mounted across a focus change", () => {
+    const { host, setCompact } = mountToggleable(false);
+    const chat = host.querySelector(`[data-test-panel='${CHAT_ID}']`);
+    expect(chat).not.toBeNull();
+    setCompact(true);
+    expect(host.querySelector(`[data-test-panel='${CHAT_ID}']`)).toBe(chat);
+    setCompact(false);
+    expect(host.querySelector(`[data-test-panel='${CHAT_ID}']`)).toBe(chat);
+    expect(host.querySelector(`[data-test-panel='${SIDE_ID}']`)).not.toBeNull();
   });
 });
