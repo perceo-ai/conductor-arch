@@ -457,7 +457,7 @@ enum ArchcarCommand {
         visible_input: Option<String>,
         #[arg(
             long,
-            help = "Deliver now: steer an active agent turn or start a new turn"
+            help = "Deliver now: steer an active agent turn, or send as soon as the current one ends for an agent that cannot be steered"
         )]
         immediate: bool,
         input: Vec<String>,
@@ -1487,7 +1487,7 @@ enum SessionCommand {
         timeout_ms: u64,
         #[arg(
             long,
-            help = "Deliver now: steer an active agent turn or start a new turn"
+            help = "Deliver now: steer an active agent turn, or send as soon as the current one ends for an agent that cannot be steered"
         )]
         immediate: bool,
         message: Vec<String>,
