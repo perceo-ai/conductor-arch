@@ -1075,4 +1075,59 @@ mod tests {
             HarnessEffect::Fatal(message) if message.contains("context length exceeded")
         )));
     }
+
+    /// The interaction surface shows and answers an ask through the chat and
+    /// session that raised it, so the draft has to carry them.
+    #[test]
+    fn permission_requests_name_the_workspace_thread_and_session_that_asked() {
+        let mut adapter = established();
+        let effects = adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":42,"method":"session/request_permission","params":{"sessionId":"sess-1","toolCall":{"title":"Write src/main.rs"},"options":[]}}"#,
+            ))
+            .unwrap();
+
+        let HarnessEffect::InteractionRequested(draft) = &effects[0] else {
+            panic!("expected an interaction request");
+        };
+        assert_eq!(draft.workspace, "berlin");
+        assert_eq!(draft.thread_id, 11);
+        assert_eq!(draft.session_id, 7);
+        assert_eq!(draft.native_session_id.as_deref(), Some("sess-1"));
+    }
+
+    /// A prompt answered with a JSON-RPC error still gets its `Turn` record:
+    /// the transcript reads a turn's outcome off that record, so without it
+    /// the failed turn renders as running forever.
+    #[test]
+    fn a_failed_prompt_writes_a_failed_turn_record() {
+        let mut adapter = established();
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "input-1".to_owned(),
+                content: "hi".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"context length exceeded"}}"#,
+            ))
+            .unwrap();
+
+        let turn = effects
+            .iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::ProviderEvent(draft) if draft.kind == ProviderEventKind::Turn => {
+                    Some(draft)
+                }
+                _ => None,
+            })
+            .expect("a failed prompt still records its turn");
+        assert_eq!(turn.phase, ProviderEventPhase::Failed);
+        assert_eq!(turn.provider_item_id.as_deref(), Some("turn-3"));
+    }
 }

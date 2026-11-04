@@ -7147,4 +7147,360 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
             CodexInputResponseAction::Complete
         );
     }
+
+    /// A scripted ACP agent. `ok` answers the handshake and every prompt
+    /// (slowly, so a second prompt arrives while the first is still running);
+    /// `reject_new` refuses `session/new`; `prompt_error` fails every prompt.
+    const FAKE_ACP_AGENT: &str = r#"
+import json, sys, time
+mode = sys.argv[1]
+def send(message):
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    message = json.loads(line)
+    method, request_id = message.get("method"), message.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": 1, "agentCapabilities": {}}})
+    elif method == "session/new":
+        if mode == "reject_new":
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "not authenticated"}})
+        else:
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"sessionId": "sess-fake"}})
+    elif method == "session/prompt":
+        if mode == "prompt_error":
+            send({"jsonrpc": "2.0", "id": request_id, "error": {"code": -32000, "message": "context length exceeded"}})
+            continue
+        time.sleep(0.4)
+        text = message["params"]["prompt"][0]["text"].strip().splitlines()[-1]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "sess-fake", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "reply to " + text}}}})
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}})
+"#;
+
+    struct FakeAcpSession {
+        _temp: tempfile::TempDir,
+        store: WorkspaceStore,
+        db_path: PathBuf,
+        thread: ChatThreadRecord,
+        process: ProcessRecord,
+        pid: u32,
+        snapshot: Arc<Mutex<SessionSnapshot>>,
+        command_tx: Sender<SessionCommand>,
+        event_rx: Receiver<ArchcarEvent>,
+        loop_thread: thread::JoinHandle<()>,
+    }
+
+    fn record_acp_thread_session(
+        store: &WorkspaceStore,
+        thread: &ChatThreadRecord,
+        pid: u32,
+    ) -> ProcessRecord {
+        let kind = SessionKind::new(&thread.provider);
+        let launch = store.session_launch("berlin", kind).unwrap();
+        store
+            .record_session_process_for_thread("berlin", thread.id, &launch, pid)
+            .unwrap()
+    }
+
+    fn start_fake_acp_session(mode: &str) -> FakeAcpSession {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "gemini", "Gemini", None)
+            .unwrap();
+        let script = temp.path().join("fake_acp_agent.py");
+        fs::write(&script, FAKE_ACP_AGENT).unwrap();
+        let mut child = ProcessCommand::new("python3")
+            .arg("-u")
+            .arg(&script)
+            .arg(mode)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let process = record_acp_thread_session(&store, &thread, pid);
+        let connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: spawn_stdout_line_reader(stdout),
+            next_read_line: 0,
+            native_thread_id: None,
+            program: PathBuf::from("python3"),
+            env: Vec::new(),
+            cwd: temp.path().to_path_buf(),
+            model: None,
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::new("gemini"),
+            pid,
+            false,
+        )));
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let loop_db_path = db_path.clone();
+        let loop_thread = thread::spawn(move || {
+            run_acp_session_loop(
+                loop_db_path,
+                snapshot_for_loop,
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+        FakeAcpSession {
+            _temp: temp,
+            store,
+            db_path,
+            thread,
+            process,
+            pid,
+            snapshot,
+            command_tx,
+            event_rx,
+            loop_thread,
+        }
+    }
+
+    fn send_acp_input(session: &FakeAcpSession, input: &str) {
+        session
+            .command_tx
+            .send(SessionCommand::SendInput {
+                input: input.to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+    }
+
+    /// Polls the persisted transcript until `done` holds or five seconds pass,
+    /// and returns what it last saw either way.
+    fn wait_for_provider_events(
+        session: &FakeAcpSession,
+        done: impl Fn(&[crate::provider_events::ProviderEventRecord]) -> bool,
+    ) -> Vec<crate::provider_events::ProviderEventRecord> {
+        let events_store = crate::provider_events::ProviderEventStore::new(&session.db_path);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = events_store
+                .list_for_chat_thread(session.thread.id)
+                .unwrap();
+            if done(&events) || std::time::Instant::now() >= deadline {
+                return events;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn turn_records(
+        events: &[crate::provider_events::ProviderEventRecord],
+    ) -> Vec<(String, ProviderEventPhase)> {
+        events
+            .iter()
+            .filter(|event| event.kind == ProviderEventKind::Turn)
+            .map(|event| {
+                (
+                    event.provider_item_id.clone().unwrap_or_default(),
+                    event.phase,
+                )
+            })
+            .collect()
+    }
+
+    fn stop_fake_acp_session(session: FakeAcpSession) {
+        let _ = session.command_tx.send(SessionCommand::Kill);
+        drop(session.command_tx);
+        session.loop_thread.join().unwrap();
+    }
+
+    /// ACP allows one prompt in flight. A second message sent while the first
+    /// turn is running (`session send --immediate`, or a direct send that the
+    /// readiness check let through) must wait its turn, not take over the
+    /// first one's slot and lose its completion.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acp_prompt_sent_mid_turn_waits_and_both_turns_complete_in_order() {
+        let session = start_fake_acp_session("ok");
+        recv_archcar_event_until(
+            &session.event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == session.process.id),
+        );
+
+        send_acp_input(&session, "first question");
+        send_acp_input(&session, "second question");
+
+        let events = wait_for_provider_events(&session, |events| turn_records(events).len() >= 2);
+        let turns = turn_records(&events);
+        let replies: Vec<String> = events
+            .iter()
+            .filter(|event| event.kind == ProviderEventKind::AssistantOutput)
+            .map(|event| {
+                event.normalized_payload["body"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect();
+        stop_fake_acp_session(session);
+
+        assert_eq!(
+            turns,
+            vec![
+                ("turn-3".to_owned(), ProviderEventPhase::Completed),
+                ("turn-4".to_owned(), ProviderEventPhase::Completed),
+            ],
+            "both turns must complete, in order"
+        );
+        assert_eq!(
+            replies,
+            vec![
+                "reply to first question".to_owned(),
+                "reply to second question".to_owned(),
+            ],
+            "each turn keeps its own reply"
+        );
+    }
+
+    /// An agent that refuses `session/new` leaves no usable session. The
+    /// child must not be left running behind a session that can never take a
+    /// prompt, and the session has to end in a terminal state.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acp_rejected_session_new_kills_the_agent_and_ends_the_session() {
+        let session = start_fake_acp_session("reject_new");
+        recv_archcar_event_until(
+            &session.event_rx,
+            |event| matches!(event, ArchcarEvent::SessionError { session_id, .. } if *session_id == Some(session.process.id)),
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !session.loop_thread.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        let loop_ended_on_its_own = session.loop_thread.is_finished();
+        let child_alive = terminal_process_alive(session.pid);
+        let record = session
+            .store
+            .get_process_record(session.process.id)
+            .unwrap();
+        let snapshot = session.snapshot.lock().unwrap().clone();
+        let pid = session.pid;
+        stop_fake_acp_session(session);
+        let _ = ProcessCommand::new("kill").arg(pid.to_string()).status();
+
+        assert!(
+            loop_ended_on_its_own,
+            "the session loop kept polling a dead ACP session"
+        );
+        assert!(!child_alive, "the rejected ACP agent was left running");
+        assert_ne!(
+            record.status,
+            ProcessStatus::Running,
+            "the process row still reads running"
+        );
+        assert_eq!(snapshot.status, ProcessStatus::Exited);
+        assert_eq!(snapshot.runtime_state, AgentSessionState::Failed);
+    }
+
+    /// A JSON-RPC error answering a prompt ends that turn as failed in the
+    /// saved transcript, rather than leaving it running forever.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn acp_prompt_error_persists_the_turn_as_failed() {
+        let session = start_fake_acp_session("prompt_error");
+        recv_archcar_event_until(
+            &session.event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == session.process.id),
+        );
+
+        send_acp_input(&session, "too long");
+
+        let events = wait_for_provider_events(&session, |events| !turn_records(events).is_empty());
+        let turns = turn_records(&events);
+        stop_fake_acp_session(session);
+
+        assert_eq!(
+            turns,
+            vec![("turn-3".to_owned(), ProviderEventPhase::Failed)],
+            "the failed prompt's turn must be recorded as failed"
+        );
+    }
+
+    /// Two chats on the same ACP provider each number their standalone
+    /// updates from 1. Those rows must not share an identity, or the second
+    /// chat's rows overwrite the first's.
+    #[test]
+    fn concurrent_acp_chats_keep_their_own_standalone_update_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let db_path = temp.path().join("state.db");
+        let events_store = crate::provider_events::ProviderEventStore::new(&db_path);
+        let mut chats = Vec::new();
+        for (index, native_session) in ["sess-a", "sess-b"].into_iter().enumerate() {
+            let thread = store
+                .create_chat_thread("berlin", "gemini", &format!("Gemini {index}"), None)
+                .unwrap();
+            let process = record_acp_thread_session(&store, &thread, 40_000 + index as u32);
+            let mut adapter = AcpAdapter::new(
+                SessionKind::new("gemini"),
+                &HarnessAdapterContext {
+                    session_id: process.id,
+                    thread_id: thread.id,
+                    workspace: "berlin".to_owned(),
+                    native_session_id: None,
+                    controls: DesiredHarnessControls::default(),
+                },
+            );
+            let mut lines = vec![format!(
+                r#"{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"{native_session}"}}}}"#
+            )];
+            lines.push(format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{native_session}","update":{{"sessionUpdate":"available_commands_update","availableCommands":[]}}}}}}"#
+            ));
+            lines.push(format!(
+                r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"{native_session}","update":{{"sessionUpdate":"brand_new_thing","content":{{"type":"text","text":"from {native_session}"}}}}}}}}"#
+            ));
+            for line in lines {
+                for effect in adapter
+                    .observe_native(NativeRecord {
+                        provider_key: "gemini",
+                        payload: line.into_bytes(),
+                    })
+                    .unwrap()
+                {
+                    if let HarnessEffect::ProviderEvent(draft) = effect {
+                        events_store.upsert_event(&draft).unwrap();
+                    }
+                }
+            }
+            chats.push(thread);
+        }
+
+        for (thread, native_session) in chats.iter().zip(["sess-a", "sess-b"]) {
+            let rows = events_store.list_for_chat_thread(thread.id).unwrap();
+            assert_eq!(rows.len(), 2, "chat {native_session} lost rows: {rows:?}");
+            assert!(rows
+                .iter()
+                .any(|row| row.kind == ProviderEventKind::EnvironmentConfigModel));
+            assert!(rows.iter().any(|row| row.kind == ProviderEventKind::Unknown
+                && row.normalized_payload["body"] == format!("from {native_session}")));
+        }
+    }
 }
