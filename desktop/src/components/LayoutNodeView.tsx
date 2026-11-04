@@ -8,6 +8,7 @@ import {
   panelMinPx,
 } from "@/lib/panelWidths";
 import {
+  containsLeaf,
   eachLeaf,
   type LayoutLeaf,
   type LayoutNode,
@@ -17,6 +18,7 @@ import {
 } from "@/lib/layout";
 import { panelDescriptor } from "@/lib/panelRegistry";
 import PanelLeaf from "./PanelLeaf";
+import { useWorkbenchCompact } from "./workbenchCompact";
 import { SplitHandle } from "./ResizeHandle";
 
 /**
@@ -77,6 +79,17 @@ const EMPTY_RECT: Rect = { left: 0, top: 0, width: 0, height: 0 };
 
 function SplitView(props: { node: LayoutSplit; workspace: string }) {
   let element: HTMLDivElement | undefined;
+  const compact = useWorkbenchCompact();
+  /**
+   * A compact workbench shows the chat column alone, so the child without the
+   * chat leaf under it is not rendered and the other takes the whole split.
+   * The split itself stays — its DOM, and the chat subtree's, is what keeps
+   * the transcript mounted across a focus change between panes.
+   */
+  const hidden = (index: 0 | 1) => {
+    const chat = compact.chatLeafId();
+    return chat != null && !containsLeaf(props.node.children[index], chat);
+  };
   // Ratios are stored as a fraction but clamped in pixels, so the split has to
   // know how wide it actually is before it can honour a child's minimum.
   const [availablePx, setAvailablePx] = createSignal(0);
@@ -95,7 +108,10 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
     });
   });
 
-  const collapsed = (index: 0 | 1) => allCollapsed(props.node.children[index]);
+  // Collapse sizing is off in compact: the one child on screen is the chat
+  // column, and a collapsed chat leaf (compact renders it open) would pin the
+  // split to a rail's width with nothing beside it.
+  const collapsed = (index: 0 | 1) => !compact.active() && allCollapsed(props.node.children[index]);
   const fixedHeight = (index: 0 | 1) => fixedStripHeight(props.node.children[index], props.node.direction);
   const anyCollapsed = () => collapsed(0) || collapsed(1);
   const anyFixed = () => fixedHeight(0) != null || fixedHeight(1) != null;
@@ -126,6 +142,8 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
   // but a bare zero length is a shorthand form jsdom's CSSOM discards, which
   // would make every one of these declarations untestable.
   const childStyle = (index: 0 | 1): JSX.CSSProperties => {
+    if (hidden(index)) return { display: "none" };
+    if (hidden(index === 0 ? 1 : 0)) return { flex: "1 1 0%" };
     if (collapsed(index)) return { flex: `0 0 ${collapsedPx()}px` };
     if (collapsed(index === 0 ? 1 : 0)) return { flex: "1 1 0%" };
     const fixed = fixedHeight(index);
@@ -152,7 +170,9 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
         classList={{ "workbench-split-child-collapsed": collapsed(0) }}
         style={childStyle(0)}
       >
-        <LayoutNodeView node={props.node.children[0]} workspace={props.workspace} />
+        <Show when={!hidden(0)}>
+          <LayoutNodeView node={props.node.children[0]} workspace={props.workspace} />
+        </Show>
       </div>
       {/* While a child is collapsed the ratio does not drive anything, so a
           drag here would change nothing on screen while still forking the
@@ -160,7 +180,7 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
           like drag, split, collapse, close, and add — all of it lives inside
           edit mode, so outside it the handle is not just visually dimmed but
           absent from the DOM: no element, no pointerdown handler, no resize. */}
-      <Show when={!anyCollapsed() && !anyFixed() && layoutStore.editing()}>
+      <Show when={!compact.active() && !anyCollapsed() && !anyFixed() && layoutStore.editing()}>
         <SplitHandle
           direction={props.node.direction}
           ratio={ratio}
@@ -178,7 +198,9 @@ function SplitView(props: { node: LayoutSplit; workspace: string }) {
         classList={{ "workbench-split-child-collapsed": collapsed(1) }}
         style={childStyle(1)}
       >
-        <LayoutNodeView node={props.node.children[1]} workspace={props.workspace} />
+        <Show when={!hidden(1)}>
+          <LayoutNodeView node={props.node.children[1]} workspace={props.workspace} />
+        </Show>
       </div>
     </div>
   );

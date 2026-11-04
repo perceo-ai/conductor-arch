@@ -8,6 +8,7 @@ import Icon from "./Icon";
 import { openContextMenu, openContextMenuFromKeyboard, type ContextMenuItem } from "./ContextMenu";
 import { announceLayout } from "./LayoutControls";
 import { usePanelDnd } from "./PanelDnd";
+import { useWorkbenchCompact } from "./workbenchCompact";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 import type { ShortcutAction } from "@/lib/shortcuts";
 
@@ -34,6 +35,12 @@ function domId(leafId: string, panel: PanelId, suffix: string) {
  */
 export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }) {
   const dnd = usePanelDnd();
+  const workbenchCompact = useWorkbenchCompact();
+  // A compact workbench is nothing but its chat column, so a chat leaf the
+  // preset left collapsed renders open here rather than leaving the pane a
+  // bare rail. The stored layout is untouched: the focused pane still shows
+  // the leaf collapsed.
+  const collapsed = () => props.leaf.collapsed && !workbenchCompact.active();
   const panels = () => props.leaf.panels;
   const activeId = () => panels()[Math.max(0, Math.min(props.leaf.active, panels().length - 1))];
   const activeDescriptor = () => (activeId() ? panelDescriptor(activeId()) : undefined);
@@ -57,7 +64,7 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
   // (`.workbench-tablist-single`'s display is then toggled back on by the
   // `.workbench-editing` CSS override, not by this condition).
   const showTabs = createMemo(() => props.leaf.display === "tabs" || panels().length > 1);
-  const showTabBar = () => showTabs() || props.leaf.collapsed || layoutStore.editing();
+  const showTabBar = () => showTabs() || collapsed() || layoutStore.editing();
 
   function activate(id: PanelId) {
     layoutStore.activatePanel(id);
@@ -132,7 +139,7 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
     <section
       class="workbench-leaf"
       classList={{
-        "workbench-leaf-collapsed": props.leaf.collapsed,
+        "workbench-leaf-collapsed": collapsed(),
         "workbench-leaf-compact": !showTabs(),
       }}
       data-leaf-id={props.leaf.id}
@@ -228,7 +235,7 @@ export default function PanelLeaf(props: { leaf: LayoutLeaf; workspace: string }
         </div>
       </Show>
 
-      <Show when={!props.leaf.collapsed}>
+      <Show when={!collapsed()}>
         <Show when={activeDescriptor()} keyed>
           {(descriptor) => {
             const Component = descriptor.component;
