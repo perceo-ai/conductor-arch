@@ -28,6 +28,7 @@ use crate::archcar::protocol::{
 };
 use crate::codex_tui::codex_screen_ready_for_input;
 use crate::harness::{normalize_agent_harness_options, FORCED_APPROVAL_MODE};
+use crate::provider_adapters::acp::AcpAdapter;
 use crate::provider_adapters::claude_hooks::build_claude_hook_settings;
 use crate::provider_adapters::claude_stream::{
     build_claude_stream_args, ClaudeManagedAdapter, ClaudeStreamLaunchConfig,
@@ -345,6 +346,9 @@ enum ManagedSessionConnection {
     Live(PtySession),
     CodexAppServer(ProviderProcessConnection),
     ClaudeStream(ProviderProcessConnection),
+    /// Any agent driven over the Agent Client Protocol. One variant serves
+    /// every ACP provider, which is what keeps a new agent a registry entry.
+    Acp(ProviderProcessConnection),
     Reattached {
         write: std::fs::File,
         output: Arc<Mutex<String>>,
@@ -414,7 +418,7 @@ impl ManagedSessionConnection {
     fn send_line(&mut self, input: &str) -> Result<()> {
         match self {
             Self::Live(session) => session.send_line(input),
-            Self::CodexAppServer(_) | Self::ClaudeStream(_) => {
+            Self::CodexAppServer(_) | Self::ClaudeStream(_) | Self::Acp(_) => {
                 anyhow::bail!("provider-native sessions do not accept terminal input")
             }
             Self::Reattached { write, .. } => {
@@ -431,7 +435,7 @@ impl ManagedSessionConnection {
     fn write_raw(&mut self, input: &str) -> Result<()> {
         match self {
             Self::Live(session) => session.write(input),
-            Self::CodexAppServer(_) | Self::ClaudeStream(_) => {
+            Self::CodexAppServer(_) | Self::ClaudeStream(_) | Self::Acp(_) => {
                 anyhow::bail!("provider-native sessions do not accept terminal input")
             }
             Self::Reattached { write, .. } => {
@@ -445,7 +449,9 @@ impl ManagedSessionConnection {
     fn stop(&mut self) -> Result<()> {
         match self {
             Self::Live(session) => session.stop(),
-            Self::CodexAppServer(connection) | Self::ClaudeStream(connection) => {
+            Self::CodexAppServer(connection)
+            | Self::ClaudeStream(connection)
+            | Self::Acp(connection) => {
                 connection.child.kill()?;
                 Ok(())
             }
@@ -456,7 +462,7 @@ impl ManagedSessionConnection {
     fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
         match self {
             Self::Live(session) => session.resize(rows, cols),
-            Self::CodexAppServer(_) | Self::ClaudeStream(_) => Ok(()),
+            Self::CodexAppServer(_) | Self::ClaudeStream(_) | Self::Acp(_) => Ok(()),
             Self::Reattached { .. } => Ok(()),
         }
     }
@@ -464,9 +470,9 @@ impl ManagedSessionConnection {
     fn has_exited(&mut self) -> Result<bool> {
         match self {
             Self::Live(session) => session.has_exited(),
-            Self::CodexAppServer(connection) | Self::ClaudeStream(connection) => {
-                Ok(connection.child.try_wait()?.is_some())
-            }
+            Self::CodexAppServer(connection)
+            | Self::ClaudeStream(connection)
+            | Self::Acp(connection) => Ok(connection.child.try_wait()?.is_some()),
             Self::Reattached { pid, .. } => Ok(!terminal_process_alive(*pid)),
         }
     }
@@ -474,7 +480,9 @@ impl ManagedSessionConnection {
     fn read_available(&mut self) -> String {
         match self {
             Self::Live(session) => session.read_available(),
-            Self::CodexAppServer(connection) | Self::ClaudeStream(connection) => {
+            Self::CodexAppServer(connection)
+            | Self::ClaudeStream(connection)
+            | Self::Acp(connection) => {
                 let mut output = String::new();
                 while let Ok(line) = connection.stdout_rx.try_recv() {
                     output.push_str(&line);
@@ -500,7 +508,7 @@ impl ManagedSessionConnection {
     fn visible_screen_text(&self) -> String {
         match self {
             Self::Live(session) => session.visible_screen_text(),
-            Self::CodexAppServer(_) | Self::ClaudeStream(_) => String::new(),
+            Self::CodexAppServer(_) | Self::ClaudeStream(_) | Self::Acp(_) => String::new(),
             Self::Reattached { .. } => String::new(),
         }
     }
@@ -575,8 +583,15 @@ struct LiveSessionStart<'a> {
     on_child_spawned: &'a dyn Fn(u32),
 }
 
+/// Whether this agent is driven over piped stdio rather than in a PTY. Every
+/// structured transport needs the pipes: an ACP agent in a PTY has no one
+/// speaking JSON-RPC to it, so it would sit there having rendered nothing.
+fn uses_piped_stdio_transport(kind: SessionKind) -> bool {
+    matches!(kind, SessionKind::CODEX | SessionKind::CLAUDE) || kind_speaks_acp(kind)
+}
+
 fn spawn_live_managed_session(start: LiveSessionStart<'_>) -> Result<SessionHandle> {
-    if matches!(start.kind, SessionKind::CODEX | SessionKind::CLAUDE) {
+    if uses_piped_stdio_transport(start.kind) {
         return spawn_provider_native_managed_session(start);
     }
 
@@ -670,7 +685,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
         pid,
         false,
     );
-    if start.kind == SessionKind::CLAUDE {
+    if start.kind == SessionKind::CLAUDE || kind_speaks_acp(start.kind) {
         // Booting, not busy: the session loop reports ready once the
         // transport is up. `running` here read the same as mid-turn, so a
         // first `session send` racing the start was queued as if behind a
@@ -697,6 +712,7 @@ fn spawn_provider_native_managed_session(start: LiveSessionStart<'_>) -> Result<
     let connection = match start.kind {
         SessionKind::CODEX => ManagedSessionConnection::CodexAppServer(connection),
         SessionKind::CLAUDE => ManagedSessionConnection::ClaudeStream(connection),
+        other if kind_speaks_acp(other) => ManagedSessionConnection::Acp(connection),
         // Reaching here with an unmanaged kind is a routing bug, but a daemon
         // serving other sessions should report it rather than abort.
         other => anyhow::bail!("{other} has no managed transport; it runs as a PTY session"),
@@ -2114,6 +2130,9 @@ fn run_session_loop(
             return run_claude_stream_session_loop(
                 db_path, snapshot, connection, command_rx, event_tx,
             );
+        }
+        ManagedSessionConnection::Acp(connection) => {
+            return run_acp_session_loop(db_path, snapshot, connection, command_rx, event_tx);
         }
         _ => {}
     }
@@ -3587,6 +3606,366 @@ fn drain_claude_stdout(
     }
 }
 
+/// True when the registry says this agent speaks ACP, so the one shared ACP
+/// transport can drive it rather than a vendor-specific adapter.
+fn kind_speaks_acp(kind: SessionKind) -> bool {
+    crate::agent_tools::tool_by_provider(kind.as_str()).is_some_and(|tool| tool.speaks_acp())
+}
+
+/// Drives any ACP-speaking agent. The protocol work lives in `AcpAdapter`;
+/// this is the transport around it: the `initialize` / `session/new` handshake,
+/// prompt writes, and the effects those produce.
+///
+/// Readiness is deliberately later than Claude's: ACP cannot accept a prompt
+/// until `session/new` returns a session id, so the session reports ready from
+/// the adapter's `Ready` effect rather than from the transport coming up.
+fn run_acp_session_loop(
+    db_path: PathBuf,
+    snapshot: Arc<Mutex<SessionSnapshot>>,
+    mut connection: ProviderProcessConnection,
+    command_rx: Receiver<SessionCommand>,
+    event_tx: Sender<ArchcarEvent>,
+) {
+    let started = snapshot.lock().unwrap().clone();
+    let harness_name = format!("{}-acp", started.kind.as_str());
+    let general_prompt = match resolved_general_prompt(&db_path, &started.workspace) {
+        Ok(prompt) => prompt,
+        Err(err) => {
+            let _ = event_tx.send(ArchcarEvent::SessionError {
+                session_id: Some(started.session_id),
+                thread_id: Some(started.thread_id),
+                message: format!("Could not resolve general prompt: {err:#}"),
+            });
+            None
+        }
+    };
+    let runtime_store = RuntimeSessionStore::new(db_path.clone());
+    let _ = event_tx.send(ArchcarEvent::SessionStarted {
+        session_id: started.session_id,
+        thread_id: started.thread_id,
+        workspace: started.workspace.clone(),
+        kind: started.kind,
+        pid: started.pid,
+        replayed: false,
+        ready: false,
+        runtime_state: None,
+    });
+    let _ = runtime_store.append_provider_native_output(
+        started.session_id,
+        &harness_name,
+        "transport started: acp over stdio",
+    );
+    let mut user_input_sequence = runtime_store
+        .max_runtime_input_provider_sequence(started.session_id)
+        .unwrap_or(0);
+    let mut adapter = AcpAdapter::new(
+        started.kind,
+        &HarnessAdapterContext {
+            session_id: started.session_id,
+            thread_id: started.thread_id,
+            workspace: started.workspace.clone(),
+            native_session_id: connection.native_thread_id.clone(),
+            controls: DesiredHarnessControls {
+                model: connection.model.clone(),
+                effort: connection.effort_mode.clone(),
+                permission_mode: connection.approval_policy.clone(),
+                fast_mode: Some(connection.fast_mode),
+            },
+        },
+    );
+    let initialize = adapter.initialize_request();
+    if let Err(err) = write_acp_request(&mut connection, &initialize.payload) {
+        let _ = connection.child.kill();
+        mark_provider_session_failed(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            format!("ACP initialize failed: {err:#}"),
+        );
+        return;
+    }
+    // `session/new` is the second half of the handshake and cannot be sent
+    // before the agent has answered `initialize`.
+    let mut session_new_sent = false;
+
+    loop {
+        drain_acp_stdout(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &harness_name,
+            &mut connection,
+            &mut adapter,
+        );
+
+        if !session_new_sent && adapter.is_initialized() {
+            let cwd = connection.cwd.to_string_lossy().to_string();
+            let request = adapter.session_new_request(&cwd);
+            match write_acp_request(&mut connection, &request.payload) {
+                Ok(()) => session_new_sent = true,
+                Err(err) => {
+                    let _ = connection.child.kill();
+                    mark_provider_session_failed(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        format!("ACP session/new failed: {err:#}"),
+                    );
+                    return;
+                }
+            }
+        }
+
+        while let Ok(command) = command_rx.try_recv() {
+            let (command, queued_handoff) = command.split_queued_claim();
+            match command {
+                SessionCommand::SendInput {
+                    input,
+                    visible_input,
+                    kind,
+                    delivery,
+                } => {
+                    crate::archcar::test_hooks::pause_before_session_takes_input();
+                    let first_turn = if kind == ArchcarInputKind::ControlCommand {
+                        false
+                    } else {
+                        match durable_thread_is_first_user_turn(&db_path, started.thread_id) {
+                            Ok(first_turn) => first_turn,
+                            Err(err) => {
+                                requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                                mark_provider_session_failed(
+                                    &runtime_store,
+                                    &snapshot,
+                                    &event_tx,
+                                    &started,
+                                    format!("Could not prepare ACP input history: {err:#}"),
+                                );
+                                continue;
+                            }
+                        }
+                    };
+                    let provider_input =
+                        compose_first_turn_input(general_prompt.as_deref(), &input, first_turn);
+                    let persisted_input = visible_input.as_deref().unwrap_or(&input).to_owned();
+                    let next_input_sequence = user_input_sequence + 1;
+                    let local_input_id =
+                        provider_input_local_id(started.session_id, next_input_sequence);
+                    if let Err(err) = enqueue_provider_input(
+                        &runtime_store,
+                        &started,
+                        &local_input_id,
+                        &provider_input,
+                        Some(&persisted_input),
+                        &kind,
+                        delivery,
+                        connection.native_thread_id.clone(),
+                    ) {
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("ACP input persistence failed: {err:#}"),
+                        );
+                        continue;
+                    }
+                    if let Ok(mut state) = snapshot.lock() {
+                        mark_session_busy_for_input(&mut state);
+                        state.turns.note_input(local_input_id.clone());
+                    }
+                    // Recorded before the prompt is written, not after: ACP
+                    // agents stream their reply within milliseconds, and the
+                    // transcript is ordered by when each record was stored, so
+                    // persisting afterwards put the answer above the question.
+                    user_input_sequence = next_input_sequence;
+                    persist_runtime_user_input(
+                        &runtime_store,
+                        &started,
+                        &provider_input,
+                        Some(&persisted_input),
+                        &kind,
+                        user_input_sequence,
+                    );
+                    let write_result = adapter
+                        .encode_input(HarnessInput {
+                            local_input_id: local_input_id.clone(),
+                            content: provider_input.clone(),
+                            visible_content: Some(persisted_input.clone()),
+                            kind: kind.clone(),
+                            delivery,
+                        })
+                        .and_then(|native_write| {
+                            write_acp_request(&mut connection, &native_write.payload)
+                        });
+                    if write_result.is_ok() {
+                        crate::archcar::test_hooks::pause_after_provider_handoff();
+                    }
+                    if let Err(err) = write_result {
+                        let _ = runtime_store
+                            .mark_provider_input_failed(&local_input_id, &err.to_string());
+                        let _ = connection.child.kill();
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("ACP prompt write failed: {err:#}"),
+                        );
+                    } else if let Err(err) =
+                        runtime_store.mark_provider_input_written(&local_input_id)
+                    {
+                        let _ = connection.child.kill();
+                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        mark_provider_session_failed(
+                            &runtime_store,
+                            &snapshot,
+                            &event_tx,
+                            &started,
+                            format!("ACP input written-state persistence failed: {err:#}"),
+                        );
+                    } else {
+                        // ACP answers a prompt with its completion, never with
+                        // a receipt, so delivery is marked here — the write
+                        // succeeding *is* the acknowledgement. The descriptor
+                        // declares this feature emulated for that reason.
+                        for effect in [
+                            HarnessEffect::InputAcknowledged {
+                                local_input_id: local_input_id.clone(),
+                            },
+                            HarnessEffect::TurnStarted {
+                                local_input_id: local_input_id.clone(),
+                            },
+                        ] {
+                            apply_harness_effect(
+                                &runtime_store,
+                                &snapshot,
+                                &event_tx,
+                                &started,
+                                &mut connection.native_thread_id,
+                                effect,
+                            );
+                        }
+                    }
+                }
+                SessionCommand::SendQueuedInput { .. } => {
+                    unreachable!("split_queued_claim hands a queued input over as SendInput")
+                }
+                SessionCommand::Kill => {
+                    let _ = connection.child.kill();
+                }
+                SessionCommand::InterruptTurn => {
+                    let plan = adapter.plan_control(HarnessControl::Interrupt);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        &harness_name,
+                        plan,
+                    );
+                }
+                SessionCommand::ApplyControl(control) => {
+                    let plan = adapter.plan_control(control);
+                    apply_provider_control_plan(
+                        &runtime_store,
+                        &snapshot,
+                        &event_tx,
+                        &started,
+                        &mut connection,
+                        &harness_name,
+                        plan,
+                    );
+                }
+                SessionCommand::Resize { .. } => {}
+            }
+        }
+
+        match connection.child.try_wait() {
+            Ok(Some(status)) => {
+                drain_acp_stdout(
+                    &runtime_store,
+                    &snapshot,
+                    &event_tx,
+                    &started,
+                    &harness_name,
+                    &mut connection,
+                    &mut adapter,
+                );
+                let code = status.code();
+                let _ = runtime_store.mark_session_process_exited(started.session_id, code);
+                mark_snapshot_exited(&snapshot, code);
+                let _ = event_tx.send(ArchcarEvent::SessionExited {
+                    session_id: started.session_id,
+                    exit_code: code,
+                });
+                break;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                mark_provider_session_failed(&runtime_store, &snapshot, &event_tx, &started, err);
+                break;
+            }
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn write_acp_request(connection: &mut ProviderProcessConnection, payload: &[u8]) -> Result<()> {
+    connection.stdin.write_all(payload)?;
+    connection.stdin.flush()?;
+    Ok(())
+}
+
+fn drain_acp_stdout(
+    runtime_store: &RuntimeSessionStore,
+    snapshot: &Arc<Mutex<SessionSnapshot>>,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    harness_name: &str,
+    connection: &mut ProviderProcessConnection,
+    adapter: &mut AcpAdapter,
+) {
+    while let Ok(line) = connection.stdout_rx.try_recv() {
+        let _ =
+            runtime_store.append_provider_native_output(started.session_id, harness_name, &line);
+        match adapter.observe_native(NativeRecord {
+            provider_key: started.kind.as_str(),
+            payload: line.into_bytes(),
+        }) {
+            Ok(effects) => {
+                for effect in effects {
+                    // An ACP permission request is a JSON-RPC request: the
+                    // agent blocks until it is answered, so the session has to
+                    // read as awaiting input rather than mid-turn.
+                    if matches!(effect, HarnessEffect::InteractionRequested(_)) {
+                        mark_snapshot_awaiting_input(snapshot);
+                    }
+                    apply_harness_effect(
+                        runtime_store,
+                        snapshot,
+                        event_tx,
+                        started,
+                        &mut connection.native_thread_id,
+                        effect,
+                    );
+                }
+            }
+            Err(err) => warn!(
+                session_id = started.session_id,
+                error = %format!("{err:#}"),
+                "failed to parse an ACP message"
+            ),
+        }
+    }
+}
+
 fn start_codex_app_server_lifecycle(
     connection: &mut ProviderProcessConnection,
     _started: &SessionSnapshot,
@@ -4185,6 +4564,28 @@ fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Registering an ACP agent has to be enough to drive it: the transport
+    /// choice and the loop both come from the registry, not from a match on
+    /// provider names.
+    #[test]
+    fn acp_agents_are_driven_over_piped_stdio_like_the_other_managed_agents() {
+        let devin = SessionKind::new("devin");
+        let gemini = SessionKind::new("gemini");
+
+        assert!(kind_speaks_acp(devin));
+        assert!(kind_speaks_acp(gemini));
+        assert!(uses_piped_stdio_transport(devin));
+        assert!(uses_piped_stdio_transport(gemini));
+        // The vendor-specific transports are unchanged.
+        assert!(uses_piped_stdio_transport(SessionKind::CODEX));
+        assert!(uses_piped_stdio_transport(SessionKind::CLAUDE));
+        assert!(!kind_speaks_acp(SessionKind::CODEX));
+        // A PTY agent stays a PTY agent, and a shell is never managed.
+        assert!(!uses_piped_stdio_transport(SessionKind::new("aider")));
+        assert!(!uses_piped_stdio_transport(SessionKind::SHELL));
+    }
+
     use crate::repository::{AddRepository, RepositoryStore};
     use crate::test_support::EnvGuard;
     use crate::workspace::{CreateWorkspace, ProcessRecord};

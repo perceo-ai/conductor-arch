@@ -8,6 +8,7 @@ import { ansiToHtml } from "@/lib/ansi";
 import Icon from "@/components/Icon";
 import { configuredShortcut } from "@/lib/configuredShortcut";
 import { usePane } from "./paneContext";
+import { providerToKind } from "./chat/providerKind";
 
 // Right-panel bottom region — port of the GTK run console (ws_run_console). A
 // collapsible dock whose tab strip holds two prompt tabs (Setup, Run) plus any
@@ -20,10 +21,6 @@ const DOCK_EXPANDED_KEY = "archductor.terminalDock.expanded";
 
 // Active tab is either a prompt tab or a specific terminal id.
 type RunTab = "setup" | "run" | { term: string };
-
-function providerKind(provider: string): "codex" | "claude" | "shell" {
-  return provider === "claude" || provider === "shell" ? provider : "codex";
-}
 
 function RunScriptsList(props: { workspace: string }) {
   const [scripts] = createResource(
@@ -144,7 +141,7 @@ function PromptTab(props: { workspace: string; kind: "setup" | "run" }) {
       input: text,
       visible_input: text,
       kind: "user",
-      session_kind: providerKind(thread.provider),
+      session_kind: providerToKind(thread.provider),
     })
       .then(() => toastsStore.push(`${heading()} queued to chat.`, "info"))
       .catch(() => {});

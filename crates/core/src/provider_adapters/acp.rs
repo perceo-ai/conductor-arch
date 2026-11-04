@@ -23,6 +23,14 @@ use crate::archcar::harness_contract::{
 use crate::provider_events::{ProviderEventDraft, ProviderEventKind, ProviderEventPhase};
 use crate::session_kind::SessionKind;
 use serde_json::{json, Value};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
 
 pub const ACP_ADAPTER_VERSION: &str = "acp-1";
 
@@ -133,6 +141,10 @@ struct PendingTurn {
 
 pub struct AcpAdapter {
     kind: SessionKind,
+    /// The chat thread and session row these events belong to. Without them the
+    /// events persist unattached and nothing renders them in a chat.
+    chat_thread_id: i64,
+    process_id: i64,
     session_id: Option<String>,
     next_request_id: i64,
     pending: Option<PendingTurn>,
@@ -144,6 +156,8 @@ impl AcpAdapter {
     pub fn new(kind: SessionKind, context: &HarnessAdapterContext) -> Self {
         Self {
             kind,
+            chat_thread_id: context.thread_id,
+            process_id: context.session_id,
             session_id: context.native_session_id.clone(),
             // 1 and 2 are reserved for the initialize / session_new handshake.
             next_request_id: 3,
@@ -167,6 +181,12 @@ impl AcpAdapter {
         }
     }
 
+    /// True once the agent has answered `initialize`, which is when
+    /// `session/new` may be sent.
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
     /// The opening `initialize` request. Emitted by the session layer before
     /// any input is delivered.
     pub fn initialize_request(&mut self) -> NativeWrite {
@@ -177,8 +197,12 @@ impl AcpAdapter {
                 "method": "initialize",
                 "params": {
                     "protocolVersion": ACP_PROTOCOL_VERSION,
+                    // Only capabilities this transport actually serves. An
+                    // agent told we handle `fs/read_text_file` would block on a
+                    // response nothing here sends; agents fall back to their
+                    // own file access when it is off.
                     "clientCapabilities": {
-                        "fs": {"readTextFile": true, "writeTextFile": true},
+                        "fs": {"readTextFile": false, "writeTextFile": false},
                     },
                 },
             }),
@@ -198,18 +222,22 @@ impl AcpAdapter {
         )
     }
 
+    /// `item_id` is what makes a stream one card: the projection merges records
+    /// that share a provider item id, so every chunk of one assistant message
+    /// has to carry the same one. `None` leaves the record standing alone.
     fn event(
         &mut self,
         kind: ProviderEventKind,
         phase: ProviderEventPhase,
         payload: Value,
         raw: Value,
+        item_id: Option<String>,
     ) -> ProviderEventDraft {
         self.sequence += 1;
         ProviderEventDraft {
             provider: self.kind.as_str().to_owned(),
             provider_event_id: Some(format!("{}-{}", self.kind.as_str(), self.sequence)),
-            provider_item_id: None,
+            provider_item_id: item_id,
             provider_thread_id: self.session_id.clone(),
             provider_turn_id: self
                 .pending
@@ -218,13 +246,13 @@ impl AcpAdapter {
             parent_provider_item_id: None,
             parent_provider_thread_id: None,
             workspace_id: None,
-            chat_thread_id: None,
-            process_id: None,
+            chat_thread_id: Some(self.chat_thread_id),
+            process_id: Some(self.process_id),
             phase,
             kind,
             provider_subtype: None,
             provider_sequence: Some(self.sequence),
-            occurred_at_ms: 0,
+            occurred_at_ms: unix_millis(),
             normalized_payload: payload,
             raw_json: raw,
             schema_version: 1,
@@ -265,12 +293,37 @@ impl AcpAdapter {
             .or_else(|| update["title"].as_str().map(str::to_owned))
             .unwrap_or_default();
         let payload = json!({"title": variant, "body": body});
+        let item_id = self.update_item_id(variant, update);
         vec![HarnessEffect::ProviderEvent(self.event(
             kind,
             phase,
             payload,
             raw.clone(),
+            item_id,
         ))]
+    }
+
+    /// A stable id for the thing this update is about. A tool call is one card
+    /// from its announcement to its result, and a message is one card however
+    /// many chunks it streams in, so both key off the turn rather than off the
+    /// individual record.
+    fn update_item_id(&self, variant: &str, update: &Value) -> Option<String> {
+        if let Some(tool_call_id) = update["toolCallId"].as_str() {
+            return Some(format!("tool-{tool_call_id}"));
+        }
+        let turn = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.request_id.to_string())
+            .unwrap_or_else(|| "boot".to_owned());
+        match variant {
+            "agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk" => {
+                Some(format!("{variant}-{turn}"))
+            }
+            // Anything else is a standalone record; giving it a shared id would
+            // collapse unrelated updates into one card.
+            _ => None,
+        }
     }
 
     fn handle_permission_request(&mut self, id: &Value, params: &Value) -> Vec<HarnessEffect> {
@@ -353,10 +406,27 @@ impl AcpAdapter {
             "refusal" => HarnessTurnStatus::Failed,
             _ => HarnessTurnStatus::Success,
         };
+        let turn_id = pending.request_id;
+        let turn_phase = match status {
+            HarnessTurnStatus::Success => ProviderEventPhase::Completed,
+            HarnessTurnStatus::Interrupted => ProviderEventPhase::Interrupted,
+            HarnessTurnStatus::Failed => ProviderEventPhase::Failed,
+            // ACP has no deferral; mapped for completeness.
+            HarnessTurnStatus::Deferred => ProviderEventPhase::Declined,
+        };
         let mut effects = vec![HarnessEffect::TurnCompleted {
             local_input_id,
             status,
         }];
+        // The transcript reads a turn's outcome off a `Turn` record. Without
+        // one the turn renders as still running after the agent has answered.
+        effects.push(HarnessEffect::ProviderEvent(self.event(
+            ProviderEventKind::Turn,
+            turn_phase,
+            json!({"title": "Turn", "body": stop_reason}),
+            message.clone(),
+            Some(format!("turn-{turn_id}")),
+        )));
         // max_tokens and max_turn_requests are truncations, not successes; the
         // turn is over either way but the user should be told why.
         if matches!(stop_reason, "max_tokens" | "max_turn_requests") {
@@ -365,6 +435,11 @@ impl AcpAdapter {
             )));
         }
         effects.push(HarnessEffect::TurnSettled { status });
+        // ACP has no idle notification, so the end of a turn is the only moment
+        // the session can be declared ready again. Without this it stays
+        // "working" forever and every later message is queued behind a turn
+        // that already finished.
+        effects.push(HarnessEffect::Ready);
         effects
     }
 
@@ -685,6 +760,35 @@ mod tests {
             .any(|effect| matches!(effect, HarnessEffect::Ready)));
     }
 
+    /// Capabilities are a promise: claiming `fs` would have agents call
+    /// `fs/read_text_file` and block forever on a reply this transport never
+    /// sends.
+    #[test]
+    fn initialize_only_claims_capabilities_this_transport_serves() {
+        let mut adapter = adapter();
+
+        assert!(!adapter.is_initialized());
+        let payload: Value = serde_json::from_slice(&adapter.initialize_request().payload).unwrap();
+
+        assert_eq!(
+            payload["params"]["clientCapabilities"]["fs"]["readTextFile"],
+            false
+        );
+        assert_eq!(
+            payload["params"]["clientCapabilities"]["fs"]["writeTextFile"],
+            false
+        );
+
+        adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":1,"result":{"agentCapabilities":{}}}"#,
+            ))
+            .unwrap();
+
+        // The session layer waits on this before sending `session/new`.
+        assert!(adapter.is_initialized());
+    }
+
     #[test]
     fn a_prompt_cannot_be_sent_before_the_session_exists() {
         let mut adapter = adapter();
@@ -736,6 +840,40 @@ mod tests {
         assert!(!duplicate
             .iter()
             .any(|effect| matches!(effect, HarnessEffect::TurnCompleted { .. })));
+    }
+
+    /// Nothing else marks an ACP session idle, so a finished turn has to.
+    #[test]
+    fn a_finished_turn_reports_the_outcome_and_leaves_the_session_ready() {
+        let mut adapter = established();
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "input-1".to_owned(),
+                content: "run the tests".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+
+        let effects = adapter
+            .observe_native(record(
+                r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}"#,
+            ))
+            .unwrap();
+
+        assert!(matches!(effects.last(), Some(HarnessEffect::Ready)));
+        let turn = effects
+            .iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::ProviderEvent(draft) if draft.kind == ProviderEventKind::Turn => {
+                    Some(draft)
+                }
+                _ => None,
+            })
+            .expect("a turn record carries the outcome into the transcript");
+        assert_eq!(turn.phase, ProviderEventPhase::Completed);
+        assert_eq!(turn.provider_item_id.as_deref(), Some("turn-3"));
     }
 
     #[test]
