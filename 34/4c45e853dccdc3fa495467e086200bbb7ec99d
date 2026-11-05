@@ -1,0 +1,22 @@
+crates/core/src/archcar/server.rs
+  s_b90b75f2f03d93::t_6736179ca89a08 813,822
+crates/core/src/archcar/client.rs
+  s_b90b75f2f03d93::t_785030dc619667 9
+  s_b90b75f2f03d93::t_6736179ca89a08 735,745
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "344c45e853dccdc3fa495467e086200bbb7ec99d",
+  "prompts": {},
+  "sessions": {
+    "s_b90b75f2f03d93": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a227dff8-f133-4d6b-9607-55ee1ba5f4a6",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Pranav Kannepalli <pranav.kannepalli@gmail.com>"
+    }
+  }
+}
