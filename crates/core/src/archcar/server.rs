@@ -810,7 +810,7 @@ fn log_archcar_rpc(
     raw_payload: &str,
 ) {
     if let Some(payload) = archcar_rpc_log_payload(raw_payload) {
-        info!(
+        debug!(
             %rpc_id,
             direction,
             message_type,
@@ -819,7 +819,7 @@ fn log_archcar_rpc(
             "archcar local rpc"
         );
     } else {
-        info!(
+        debug!(
             %rpc_id,
             direction,
             message_type,

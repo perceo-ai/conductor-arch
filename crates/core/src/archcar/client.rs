@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::archcar::protocol::{
@@ -732,7 +732,7 @@ fn log_archcar_rpc(
     raw_payload: &str,
 ) {
     if let Some(payload) = archcar_rpc_log_payload(raw_payload) {
-        info!(
+        debug!(
             endpoint = %endpoint_path.display(),
             %rpc_id,
             direction,
@@ -742,7 +742,7 @@ fn log_archcar_rpc(
             "archcar local rpc"
         );
     } else {
-        info!(
+        debug!(
             endpoint = %endpoint_path.display(),
             %rpc_id,
             direction,
