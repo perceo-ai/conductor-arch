@@ -154,6 +154,28 @@ describe("AchievementsPage", () => {
     expect(host.textContent).toContain("Worktree Cemetery");
   });
 
+  it("hides an unearned secret from a daemon too old to send `revealed`", async () => {
+    const { revealed: _revealed, ...fromOlderDaemon } = entry({
+      id: "permission_denied_any_percent",
+      name: "Permission Denied Any%",
+      category: "Debugging Chaos",
+      value: 3,
+      tier: null,
+      tier_name: null,
+      next_threshold: 10,
+      secret: true,
+    });
+    send.mockResolvedValueOnce({
+      type: "achievements",
+      summary: { ...SUMMARY, achievements: [fromOlderDaemon as ReturnType<typeof entry>] },
+    });
+    const host = mount();
+    await settle();
+
+    expect(host.textContent).not.toContain("Permission Denied Any%");
+    expect(host.textContent).toContain("1 secret achievement still hidden");
+  });
+
   it("hides locked achievements when the toggle is cleared", async () => {
     const host = mount();
     await settle();
