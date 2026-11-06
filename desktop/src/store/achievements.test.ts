@@ -127,6 +127,24 @@ describe("achievementsStore", () => {
     expect(achievementsStore.loading()).toBe(false);
   });
 
+  it("a daemon change drops the cache and the old request at once", async () => {
+    await achievementsStore.load();
+    let answerOldDaemon: (value: unknown) => void = () => undefined;
+    send.mockReturnValueOnce(new Promise((resolve) => (answerOldDaemon = resolve)));
+    const oldRefresh = achievementsStore.refresh();
+    expect(achievementsStore.loading()).toBe(true);
+
+    bumpDaemonEpoch();
+    achievementsStore.daemonChanged();
+
+    expect(achievementsStore.summary()).toBeUndefined();
+    expect(achievementsStore.loading()).toBe(false);
+
+    answerOldDaemon(summary(1));
+    await oldRefresh;
+    expect(achievementsStore.summary()).toBeUndefined();
+  });
+
   it("reports a rejected request as an error rather than throwing", async () => {
     send.mockRejectedValue(new Error("socket closed"));
     await achievementsStore.refresh();

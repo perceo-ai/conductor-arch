@@ -29,6 +29,8 @@ function forgetPreviousDaemon(): void {
   setSummary(undefined);
   setError(undefined);
   loadedAt = 0;
+  inFlight = undefined;
+  setLoading(false);
 }
 
 async function fetchSummary(epoch: number): Promise<void> {
@@ -78,6 +80,14 @@ export const achievementsStore = {
     });
     inFlight = { epoch, request };
     return request;
+  },
+
+  /**
+   * The active daemon changed. A later `load` would catch this too, but one is
+   * not guaranteed: a failed inventory pull leaves this page mounted.
+   */
+  daemonChanged(): void {
+    forgetPreviousDaemon();
   },
 
   /** Test seam: forget the cache so the next `load` goes to the daemon. */
