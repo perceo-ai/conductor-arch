@@ -4164,7 +4164,6 @@ fn drain_acp_stdout(
                 // One ACP result's completion and settle arrive in one batch,
                 // so the duration is carried here, out of reach of the loop
                 // thread draining the next input between them.
-                let mut pending_turn_duration_ms: Option<u64> = None;
                 for effect in effects {
                     // An ACP permission request is a JSON-RPC request: the
                     // agent blocks until it is answered, so the session has to
@@ -4181,7 +4180,7 @@ fn drain_acp_stdout(
                         event_tx,
                         started,
                         &mut connection.native_thread_id,
-                        &mut pending_turn_duration_ms,
+                        &mut None,
                         effect,
                     );
                 }
@@ -5143,6 +5142,31 @@ mod tests {
         });
         assert_eq!(durations.len(), 2, "{durations:?}");
         assert_eq!(durations[0], durations[1]);
+    }
+
+    /// The carry works only because `drain_acp_stdout` declares the local once
+    /// per ACP message and threads it through the effects loop. No behavioural
+    /// test reaches that argument -- swapping it for `&mut None` restores the
+    /// #249 defect with the whole suite green -- so it is pinned here, the way
+    /// the claude runtime's wiring is pinned above.
+    #[test]
+    fn the_acp_drain_loop_threads_one_pending_duration_through_its_effects() {
+        let source = include_str!("session.rs");
+        let drain_source = source
+            .split_once("fn drain_acp_stdout")
+            .unwrap()
+            .1
+            .split_once("\nfn ")
+            .unwrap()
+            .0;
+        assert!(
+            drain_source.contains("let mut pending_turn_duration_ms: Option<u64> = None;"),
+            "the drain loop must own the pending duration"
+        );
+        assert!(
+            drain_source.contains("&mut pending_turn_duration_ms,"),
+            "the drain loop must thread it into every effect it applies"
+        );
     }
 
     /// Registering an ACP agent has to be enough to drive it: the transport
