@@ -167,7 +167,29 @@ describe("Timeline", () => {
       setScrollMetrics(el, { scrollTop: 600, clientHeight: 300, scrollHeight: 1400 });
       observed[0].callback();
 
-      expect(scrollTo).toHaveBeenCalledWith({ top: 1100, behavior: "auto" });
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1100, behavior: "instant" });
+    });
+
+    it("stays pinned when a second image lands before the first scroll settles", async () => {
+      const { el, observed } = await mountScroller();
+      // What the browser does here: `.chat-timeline-scroll` sets `scroll-behavior:
+      // smooth`, so anything but "instant" starts an animation, and its scroll
+      // events report the positions on the way there.
+      el.scrollTo = ((options: ScrollToOptions) => {
+        const target = options.top ?? 0;
+        el.scrollTop =
+          options.behavior === "instant" ? target : el.scrollTop + (target - el.scrollTop) / 2;
+        el.dispatchEvent(new Event("scroll"));
+      }) as typeof el.scrollTo;
+      setScrollMetrics(el, { scrollTop: 600, clientHeight: 300, scrollHeight: 900 });
+      el.dispatchEvent(new Event("scroll"));
+
+      setScrollMetrics(el, { scrollTop: el.scrollTop, clientHeight: 300, scrollHeight: 1400 });
+      observed[0].callback();
+      setScrollMetrics(el, { scrollTop: el.scrollTop, clientHeight: 300, scrollHeight: 1900 });
+      observed[0].callback();
+
+      expect(el.scrollTop).toBe(1600);
     });
 
     it("leaves a reader who scrolled up where they are", async () => {

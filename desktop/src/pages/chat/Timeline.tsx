@@ -122,7 +122,10 @@ export function Timeline(props: { threadId: number; workspace: string }) {
     // like an image that finishes loading in a card already on screen.
     if (typeof ResizeObserver === "undefined" || !messagesRef) return;
     const observer = new ResizeObserver(() => {
-      if (followBottom) scrollToBottom("auto");
+      // "instant", not "auto": auto defers to this element's `scroll-behavior:
+      // smooth`, and a position reported mid-animation clears `followBottom`,
+      // so the next resize would be skipped.
+      if (followBottom) scrollToBottom("instant");
     });
     observer.observe(messagesRef);
     onCleanup(() => observer.disconnect());
