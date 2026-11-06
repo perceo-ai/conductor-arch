@@ -103,12 +103,92 @@ afterEach(() => {
   setLiveItems(null);
   pending = null;
   setSession({ runtime_state: "ready", ready: true });
+  vi.unstubAllGlobals();
 });
+
+/** Records what Timeline observes, so a test can report a resize by hand. */
+function stubResizeObserver() {
+  const observed: { callback: () => void; targets: Element[]; disconnected: boolean }[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      entry = { callback: () => {}, targets: [] as Element[], disconnected: false };
+      constructor(callback: () => void) {
+        this.entry.callback = callback;
+        observed.push(this.entry);
+      }
+      observe(target: Element) {
+        this.entry.targets.push(target);
+      }
+      unobserve() {}
+      disconnect() {
+        this.entry.disconnected = true;
+      }
+    },
+  );
+  return observed;
+}
+
+/** jsdom lays nothing out, so the scroller's size has to be stated. */
+function setScrollMetrics(
+  el: HTMLElement,
+  metrics: { scrollTop: number; clientHeight: number; scrollHeight: number },
+) {
+  Object.defineProperty(el, "clientHeight", { configurable: true, value: metrics.clientHeight });
+  Object.defineProperty(el, "scrollHeight", { configurable: true, value: metrics.scrollHeight });
+  el.scrollTop = metrics.scrollTop;
+}
 
 describe("Timeline", () => {
   it("mounts", () => {
     items = [projectionItem({ id: "a", body: "hello" })];
     expect(mount().querySelector(".chat-timeline-scroll")).toBeTruthy();
+  });
+
+  describe("when the content grows without a new message", () => {
+    async function mountScroller() {
+      const observed = stubResizeObserver();
+      items = [projectionItem({ id: "a", body: "hello" })];
+      const el = mount().querySelector<HTMLElement>(".chat-timeline-scroll")!;
+      // Let the scrolls queued at mount land before watching for new ones.
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const scrollTo = vi.fn();
+      el.scrollTo = scrollTo as unknown as typeof el.scrollTo;
+      return { el, scrollTo, observed };
+    }
+
+    it("stays on the bottom when the reader was following it", async () => {
+      const { el, scrollTo, observed } = await mountScroller();
+      expect(observed[0]?.targets).toEqual([el.querySelector(".chat-messages")]);
+      setScrollMetrics(el, { scrollTop: 600, clientHeight: 300, scrollHeight: 900 });
+      el.dispatchEvent(new Event("scroll"));
+
+      // An image finished loading: taller content, no new message, no scroll.
+      setScrollMetrics(el, { scrollTop: 600, clientHeight: 300, scrollHeight: 1400 });
+      observed[0].callback();
+
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1100, behavior: "auto" });
+    });
+
+    it("leaves a reader who scrolled up where they are", async () => {
+      const { el, scrollTo, observed } = await mountScroller();
+      setScrollMetrics(el, { scrollTop: 100, clientHeight: 300, scrollHeight: 900 });
+      el.dispatchEvent(new Event("scroll"));
+
+      setScrollMetrics(el, { scrollTop: 100, clientHeight: 300, scrollHeight: 1400 });
+      observed[0].callback();
+
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("stops observing when the timeline goes away", async () => {
+      const { observed } = await mountScroller();
+
+      dispose?.();
+      dispose = undefined;
+
+      expect(observed[0].disconnected).toBe(true);
+    });
   });
 
   it("renders the plan once when the card was lifted from the last message", () => {

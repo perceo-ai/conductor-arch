@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, createResource, createSignal, on, onMount } from "solid-js";
+import { For, Show, createEffect, createMemo, createResource, createSignal, on, onCleanup, onMount } from "solid-js";
 import {
   chatStore,
   interactionsStore,
@@ -35,6 +35,7 @@ import { PlanCard } from "./Interactions";
 // generation loader that trails the last message.
 export function Timeline(props: { threadId: number; workspace: string }) {
   let scrollRef: HTMLDivElement | undefined;
+  let messagesRef: HTMLDivElement | undefined;
   // Only used to work out where a sent message's file chip points; a chip whose
   // name isn't in the list simply stays inert, so the list arriving late costs
   // nothing but a re-render.
@@ -117,6 +118,14 @@ export function Timeline(props: { threadId: number; workspace: string }) {
 
   onMount(() => {
     requestAnimationFrame(() => scrollToBottom("auto"));
+    // The scroll signal only sees rows change. Content can also grow by itself,
+    // like an image that finishes loading in a card already on screen.
+    if (typeof ResizeObserver === "undefined" || !messagesRef) return;
+    const observer = new ResizeObserver(() => {
+      if (followBottom) scrollToBottom("auto");
+    });
+    observer.observe(messagesRef);
+    onCleanup(() => observer.disconnect());
   });
 
   createEffect(
@@ -128,7 +137,7 @@ export function Timeline(props: { threadId: number; workspace: string }) {
 
   return (
     <div class="chat-timeline-scroll" ref={scrollRef} onScroll={updateFollowBottom}>
-      <div class="chat-messages">
+      <div class="chat-messages" ref={messagesRef}>
         <Show
           when={!showsNewChatIntro(items().length, pendingPlan() != null)}
           fallback={<NewChatIntro workspace={props.workspace} threadId={props.threadId} />}
