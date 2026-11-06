@@ -39,6 +39,16 @@ export type ArchcarResponse =
   | { type: "sync_applied"; applied: SyncAction[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
+  | {
+      type: "chat_image";
+      thread_id: number;
+      item_id: string;
+      index: number;
+      /** MIME type the provider declared, e.g. `image/png`. */
+      media_type: string;
+      /** The image, base64-encoded exactly as the provider sent it. */
+      data: string;
+    }
   | { type: "chat_transcripts"; workspace: string; transcripts: ArchcarChatTranscriptSummary[] }
   | { type: "chat_transcript"; thread_id: number; title: string; messages: ArchcarChatTranscriptMessage[] }
   | { type: "context_plans"; workspace: string; plans: ArchcarContextPlan[] }

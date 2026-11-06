@@ -76,6 +76,7 @@ export type ArchcarRequest =
   | { type: "apply_sync"; selection?: SyncSelection }
   | { type: "list_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
+  | { type: "get_chat_image"; thread_id: number; item_id: string; index: number }
   | { type: "list_chat_transcripts"; workspace: string; limit?: number }
   | { type: "get_chat_transcript"; thread_id: number }
   | { type: "list_context_plans"; workspace: string }

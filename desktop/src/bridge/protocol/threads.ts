@@ -25,6 +25,20 @@ export interface ArchcarProjectionItem {
    * command. Absent (false) from daemons that predate it.
    */
   background_agent?: boolean;
+  /**
+   * Images the card holds, described rather than inlined — the bytes are
+   * fetched one at a time with `get_chat_image`, so a chat full of
+   * screenshots still refreshes in kilobytes. Absent from older daemons.
+   */
+  images?: ArchcarProjectionImage[];
+}
+
+/** An image a timeline card carries: what it is, not its bytes. */
+export interface ArchcarProjectionImage {
+  /** MIME type the provider declared, e.g. `image/png`. */
+  media_type: string;
+  /** Decoded size in bytes. */
+  bytes: number;
 }
 
 export interface ArchcarChatThread {
