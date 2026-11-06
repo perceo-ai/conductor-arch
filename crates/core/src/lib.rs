@@ -31,6 +31,7 @@ pub mod provider_events;
 pub mod provider_inputs;
 pub mod provider_interactions;
 pub mod provider_projection;
+pub mod provider_usage;
 pub mod pty;
 pub mod redaction;
 pub mod repository;

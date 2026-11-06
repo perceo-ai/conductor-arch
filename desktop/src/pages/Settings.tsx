@@ -21,6 +21,7 @@ import {
 import { readTomlValue, writeTomlValue, type TomlValueKind } from "./settings/toml";
 import {  setShortcutBinding, shortcutBindingKey } from "./settings/shortcuts";
 import { SkillsCard } from "./settings/SkillsCard";
+import { ProviderUsageCard } from "./settings/ProviderUsageCard";
 import { RemoteDaemonCard } from "./settings/RemoteDaemonCard";
 import { PairPhoneCard } from "./settings/PairPhoneCard";
 import { BackgroundServiceCard } from "./settings/BackgroundServiceCard";
@@ -377,6 +378,14 @@ export function SettingsPage() {
           </div>
         </Show>
 
+        <Show when={activeSection() === "usage"}>
+          <div class="settings-content-narrow">
+            <h1>Usage</h1>
+            <SettingsSectionBlock title="Plan quota">
+              <ProviderUsageCard />
+            </SettingsSectionBlock>
+          </div>
+        </Show>
         <Show when={activeSection() === "repository"}>
           <div class="settings-content-wide">
             <h1>{repo() === undefined ? "Repository Behavior" : repo()}</h1>

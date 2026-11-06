@@ -1,0 +1,81 @@
+/* Settings → Usage: one block per provider, one bar per limit window.
+   Bars read left-to-right as "spent", so a short bar is good news. */
+
+.usage-provider-head {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+}
+
+.usage-provider.muted .settings-status {
+    color: var(--lc-text-muted);
+}
+
+.usage-plan-chip {
+    background: var(--lc-surface-2, rgba(255, 255, 255, 0.06));
+    border: 1px solid var(--lc-border);
+    border-radius: 999px;
+    color: var(--lc-text-muted);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    padding: 1px 7px;
+    text-transform: uppercase;
+}
+
+.usage-meter {
+    align-items: center;
+    display: grid;
+    gap: 12px;
+    grid-template-columns: minmax(120px, 1fr) minmax(90px, 3fr) auto;
+    margin-top: 10px;
+}
+
+.usage-meter-label {
+    color: var(--lc-text);
+    font-size: 12px;
+}
+
+.usage-meter-detail {
+    color: var(--lc-text-muted);
+    font-size: 11px;
+}
+
+.usage-meter-bar {
+    background: var(--lc-border);
+    border-radius: 999px;
+    height: 4px;
+    overflow: hidden;
+}
+
+.usage-meter-fill {
+    background: var(--lc-accent);
+    height: 100%;
+    /* Even 0% should show the bar exists rather than reading as a missing one. */
+    min-width: 2px;
+}
+
+.usage-meter-fill.warning {
+    background: var(--lc-warning);
+}
+
+.usage-meter-fill.critical {
+    background: var(--lc-danger);
+}
+
+.usage-meter-value {
+    color: var(--lc-text-muted);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+    .usage-meter {
+        grid-template-columns: 1fr auto;
+    }
+
+    .usage-meter-bar {
+        grid-column: 1 / -1;
+        order: 3;
+    }
+}
