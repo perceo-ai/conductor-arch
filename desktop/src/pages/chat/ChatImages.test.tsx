@@ -85,4 +85,47 @@ describe("images a tool result carried", () => {
     await vi.waitFor(() => expect(host.querySelectorAll("img.chat-image")).toHaveLength(2));
     expect(send.mock.calls.map(([request]) => request.index)).toEqual([0, 1]);
   });
+
+  it("keeps a failed image to its own error, leaving the rest of the strip standing", async () => {
+    send.mockRejectedValueOnce(new Error("image gone"));
+
+    const host = await mount([
+      { media_type: "image/png", bytes: 16 },
+      { media_type: "image/jpeg", bytes: 32 },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(host.querySelector(".chat-image-error")?.textContent).toBe(
+        "Image unavailable: image gone",
+      );
+      expect(host.querySelectorAll("img.chat-image")).toHaveLength(1);
+    });
+    expect(host.querySelector(".chat-image-strip")).toBeTruthy();
+  });
+
+  it("enlarges and shrinks from the keyboard", async () => {
+    const host = await mount([{ media_type: "image/png", bytes: 16 }]);
+    const img = await vi.waitFor(() => {
+      const el = host.querySelector<HTMLImageElement>("img.chat-image");
+      expect(el).toBeTruthy();
+      return el!;
+    });
+
+    expect(img.tabIndex).toBe(0);
+    expect(img.getAttribute("role")).toBe("button");
+    expect(img.getAttribute("aria-label")).toBe("Click to enlarge");
+
+    img.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(img.classList.contains("chat-image-full")).toBe(true);
+    expect(img.getAttribute("aria-label")).toBe("Click to shrink");
+
+    // Space scrolls the page unless the handler claims it.
+    const space = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    img.dispatchEvent(space);
+    expect(img.classList.contains("chat-image-full")).toBe(false);
+    expect(space.defaultPrevented).toBe(true);
+
+    img.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    expect(img.classList.contains("chat-image-full")).toBe(false);
+  });
 });
