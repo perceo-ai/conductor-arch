@@ -35,7 +35,7 @@ export function headline(report: ProviderUsageReport): string {
   if (report.meters.length === 0) return report.message ?? "No active limit window.";
   const worst = report.meters.reduce((a, b) => (b.percent_used > a.percent_used ? b : a));
   const left = Math.max(0, 100 - worst.percent_used);
-  if (worst.percent_used >= 95) return `Out of room on ${worst.label.toLowerCase()}.`;
+  if (worst.percent_used >= 100) return `Out of room on ${worst.label.toLowerCase()}.`;
   if (worst.percent_used >= 80) return `${left}% left on ${worst.label.toLowerCase()}.`;
   return `On track. ${left}% left on ${worst.label.toLowerCase()}.`;
 }
@@ -102,12 +102,22 @@ function ProviderBlock(props: { report: ProviderUsageReport }) {
 
 export function ProviderUsageCard() {
   const [refreshing, setRefreshing] = createSignal(false);
-  const [usage, { refetch }] = createResource(async (_source, info: { refetching: boolean | unknown }) => {
-    const res = await send({ type: "get_provider_usage", refresh: info.refetching === true });
-    if (res.type !== "provider_usage") {
-      throw new Error(res.type === "error" ? res.message : `unexpected response ${res.type}`);
+  const [loadError, setLoadError] = createSignal<string | null>(null);
+  // A rejected fetcher makes the resource accessor rethrow wherever it is read,
+  // and nothing above this pane catches that. So a failure lands in `loadError`
+  // and the last good snapshot, if any, stays on screen under it.
+  const [usage, { refetch }] = createResource<ProviderUsageReport[]>(async (_source, info) => {
+    try {
+      const res = await send({ type: "get_provider_usage", refresh: info.refetching === true });
+      if (res.type !== "provider_usage") {
+        throw new Error(res.type === "error" ? res.message : `unexpected response ${res.type}`);
+      }
+      setLoadError(null);
+      return res.providers;
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+      return info.value ?? [];
     }
-    return res.providers;
   });
 
   const reload = async () => {
@@ -119,12 +129,16 @@ export function ProviderUsageCard() {
     }
   };
 
+  const hasProviders = () => (usage() ?? []).length > 0;
+
   return (
     <>
-      <Show when={usage.error}>
-        <div class="settings-field">
-          <div class="settings-status">Could not read provider usage: {String(usage.error)}</div>
-        </div>
+      <Show when={loadError()}>
+        {(message) => (
+          <div class="settings-field">
+            <div class="settings-status">Could not read provider usage: {message()}</div>
+          </div>
+        )}
       </Show>
       <Show when={usage.loading && !usage()}>
         <div class="settings-field">
@@ -132,10 +146,10 @@ export function ProviderUsageCard() {
         </div>
       </Show>
       <For each={usage() ?? []}>{(report) => <ProviderBlock report={report} />}</For>
-      <Show when={(usage() ?? []).length > 0}>
+      <Show when={hasProviders() || loadError()}>
         <div class="settings-action-row">
           <button class="ui-button-secondary" disabled={refreshing()} onClick={() => void reload()}>
-            {refreshing() ? "Refreshing…" : "Refresh"}
+            {refreshing() ? "Refreshing…" : hasProviders() ? "Refresh" : "Try again"}
           </button>
         </div>
       </Show>

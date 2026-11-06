@@ -87,6 +87,56 @@ describe("ProviderUsageCard", () => {
     expect(host.textContent).toContain("bills per token");
     expect(host.textContent).toContain("Open Codex usage");
   });
+
+  it("shows a rejected request as an error with a retry that recovers", async () => {
+    send.mockRejectedValueOnce(new Error("daemon disconnected"));
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    dispose = render(() => <ProviderUsageCard />, host);
+    await flush();
+
+    expect(host.textContent).toContain("Could not read provider usage: daemon disconnected");
+    const retry = host.querySelector<HTMLButtonElement>(".settings-action-row button");
+    expect(retry?.textContent).toBe("Try again");
+
+    send.mockResolvedValueOnce({ type: "provider_usage", providers: [report()], collected_at: 1 });
+    retry?.click();
+    await flush();
+
+    expect(host.textContent).not.toContain("Could not read provider usage");
+    expect(host.textContent).toContain("38% used");
+  });
+
+  it("shows a daemon that refuses the request as an error", async () => {
+    send.mockResolvedValue({ type: "error", message: "unknown request get_provider_usage" });
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    dispose = render(() => <ProviderUsageCard />, host);
+    await flush();
+
+    expect(host.textContent).toContain(
+      "Could not read provider usage: unknown request get_provider_usage",
+    );
+  });
+
+  it("keeps the last good bars when a refresh fails", async () => {
+    send.mockResolvedValueOnce({ type: "provider_usage", providers: [report()], collected_at: 1 });
+    const host = document.createElement("div");
+    document.body.append(host);
+
+    dispose = render(() => <ProviderUsageCard />, host);
+    await flush();
+
+    send.mockRejectedValueOnce(new Error("daemon disconnected"));
+    host.querySelector<HTMLButtonElement>(".settings-action-row button")?.click();
+    await flush();
+
+    expect(host.textContent).toContain("Could not read provider usage: daemon disconnected");
+    expect(host.textContent).toContain("38% used");
+    expect(host.querySelector(".settings-action-row button")?.textContent).toBe("Refresh");
+  });
 });
 
 describe("headline", () => {
@@ -95,9 +145,15 @@ describe("headline", () => {
     expect(
       headline(report({ meters: [{ label: "This week", percent_used: 88, severity: "warning" }] })),
     ).toBe("12% left on this week.");
-    expect(
-      headline(report({ meters: [{ label: "This week", percent_used: 99, severity: "critical" }] })),
-    ).toBe("Out of room on this week.");
+  });
+
+  it("reserves out of room for a window with nothing left", () => {
+    const at = (percent_used: number) =>
+      headline(report({ meters: [{ label: "This week", percent_used, severity: "critical" }] }));
+
+    expect(at(95)).toBe("5% left on this week.");
+    expect(at(99)).toBe("1% left on this week.");
+    expect(at(100)).toBe("Out of room on this week.");
   });
 
   it("falls back to the provider's own message when there is nothing to draw", () => {

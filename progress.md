@@ -39,15 +39,21 @@ stored and calls the provider's own account endpoint, the way the CLI's own
 `/usage` does:
 
 - Claude Code — OAuth token (macOS keychain, else `~/.claude/.credentials.json`)
-  against `api.anthropic.com/api/oauth/usage`.
+  against `api.anthropic.com/api/oauth/usage`. `ANTHROPIC_API_KEY` alone reports
+  no plan quota. The keychain lookup stops after 12 seconds, and passing that
+  is an error for Claude only.
 - Codex — `~/.codex/auth.json`; ChatGPT sign-ins report their rolling windows,
-  an API-key sign-in reports that it has no plan quota instead.
+  an API-key sign-in (stored, or `OPENAI_API_KEY`/`OPENAI_API_TOKEN`) reports
+  that it has no plan quota instead.
 - Devin — `credentials.toml` against the Connect `GetUserStatus` RPC. That
   server parses the client version as semver and answers 500 otherwise.
 
 Probes run in parallel behind a 60-second daemon-side cache, with secrets passed
 to `curl` through a stdin config so they never reach argv. A provider that
-cannot answer reports a status and a reason rather than an empty bar.
+cannot answer reports a status and a reason rather than an empty bar. Concurrent
+cache misses share one collection; `--refresh` always starts its own, and a
+slower older collection never replaces a newer snapshot. A failed request shows
+in the pane with a retry, keeping any bars already drawn.
 
 ## Workspace tabs and splits (2026-10-31)
 

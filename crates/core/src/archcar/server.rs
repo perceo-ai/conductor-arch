@@ -2265,7 +2265,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             providers: crate::archcar::protocol::agent_provider_summaries(),
         },
         ArchcarRequest::GetProviderUsage { refresh } => {
-            let (providers, collected_at) = provider_usage_snapshot(refresh);
+            let (providers, collected_at) = crate::provider_usage::provider_usage_snapshot(refresh);
             ArchcarResponse::ProviderUsage {
                 providers,
                 collected_at,
@@ -5422,39 +5422,6 @@ fn workspace_git_action_visible_input(action: WorkspaceGitAction) -> &'static st
         WorkspaceGitAction::MergePr => "Merge pull request",
         WorkspaceGitAction::OpenPr => "Review pull request",
     }
-}
-
-/// Provider quota costs three network calls, so one snapshot is shared by every
-/// client for a minute. `refresh` is the user asking again, and bypasses it.
-fn provider_usage_snapshot(
-    refresh: bool,
-) -> (Vec<crate::provider_usage::ProviderUsageReport>, i64) {
-    use crate::provider_usage::{ProviderUsageReport, USAGE_CACHE_TTL_SECONDS};
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
-
-    /// Collection time plus what was collected.
-    type Snapshot = (i64, Vec<ProviderUsageReport>);
-    static CACHE: OnceLock<Mutex<Option<Snapshot>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or_default();
-    if !refresh {
-        if let Ok(guard) = cache.lock() {
-            if let Some((collected_at, reports)) = guard.as_ref() {
-                if now - *collected_at < USAGE_CACHE_TTL_SECONDS {
-                    return (reports.clone(), *collected_at);
-                }
-            }
-        }
-    }
-    let reports = crate::provider_usage::collect_provider_usage();
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((now, reports.clone()));
-    }
-    (reports, now)
 }
 
 fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {

@@ -19,6 +19,8 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 /// How long a collected snapshot stays fresh. Quota moves in minutes, not
 /// milliseconds, and each refresh is three network calls.
@@ -26,6 +28,9 @@ pub const USAGE_CACHE_TTL_SECONDS: i64 = 60;
 
 /// Seconds any one provider probe may take before we report it as unreachable.
 const PROBE_TIMEOUT_SECONDS: u32 = 12;
+
+/// How long the macOS Keychain lookup may wait, matching curl's limit.
+const KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(PROBE_TIMEOUT_SECONDS as u64);
 
 /// One bar in the UI: a window ("This week") and how much of it is spent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,17 +101,126 @@ impl ProviderUsageReport {
     }
 }
 
+/// A snapshot and the order its collection started in.
+struct CachedUsage {
+    generation: u64,
+    collected_at: i64,
+    reports: Vec<ProviderUsageReport>,
+}
+
+struct UsageCacheState {
+    snapshot: Option<CachedUsage>,
+    /// Collections started so far; the latest one's generation.
+    started: u64,
+    /// Collections still out asking providers.
+    running: usize,
+}
+
+/// Provider quota costs three network calls, so one snapshot is shared by every
+/// client for a minute. Reads that miss the cache wait for a collection already
+/// running rather than starting their own; `refresh` is the user asking again,
+/// so it always starts one. Collections can then overlap, and the generation
+/// keeps a slow older one from replacing what a newer one already stored.
+struct UsageCache {
+    state: Mutex<UsageCacheState>,
+    settled: Condvar,
+}
+
+/// Marks a collection finished even if it panicked, so nobody waits on it forever.
+struct RunningCollection<'a>(&'a UsageCache);
+
+impl Drop for RunningCollection<'_> {
+    fn drop(&mut self) {
+        self.0.lock().running -= 1;
+        self.0.settled.notify_all();
+    }
+}
+
+impl UsageCache {
+    const fn new() -> Self {
+        Self {
+            state: Mutex::new(UsageCacheState {
+                snapshot: None,
+                started: 0,
+                running: 0,
+            }),
+            settled: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, UsageCacheState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `clock` runs with the cache locked.
+    fn snapshot(
+        &self,
+        refresh: bool,
+        clock: impl Fn() -> i64,
+        collect: impl FnOnce() -> Vec<ProviderUsageReport>,
+    ) -> (Vec<ProviderUsageReport>, i64) {
+        let mut state = self.lock();
+        let (generation, collected_at) = loop {
+            let now = clock();
+            if !refresh {
+                if let Some(cached) = &state.snapshot {
+                    if now - cached.collected_at < USAGE_CACHE_TTL_SECONDS {
+                        return (cached.reports.clone(), cached.collected_at);
+                    }
+                }
+                if state.running > 0 {
+                    state = self
+                        .settled
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    continue;
+                }
+            }
+            state.started += 1;
+            state.running += 1;
+            break (state.started, now);
+        };
+        drop(state);
+
+        let _running = RunningCollection(self);
+        let reports = collect();
+        let mut state = self.lock();
+        match &state.snapshot {
+            Some(newer) if newer.generation > generation => {
+                (newer.reports.clone(), newer.collected_at)
+            }
+            _ => {
+                state.snapshot = Some(CachedUsage {
+                    generation,
+                    collected_at,
+                    reports: reports.clone(),
+                });
+                (reports, collected_at)
+            }
+        }
+    }
+}
+
+/// The snapshot every client shares; see [`UsageCache`].
+pub fn provider_usage_snapshot(refresh: bool) -> (Vec<ProviderUsageReport>, i64) {
+    static CACHE: UsageCache = UsageCache::new();
+    CACHE.snapshot(refresh, now_epoch, collect_provider_usage)
+}
+
 /// A provider key and the probe that answers for it.
 type Probe = (&'static str, fn() -> ProviderUsageReport);
 
 /// Ask every provider we can, in parallel. Never fails as a whole: a provider
 /// that cannot answer contributes a report explaining why.
 pub fn collect_provider_usage() -> Vec<ProviderUsageReport> {
-    let probes: Vec<Probe> = vec![
+    collect_from(vec![
         ("claude", claude_usage),
         ("codex", codex_usage),
         ("devin", devin_usage),
-    ];
+    ])
+}
+
+fn collect_from(probes: Vec<Probe>) -> Vec<ProviderUsageReport> {
     let handles: Vec<_> = probes
         .into_iter()
         .map(|(key, probe)| {
@@ -145,12 +259,21 @@ fn display_name_for(provider_key: &str) -> &'static str {
 /// Claude Code stores an OAuth token (macOS keychain, or `~/.claude/.credentials.json`
 /// elsewhere) and `/usage` reads `api.anthropic.com/api/oauth/usage` with it.
 fn claude_usage() -> ProviderUsageReport {
-    let now = now_epoch();
-    let Some(credentials) = claude_credentials() else {
-        return ProviderUsageReport::new("claude", "Claude Code", "unauthenticated", now)
-            .with_message(
-                "Claude Code is not signed in on this machine. Run `claude` and sign in.",
-            );
+    claude_usage_with(claude_credentials(), now_epoch())
+}
+
+fn claude_usage_with(
+    credentials: Result<Option<ClaudeCredentials>>,
+    now: i64,
+) -> ProviderUsageReport {
+    let credentials = match credentials {
+        Ok(Some(credentials)) => credentials,
+        Ok(None) => return claude_signed_out_report(now),
+        Err(err) => {
+            return ProviderUsageReport::new("claude", "Claude Code", "error", now)
+                .with_message(format!("could not read Claude credentials: {err}"))
+                .with_manage_url("https://claude.ai/settings/usage")
+        }
     };
     let body = match run_curl(&claude_usage_request(&credentials.access_token)) {
         Ok(body) => body,
@@ -173,36 +296,89 @@ fn claude_usage() -> ProviderUsageReport {
     report
 }
 
+/// No stored sign-in. An API key still runs agents (see `crate::mcp`), it just
+/// has no plan quota to show.
+fn claude_signed_out_report(now: i64) -> ProviderUsageReport {
+    if env_key_present(&["ANTHROPIC_API_KEY"]) {
+        return ProviderUsageReport::new("claude", "Claude Code", "unsupported", now)
+            .with_message(
+                "Claude Code is using an API key, which bills per token and has no plan quota.",
+            )
+            .with_manage_url("https://console.anthropic.com/settings/usage");
+    }
+    ProviderUsageReport::new("claude", "Claude Code", "unauthenticated", now)
+        .with_message("Claude Code is not signed in on this machine. Run `claude` and sign in.")
+}
+
 struct ClaudeCredentials {
     access_token: String,
     plan: Option<String>,
 }
 
-fn claude_credentials() -> Option<ClaudeCredentials> {
-    let raw = claude_credentials_json()?;
-    parse_claude_credentials(&raw)
+fn claude_credentials() -> Result<Option<ClaudeCredentials>> {
+    Ok(claude_credentials_json()?
+        .as_deref()
+        .and_then(parse_claude_credentials))
 }
 
-fn claude_credentials_json() -> Option<String> {
-    let file = crate::platform::home_dir()?.join(".claude/.credentials.json");
-    if let Ok(text) = std::fs::read_to_string(&file) {
-        return Some(text);
+fn claude_credentials_json() -> Result<Option<String>> {
+    let Some(home) = crate::platform::home_dir() else {
+        return Ok(None);
+    };
+    if let Ok(text) = std::fs::read_to_string(home.join(".claude/.credentials.json")) {
+        return Ok(Some(text));
     }
     if cfg!(target_os = "macos") {
-        let output = Command::new("security")
-            .args([
-                "find-generic-password",
-                "-s",
-                "Claude Code-credentials",
-                "-w",
-            ])
-            .output()
-            .ok()?;
-        if output.status.success() {
-            return Some(String::from_utf8_lossy(&output.stdout).into_owned());
+        let mut lookup = Command::new("security");
+        lookup.args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ]);
+        return keychain_output(&mut lookup, KEYCHAIN_TIMEOUT);
+    }
+    Ok(None)
+}
+
+/// Keychain can sit waiting for an unlock or an approval for as long as nobody
+/// answers, so the lookup gets a deadline. Passing it is an error, not "signed
+/// out": the credentials may well be there. A lookup that ends on its own and
+/// finds nothing is the signed-out case.
+fn keychain_output(lookup: &mut Command, timeout: Duration) -> Result<Option<String>> {
+    let Ok(mut child) = lookup
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Ok(None);
+    };
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().context("read Keychain lookup")?;
+                return Ok(status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&output.stdout).into_owned()));
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!(
+                    "Keychain did not answer within {} seconds; it may be locked",
+                    timeout.as_secs()
+                );
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err).context("wait on Keychain lookup");
+            }
         }
     }
-    None
 }
 
 fn parse_claude_credentials(raw: &str) -> Option<ClaudeCredentials> {
@@ -313,12 +489,10 @@ fn claude_limit_label(kind: &str, scope: Option<&Value>) -> String {
 fn codex_usage() -> ProviderUsageReport {
     let now = now_epoch();
     let Some(path) = crate::platform::home_dir().map(|home| home.join(".codex/auth.json")) else {
-        return ProviderUsageReport::new("codex", "Codex", "unauthenticated", now)
-            .with_message("Codex is not signed in on this machine. Run `codex login`.");
+        return codex_signed_out_report(now);
     };
     let Ok(raw) = std::fs::read_to_string(path) else {
-        return ProviderUsageReport::new("codex", "Codex", "unauthenticated", now)
-            .with_message("Codex is not signed in on this machine. Run `codex login`.");
+        return codex_signed_out_report(now);
     };
     match parse_codex_auth(&raw) {
         CodexAuth::ChatGpt {
@@ -350,14 +524,27 @@ fn codex_usage() -> ProviderUsageReport {
                     .with_message(format!("could not read Codex usage: {err}")),
             }
         }
-        CodexAuth::ApiKey => ProviderUsageReport::new("codex", "Codex", "unsupported", now)
-            .with_message(
-                "Codex is signed in with an API key, which bills per token and has no plan quota.",
-            )
-            .with_manage_url("https://platform.openai.com/usage"),
-        CodexAuth::None => ProviderUsageReport::new("codex", "Codex", "unauthenticated", now)
-            .with_message("Codex is not signed in on this machine. Run `codex login`."),
+        CodexAuth::ApiKey => codex_api_key_report(now),
+        CodexAuth::None => codex_signed_out_report(now),
     }
+}
+
+fn codex_api_key_report(now: i64) -> ProviderUsageReport {
+    ProviderUsageReport::new("codex", "Codex", "unsupported", now)
+        .with_message(
+            "Codex is signed in with an API key, which bills per token and has no plan quota.",
+        )
+        .with_manage_url("https://platform.openai.com/usage")
+}
+
+/// No stored sign-in. As with Claude, an API key in the environment still runs
+/// agents (see `crate::mcp`).
+fn codex_signed_out_report(now: i64) -> ProviderUsageReport {
+    if env_key_present(&["OPENAI_API_KEY", "OPENAI_API_TOKEN"]) {
+        return codex_api_key_report(now);
+    }
+    ProviderUsageReport::new("codex", "Codex", "unauthenticated", now)
+        .with_message("Codex is not signed in on this machine. Run `codex login`.")
 }
 
 #[derive(Debug, PartialEq)]
@@ -686,6 +873,11 @@ fn run_curl(request: &CurlRequest) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn env_key_present(keys: &[&str]) -> bool {
+    keys.iter()
+        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()))
+}
+
 fn curl_config_escape(value: &str) -> String {
     value
         .chars()
@@ -759,6 +951,220 @@ fn now_epoch() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::EnvGuard;
+    use std::sync::mpsc;
+
+    fn usage(status: &str) -> Vec<ProviderUsageReport> {
+        vec![ProviderUsageReport::new("claude", "Claude Code", status, 0)]
+    }
+
+    fn statuses(reports: &[ProviderUsageReport]) -> Vec<&str> {
+        reports
+            .iter()
+            .map(|report| report.status.as_str())
+            .collect()
+    }
+
+    /// A read whose collection is held open until `release` fires.
+    fn held_read(
+        cache: &'static UsageCache,
+        started: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    ) -> std::thread::JoinHandle<(Vec<ProviderUsageReport>, i64)> {
+        std::thread::spawn(move || {
+            cache.snapshot(
+                false,
+                || 100,
+                || {
+                    started.send(()).unwrap();
+                    release.recv().unwrap();
+                    usage("older")
+                },
+            )
+        })
+    }
+
+    fn leaked_cache() -> &'static UsageCache {
+        Box::leak(Box::new(UsageCache::new()))
+    }
+
+    #[test]
+    fn concurrent_reads_share_one_collection() {
+        let cache = leaked_cache();
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let first = held_read(cache, started_tx, release_rx);
+        started.recv().unwrap();
+
+        // The clock runs under the cache lock, and the first read needs that
+        // lock to finish, so releasing it after this signal cannot beat the
+        // second read to its wait.
+        let (reading_tx, reading) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            cache.snapshot(
+                false,
+                || {
+                    reading_tx.send(()).unwrap();
+                    100
+                },
+                || usage("duplicate"),
+            )
+        });
+        reading.recv().unwrap();
+        release.send(()).unwrap();
+
+        assert_eq!(statuses(&first.join().unwrap().0), ["older"]);
+        assert_eq!(statuses(&second.join().unwrap().0), ["older"]);
+    }
+
+    #[test]
+    fn an_older_collection_cannot_replace_a_newer_one() {
+        let cache = leaked_cache();
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let slow_read = held_read(cache, started_tx, release_rx);
+        started.recv().unwrap();
+
+        let (refreshed, collected_at) = cache.snapshot(true, || 105, || usage("newer"));
+        assert_eq!(statuses(&refreshed), ["newer"]);
+        release.send(()).unwrap();
+
+        // The slow read hands back the newer snapshot, and the cache keeps it.
+        assert_eq!(slow_read.join().unwrap(), (refreshed, collected_at));
+        let (cached, cached_at) = cache.snapshot(false, || 106, || usage("unexpected"));
+        assert_eq!(statuses(&cached), ["newer"]);
+        assert_eq!(cached_at, 105);
+    }
+
+    #[test]
+    fn refresh_and_an_expired_snapshot_collect_again() {
+        let cache = UsageCache::new();
+        cache.snapshot(false, || 100, || usage("first"));
+
+        let (fresh, _) = cache.snapshot(false, || 159, || usage("unexpected"));
+        assert_eq!(statuses(&fresh), ["first"]);
+        let (refreshed, _) = cache.snapshot(true, || 159, || usage("refreshed"));
+        assert_eq!(statuses(&refreshed), ["refreshed"]);
+        let (expired, _) = cache.snapshot(false, || 219, || usage("expired"));
+        assert_eq!(statuses(&expired), ["expired"]);
+    }
+
+    #[test]
+    fn a_panicked_collection_does_not_strand_a_waiting_read() {
+        let cache = leaked_cache();
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let panicking = std::thread::spawn(move || {
+            cache.snapshot(
+                false,
+                || 100,
+                || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    panic!("probe blew up");
+                },
+            )
+        });
+        started.recv().unwrap();
+
+        let (reading_tx, reading) = mpsc::channel();
+        let waiting = std::thread::spawn(move || {
+            cache.snapshot(
+                false,
+                || {
+                    let _ = reading_tx.send(());
+                    100
+                },
+                || usage("recovered"),
+            )
+        });
+        reading.recv().unwrap();
+        release.send(()).unwrap();
+
+        assert!(panicking.join().is_err());
+        assert_eq!(statuses(&waiting.join().unwrap().0), ["recovered"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keychain_lookup_past_its_deadline_is_stopped_and_reported() {
+        let mut lookup = Command::new("sleep");
+        lookup.arg("30");
+        let started = Instant::now();
+
+        let err = keychain_output(&mut lookup, Duration::from_millis(100)).unwrap_err();
+
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(err.to_string().contains("did not answer"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_keychain_lookup_that_ends_reports_what_it_found() {
+        let mut found = Command::new("sh");
+        found.args(["-c", "printf secret"]);
+        let mut missing = Command::new("sh");
+        missing.args(["-c", "exit 44"]);
+        let timeout = Duration::from_secs(10);
+
+        assert_eq!(
+            keychain_output(&mut found, timeout).unwrap().as_deref(),
+            Some("secret")
+        );
+        assert_eq!(keychain_output(&mut missing, timeout).unwrap(), None);
+    }
+
+    #[test]
+    fn a_failed_keychain_lookup_is_a_claude_error_beside_the_other_providers() {
+        fn timed_out() -> ProviderUsageReport {
+            claude_usage_with(Err(anyhow::anyhow!("Keychain did not answer")), 0)
+        }
+        fn answered() -> ProviderUsageReport {
+            ProviderUsageReport::new("codex", "Codex", "ok", 0)
+        }
+
+        let reports = collect_from(vec![("claude", timed_out), ("codex", answered)]);
+
+        assert_eq!(statuses(&reports), ["error", "ok"]);
+        assert!(reports[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("Keychain did not answer")));
+    }
+
+    #[test]
+    fn an_anthropic_api_key_has_no_plan_quota_rather_than_no_sign_in() {
+        let mut env = EnvGuard::lock();
+        env.remove("ANTHROPIC_API_KEY");
+        assert_eq!(claude_usage_with(Ok(None), 0).status, "unauthenticated");
+
+        env.set("ANTHROPIC_API_KEY", "test-anthropic");
+        let report = claude_usage_with(Ok(None), 0);
+        drop(env);
+
+        assert_eq!(report.status, "unsupported");
+        assert!(report.manage_url.is_some());
+    }
+
+    #[test]
+    fn an_openai_api_key_has_no_plan_quota_rather_than_no_sign_in() {
+        let mut env = EnvGuard::lock();
+        let home = tempfile::tempdir().unwrap();
+        env.set("HOME", home.path());
+        env.set("USERPROFILE", home.path());
+        env.remove("OPENAI_API_KEY");
+        env.remove("OPENAI_API_TOKEN");
+        assert_eq!(codex_usage().status, "unauthenticated");
+
+        for key in ["OPENAI_API_KEY", "OPENAI_API_TOKEN"] {
+            env.set(key, "test-openai");
+            let report = codex_usage();
+            env.remove(key);
+
+            assert_eq!(report.status, "unsupported", "{key}");
+            assert_eq!(report, codex_api_key_report(report.checked_at), "{key}");
+        }
+    }
 
     #[test]
     fn claude_usage_reads_every_active_window() {
