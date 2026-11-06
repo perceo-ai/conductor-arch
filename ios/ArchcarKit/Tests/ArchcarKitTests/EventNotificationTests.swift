@@ -126,7 +126,7 @@ private let chatContext = NotificationContext(
 @Test func modelLabelsReadLikeTheRestOfTheApp() {
     #expect(EventNotificationDescriptor.modelLabel("claude-opus-5") == "Claude Opus 5")
     #expect(EventNotificationDescriptor.modelLabel("gpt-5.6-sol") == "GPT 5.6 Sol")
-    #expect(EventNotificationDescriptor.modelLabel("claude-sonnet-4-6[1m]") == "Claude Sonnet 4 6 1M")
+    #expect(EventNotificationDescriptor.modelLabel("claude-sonnet-4-6[1m]") == "Claude Sonnet 4.6 1M")
 }
 
 @Test func turnDurationsReadTheSameAsTheChatTurnRow() {

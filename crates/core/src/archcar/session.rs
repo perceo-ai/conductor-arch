@@ -8,7 +8,7 @@ use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
@@ -40,7 +40,6 @@ use crate::provider_adapters::codex_app_server::{
     CodexAppServerThreadStartParams, CodexAppServerTurnStartParams, CodexAppServerTurnSteerParams,
     CodexAppServerUserInput, CodexManagedAdapter, CODEX_APP_SERVER_DEFAULT_ARGS,
 };
-use crate::provider_events::unix_millis;
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
@@ -182,10 +181,14 @@ pub struct TurnGenerations {
     /// generation below one is live work, and one above it may be a busy mark
     /// whose input is still on its way to the session loop.
     retired: BTreeSet<u64>,
-    /// When each live generation was marked busy, in epoch ms, so a
-    /// completion can say how long the turn ran. Entries are dropped as
-    /// `completed` passes them, so this never outgrows the live turns.
+    /// When each live generation was marked busy, on [`monotonic_millis`], so
+    /// a completion can say how long the turn ran. Entries are dropped as
+    /// `completed` passes them and when their input is retired or refused, so
+    /// this never outgrows the live turns.
     started_at_ms: BTreeMap<u64, u64>,
+    /// What the last `TurnCompleted` reported, for the `TurnSettled` that
+    /// closes the same turn. Cleared when the loop takes the next input.
+    reported_duration_ms: Option<u64>,
 }
 
 impl TurnGenerations {
@@ -197,6 +200,12 @@ impl TurnGenerations {
     /// Ties the generation the latest busy mark started to the input it was
     /// for.
     pub(crate) fn note_input(&mut self, local_input_id: String) {
+        // Noted again means refused: the earlier mark opened no turn, so it
+        // must not time the one this input starts instead.
+        for (_, generation) in self.inputs.iter().filter(|(id, _)| *id == local_input_id) {
+            self.started_at_ms.remove(generation);
+        }
+        self.reported_duration_ms = None;
         self.inputs.push_back((local_input_id, self.started));
     }
 
@@ -212,6 +221,8 @@ impl TurnGenerations {
                 .map(|(_, generation)| *generation),
         );
         self.inputs.retain(|(id, _)| id != local_input_id);
+        self.started_at_ms
+            .retain(|generation, _| !self.retired.contains(generation));
         self.catch_up_over_retired();
     }
 
@@ -235,14 +246,14 @@ impl TurnGenerations {
         self.started_at_ms.insert(self.started, now_ms);
     }
 
-    /// Returns the generation this completion finished, and when that
-    /// generation was marked busy. The timestamp is None when the mark
-    /// predates this bookkeeping (a session already live across a daemon
-    /// upgrade), in which case the turn reports no duration rather than a
-    /// wrong one.
+    /// Returns the generation this completion finished, and when its turn
+    /// began: the oldest mark it finished, since anything newer joined a turn
+    /// already running. The timestamp is None when the mark predates this
+    /// bookkeeping (a session already live across a daemon upgrade), in which
+    /// case the turn reports no duration rather than a wrong one.
     fn finish(&mut self, turn: FinishedTurn<'_>) -> (u64, Option<u64>) {
         let finished = match turn {
-            FinishedTurn::Latest => self.started,
+            FinishedTurn::Latest | FinishedTurn::Settled => self.started,
             // An input the session never recorded is one this ledger cannot
             // place; finishing everything keeps the daemon's ready mark, the
             // safety net for a lost `Ready`, from being disabled by it.
@@ -272,12 +283,30 @@ impl TurnGenerations {
         self.taken = self.taken.max(finished);
         self.inputs.retain(|(_, generation)| *generation > finished);
         self.catch_up_over_retired();
-        // Read the start time before pruning: the generation being finished
-        // is exactly the one about to be dropped.
-        let started_at_ms = self.started_at_ms.get(&finished).copied();
+        // Read the start time before pruning: the generations being finished
+        // are exactly the ones about to be dropped.
+        let started_at_ms = self
+            .started_at_ms
+            .range(..=finished)
+            .next()
+            .map(|(_, started_at_ms)| *started_at_ms);
         self.started_at_ms
             .retain(|generation, _| *generation > finished);
         (finished, started_at_ms)
+    }
+
+    /// Finishes `turn` and returns how long it ran, as of `now_ms`. A settle
+    /// repeats what its turn's completion reported: that completion already
+    /// spent the turn's mark, and anything left is a later turn's.
+    fn finish_timed(&mut self, turn: FinishedTurn<'_>, now_ms: u64) -> Option<u64> {
+        let settled = matches!(turn, FinishedTurn::Settled);
+        let (_, started_at_ms) = self.finish(turn);
+        let measured = started_at_ms.map(|started_at_ms| now_ms.saturating_sub(started_at_ms));
+        if settled {
+            return self.reported_duration_ms.take().or(measured);
+        }
+        self.reported_duration_ms = measured;
+        measured
     }
 }
 
@@ -285,6 +314,9 @@ impl TurnGenerations {
 pub(crate) enum FinishedTurn<'a> {
     /// Every input started so far.
     Latest,
+    /// Every input started so far, closing a turn whose `TurnCompleted` may
+    /// already have gone out.
+    Settled,
     /// The turn this input ran in: it, and any later input the provider took
     /// into the same turn.
     Input(&'a str),
@@ -304,7 +336,15 @@ pub(crate) fn mark_session_busy_for_input(state: &mut SessionSnapshot) {
     state.ready = false;
     state.runtime_state = AgentSessionState::Running;
     state.turns.started += 1;
-    state.turns.note_started(unix_millis());
+    state.turns.note_started(monotonic_millis());
+}
+
+/// Milliseconds since the first reading in this process. Turn durations
+/// subtract these rather than wall-clock times, which a clock correction
+/// moves mid-turn. Marks live in memory, so they never outlive the origin.
+fn monotonic_millis() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// Sends `TurnCompleted`, first recording what it finished so the daemon's
@@ -319,11 +359,11 @@ pub(crate) fn send_turn_completed(
     turn: FinishedTurn<'_>,
     status: Option<String>,
 ) {
-    let now_ms = unix_millis();
-    let duration_ms = snapshot.lock().ok().and_then(|mut state| {
-        let (_, started_at_ms) = state.turns.finish(turn);
-        started_at_ms.map(|started_at_ms| now_ms.saturating_sub(started_at_ms))
-    });
+    let now_ms = monotonic_millis();
+    let duration_ms = snapshot
+        .lock()
+        .ok()
+        .and_then(|mut state| state.turns.finish_timed(turn, now_ms));
     let _ = event_tx.send(ArchcarEvent::TurnCompleted {
         session_id: started.session_id,
         thread_id: started.thread_id,
@@ -1000,7 +1040,7 @@ fn apply_harness_effect(
                 snapshot,
                 event_tx,
                 started,
-                FinishedTurn::Latest,
+                FinishedTurn::Settled,
                 Some(harness_turn_status_label(status).to_owned()),
             );
         }
@@ -4756,6 +4796,305 @@ mod tests {
         assert!(turns.started_at_ms.is_empty());
         turns.started += 1;
         assert_eq!(turns.finish(FinishedTurn::Latest), (3, None));
+    }
+
+    /// A claude message taken in at a tool boundary joins the open turn, so
+    /// the turn still began at its own busy mark. Five minutes of work and a
+    /// message ten seconds from the end is a five minute turn.
+    #[test]
+    fn a_message_taken_into_a_live_claude_turn_does_not_shorten_it() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.note_input_taken("turn-input");
+        turns.started += 1;
+        turns.note_started(301_000);
+        turns.note_input("immediate-input".to_owned());
+        turns.note_input_taken("immediate-input");
+
+        assert_eq!(
+            turns.finish(FinishedTurn::Input("turn-input")),
+            (2, Some(1_000))
+        );
+        assert!(turns.started_at_ms.is_empty(), "{turns:?}");
+    }
+
+    #[test]
+    fn an_accepted_codex_steer_does_not_shorten_the_turn_it_joined() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_started(301_000);
+        turns.note_input("steer-input".to_owned());
+
+        assert_eq!(
+            turns.finish(FinishedTurn::Inputs(&[
+                "turn-input".to_owned(),
+                "steer-input".to_owned(),
+            ])),
+            (2, Some(1_000))
+        );
+    }
+
+    /// A completion that cannot be placed finishes everything, so it reads
+    /// the same way: from the oldest mark it finished.
+    #[test]
+    fn an_unplaced_completion_times_from_the_oldest_mark_it_finished() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_started(301_000);
+        turns.note_input("steer-input".to_owned());
+
+        assert_eq!(turns.finish(FinishedTurn::Latest), (2, Some(1_000)));
+    }
+
+    /// A refused steer opened nothing: the turn its input starts instead is
+    /// timed from that turn's own mark, not from the refused attempt.
+    #[test]
+    fn a_refused_steer_is_timed_from_the_turn_it_started_instead() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_started(2_000);
+        turns.note_input("steer-input".to_owned());
+        turns.started += 1;
+        turns.note_started(9_000);
+        turns.note_input("steer-input".to_owned());
+
+        assert_eq!(
+            turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()])),
+            (1, Some(1_000))
+        );
+        assert_eq!(
+            turns.finish(FinishedTurn::Inputs(&["steer-input".to_owned()])),
+            (3, Some(9_000))
+        );
+    }
+
+    /// Rejected starts with nothing live never reach a completion, so
+    /// nothing else would ever drop their marks.
+    #[test]
+    fn rejected_inputs_leave_no_start_times_behind() {
+        let mut turns = TurnGenerations::default();
+        for attempt in 1..=3_u64 {
+            let input = format!("rejected-{attempt}");
+            turns.started += 1;
+            turns.note_started(attempt * 1_000);
+            turns.note_input(input.clone());
+            turns.retire_input(&input);
+        }
+
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.started_at_ms.is_empty(), "{turns:?}");
+    }
+
+    /// A generation retired above a live turn is stepped over later, by that
+    /// turn's completion; its mark has to be gone by then, and must not time
+    /// the turn after it.
+    #[test]
+    fn a_rejected_input_above_a_live_turn_leaves_no_start_time_behind() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("live-input".to_owned());
+        turns.started += 1;
+        turns.note_started(2_000);
+        turns.note_input("rejected-input".to_owned());
+        turns.retire_input("rejected-input");
+
+        assert_eq!(turns.started_at_ms.keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(
+            turns.finish(FinishedTurn::Input("live-input")),
+            (1, Some(1_000))
+        );
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.started_at_ms.is_empty(), "{turns:?}");
+
+        turns.started += 1;
+        turns.note_started(9_000);
+        turns.note_input("next-input".to_owned());
+        assert_eq!(
+            turns.finish(FinishedTurn::Input("next-input")),
+            (3, Some(9_000))
+        );
+    }
+
+    /// A settle with no completion before it is the only report its turn
+    /// gets, and one after the next input must not repeat the last turn's
+    /// figure.
+    #[test]
+    fn a_settle_measures_its_own_turn_when_no_completion_reported_it() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("first".to_owned());
+        assert_eq!(
+            turns.finish_timed(FinishedTurn::Input("first"), 2_000),
+            Some(1_000)
+        );
+
+        turns.started += 1;
+        turns.note_started(5_000);
+        turns.note_input("second".to_owned());
+        assert_eq!(turns.finish_timed(FinishedTurn::Settled, 5_250), Some(250));
+    }
+
+    /// Runs one turn from busy mark to completion with `step` applied to the
+    /// wall clock while it runs, and returns what the turn reported.
+    fn duration_across_a_wall_clock_step(step_ms: i64, turn_ms: u64) -> Option<u64> {
+        let started = running_session_snapshot(
+            1,
+            2,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            std::process::id(),
+            false,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let (event_tx, event_rx) = mpsc::channel();
+        mark_session_busy_for_input(&mut snapshot.lock().unwrap());
+
+        crate::provider_events::set_wall_clock_step_for_test(step_ms);
+        thread::sleep(Duration::from_millis(turn_ms));
+        send_turn_completed(
+            &snapshot,
+            &event_tx,
+            &started,
+            FinishedTurn::Latest,
+            Some("success".to_owned()),
+        );
+        crate::provider_events::set_wall_clock_step_for_test(0);
+
+        match event_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ArchcarEvent::TurnCompleted { duration_ms, .. } => duration_ms,
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        }
+    }
+
+    /// An NTP correction or a manual clock change mid-turn says nothing about
+    /// how long the agent worked. Subtracting wall-clock readings reported
+    /// 0ms across a backward step and the size of the step across a forward
+    /// one.
+    #[test]
+    fn a_wall_clock_step_mid_turn_does_not_change_the_reported_duration() {
+        const HOUR_MS: i64 = 3_600_000;
+        const TURN_MS: u64 = 30;
+        for step_ms in [-HOUR_MS, HOUR_MS] {
+            let duration_ms = duration_across_a_wall_clock_step(step_ms, TURN_MS)
+                .expect("a marked turn reports a duration");
+            assert!(
+                (TURN_MS..HOUR_MS as u64).contains(&duration_ms),
+                "a {step_ms}ms clock step reported a {duration_ms}ms turn"
+            );
+        }
+    }
+
+    /// Drives the pair of effects every ACP result ends with and returns the
+    /// `duration_ms` of each `TurnCompleted` they sent. `between` runs after
+    /// the completion, where the daemon's queue drain can land.
+    fn acp_turn_durations(between: impl FnOnce(&Arc<Mutex<SessionSnapshot>>)) -> Vec<Option<u64>> {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43992);
+        let runtime_store = RuntimeSessionStore::new(temp.path().join("state.db"));
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            process.pid,
+            false,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let (event_tx, event_rx) = mpsc::channel();
+        let mut native_thread_id = None;
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "acp-input",
+            "hello",
+            None,
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Auto,
+            None,
+        )
+        .unwrap();
+        runtime_store
+            .mark_provider_input_written("acp-input")
+            .unwrap();
+        {
+            let mut state = snapshot.lock().unwrap();
+            mark_session_busy_for_input(&mut state);
+            state.turns.note_input("acp-input".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut native_thread_id,
+            HarnessEffect::TurnCompleted {
+                local_input_id: "acp-input".to_owned(),
+                status: HarnessTurnStatus::Success,
+            },
+        );
+        between(&snapshot);
+        thread::sleep(Duration::from_millis(5));
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut native_thread_id,
+            HarnessEffect::TurnSettled {
+                status: HarnessTurnStatus::Success,
+            },
+        );
+
+        drop(event_tx);
+        event_rx
+            .iter()
+            .filter_map(|event| match event {
+                ArchcarEvent::TurnCompleted { duration_ms, .. } => Some(duration_ms),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Both events build the same notification id, so the later one replaces
+    /// the earlier banner: if it carries no duration, the user sees none.
+    #[test]
+    fn an_acp_settle_repeats_the_duration_its_completion_reported() {
+        let durations = acp_turn_durations(|_| {});
+        assert_eq!(durations.len(), 2, "{durations:?}");
+        assert!(durations[0].is_some(), "{durations:?}");
+        assert_eq!(durations[0], durations[1]);
+    }
+
+    /// The daemon drains the queue on the completion, so a busy mark for the
+    /// next input can land before the settle. The settle still reports the
+    /// turn that ended, not the one being handed over.
+    #[test]
+    fn an_acp_settle_is_not_timed_from_a_busy_mark_that_landed_after_the_completion() {
+        let durations = acp_turn_durations(|snapshot| {
+            mark_session_busy_for_input(&mut snapshot.lock().unwrap());
+        });
+        assert_eq!(durations.len(), 2, "{durations:?}");
+        assert!(durations[0].is_some(), "{durations:?}");
+        assert_eq!(durations[0], durations[1]);
     }
 
     /// Registering an ACP agent has to be enough to drive it: the transport

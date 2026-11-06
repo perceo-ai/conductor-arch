@@ -166,16 +166,9 @@ public struct EventNotificationDescriptor: Sendable, Equatable, Hashable {
         return context.provider.flatMap(nonEmpty).map(capitalized)
     }
 
-    /// "claude-opus-5" -> "Claude Opus 5", "gpt-5.6-sol" -> "GPT 5.6 Sol".
+    /// The same label the model pickers show.
     static func modelLabel(_ model: String) -> String {
-        let longContext = model.hasSuffix("[1m]")
-        let base = longContext ? String(model.dropLast(4)) : model
-        var parts = base.split(whereSeparator: { $0 == "-" || $0 == "_" })
-            .map { part -> String in
-                part.lowercased() == "gpt" ? "GPT" : capitalized(String(part))
-            }
-        if longContext { parts.append("1M") }
-        return parts.joined(separator: " ")
+        AgentModels.label(model)
     }
 
     /// "840ms", "18.3s", "4m 12s" — the same shape as

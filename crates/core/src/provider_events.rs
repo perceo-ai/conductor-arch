@@ -964,13 +964,28 @@ fn timestamp() -> String {
         .unwrap_or_else(|_| "0".to_owned())
 }
 
-/// Wall-clock milliseconds since the epoch. Shared with the session loop,
-/// which times a turn from its busy mark to its completion.
-pub(crate) fn unix_millis() -> u64 {
-    SystemTime::now()
+/// Wall-clock milliseconds since the epoch. For when an event happened, not
+/// for how long something took: the clock can be corrected in between.
+fn unix_millis() -> u64 {
+    let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    #[cfg(test)]
+    let now_ms = now_ms.saturating_add_signed(WALL_CLOCK_STEP_MS.get());
+    now_ms
+}
+
+#[cfg(test)]
+thread_local! {
+    static WALL_CLOCK_STEP_MS: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+}
+
+/// Steps this thread's wall clock, the way NTP or a user changing the time
+/// would, so a test can show what does and does not read it.
+#[cfg(test)]
+pub(crate) fn set_wall_clock_step_for_test(step_ms: i64) {
+    WALL_CLOCK_STEP_MS.set(step_ms);
 }
 
 fn stable_text_hash(value: &str) -> u64 {
