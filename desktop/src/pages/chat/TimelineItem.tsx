@@ -3,6 +3,7 @@ import type { JSX } from "solid-js";
 import type {
   ArchcarProjectionItem,
 } from "@/bridge/protocol";
+import ChatImages from "./ChatImages";
 import Diff from "@/components/Diff";
 import Icon from "@/components/Icon";
 import type { IconName } from "@/components/Icon";
@@ -74,6 +75,7 @@ export function eventIcon(renderClass: string): IconName {
 function InlineCard(props: {
   item: ArchcarProjectionItem;
   running: boolean;
+  threadId: number;
   nested: ArchcarProjectionItem[];
   renderNested: (item: ArchcarProjectionItem) => JSX.Element;
 }) {
@@ -137,6 +139,15 @@ function InlineCard(props: {
           {(step) => <span class="chat-inline-event-latest">{step()}</span>}
         </Show>
       </div>
+      <Show when={(props.item.images?.length ?? 0) > 0}>
+        {/* Outside the expander: the image is what the card is about, and a
+            collapsed row would hide the one thing worth looking at. */}
+        <ChatImages
+          threadId={props.threadId}
+          itemId={props.item.id}
+          images={props.item.images ?? []}
+        />
+      </Show>
       <Show when={open() && hasNested()}>
         <div class="chat-inline-event-nested">
           <Show when={nestedWindow().hidden > 0}>
@@ -205,6 +216,7 @@ export function TimelineItem(props: {
       fallback={
         <InlineCard
           item={props.item}
+          threadId={props.threadId}
           running={showsRunning(props.item, { idle: props.agentIdle, sessionAlive: props.sessionAlive })}
           nested={nested()}
           renderNested={renderNested}

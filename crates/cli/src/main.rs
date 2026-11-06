@@ -4318,6 +4318,17 @@ fn format_chat_projection(thread_id: i64, items: &[ArchcarProjectionItem], full:
     out
 }
 
+/// Human-readable size of an image the terminal is only naming.
+fn format_image_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full: bool) -> String {
     let indent = "  ".repeat(depth);
     let is_text = matches!(
@@ -4329,6 +4340,15 @@ fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full:
     if !title.is_empty() {
         line.push(' ');
         line.push_str(title.lines().next().unwrap_or_default());
+    }
+    // A terminal cannot draw the image, so say it is there and how big it is.
+    // The desktop timeline renders the same bytes inline.
+    for image in &item.images {
+        line.push_str(&format!(
+            " [{} {}]",
+            image.media_type,
+            format_image_bytes(image.bytes)
+        ));
     }
     let body = item.body.trim_end();
     if full {
@@ -4415,6 +4435,18 @@ fn render_achievements(
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
+        // Base64 image bytes are not something to spill into a terminal; the
+        // line says what arrived so a caller can confirm the fetch worked.
+        ArchcarResponse::ChatImage {
+            item_id,
+            index,
+            media_type,
+            data,
+            ..
+        } => println!(
+            "{item_id}[{index}]: {media_type}, {} base64 chars",
+            data.len()
+        ),
         ArchcarResponse::McpRegistration { clients } => {
             for client in clients {
                 let state = if !client.installed {
@@ -8766,6 +8798,7 @@ mod tests {
             timeline_seq: None,
             parent_id: parent_id.map(ToOwned::to_owned),
             background_agent: false,
+            images: Vec::new(),
         }
     }
 

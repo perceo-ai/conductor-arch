@@ -110,3 +110,41 @@
   max-height: 320px;
   overflow-y: auto;
 }
+/* Images a tool result carried, under the card's header. Indented to the
+   card's body so a screenshot lines up with the text it belongs to. */
+.chat-image-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 2px 18px;
+}
+.chat-image {
+  display: block;
+  max-width: min(100%, 420px);
+  max-height: 260px;
+  width: auto;
+  height: auto;
+  border: 1px solid #2a2a2a;
+  border-radius: 5px;
+  background: #181818;
+  cursor: zoom-in;
+}
+/* Enlarged: as wide as the card allows, still scaled to its own ratio. */
+.chat-image-full {
+  max-width: 100%;
+  max-height: none;
+  cursor: zoom-out;
+}
+.chat-image-deferred {
+  border: 1px solid #343434;
+  border-radius: 3px;
+  background: #191919;
+  color: #bdbdbd;
+  font-size: 11px;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+.chat-image-error {
+  color: #d08770;
+  font-size: 11px;
+}

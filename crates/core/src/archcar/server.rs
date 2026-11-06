@@ -1375,8 +1375,58 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             timeline_seq: item.timeline_seq,
                             parent_id: item.parent_id,
                             background_agent: item.background_agent,
+                            images: item
+                                .images
+                                .into_iter()
+                                .map(|image| crate::archcar::protocol::ArchcarProjectionImage {
+                                    media_type: image.media_type,
+                                    bytes: image.bytes,
+                                })
+                                .collect(),
                         })
                         .collect(),
+                    }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetChatImage {
+            thread_id,
+            item_id,
+            index,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id) {
+                // The projection is keyed by canonical id, and so is the card
+                // the client asked about, so the right record is the one whose
+                // canonical id matches. Several records share it (a tool call
+                // and its result); the images live on the one that has any.
+                Ok(records) => {
+                    let found = records
+                        .iter()
+                        .filter(|record| {
+                            crate::provider_projection::provider_projection_canonical_id(record)
+                                == item_id
+                        })
+                        .find_map(|record| {
+                            crate::provider_projection::projection_image_data(
+                                &record.raw_json,
+                                index,
+                            )
+                        });
+                    match found {
+                        Some((media_type, data)) => ArchcarResponse::ChatImage {
+                            thread_id,
+                            item_id,
+                            index,
+                            media_type,
+                            data,
+                        },
+                        None => ArchcarResponse::Error {
+                            message: format!("no image {index} on timeline item {item_id}"),
+                        },
                     }
                 }
                 Err(err) => ArchcarResponse::Error {

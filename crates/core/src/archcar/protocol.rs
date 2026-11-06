@@ -282,6 +282,17 @@ pub enum ArchcarRequest {
     GetChatProjection {
         thread_id: i64,
     },
+    /// Bytes of one image a projected timeline item carries.
+    ///
+    /// The projection names a card's images but never inlines them, so a
+    /// surface that draws one asks for it here, by the card's id and the
+    /// image's position in that card. Kept out of the projection so a chat
+    /// full of screenshots still refreshes in kilobytes.
+    GetChatImage {
+        thread_id: i64,
+        item_id: String,
+        index: usize,
+    },
     /// Recent non-empty chats offered as attachable context on the new-chat
     /// screen.
     ListChatTranscripts {
@@ -1100,6 +1111,15 @@ pub enum ArchcarResponse {
         thread_id: i64,
         items: Vec<ArchcarProjectionItem>,
     },
+    ChatImage {
+        thread_id: i64,
+        item_id: String,
+        index: usize,
+        /// MIME type the provider declared, e.g. `image/png`.
+        media_type: String,
+        /// The image, base64-encoded exactly as the provider sent it.
+        data: String,
+    },
     ChatTranscripts {
         workspace: String,
         transcripts: Vec<ArchcarChatTranscriptSummary>,
@@ -1687,6 +1707,20 @@ pub struct ArchcarProjectionItem {
     /// idle. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background_agent: bool,
+    /// Images the card holds, described rather than inlined; fetch the bytes
+    /// with `GetChatImage`. Omitted when there are none, so a daemon that
+    /// predates it stays wire-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ArchcarProjectionImage>,
+}
+
+/// An image a timeline card carries: what it is, not its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarProjectionImage {
+    /// MIME type the provider declared, e.g. `image/png`.
+    pub media_type: String,
+    /// Decoded size in bytes.
+    pub bytes: usize,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,
@@ -2012,6 +2046,11 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetChatProjection { thread_id } => {
             format!("get_chat_projection thread_id={thread_id}")
         }
+        ArchcarRequest::GetChatImage {
+            thread_id,
+            item_id,
+            index,
+        } => format!("get_chat_image thread_id={thread_id} item_id={item_id} index={index}"),
         ArchcarRequest::ListChatTranscripts { workspace, limit } => format!(
             "list_chat_transcripts workspace={workspace} limit={}",
             limit
@@ -2735,6 +2774,16 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::ChatProjection { thread_id, items } => {
             format!("chat_projection thread_id={thread_id} items={}", items.len())
         }
+        ArchcarResponse::ChatImage {
+            thread_id,
+            item_id,
+            media_type,
+            data,
+            ..
+        } => format!(
+            "chat_image thread_id={thread_id} item_id={item_id} media_type={media_type} base64_len={}",
+            data.len()
+        ),
         ArchcarResponse::ChatTranscripts {
             workspace,
             transcripts,

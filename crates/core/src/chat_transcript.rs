@@ -466,7 +466,12 @@ fn tool_entry(
         .trim_start_matches("<tool_use_error>")
         .trim_end_matches("</tool_use_error>");
     let (text, arg_clipped) = clip(&one_line(&relative(arg)), TOOL_ARG_LIMIT, options.full);
-    let (result, result_clipped) = if result.trim().is_empty() {
+    // An image result has no text at all: without this the card reads as a
+    // tool that returned nothing. The desktop draws the image; a transcript
+    // can only name it.
+    let (result, result_clipped) = if result.trim().is_empty() && !item.images.is_empty() {
+        (Some(image_result_marker(&item.images)), false)
+    } else if result.trim().is_empty() {
         (None, false)
     } else {
         let (result, clipped) = clip(
@@ -499,6 +504,31 @@ fn tool_entry(
         truncated: arg_clipped || result_clipped,
         nested: false,
         at_ms: None,
+    }
+}
+
+/// What a transcript says in place of an image it cannot draw.
+fn image_result_marker(images: &[crate::provider_projection::ProjectionImage]) -> String {
+    images
+        .iter()
+        .map(|image| {
+            format!(
+                "[{} {}]",
+                image.media_type,
+                transcript_image_size(image.bytes)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn transcript_image_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -847,6 +877,34 @@ pub(crate) mod tests {
         assert!(!json.contains("s up by number"), "{json}");
         assert!(!json.contains("thinking_delta"), "{json}");
         assert!(!json.contains("stream_event"), "{json}");
+    }
+
+    #[test]
+    fn an_image_result_is_named_rather_than_reading_as_an_empty_tool() {
+        // An image tool result has no text, so without a marker the entry
+        // looks like a Read that returned nothing. A terminal cannot draw it;
+        // the desktop timeline renders the same bytes inline.
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"look at the shot"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","session_id":"s1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_img","name":"Read","input":{"file_path":"/work/ws/shot.png"}}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_img","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUg=="}}]}]}}"#,
+        );
+        let records = records_from_claude(native, 1_790_757_000_000);
+        let turns = build_chat_transcript(&records, &options(Path::new("/work/ws")));
+
+        let read = turns
+            .iter()
+            .flat_map(|turn| turn.entries.iter())
+            .find(|entry| entry.tool.as_deref() == Some("Read"))
+            .expect("the read is in the transcript");
+        assert_eq!(read.text, "shot.png");
+        assert_eq!(read.result.as_deref(), Some("[image/png 16 B]"));
+
+        // The bytes themselves never reach a transcript.
+        let json = serde_json::to_string(&turns).unwrap();
+        assert!(!json.contains("iVBORw0KGgo"), "{json}");
     }
 
     #[test]
