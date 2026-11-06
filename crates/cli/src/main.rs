@@ -544,7 +544,8 @@ enum ArchcarCommand {
     /// Purely for fun: every number is derived on demand from rows the daemon
     /// already keeps, so this costs nothing until it is asked for.
     Achievements {
-        /// Include achievements with no tier earned yet.
+        /// Include achievements with no tier earned yet. Secret ones stay
+        /// hidden until their first tier.
         #[arg(long)]
         locked: bool,
         /// List the generated workspace names and which ones are discovered.
@@ -4349,7 +4350,7 @@ fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full:
 }
 
 /// Render the achievements summary. `locked` adds entries with no tier yet
-/// (secret ones stay hidden until their metric moves, same as the desktop
+/// (secret ones stay hidden until their first tier, same as the desktop
 /// surface), `names` adds the workspace-name discovery list.
 fn render_achievements(
     summary: &archductor_core::achievements::AchievementsSummary,
@@ -4372,7 +4373,7 @@ fn render_achievements(
 
     let mut category = String::new();
     for entry in &summary.achievements {
-        let shown = entry.unlocked() || (locked && !entry.secret);
+        let shown = entry.is_revealed() && (locked || entry.unlocked());
         if !shown {
             continue;
         }
@@ -4395,7 +4396,7 @@ fn render_achievements(
     let hidden = summary
         .achievements
         .iter()
-        .filter(|entry| entry.secret && !entry.unlocked())
+        .filter(|entry| !entry.is_revealed())
         .count();
     if hidden > 0 {
         let _ = writeln!(out, "\n{hidden} secret achievement(s) still hidden");
@@ -9232,6 +9233,9 @@ mod tests {
                 next_threshold: Some(25),
                 tier_thresholds: vec![5, 25, 100, 400, 1500],
                 secret,
+                // What an older daemon deserializes to: the renderer must
+                // decide from `secret` and `tier`, not trust this field.
+                revealed: false,
             }
         }
 
@@ -9240,6 +9244,8 @@ mod tests {
                 entry("earned", "Worktree Wrangler", Some(1), false, 7),
                 entry("locked", "Merge Merchant", None, false, 0),
                 entry("hidden", "Red Text Connoisseur", None, true, 0),
+                // The metric moved but no tier is earned: still a secret.
+                entry("tempted", "Permission Denied Any%", None, true, 3),
             ],
             discovery: DiscoverySummary {
                 total: 2,
@@ -9258,11 +9264,11 @@ mod tests {
             metrics: Default::default(),
             unlocked: 1,
             tiers_earned: 1,
-            total: 3,
+            total: 4,
         };
 
         let default = render_achievements(&summary, false, false);
-        assert!(default.contains("achievements 1/3 unlocked, 1 tiers earned"));
+        assert!(default.contains("achievements 1/4 unlocked, 1 tiers earned"));
         assert!(default.contains("discovery 1/2 workspace names"));
         assert!(default.contains("Worktree Wrangler"));
         assert!(
@@ -9273,7 +9279,7 @@ mod tests {
             !default.contains("Red Text Connoisseur"),
             "untouched secrets stay hidden"
         );
-        assert!(default.contains("1 secret achievement(s) still hidden"));
+        assert!(default.contains("2 secret achievement(s) still hidden"));
         assert!(!default.contains("[discovery]"));
 
         let verbose = render_achievements(&summary, true, true);
@@ -9281,6 +9287,10 @@ mod tests {
         assert!(
             !verbose.contains("Red Text Connoisseur"),
             "--locked must not reveal secrets"
+        );
+        assert!(
+            !verbose.contains("Permission Denied Any%"),
+            "a positive value below the first threshold is not a reveal"
         );
         assert!(verbose.contains("[discovery]"));
         assert!(verbose.contains("[x] pipewire"));

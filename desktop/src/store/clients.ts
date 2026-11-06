@@ -7,6 +7,7 @@ import {
   type SelectedDaemon,
 } from "@/bridge/client";
 import { logAction, logState } from "@/lib/log";
+import { achievementsStore } from "./achievements";
 import { actions } from "./actions";
 import { bumpDaemonEpoch } from "./daemonEpoch";
 import { providersStore } from "./providers";
@@ -110,6 +111,10 @@ async function resync(): Promise<void> {
   // re-pull below issues requests to the new one. Without this a slow response
   // from the old daemon can land afterwards and overwrite the new state.
   bumpDaemonEpoch();
+  // Not left to the inventory restore below: when that pull fails nothing
+  // navigates, so an open Achievements page stays mounted and never reloads.
+  achievementsStore.daemonChanged();
+  if (nav.activePage() === "achievements") void achievementsStore.load();
   let inventoryOk = true;
   await actions.refreshInventory().catch(() => {
     inventoryOk = false;

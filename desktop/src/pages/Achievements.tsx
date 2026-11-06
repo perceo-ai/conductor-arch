@@ -30,6 +30,14 @@ function percent(entry: AchievementProgress): number {
   return Math.max(0, Math.min(100, Math.round(((entry.value - floor) / span) * 100)));
 }
 
+/**
+ * The daemon decides, so this page and `archcar achievements` cannot disagree.
+ * The fallback is for a remote daemon older than `revealed`, not a second rule.
+ */
+function revealed(entry: AchievementProgress): boolean {
+  return entry.revealed ?? (!entry.secret || entry.tier != null);
+}
+
 function AchievementCard(props: { entry: AchievementProgress }) {
   const [open, setOpen] = createSignal(false);
   const entry = () => props.entry;
@@ -95,12 +103,9 @@ export function AchievementsPage() {
   /** Visible entries grouped by category, catalog order preserved. */
   const groups = createMemo(() => {
     const all = summary()?.achievements ?? [];
-    const visible = all.filter((entry) => {
-      // Secret entries stay hidden until their metric moves at all: seeing
-      // "Permission Denied Any%" before it happens spoils the joke.
-      if (entry.secret && entry.tier == null && entry.value === 0) return false;
-      return showLocked() || entry.tier != null;
-    });
+    const visible = all.filter(
+      (entry) => revealed(entry) && (showLocked() || entry.tier != null),
+    );
     const byCategory = new Map<string, AchievementProgress[]>();
     for (const entry of visible) {
       const bucket = byCategory.get(entry.category) ?? [];
@@ -111,10 +116,7 @@ export function AchievementsPage() {
   });
 
   const hiddenSecrets = createMemo(
-    () =>
-      (summary()?.achievements ?? []).filter(
-        (entry) => entry.secret && entry.tier == null && entry.value === 0,
-      ).length,
+    () => (summary()?.achievements ?? []).filter((entry) => !revealed(entry)).length,
   );
 
   return (
