@@ -73,12 +73,30 @@ pub struct AchievementProgress {
     pub next_threshold: Option<i64>,
     pub tier_thresholds: Vec<i64>,
     pub secret: bool,
+    /// Whether a surface may show this entry, for clients that cannot call
+    /// [`AchievementProgress::is_revealed`]. Defaulted because a remote daemon
+    /// older than this field does not send it.
+    #[serde(default)]
+    pub revealed: bool,
 }
 
 impl AchievementProgress {
     pub fn unlocked(&self) -> bool {
         self.tier.is_some()
     }
+
+    /// Whether a surface may show this entry at all. Read from `secret` and
+    /// `tier`, not the `revealed` field, so it also holds for an older daemon.
+    pub fn is_revealed(&self) -> bool {
+        reveals(self.secret, self.tier)
+    }
+}
+
+/// The one reveal rule, shared by the CLI and the desktop page: a secret stays
+/// hidden until its first tier is earned. Seeing "Permission Denied Any%"
+/// before it happens spoils the joke.
+fn reveals(secret: bool, tier: Option<u8>) -> bool {
+    !secret || tier.is_some()
 }
 
 /// One generated workspace name and whether it has ever been used here.
@@ -461,7 +479,7 @@ pub fn catalog() -> Vec<AchievementDef> {
             name: "It Died Again",
             description: "Processes that did not make it to the end.",
             category: "Debugging Chaos",
-            counts: "Processes that exited with a failed status.",
+            counts: "Processes that exited with a failing exit code.",
             metric: "failed_processes",
             kind: AchievementKind::Lifetime,
             tiers: [5, 40, 200, 800, 3000],
@@ -512,6 +530,7 @@ fn evaluate(def: &AchievementDef, metrics: &BTreeMap<String, i64>) -> Achievemen
         next_threshold: def.tiers.get(earned).copied(),
         tier_thresholds: def.tiers.to_vec(),
         secret: def.secret,
+        revealed: reveals(def.secret, tier),
     }
 }
 
@@ -594,7 +613,7 @@ const METRIC_QUERIES: &[(&str, &str)] = &[
     ),
     (
         "failed_processes",
-        "SELECT COUNT(*) FROM processes WHERE status = 'failed'",
+        "SELECT COUNT(*) FROM processes WHERE status = 'exited' AND exit_code <> 0",
     ),
     // `started_at` is epoch seconds stored as TEXT, so every date function has
     // to be told that with 'unixepoch'; 'localtime' is what makes "weekend"
@@ -782,6 +801,23 @@ mod tests {
             .unwrap();
     }
 
+    fn insert_process(
+        store: &WorkspaceStore,
+        workspace_id: i64,
+        status: &str,
+        exit_code: Option<i32>,
+    ) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO processes
+                   (workspace_id, kind, command, pid, log_path, status, started_at, exit_code)
+                 VALUES (?1, 'run', 'make', 1, '/tmp/log', ?2, '0', ?3)",
+                params![workspace_id, status, exit_code],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn every_metric_query_runs_against_the_real_schema() {
         let (_temp, store) = store();
@@ -834,6 +870,71 @@ mod tests {
 
         let discovered = store.discovered_workspace_names().unwrap();
         assert!(discovered.contains(pool_name));
+    }
+
+    #[test]
+    fn failed_processes_counts_exited_rows_with_a_failing_exit_code() {
+        let (_temp, store) = store();
+        let workspace_id = insert_workspace(&store, "nixos");
+        insert_process(&store, workspace_id, "exited", Some(1));
+        insert_process(&store, workspace_id, "exited", Some(137));
+        // None of these failed: a clean exit, an exit with no code to judge
+        // (daemon restart, lost child), a deliberate SIGTERM stop, a live row.
+        insert_process(&store, workspace_id, "exited", Some(0));
+        insert_process(&store, workspace_id, "exited", None);
+        insert_process(&store, workspace_id, "stopped", Some(143));
+        insert_process(&store, workspace_id, "running", None);
+
+        assert_eq!(store.achievement_metrics()["failed_processes"], 2);
+    }
+
+    #[test]
+    fn custom_workspace_names_do_not_feed_cartographer() {
+        let (_temp, store) = store();
+        for index in 0..10 {
+            let name = format!("my-custom-name-{index}");
+            insert_workspace(&store, &name);
+            store.record_workspace_name_discovery(&name).unwrap();
+        }
+
+        let summary = store.achievements_summary().unwrap();
+        assert_eq!(summary.discovery.discovered, 0);
+        assert_eq!(summary.metrics["names_discovered"], 0);
+        let cartographer = summary
+            .achievements
+            .iter()
+            .find(|entry| entry.id == "cartographer")
+            .unwrap();
+        assert_eq!(cartographer.tier, None);
+    }
+
+    #[test]
+    fn upgrading_backfills_discoveries_so_they_outlive_the_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("workspace.db");
+        let pool_name = workspace_name_pool()[11];
+        // A database from before discoveries were recorded: live workspace
+        // rows and nothing in the table, which is what every v0.14.0 install
+        // has for its older workspaces.
+        let (pool_id, custom_id) = {
+            let store = WorkspaceStore::open(&path).unwrap();
+            (
+                insert_workspace(&store, pool_name),
+                insert_workspace(&store, "my-custom-name"),
+            )
+        };
+
+        let store = WorkspaceStore::open(&path).unwrap();
+        for id in [pool_id, custom_id] {
+            store
+                .conn
+                .execute("DELETE FROM workspaces WHERE id = ?1", [id])
+                .unwrap();
+        }
+
+        let discovered = store.discovered_workspace_names().unwrap();
+        assert!(discovered.contains(pool_name));
+        assert_eq!(discovered.len(), 1, "custom names are not discoveries");
     }
 
     #[test]
@@ -912,6 +1013,27 @@ mod tests {
                 AchievementKind::Lifetime
             };
             assert_eq!(def.kind, expected, "{} kind", def.id);
+        }
+    }
+
+    #[test]
+    fn a_secret_is_revealed_by_its_first_tier_and_not_before() {
+        let entry = |value| {
+            let summary = summarize(
+                metrics(&[("permission_events", value)]),
+                &Default::default(),
+            );
+            summary
+                .achievements
+                .into_iter()
+                .find(|entry| entry.id == "permission_denied_any_percent")
+                .unwrap()
+        };
+
+        for (value, revealed) in [(0, false), (9, false), (10, true)] {
+            let entry = entry(value);
+            assert_eq!(entry.is_revealed(), revealed, "value {value}");
+            assert_eq!(entry.revealed, revealed, "value {value}");
         }
     }
 

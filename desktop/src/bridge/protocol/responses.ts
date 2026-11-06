@@ -271,6 +271,8 @@ export interface AchievementProgress {
   next_threshold?: number | null;
   tier_thresholds: number[];
   secret: boolean;
+  /** Whether a surface may show this entry. Absent from older daemons. */
+  revealed?: boolean;
 }
 
 export interface DiscoveredName {

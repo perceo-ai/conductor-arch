@@ -17,6 +17,7 @@ function entry(overrides: Record<string, unknown> = {}) {
     next_threshold: 25,
     tier_thresholds: [5, 25, 100, 400, 1500],
     secret: false,
+    revealed: true,
     ...overrides,
   };
 }
@@ -43,6 +44,7 @@ const SUMMARY = {
       tier_name: null,
       next_threshold: 10,
       secret: true,
+      revealed: false,
     }),
   ],
   discovery: {
@@ -67,6 +69,7 @@ const send = vi.fn(async (request: { type: string }) => {
 vi.mock("@/bridge/client", () => ({ send }));
 
 const { AchievementsPage } = await import("./Achievements");
+const { achievementsStore } = await import("@/store");
 
 let dispose: (() => void) | undefined;
 
@@ -82,6 +85,8 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 afterEach(() => {
   dispose?.();
   dispose = undefined;
+  // The store outlives a mount; a cached summary would answer the next test.
+  achievementsStore.reset();
   document.body.innerHTML = "";
 });
 
@@ -104,6 +109,49 @@ describe("AchievementsPage", () => {
 
     expect(host.textContent).not.toContain("Red Text Connoisseur");
     expect(host.textContent).toContain("1 secret achievement still hidden");
+  });
+
+  it("keeps a secret hidden while its value is below the first tier", async () => {
+    send.mockResolvedValueOnce({
+      type: "achievements",
+      summary: {
+        ...SUMMARY,
+        achievements: [
+          entry({
+            id: "permission_denied_any_percent",
+            name: "Permission Denied Any%",
+            category: "Debugging Chaos",
+            value: 3,
+            tier: null,
+            tier_name: null,
+            next_threshold: 10,
+            secret: true,
+            revealed: false,
+          }),
+        ],
+      },
+    });
+    const host = mount();
+    await settle();
+
+    expect(host.textContent).not.toContain("Permission Denied Any%");
+    expect(host.textContent).toContain("1 secret achievement still hidden");
+  });
+
+  it("shows an earned secret from a daemon too old to send `revealed`", async () => {
+    const { revealed: _revealed, ...fromOlderDaemon } = entry({
+      id: "worktree_cemetery",
+      name: "Worktree Cemetery",
+      secret: true,
+    });
+    send.mockResolvedValueOnce({
+      type: "achievements",
+      summary: { ...SUMMARY, achievements: [fromOlderDaemon as ReturnType<typeof entry>] },
+    });
+    const host = mount();
+    await settle();
+
+    expect(host.textContent).toContain("Worktree Cemetery");
   });
 
   it("hides locked achievements when the toggle is cleared", async () => {

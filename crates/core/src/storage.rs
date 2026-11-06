@@ -512,6 +512,9 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         );
         ",
     )?;
+    // Discovery is a toy; it does not get to fail opening the database. A miss
+    // here is retried on the next open.
+    let _ = backfill_workspace_name_discoveries(conn);
     remove_chat_events_exact_unique_constraint(conn)?;
     ensure_column(
         conn,
@@ -763,6 +766,35 @@ fn remove_chat_events_exact_unique_constraint(conn: &Connection) -> Result<()> {
         DROP TABLE chat_events_with_exact_unique;
         ",
     )?;
+    Ok(())
+}
+
+/// Record the pool names of workspaces that predate the discoveries table, so
+/// a name stays discovered once its workspace row is deleted.
+///
+/// Runs on every open rather than when the table is created: databases already
+/// on v0.14.0 have the table and still have the gap. Reads first so that the
+/// usual open, with nothing to record, never takes the write lock.
+fn backfill_workspace_name_discoveries(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT name, MIN(created_at) FROM workspaces
+         WHERE name NOT IN (SELECT name FROM workspace_name_discoveries)
+         GROUP BY name",
+    )?;
+    let missing = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (name, created_at) in missing {
+        if crate::workspace::workspace_name_pool().contains(&name.as_str()) {
+            conn.execute(
+                "INSERT OR IGNORE INTO workspace_name_discoveries (name, discovered_at)
+                 VALUES (?1, ?2)",
+                rusqlite::params![name, created_at],
+            )?;
+        }
+    }
     Ok(())
 }
 
