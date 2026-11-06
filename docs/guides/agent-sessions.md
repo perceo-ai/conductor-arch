@@ -293,6 +293,33 @@ The CLI has no equivalent yet. It has no long-running command that watches a
 chat finish; `archductor status` shows each agent's state (`working`,
 `finished`, `awaiting_input`) when you ask.
 
+## How much usage is left
+
+**Settings → Usage** shows the plan quota left for each provider signed in on
+the daemon's machine, as one bar per limit window — the same numbers Claude
+Code shows behind `/usage`, without opening a session to ask.
+
+Archductor reads the credentials each provider's CLI already stored on that
+machine and asks that provider's own account endpoint. Nothing extra to log
+into, and no API key of Archductor's own.
+
+| Provider | What it reports |
+| --- | --- |
+| Claude Code | Weekly and session windows, per-model scoped windows, and extra usage credits when they are enabled. |
+| Codex | The ChatGPT plan's rolling windows. An API-key sign-in bills per token and has no plan quota, so it says so instead. |
+| Devin | Daily and weekly quota, plus ACUs on plans that meter them. |
+
+A provider that is not signed in says that rather than showing an empty bar.
+The daemon caches one snapshot for a minute so every client shares it;
+**Refresh** probes again.
+
+From the CLI:
+
+```bash
+archductor archcar usage             # one block per provider
+archductor archcar usage --refresh   # skip the cache
+```
+
 ## MCP
 
 Archductor is an MCP server, so an agent can query and drive Archductor itself.

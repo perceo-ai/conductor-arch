@@ -496,6 +496,13 @@ pub enum ArchcarRequest {
     /// each one. Clients render provider pickers from this rather than
     /// hardcoding a provider list that drifts from the registry.
     ListAgentProviders,
+    /// How much plan quota is left for each agent provider signed in on this
+    /// machine. The daemon caches a snapshot briefly; `refresh` forces a fresh
+    /// probe.
+    GetProviderUsage {
+        #[serde(default)]
+        refresh: bool,
+    },
     /// List the prompt-pack names available for a repository and which is active.
     ListPromptPacks {
         repository: String,
@@ -1280,6 +1287,12 @@ pub enum ArchcarResponse {
     },
     AgentProviders {
         providers: Vec<AgentProviderSummary>,
+    },
+    ProviderUsage {
+        providers: Vec<crate::provider_usage::ProviderUsageReport>,
+        /// Epoch seconds the snapshot was collected; older than now means it
+        /// came from the daemon's short-lived cache.
+        collected_at: i64,
     },
     PromptPacks {
         repository: String,
@@ -2160,6 +2173,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             format!("list_repository_branches repository={repository}")
         }
         ArchcarRequest::ListAgentProviders => "list_agent_providers".to_owned(),
+        ArchcarRequest::GetProviderUsage { .. } => "get_provider_usage".to_owned(),
         ArchcarRequest::ListPromptPacks { repository } => {
             format!("list_prompt_packs repository={repository}")
         }
@@ -2866,6 +2880,11 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "agent_providers count={} managed={}",
             providers.len(),
             providers.iter().filter(|provider| provider.managed).count()
+        ),
+        ArchcarResponse::ProviderUsage { providers, collected_at } => format!(
+            "provider_usage count={} ok={} collected_at={collected_at}",
+            providers.len(),
+            providers.iter().filter(|report| report.status == "ok").count()
         ),
         ArchcarResponse::PromptPacks { repository, packs, active } => format!(
             "prompt_packs repository={repository} count={} active={}",

@@ -28,6 +28,7 @@ archductor status                    # workspaces at a glance: run script, agent
 archductor remote status             # which daemon this machine talks to
 archductor service status            # is the background service installed and running
 archductor archcar providers         # every agent this build knows, and how far it drives each
+archductor archcar usage             # plan quota left per signed-in provider; --refresh to re-probe
 archductor archcar inventory-snapshot  # repositories, workspaces, and active chats in one request
 ```
 

@@ -865,6 +865,12 @@ enum ArchcarCommand {
     },
     /// List every agent this build knows and how completely it drives each.
     Providers,
+    /// Show how much plan quota is left for each signed-in agent provider.
+    Usage {
+        /// Skip the daemon's short-lived cache and probe the providers again.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// List a repository's available prompt packs and the active one.
     PromptPacks {
         repository: String,
@@ -2791,6 +2797,11 @@ fn run_cli() -> Result<()> {
                 }
                 ArchcarCommand::Providers => {
                     print_archcar_response(client.send(ArchcarRequest::ListAgentProviders)?);
+                }
+                ArchcarCommand::Usage { refresh } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetProviderUsage { refresh })?,
+                    );
                 }
                 ArchcarCommand::PromptPacks { repository } => {
                     print_archcar_response(
@@ -4852,6 +4863,42 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("repository_branches {repository} {}", branches.len());
             for b in branches {
                 println!("{b}");
+            }
+        }
+        ArchcarResponse::ProviderUsage {
+            providers,
+            collected_at,
+        } => {
+            println!(
+                "provider_usage {} collected_at={collected_at}",
+                providers.len()
+            );
+            for report in providers {
+                println!(
+                    "{:<14} {:<14} {}",
+                    report.provider_key,
+                    report.status,
+                    report
+                        .plan
+                        .as_deref()
+                        .or(report.message.as_deref())
+                        .unwrap_or("")
+                );
+                for meter in &report.meters {
+                    let resets = meter
+                        .resets_at
+                        .map(|at| format!(" resets_at={at}"))
+                        .unwrap_or_default();
+                    let detail = meter
+                        .detail
+                        .as_deref()
+                        .map(|detail| format!(" ({detail})"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {:<22} {:>3}% used {}{resets}{detail}",
+                        meter.label, meter.percent_used, meter.severity
+                    );
+                }
             }
         }
         ArchcarResponse::AgentProviders { providers } => {
