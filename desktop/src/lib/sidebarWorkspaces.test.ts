@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { sidebarWorkspaceNames, type SidebarRowFields } from "./sidebarWorkspaces";
+import {
+  sidebarWorkspaceNames,
+  sidebarWorkspaceOrder,
+  type SidebarRowFields,
+} from "./sidebarWorkspaces";
 
 const rows: Record<string, SidebarRowFields> = {
   berlin: { repository: "demo", status: "active" },
@@ -44,5 +48,54 @@ describe("sidebarWorkspaceNames", () => {
     expect(
       sidebarWorkspaceNames([...order, "ghost"], (n) => rows[n], "demo", matches, none),
     ).toEqual(["rome"]);
+  });
+});
+
+describe("sidebarWorkspaceOrder", () => {
+  const repos = ["demo", "other"];
+
+  it("counts down the rendered list, project group by project group", () => {
+    expect(sidebarWorkspaceOrder(repos, order, (n) => rows[n], none)).toEqual([
+      "berlin",
+      "rome",
+      "oslo",
+    ]);
+  });
+
+  it("follows pins, so a pinned row's slot matches where it is drawn", () => {
+    const pinned = (n: string) => n === "rome";
+    expect(sidebarWorkspaceOrder(repos, order, (n) => rows[n], pinned)).toEqual([
+      "rome",
+      "berlin",
+      "oslo",
+    ]);
+  });
+
+  it("ignores the sidebar filter so slots hold still while someone types", () => {
+    // sidebarWorkspaceOrder takes no filter at all: this is the contract that
+    // mod+2 means the same row before and after a search.
+    expect(sidebarWorkspaceOrder(repos, order, (n) => rows[n], none)[1]).toBe("rome");
+  });
+
+  it("still keeps a workspace whose repository has no group", () => {
+    const extra: Record<string, SidebarRowFields> = {
+      ...rows,
+      lima: { repository: "gone", status: "active" },
+    };
+    expect(sidebarWorkspaceOrder(repos, [...order, "lima"], (n) => extra[n], none)).toEqual([
+      "berlin",
+      "rome",
+      "oslo",
+      "lima",
+    ]);
+  });
+
+  it("drops archived workspaces and unknown rows", () => {
+    expect(sidebarWorkspaceOrder(repos, [...order, "ghost"], (n) => rows[n], none)).not.toContain(
+      "paris",
+    );
+    expect(sidebarWorkspaceOrder(repos, [...order, "ghost"], (n) => rows[n], none)).not.toContain(
+      "ghost",
+    );
   });
 });
