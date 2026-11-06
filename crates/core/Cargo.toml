@@ -16,14 +16,14 @@ base64 = "0.23"
 ctrlc = { version = "3", features = ["termination"] }
 globset = "0.4"
 portable-pty = "0.9"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 toml = "1.1"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
-vt100 = "0.16"
+vt100 = "0.18"
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
