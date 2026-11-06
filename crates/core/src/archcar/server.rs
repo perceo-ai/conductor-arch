@@ -5831,10 +5831,18 @@ fn repository_summaries(db_path: &Path) -> Result<Vec<ArchcarRepositorySummary>>
         })
 }
 
+/// A workspace's chats for the clients, in creation order (`id` ascending).
+///
+/// The store lists chats newest-touched first because its own callers want "the
+/// latest chat", but a client renders this list as a strip of tabs: ordering it
+/// by recency makes tabs swap places under the pointer every time an agent
+/// writes a line, so a chat is never where it was a moment ago and no numbered
+/// or positional aim is possible. Creation order never moves.
 fn chat_threads_for_workspace(db_path: &Path, workspace: &str) -> Result<Vec<ArchcarChatThread>> {
     WorkspaceStore::open_app(db_path)
         .and_then(|store| store.list_chat_threads(workspace))
-        .map(|threads| {
+        .map(|mut threads| {
+            threads.sort_by_key(|thread| thread.id);
             threads
                 .into_iter()
                 .map(|t| {
@@ -12393,6 +12401,33 @@ default = true
             database_path: root.join("data/archductor.db"),
             logs_dir: state_dir.join("logs"),
         }
+    }
+
+    #[test]
+    fn chat_threads_list_in_creation_order_not_by_recency() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let first = store
+            .create_chat_thread("berlin", "codex", "Chat 1", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "codex", "Chat 2", None)
+            .unwrap();
+        let third = store
+            .create_chat_thread("berlin", "codex", "Chat 3", None)
+            .unwrap();
+        // Touching the oldest chat is what used to yank its tab to the front.
+        store
+            .update_chat_thread_title(first.id, "Chat 1 renamed")
+            .unwrap();
+
+        let listed = chat_threads_for_workspace(&db_path, "berlin").unwrap();
+        assert_eq!(
+            listed.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![first.id, second.id, third.id],
+            "tabs must keep creation order however recently a chat was touched"
+        );
     }
 
     fn seeded_workspace_store(db_path: &Path, logs_dir: &Path, root: &Path) -> WorkspaceStore {

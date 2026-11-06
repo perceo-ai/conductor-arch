@@ -28,7 +28,7 @@ import {
 } from "@/lib/workspacePrAction";
 import { titleCaseWorkspace } from "@/lib/text";
 import { fuzzyScore } from "@/lib/fuzzy";
-import { sidebarWorkspaceNames } from "@/lib/sidebarWorkspaces";
+import { sidebarWorkspaceNames, sidebarWorkspaceOrder } from "@/lib/sidebarWorkspaces";
 import { runShellAction } from "@/lib/shellAction";
 import ClientSwitcher from "./ClientSwitcher";
 import PeekCard from "./PeekCard";
@@ -305,11 +305,15 @@ function settingsTitle(): string {
   return hint ? `Settings (${hint})` : "Settings";
 }
 
+/** The row's numbered slot, counted down the rendered list — the same order
+ * `switch-workspace-N` resolves through in App.tsx. */
 function workspaceShortcut(name: string): ShortcutAction | undefined {
-  const active = workspacesStore.state.order.filter(
-    (candidate) => workspacesStore.row(candidate)?.status !== "archived",
-  );
-  const index = active.indexOf(name);
+  const index = sidebarWorkspaceOrder(
+    repositoriesStore.state.order,
+    workspacesStore.state.order,
+    (candidate) => workspacesStore.row(candidate),
+    (candidate) => prefsStore.isPinned(candidate),
+  ).indexOf(name);
   return index >= 0 && index < 9 ? `switch-workspace-${index + 1}` as ShortcutAction : undefined;
 }
 

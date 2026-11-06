@@ -8,6 +8,7 @@ import {
   onCleanup,
   onMount,
 } from "solid-js";
+import { sidebarWorkspaceOrder } from "@/lib/sidebarWorkspaces";
 import { nav, workspacesStore, repositoriesStore, dialogs, prefsStore, uiStore, actions, appearanceStore, toastsStore } from "@/store";
 import { updateGlobalAppearance } from "@/store/appearance";
 import { workspacePanels } from "@/lib/panelRegistry";
@@ -160,14 +161,30 @@ export default function CommandPalette() {
       });
     }
     // Workspaces.
-    for (const [index, name] of workspacesStore.state.order.entries()) {
+    // Sidebar order, so the slot a command shows is the slot the key presses.
+    const workspaceOrder = sidebarWorkspaceOrder(
+      repositoriesStore.state.order,
+      workspacesStore.state.order,
+      (name) => workspacesStore.row(name),
+      (name) => prefsStore.isPinned(name),
+    );
+    // Archived workspaces keep a palette entry (that is how one gets found
+    // again) but no numbered slot: they are not rows in the sidebar.
+    const palettable = [
+      ...workspaceOrder,
+      ...workspacesStore.state.order.filter((name) => !workspaceOrder.includes(name)),
+    ];
+    for (const [index, name] of palettable.entries()) {
       const row = workspacesStore.row(name);
       list.push({
         id: `ws:${name}`,
         label: titleCaseWorkspace(name),
         hint: row?.branch ?? row?.repository,
         group: "Workspaces",
-        shortcut: index < 9 ? `switch-workspace-${index + 1}` as ShortcutAction : undefined,
+        shortcut:
+          index < workspaceOrder.length && index < 9
+            ? (`switch-workspace-${index + 1}` as ShortcutAction)
+            : undefined,
         run: () => nav.selectWorkspace(name),
       });
     }
