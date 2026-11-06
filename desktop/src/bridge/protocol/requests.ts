@@ -138,6 +138,7 @@ export type ArchcarRequest =
   | { type: "get_settings_source"; repository?: string; layer?: string }
   | { type: "list_repository_branches"; repository: string }
   | { type: "list_agent_providers" }
+  | { type: "get_provider_usage"; refresh?: boolean }
   | { type: "list_prompt_packs"; repository: string }
   | { type: "set_active_prompt_pack"; repository: string; pack: string }
   | { type: "save_settings"; repository?: string; layer?: string; toml: string }
