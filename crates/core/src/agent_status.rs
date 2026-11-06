@@ -299,17 +299,21 @@ fn session_reports(
 
     let mut reports = Vec::new();
     for (thread_id, process) in newest {
-        // Before the events: see `SessionSignals::live`.
-        let live = probe(&process);
-        let records = events.list_for_chat_thread(thread_id)?;
-        let turns = build_chat_transcript(
-            &records,
+        let SessionRead {
+            live,
+            records,
+            turns,
+        } = read_session(
+            Some(&process),
+            probe,
+            events,
+            thread_id,
             &TranscriptOptions {
                 workspace_root: Some(&workspace.path),
                 include_thinking: false,
                 full: false,
             },
-        );
+        )?;
         reports.push(session_report(
             store,
             interactions,
@@ -339,16 +343,69 @@ fn session_reports(
     Ok(reports)
 }
 
+/// The daemon's answer and the events it goes with, from [`read_session`].
+pub struct SessionRead {
+    pub live: Option<LiveProbe>,
+    pub records: Vec<ProviderEventRecord>,
+    pub turns: Vec<TranscriptTurn>,
+}
+
+/// Reads a session's daemon state and its events so they agree about the turn
+/// boundary. The two live in different places and cannot be read at one moment,
+/// so this leans on the order session loops write them in.
+///
+/// At a turn's end the loop persists the terminal event, then marks ready. So
+/// the daemon is asked first: events read after a ready answer hold that turn's
+/// end. The other way round, events from before the turn ended meet the ready
+/// mark that came after it, and a finished turn reports as `AwaitingInput`.
+///
+/// At a turn's start the loop marks busy, then persists the input. So an idle
+/// answer followed by an open turn can be a send that landed between the two
+/// reads, and both are read once more: the second answer sees that busy mark,
+/// or, if the turn has ended by then, the second events see its end. A second
+/// look that still pairs idle with an open turn is a turn that never recorded
+/// an end, and stands. Only another turn opening inside the second look, after
+/// a whole turn inside the first, could still mislead it.
+pub fn read_session(
+    process: Option<&ProcessRecord>,
+    probe: &mut dyn FnMut(&ProcessRecord) -> Option<LiveProbe>,
+    events: &ProviderEventStore,
+    thread_id: i64,
+    options: &TranscriptOptions<'_>,
+) -> Result<SessionRead> {
+    let mut read = || -> Result<SessionRead> {
+        let live = process.and_then(&mut *probe);
+        let records = events.list_for_chat_thread(thread_id)?;
+        let turns = build_chat_transcript(&records, options);
+        Ok(SessionRead {
+            live,
+            records,
+            turns,
+        })
+    };
+    let first = read()?;
+    if idle_with_an_open_turn(&first) {
+        return read();
+    }
+    Ok(first)
+}
+
+fn idle_with_an_open_turn(read: &SessionRead) -> bool {
+    let last_turn = last_outcome(&read.turns);
+    last_turn == Some(TurnOutcome::Running)
+        && read.live.is_some_and(|live| {
+            derive_activity(live.alive, live.runtime_state, 0, last_turn)
+                == AgentActivity::AwaitingInput
+        })
+}
+
 /// What one session's report is read from.
 pub struct SessionSignals<'a> {
     pub process: &'a ProcessRecord,
     pub thread: Option<&'a ChatThreadRecord>,
-    /// The daemon's answer, `None` if it could not say. Ask it before reading
-    /// `records`: a session loop persists a turn's terminal event before it
-    /// marks the session ready, so `records` read after a ready answer hold
-    /// that turn's end. The other way round, events from before the turn ended
-    /// meet the ready mark that came after it, and `derive_activity` reports a
-    /// finished turn as `AwaitingInput`.
+    /// The daemon's answer, `None` if it could not say. Take it and `records`
+    /// from one [`read_session`]: read apart, they can disagree about a turn
+    /// boundary.
     pub live: Option<LiveProbe>,
     /// The chat thread's provider events, oldest first.
     pub records: &'a [ProviderEventRecord],
@@ -556,6 +613,104 @@ mod tests {
         assert_eq!(json["workspaces"][0]["sessions"][0]["state"], "working");
     }
 
+    const TURN_RESULT: &str = concat!(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"Clean.","duration_ms":900}"#,
+        "\n",
+    );
+    const NEXT_TURN_INPUT: &str = concat!(
+        r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"now ship it"}]}}"#,
+        "\n",
+    );
+
+    /// Failure this guards: turn start writes the other way round from turn
+    /// end, busy mark first and input event second. A send landing between the
+    /// probe and the events read met an idle answer and an open turn, and a
+    /// turn that had just started read as `awaiting_input`.
+    #[test]
+    fn a_turn_starting_during_a_status_read_reports_working() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, db_path, process, last_ms) = board_with_a_stale_pid(temp.path());
+        let base_ms = 1_790_757_000_000;
+        let thread = process.chat_thread_id;
+        let idle = format!("{FINISHED_TURN}{MID_TOOL_CALL_TURN}{TURN_RESULT}");
+        store_claude_records(&db_path, thread, &idle, base_ms);
+        let started = format!("{idle}{NEXT_TURN_INPUT}");
+        let mut asked = 0;
+
+        let report = collect_status(&store, &db_path, None, last_ms, &mut |_| {
+            asked += 1;
+            let runtime_state = if asked == 1 {
+                store_claude_records(&db_path, thread, &started, base_ms);
+                AgentSessionState::WaitingForInput
+            } else {
+                AgentSessionState::Running
+            };
+            Some(LiveProbe {
+                alive: true,
+                runtime_state: Some(runtime_state),
+            })
+        })
+        .unwrap();
+
+        let session = &report.workspaces[0].sessions[0];
+        assert_eq!(session.state, AgentActivity::Working);
+        assert_eq!(session.turn_outcome, Some(TurnOutcome::Running));
+    }
+
+    /// The second look has to read the events again, not only the daemon: a
+    /// turn that opens and ends inside one read leaves the second answer idle,
+    /// and the first events still show that turn open.
+    #[test]
+    fn a_whole_turn_inside_a_status_read_reports_finished() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, db_path, process, last_ms) = board_with_a_stale_pid(temp.path());
+        let base_ms = 1_790_757_000_000;
+        let thread = process.chat_thread_id;
+        let idle = format!("{FINISHED_TURN}{MID_TOOL_CALL_TURN}{TURN_RESULT}");
+        store_claude_records(&db_path, thread, &idle, base_ms);
+        let started = format!("{idle}{NEXT_TURN_INPUT}");
+        let ended = format!("{started}{TURN_RESULT}");
+        let mut asked = 0;
+
+        let report = collect_status(&store, &db_path, None, last_ms, &mut |_| {
+            asked += 1;
+            let native = if asked == 1 { &started } else { &ended };
+            store_claude_records(&db_path, thread, native, base_ms);
+            Some(LiveProbe {
+                alive: true,
+                runtime_state: Some(AgentSessionState::WaitingForInput),
+            })
+        })
+        .unwrap();
+
+        let session = &report.workspaces[0].sessions[0];
+        assert_eq!(session.state, AgentActivity::Finished);
+        assert_eq!(session.turn_outcome, Some(TurnOutcome::Success));
+    }
+
+    /// A turn that never recorded an end, on a session the daemon calls idle,
+    /// is not a torn read: the answer stands, after one second look.
+    #[test]
+    fn an_idle_session_with_a_turn_that_never_ended_awaits_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, db_path, _, last_ms) = board_with_a_stale_pid(temp.path());
+        let mut asked = 0;
+
+        let report = collect_status(&store, &db_path, None, last_ms, &mut |_| {
+            asked += 1;
+            Some(LiveProbe {
+                alive: true,
+                runtime_state: Some(AgentSessionState::WaitingForInput),
+            })
+        })
+        .unwrap();
+
+        let session = &report.workspaces[0].sessions[0];
+        assert_eq!(session.state, AgentActivity::AwaitingInput);
+        assert_eq!(session.turn_outcome, Some(TurnOutcome::Running));
+        assert_eq!(asked, 2);
+    }
+
     /// Failure this guards: `status` read the events, then asked the daemon. A
     /// turn that ended between the two paired events with no terminal record
     /// and the loop's ready mark, and a finished turn read as `awaiting_input`.
@@ -566,10 +721,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let (store, db_path, process, last_ms) = board_with_a_stale_pid(temp.path());
         let base_ms = 1_790_757_000_000;
-        let ended = format!(
-            "{FINISHED_TURN}{MID_TOOL_CALL_TURN}{}\n",
-            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"Clean.","duration_ms":900}"#
-        );
+        let ended = format!("{FINISHED_TURN}{MID_TOOL_CALL_TURN}{TURN_RESULT}");
         let mut turn_is_open = true;
         let mut probe = |_: &ProcessRecord| {
             if std::mem::take(&mut turn_is_open) {

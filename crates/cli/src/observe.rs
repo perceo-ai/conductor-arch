@@ -8,14 +8,13 @@
 
 use anyhow::{Context, Result};
 use archductor_core::agent_status::{
-    collect_status, now_ms, session_report, AgentActivity, LiveProbe, SessionReport,
-    SessionSignals, StatusReport, WorkspaceReport,
+    collect_status, now_ms, read_session, session_report, AgentActivity, LiveProbe, SessionRead,
+    SessionReport, SessionSignals, StatusReport, WorkspaceReport,
 };
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{ArchcarRequest, ArchcarResponse};
 use archductor_core::chat_transcript::{
-    build_chat_transcript, parse_rfc3339_ms, select_turns, EntryKind, TranscriptOptions,
-    TranscriptTurn,
+    parse_rfc3339_ms, select_turns, EntryKind, TranscriptOptions, TranscriptTurn,
 };
 use archductor_core::paths::AppPaths;
 use archductor_core::provider_events::ProviderEventStore;
@@ -244,17 +243,21 @@ pub fn run_chat(paths: &AppPaths, store: &WorkspaceStore, args: ChatArgs) -> Res
         .filter(|process| process.chat_thread_id == Some(thread_id))
         .max_by_key(|process| process.id);
     let client = ArchcarClient::from_paths(paths);
-    // Before the events: see `SessionSignals::live`.
-    let live = process.and_then(daemon_probe(&client));
-    let records = events.list_for_chat_thread(thread_id)?;
-    let turns = build_chat_transcript(
-        &records,
+    let SessionRead {
+        live,
+        records,
+        turns,
+    } = read_session(
+        process,
+        &mut daemon_probe(&client),
+        &events,
+        thread_id,
         &TranscriptOptions {
             workspace_root: Some(&workspace.path),
             include_thinking: !args.no_thinking,
             full: args.full,
         },
-    );
+    )?;
     let session = process.map(|process| {
         session_report(
             store,
