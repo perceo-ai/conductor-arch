@@ -16,14 +16,24 @@ const [summary, setSummary] = createSignal<AchievementsSummary>();
 const [loading, setLoading] = createSignal(false);
 const [error, setError] = createSignal<string>();
 let loadedAt = 0;
-let inFlight: Promise<void> | undefined;
+// Achievements belong to a daemon, so the cache and the shared request are both
+// scoped to the epoch they were read under. Time alone cannot say a summary is
+// still good: a switch inside the TTL would keep showing the previous machine.
+let cacheEpoch = daemonEpoch();
+let inFlight: { epoch: number; request: Promise<void> } | undefined;
 
-async function fetchSummary(): Promise<void> {
+/** Drop whatever the previous daemon left behind, before reading the cache. */
+function forgetPreviousDaemon(): void {
+  if (!daemonChangedSince(cacheEpoch)) return;
+  cacheEpoch = daemonEpoch();
+  setSummary(undefined);
+  setError(undefined);
+  loadedAt = 0;
+}
+
+async function fetchSummary(epoch: number): Promise<void> {
   setLoading(true);
   setError(undefined);
-  // Achievements belong to a daemon. Applying a late answer after a client
-  // switch would show the previous machine's numbers under the new one.
-  const epoch = daemonEpoch();
   try {
     const response = await send({ type: "get_achievements" });
     if (daemonChangedSince(epoch)) return;
@@ -38,9 +48,8 @@ async function fetchSummary(): Promise<void> {
     setSummary(response.summary);
     loadedAt = Date.now();
   } catch (err) {
+    if (daemonChangedSince(epoch)) return;
     setError(err instanceof Error ? err.message : String(err));
-  } finally {
-    setLoading(false);
   }
 }
 
@@ -51,16 +60,24 @@ export const achievementsStore = {
 
   /** Load once; re-fetch only when the cached summary is stale. */
   async load(): Promise<void> {
+    forgetPreviousDaemon();
     if (summary() && Date.now() - loadedAt < STALE_AFTER_MS) return;
     return this.refresh();
   },
 
-  /** Force a re-read. Concurrent callers share the one request. */
+  /** Force a re-read. Concurrent callers to one daemon share the one request. */
   async refresh(): Promise<void> {
-    inFlight ??= fetchSummary().finally(() => {
+    forgetPreviousDaemon();
+    const epoch = daemonEpoch();
+    if (inFlight?.epoch === epoch) return inFlight.request;
+    const request = fetchSummary(epoch).finally(() => {
+      // A request superseded by a switch must not end the load that replaced it.
+      if (inFlight?.request !== request) return;
       inFlight = undefined;
+      setLoading(false);
     });
-    return inFlight;
+    inFlight = { epoch, request };
+    return request;
   },
 
   /** Test seam: forget the cache so the next `load` goes to the daemon. */

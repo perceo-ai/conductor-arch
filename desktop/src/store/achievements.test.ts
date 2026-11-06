@@ -6,6 +6,7 @@ vi.mock("@/bridge/client", () => ({
 }));
 
 const { achievementsStore } = await import("./achievements");
+const { bumpDaemonEpoch } = await import("./daemonEpoch");
 
 function summary(unlocked: number) {
   return {
@@ -76,6 +77,54 @@ describe("achievementsStore", () => {
     await achievementsStore.refresh();
     expect(achievementsStore.error()).toBe("no database");
     expect(achievementsStore.summary()?.unlocked).toBe(1);
+  });
+
+  it("fetches the new daemon's summary after a switch inside the freshness window", async () => {
+    await achievementsStore.load();
+    expect(achievementsStore.summary()?.unlocked).toBe(1);
+
+    bumpDaemonEpoch();
+    send.mockResolvedValue(summary(2));
+    await achievementsStore.load();
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(achievementsStore.summary()?.unlocked).toBe(2);
+  });
+
+  it("does not join the old daemon's in-flight request after a switch", async () => {
+    let answerOldDaemon: (value: unknown) => void = () => undefined;
+    send.mockReturnValueOnce(new Promise((resolve) => (answerOldDaemon = resolve)));
+    const oldLoad = achievementsStore.load();
+
+    bumpDaemonEpoch();
+    let answerNewDaemon: (value: unknown) => void = () => undefined;
+    send.mockReturnValueOnce(new Promise((resolve) => (answerNewDaemon = resolve)));
+    const newLoad = achievementsStore.load();
+    expect(send).toHaveBeenCalledTimes(2);
+
+    // The old daemon answering late neither lands nor ends the new load.
+    answerOldDaemon(summary(1));
+    await oldLoad;
+    expect(achievementsStore.summary()).toBeUndefined();
+    expect(achievementsStore.loading()).toBe(true);
+
+    answerNewDaemon(summary(2));
+    await newLoad;
+    expect(achievementsStore.summary()?.unlocked).toBe(2);
+    expect(achievementsStore.loading()).toBe(false);
+  });
+
+  it("ignores a failure from the daemon that was switched away from", async () => {
+    let failOldDaemon: (reason: Error) => void = () => undefined;
+    send.mockReturnValueOnce(new Promise((_, reject) => (failOldDaemon = reject)));
+    const oldLoad = achievementsStore.load();
+
+    bumpDaemonEpoch();
+    failOldDaemon(new Error("socket closed"));
+    await oldLoad;
+
+    expect(achievementsStore.error()).toBeUndefined();
+    expect(achievementsStore.loading()).toBe(false);
   });
 
   it("reports a rejected request as an error rather than throwing", async () => {
