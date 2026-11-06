@@ -352,24 +352,33 @@ fn monotonic_millis() -> u64 {
 /// without the record would leave `started` ahead of `completed`, and the
 /// daemon's ready mark -- the safety net for a lost `Ready` -- would never
 /// fire for that session again.
+///
+/// `carried_duration_ms` is the exact duration a just-applied `TurnCompleted`
+/// reported for the same ACP result. A caller that has it passes it here
+/// rather than trust a re-measurement: a `note_input` racing in between clears
+/// the ledger's copy and moves the turn on to the next input's mark. Returns
+/// the duration sent, so that caller can carry it.
 pub(crate) fn send_turn_completed(
     snapshot: &Arc<Mutex<SessionSnapshot>>,
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
     turn: FinishedTurn<'_>,
     status: Option<String>,
-) {
+    carried_duration_ms: Option<u64>,
+) -> Option<u64> {
     let now_ms = monotonic_millis();
-    let duration_ms = snapshot
+    let measured = snapshot
         .lock()
         .ok()
         .and_then(|mut state| state.turns.finish_timed(turn, now_ms));
+    let duration_ms = carried_duration_ms.or(measured);
     let _ = event_tx.send(ArchcarEvent::TurnCompleted {
         session_id: started.session_id,
         thread_id: started.thread_id,
         status,
         duration_ms,
     });
+    duration_ms
 }
 
 /// Retires a codex input that failed before any turn took it in. The session
@@ -394,6 +403,7 @@ fn retire_failed_codex_input(
             event_tx,
             started,
             native_thread_id,
+            &mut None,
             HarnessEffect::Ready,
         );
     } else {
@@ -950,6 +960,7 @@ fn apply_harness_effect(
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
     native_thread_id: &mut Option<String>,
+    pending_turn_duration_ms: &mut Option<u64>,
     effect: HarnessEffect,
 ) {
     match effect {
@@ -1020,13 +1031,15 @@ fn apply_harness_effect(
                 });
                 return;
             }
-            send_turn_completed(
+            let duration_ms = send_turn_completed(
                 snapshot,
                 event_tx,
                 started,
                 FinishedTurn::Input(&local_input_id),
                 Some(harness_turn_status_label(status).to_owned()),
+                None,
             );
+            *pending_turn_duration_ms = duration_ms;
         }
         HarnessEffect::TurnSettled { status } => {
             info!(
@@ -1036,12 +1049,14 @@ fn apply_harness_effect(
                 status = harness_turn_status_label(status),
                 "managed harness turn settled"
             );
+            let carried_duration_ms = pending_turn_duration_ms.take();
             send_turn_completed(
                 snapshot,
                 event_tx,
                 started,
                 FinishedTurn::Settled,
                 Some(harness_turn_status_label(status).to_owned()),
+                carried_duration_ms,
             );
         }
         HarnessEffect::ProviderEvent(draft) => {
@@ -1848,6 +1863,7 @@ fn apply_provider_control_plan(
                 event_tx,
                 started,
                 &mut native_thread_id,
+                &mut None,
                 effect,
             );
             connection.native_thread_id = native_thread_id;
@@ -2777,6 +2793,7 @@ fn run_codex_app_server_session_loop(
                             &event_tx,
                             &started,
                             &mut connection.native_thread_id,
+                            &mut None,
                             HarnessEffect::Ready,
                         );
                     }
@@ -2985,6 +3002,7 @@ fn run_codex_app_server_session_loop(
                             &started,
                             finished_turn,
                             codex_turn_completed_status(&message),
+                            None,
                         );
                         let latest_turn_completed = snapshot
                             .lock()
@@ -2996,6 +3014,7 @@ fn run_codex_app_server_session_loop(
                                 &event_tx,
                                 &started,
                                 &mut connection.native_thread_id,
+                                &mut None,
                                 HarnessEffect::Ready,
                             );
                         }
@@ -3319,6 +3338,7 @@ fn run_claude_stream_session_loop(
         &event_tx,
         &started,
         &mut connection.native_thread_id,
+        &mut None,
         HarnessEffect::Ready,
     );
     let mut pending_restart = false;
@@ -3658,6 +3678,7 @@ fn drain_claude_stdout(
                         event_tx,
                         started,
                         &mut connection.native_thread_id,
+                        &mut None,
                         effect,
                     );
                 }
@@ -3948,6 +3969,7 @@ fn run_acp_session_loop(
                                 &event_tx,
                                 &started,
                                 &mut connection.native_thread_id,
+                                &mut None,
                                 effect,
                             );
                         }
@@ -4139,6 +4161,10 @@ fn drain_acp_stdout(
             payload: line.into_bytes(),
         }) {
             Ok(effects) => {
+                // One ACP result's completion and settle arrive in one batch,
+                // so the duration is carried here, out of reach of the loop
+                // thread draining the next input between them.
+                let mut pending_turn_duration_ms: Option<u64> = None;
                 for effect in effects {
                     // An ACP permission request is a JSON-RPC request: the
                     // agent blocks until it is answered, so the session has to
@@ -4155,6 +4181,7 @@ fn drain_acp_stdout(
                         event_tx,
                         started,
                         &mut connection.native_thread_id,
+                        &mut pending_turn_duration_ms,
                         effect,
                     );
                 }
@@ -4970,6 +4997,7 @@ mod tests {
             &started,
             FinishedTurn::Latest,
             Some("success".to_owned()),
+            None,
         );
         crate::provider_events::set_wall_clock_step_for_test(0);
 
@@ -5019,6 +5047,7 @@ mod tests {
         let snapshot = Arc::new(Mutex::new(started.clone()));
         let (event_tx, event_rx) = mpsc::channel();
         let mut native_thread_id = None;
+        let mut pending_turn_duration_ms: Option<u64> = None;
         enqueue_provider_input(
             &runtime_store,
             &started,
@@ -5046,6 +5075,7 @@ mod tests {
             &event_tx,
             &started,
             &mut native_thread_id,
+            &mut pending_turn_duration_ms,
             HarnessEffect::TurnCompleted {
                 local_input_id: "acp-input".to_owned(),
                 status: HarnessTurnStatus::Success,
@@ -5059,6 +5089,7 @@ mod tests {
             &event_tx,
             &started,
             &mut native_thread_id,
+            &mut pending_turn_duration_ms,
             HarnessEffect::TurnSettled {
                 status: HarnessTurnStatus::Success,
             },
@@ -5094,6 +5125,23 @@ mod tests {
         });
         assert_eq!(durations.len(), 2, "{durations:?}");
         assert!(durations[0].is_some(), "{durations:?}");
+        assert_eq!(durations[0], durations[1]);
+    }
+
+    /// The daemon can drain a *full* queued input between the completion and
+    /// the settle, not just the busy mark above: `note_input` runs too, under
+    /// the same lock. That full drain is what #249 missed — `note_input`
+    /// clears `reported_duration_ms`, so without carrying the duration past
+    /// the race the settle re-measures from the new input's mark instead of
+    /// repeating the completion's own duration.
+    #[test]
+    fn qa_probe_full_queue_drain_between_the_completion_and_the_settle() {
+        let durations = acp_turn_durations(|snapshot| {
+            let mut state = snapshot.lock().unwrap();
+            mark_session_busy_for_input(&mut state);
+            state.turns.note_input("next-input".to_owned());
+        });
+        assert_eq!(durations.len(), 2, "{durations:?}");
         assert_eq!(durations[0], durations[1]);
     }
 
@@ -5923,6 +5971,7 @@ mod tests {
             &event_tx,
             &started,
             &mut native_thread_id,
+            &mut None,
             HarnessEffect::Fatal(
                 "Claude authentication failed. You are not logged in. Run `claude auth login`."
                     .to_owned(),
