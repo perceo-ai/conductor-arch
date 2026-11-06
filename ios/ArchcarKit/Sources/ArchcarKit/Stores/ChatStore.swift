@@ -360,7 +360,7 @@ public final class ChatStore {
         switch event {
         case .sessionMessagesUpdated(let threadID):
             return threadID == thread ? .timeline : nil
-        case .turnCompleted(_, let threadID, _):
+        case .turnCompleted(_, let threadID, _, _):
             return threadID == thread ? .timeline : nil
         case .chatQueueUpdated(let threadID):
             return threadID == thread ? .queue : nil

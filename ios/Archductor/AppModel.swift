@@ -173,11 +173,13 @@ final class AppModel {
         while !Task.isCancelled {
             guard let subscription = await session.connectedEvents() else { return }
             for await event in subscription.events {
-                // Name the workspace rather than "Thread 42" when the list
-                // already knows the thread; otherwise fall back to the number.
-                let workspaceName = EventNotificationDescriptor.threadID(of: event)
-                    .flatMap { workspaces?.workspaceName(forThread: $0) }
-                guard let descriptor = EventNotificationDescriptor.from(event, workspaceName: workspaceName)
+                // Name the workspace, chat and agent rather than "Thread 42"
+                // when the list already knows the thread; otherwise the copy
+                // falls back to the number on its own.
+                let context = workspaces?
+                    .notificationContext(forThread: EventNotificationDescriptor.threadID(of: event))
+                    ?? NotificationContext()
+                guard let descriptor = EventNotificationDescriptor.from(event, context: context)
                 else { continue }
                 await localNotifications.deliver(descriptor, daemonID: daemonID)
             }

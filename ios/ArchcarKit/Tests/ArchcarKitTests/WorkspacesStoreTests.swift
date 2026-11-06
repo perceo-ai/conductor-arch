@@ -80,7 +80,7 @@ private func summary(
 @Test func onlyRelevantEventsInvalidateTheList() {
     #expect(WorkspacesStore.invalidates(.inventoryChanged(scope: "workspace", workspace: "w", repository: nil)))
     #expect(WorkspacesStore.invalidates(.sessionStarted(sessionID: 1, threadID: 1, workspace: "w", kind: .codex, pid: 2)))
-    #expect(WorkspacesStore.invalidates(.turnCompleted(sessionID: 1, threadID: 1, status: nil)))
+    #expect(WorkspacesStore.invalidates(.turnCompleted(sessionID: 1, threadID: 1, status: nil, durationMS: nil)))
     #expect(WorkspacesStore.invalidates(.workspaceRenamed(oldName: "a", newName: "b")))
     #expect(WorkspacesStore.invalidates(.taskUpdated(workspace: "w", taskID: 1, status: "blocked")))
     // Chat-level churn does not move the workspace list; refetching on it would

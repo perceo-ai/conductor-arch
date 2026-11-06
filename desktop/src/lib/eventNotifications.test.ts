@@ -19,62 +19,89 @@ const interactionEvent: ArchcarEvent = {
 };
 
 describe("notificationForArchcarEvent", () => {
-  it("notifies when an agent needs input", () => {
-    expect(notificationForArchcarEvent(interactionEvent)).toEqual({
+  const chat = {
+    workspace: "antix",
+    chatTitle: "fix the parser",
+    model: "claude-opus-5",
+    provider: "claude",
+  };
+
+  it("says where a chat needs you, and what it is asking", () => {
+    expect(notificationForArchcarEvent(interactionEvent, chat)).toEqual({
       id: "interaction-ask-1",
-      title: "Input required",
-      body: "checkout: Approve command? - cargo test",
+      // The interaction's own workspace wins over the looked-up one.
+      title: "checkout \u00b7 fix the parser",
+      body: "Needs you: Approve command? \u2014 cargo test",
     });
   });
 
-  it("names the workspace that owns the chat when it is known", () => {
-    expect(
+  it("says where a turn ended, how it ended, how long it took and who ran it", () => {
+    const turn = (status: string, duration_ms?: number) =>
       notificationForArchcarEvent(
-        { type: "turn_completed", session_id: 11, thread_id: 9, status: "completed" },
-        "checkout",
-      )?.body,
-    ).toBe("The chat in checkout completed.");
-    expect(
-      notificationForArchcarEvent(
-        { type: "session_error", session_id: 11, thread_id: 9, message: "codex exited" },
-        "checkout",
-      )?.body,
-    ).toBe("checkout: codex exited");
-    expect(
-      notificationForArchcarEvent(
-        { type: "turn_completed", session_id: 11, thread_id: 9, status: "completed" },
-        "  ",
-      )?.body,
-    ).toBe("Thread 9 completed.");
-  });
+        { type: "turn_completed", session_id: 11, thread_id: 9, status, duration_ms },
+        chat,
+      );
 
-  it("notifies when a chat turn finishes", () => {
-    expect(
-      notificationForArchcarEvent({
-        type: "turn_completed",
-        session_id: 11,
-        thread_id: 9,
-        status: "completed",
-      }),
-    ).toEqual({
-      id: "turn-11-9-completed",
-      title: "Chat finished",
-      body: "Thread 9 completed.",
+    expect(turn("success", 252_000)).toEqual({
+      // Keyed on the status, so a retried turn replaces its own banner.
+      id: "turn-11-9-success",
+      title: "antix \u00b7 fix the parser",
+      body: "Done in 4m 12s \u00b7 Claude Opus 5",
     });
+    expect(turn("failed", 2_000)?.body).toBe("Failed after 2.0s \u00b7 Claude Opus 5");
+    expect(turn("interrupted", 18_300)?.body).toBe("Stopped after 18.3s \u00b7 Claude Opus 5");
+    // An older daemon sends no duration; the outcome still reads.
+    expect(turn("success")?.body).toBe("Done \u00b7 Claude Opus 5");
+    // An unknown status is shown, not flattened into "stopped".
+    expect(turn("rate_limited", 900)?.body).toBe("Rate_limited after 900ms \u00b7 Claude Opus 5");
   });
 
-  it("notifies when a session errors", () => {
+  it("falls back through the context it has", () => {
+    const event: ArchcarEvent = {
+      type: "turn_completed",
+      session_id: 11,
+      thread_id: 9,
+      status: "success",
+      duration_ms: 1_500,
+    };
+    // No model recorded: the provider names who ran the turn.
+    expect(notificationForArchcarEvent(event, { ...chat, model: null })?.body).toBe(
+      "Done in 1.5s \u00b7 Claude",
+    );
+    // Nothing loaded: the thread number is the last resort, as before.
+    expect(notificationForArchcarEvent(event)).toEqual({
+      id: "turn-11-9-success",
+      title: "Thread 9",
+      body: "Done in 1.5s",
+    });
+    expect(notificationForArchcarEvent(event, { workspace: "  " })?.title).toBe("Thread 9");
+  });
+
+  it("cuts a long title at a word boundary and flattens a multi-line error", () => {
     expect(
-      notificationForArchcarEvent({
-        type: "session_error",
-        session_id: 11,
-        thread_id: 9,
-        message: "codex exited before it was ready",
-      }),
+      notificationForArchcarEvent(
+        { type: "turn_completed", session_id: 1, thread_id: 2, status: "success", duration_ms: 1_000 },
+        {
+          workspace: "antix",
+          chatTitle: "refactor the provider projection so every surface agrees on turn ids",
+        },
+      )?.title,
+    ).toBe("antix \u00b7 refactor the provider projection so every\u2026");
+
+    expect(
+      notificationForArchcarEvent(
+        {
+          type: "session_error",
+          session_id: 11,
+          thread_id: 9,
+          message: "codex exited\n\n  before it was ready",
+        },
+        chat,
+      ),
     ).toEqual({
       id: "session-error-11-9",
-      title: "Chat failed",
-      body: "codex exited before it was ready",
+      title: "antix \u00b7 fix the parser",
+      body: "Failed: codex exited before it was ready",
     });
   });
 
@@ -100,8 +127,8 @@ describe("notificationForArchcarEvent", () => {
       }),
     ).toEqual({
       id: "background-task-4-ready",
-      title: "Background task ready",
-      body: "#4 Fix checkout (checkout): Ready for review",
+      title: "checkout \u00b7 Fix checkout",
+      body: "Task ready: Ready for review",
     });
   });
 

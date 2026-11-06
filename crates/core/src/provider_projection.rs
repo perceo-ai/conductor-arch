@@ -519,7 +519,9 @@ fn provider_turn_terminal_label(phase: ProviderEventPhase) -> &'static str {
     }
 }
 
-fn format_provider_turn_duration(duration_ms: u64) -> String {
+/// "840ms", "18.3s", "4m 12s". Shared with notifications, so a banner and the
+/// turn row in the chat read the same duration.
+pub(crate) fn format_provider_turn_duration(duration_ms: u64) -> String {
     if duration_ms < 1_000 {
         return format!("{duration_ms}ms");
     }

@@ -4,7 +4,7 @@ import type {
   ProviderInteractionRecord,
 } from "@/bridge/protocol";
 import { notify, send } from "@/bridge/client";
-import { notificationForArchcarEvent } from "@/lib/eventNotifications";
+import { notificationForArchcarEvent, type NotificationContext } from "@/lib/eventNotifications";
 import { createRefreshCoalescer } from "@/lib/refreshCoalescer";
 import { chatStore } from "./chat";
 import { terminalStore } from "./terminal";
@@ -145,23 +145,50 @@ export function loadThread(threadId: number): void {
   chatRefresh.flush(threadId);
 }
 
-/// Which workspace owns the event's chat, so the banner can name it rather
-/// than "Thread 42". Undefined when the thread list has not loaded it.
-function workspaceForThread(event: ArchcarEvent): string | undefined {
-  const threadId = (event as { thread_id?: number }).thread_id;
-  if (threadId == null) return undefined;
-  return Object.entries(threadsStore.state.byWorkspace).find(([, threads]) =>
-    threads.some((thread) => thread.id === threadId),
-  )?.[0];
+/// What the thread list knows about the event's chat, so a banner can read
+/// "antix · fix the parser / Done in 4m 12s" rather than "Thread 42".
+/// Empty when the thread list has not loaded it; the copy degrades on its own.
+function notificationContextForEvent(event: ArchcarEvent): NotificationContext {
+  const threadId = notificationThreadId(event);
+  if (threadId == null) return {};
+  for (const [workspace, threads] of Object.entries(threadsStore.state.byWorkspace)) {
+    const thread = threads.find((candidate) => candidate.id === threadId);
+    if (thread) {
+      return {
+        workspace,
+        chatTitle: thread.title,
+        model: thread.model,
+        provider: thread.provider,
+      };
+    }
+  }
+  return {};
+}
+
+/// The chat an event is about, for the context lookup and the focus gate.
+function notificationThreadId(event: ArchcarEvent): number | undefined {
+  if (event.type === "provider_interaction_requested") {
+    return (event as { interaction: { thread_id: number } }).interaction.thread_id;
+  }
+  return (event as { thread_id?: number }).thread_id;
+}
+
+/// Whether an OS banner for this event would land on top of what is already
+/// on screen. A chat you are looking at narrates its own turn ending, so a
+/// banner there is pure noise -- but a turn finishing in *another* workspace
+/// is the whole reason to run several at once, and used to stay silent
+/// whenever the window happened to be focused.
+function notificationIsRedundant(event: ArchcarEvent): boolean {
+  if (!nav.windowFocused()) return false;
+  const threadId = notificationThreadId(event);
+  if (threadId == null) return true;
+  return nav.activePage() === "workspace" && nav.chatThreadInView(threadId);
 }
 
 export function applyEvent(event: ArchcarEvent) {
-  // OS banners are for the window you are not looking at. While Archductor is
-  // focused the chat itself shows the turn ending / ask arriving, and a native
-  // notification on top of it is pure noise.
-  const notification = nav.windowFocused()
+  const notification = notificationIsRedundant(event)
     ? null
-    : notificationForArchcarEvent(event, workspaceForThread(event));
+    : notificationForArchcarEvent(event, notificationContextForEvent(event));
   if (notification) void notify(notification);
 
   switch (event.type) {

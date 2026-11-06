@@ -8,7 +8,14 @@ export type ArchcarEvent =
   | { type: "session_spawn_queued"; workspace: string; kind: SessionKind }
   | { type: "session_started"; session_id: number; thread_id: number; workspace: string; kind: SessionKind; pid: number }
   | { type: "session_ready"; session_id: number; thread_id: number }
-  | { type: "turn_completed"; session_id: number; thread_id: number; status?: string }
+  | {
+      type: "turn_completed";
+      session_id: number;
+      thread_id: number;
+      status?: string;
+      /** How long the finished turn ran; absent from an older daemon. */
+      duration_ms?: number;
+    }
   | { type: "session_screen_updated"; session_id: number }
   | { type: "session_messages_updated"; thread_id: number }
   | { type: "chat_queue_updated"; thread_id: number }

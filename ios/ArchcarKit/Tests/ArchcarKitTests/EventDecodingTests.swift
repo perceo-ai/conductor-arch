@@ -22,13 +22,25 @@ private func event(_ json: String) throws -> ArchcarEvent {
 
 @Test func decodesTurnCompletedWithoutStatus() throws {
     let decoded = try event(#"{"id":"e2","payload":{"type":"turn_completed","session_id":4,"thread_id":6}}"#)
-    guard case .turnCompleted(let sessionID, let threadID, let status) = decoded else {
+    guard case .turnCompleted(let sessionID, let threadID, let status, let durationMS) = decoded else {
         Issue.record("expected turn_completed")
         return
     }
     #expect(sessionID == 4)
     #expect(threadID == 6)
     #expect(status == nil)
+    #expect(durationMS == nil)
+}
+
+@Test func decodesTurnCompletedDuration() throws {
+    let decoded = try event(
+        #"{"id":"e2b","payload":{"type":"turn_completed","session_id":4,"thread_id":6,"status":"success","duration_ms":252000}}"#)
+    guard case .turnCompleted(_, _, let status, let durationMS) = decoded else {
+        Issue.record("expected turn_completed")
+        return
+    }
+    #expect(status == "success")
+    #expect(durationMS == 252_000)
 }
 
 @Test func decodesInventoryChangedScope() throws {
