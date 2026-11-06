@@ -4758,6 +4758,285 @@ mod tests {
         assert_eq!(turns.finish(FinishedTurn::Latest), (3, None));
     }
 
+    /// A claude message taken in at a tool boundary joins the open turn, so
+    /// the turn still began at its own busy mark. Five minutes of work and a
+    /// message ten seconds from the end is a five minute turn.
+    #[test]
+    fn a_message_taken_into_a_live_claude_turn_does_not_shorten_it() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.note_input_taken("turn-input");
+        turns.started += 1;
+        turns.note_started(301_000);
+        turns.note_input("immediate-input".to_owned());
+        turns.note_input_taken("immediate-input");
+
+        assert_eq!(
+            turns.finish(FinishedTurn::Input("turn-input")),
+            (2, Some(1_000))
+        );
+        assert!(turns.started_at_ms.is_empty(), "{turns:?}");
+    }
+
+    #[test]
+    fn an_accepted_codex_steer_does_not_shorten_the_turn_it_joined() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_started(301_000);
+        turns.note_input("steer-input".to_owned());
+
+        assert_eq!(
+            turns.finish(FinishedTurn::Inputs(&[
+                "turn-input".to_owned(),
+                "steer-input".to_owned(),
+            ])),
+            (2, Some(1_000))
+        );
+    }
+
+    /// A completion that cannot be placed finishes everything, so it reads
+    /// the same way: from the oldest mark it finished.
+    #[test]
+    fn an_unplaced_completion_times_from_the_oldest_mark_it_finished() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_started(301_000);
+        turns.note_input("steer-input".to_owned());
+
+        assert_eq!(turns.finish(FinishedTurn::Latest), (2, Some(1_000)));
+    }
+
+    /// A refused steer opened nothing: the turn its input starts instead is
+    /// timed from that turn's own mark, not from the refused attempt.
+    #[test]
+    fn a_refused_steer_is_timed_from_the_turn_it_started_instead() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("turn-input".to_owned());
+        turns.started += 1;
+        turns.note_started(2_000);
+        turns.note_input("steer-input".to_owned());
+        turns.started += 1;
+        turns.note_started(9_000);
+        turns.note_input("steer-input".to_owned());
+
+        assert_eq!(
+            turns.finish(FinishedTurn::Inputs(&["turn-input".to_owned()])),
+            (1, Some(1_000))
+        );
+        assert_eq!(
+            turns.finish(FinishedTurn::Inputs(&["steer-input".to_owned()])),
+            (3, Some(9_000))
+        );
+    }
+
+    /// Rejected starts with nothing live never reach a completion, so
+    /// nothing else would ever drop their marks.
+    #[test]
+    fn rejected_inputs_leave_no_start_times_behind() {
+        let mut turns = TurnGenerations::default();
+        for attempt in 1..=3_u64 {
+            let input = format!("rejected-{attempt}");
+            turns.started += 1;
+            turns.note_started(attempt * 1_000);
+            turns.note_input(input.clone());
+            turns.retire_input(&input);
+        }
+
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.started_at_ms.is_empty(), "{turns:?}");
+    }
+
+    /// A generation retired above a live turn is stepped over later, by that
+    /// turn's completion; its mark has to be gone by then, and must not time
+    /// the turn after it.
+    #[test]
+    fn a_rejected_input_above_a_live_turn_leaves_no_start_time_behind() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("live-input".to_owned());
+        turns.started += 1;
+        turns.note_started(2_000);
+        turns.note_input("rejected-input".to_owned());
+        turns.retire_input("rejected-input");
+
+        assert_eq!(turns.started_at_ms.keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(
+            turns.finish(FinishedTurn::Input("live-input")),
+            (1, Some(1_000))
+        );
+        assert!(turns.latest_turn_completed(), "{turns:?}");
+        assert!(turns.started_at_ms.is_empty(), "{turns:?}");
+
+        turns.started += 1;
+        turns.note_started(9_000);
+        turns.note_input("next-input".to_owned());
+        assert_eq!(
+            turns.finish(FinishedTurn::Input("next-input")),
+            (3, Some(9_000))
+        );
+    }
+
+    /// Runs one turn from busy mark to completion with `step` applied to the
+    /// wall clock while it runs, and returns what the turn reported.
+    fn duration_across_a_wall_clock_step(step_ms: i64, turn_ms: u64) -> Option<u64> {
+        let started = running_session_snapshot(
+            1,
+            2,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            std::process::id(),
+            false,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let (event_tx, event_rx) = mpsc::channel();
+        mark_session_busy_for_input(&mut snapshot.lock().unwrap());
+
+        crate::provider_events::set_wall_clock_step_for_test(step_ms);
+        thread::sleep(Duration::from_millis(turn_ms));
+        send_turn_completed(
+            &snapshot,
+            &event_tx,
+            &started,
+            FinishedTurn::Latest,
+            Some("success".to_owned()),
+        );
+        crate::provider_events::set_wall_clock_step_for_test(0);
+
+        match event_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            ArchcarEvent::TurnCompleted { duration_ms, .. } => duration_ms,
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        }
+    }
+
+    /// An NTP correction or a manual clock change mid-turn says nothing about
+    /// how long the agent worked. Subtracting wall-clock readings reported
+    /// 0ms across a backward step and the size of the step across a forward
+    /// one.
+    #[test]
+    fn a_wall_clock_step_mid_turn_does_not_change_the_reported_duration() {
+        const HOUR_MS: i64 = 3_600_000;
+        const TURN_MS: u64 = 30;
+        for step_ms in [-HOUR_MS, HOUR_MS] {
+            let duration_ms = duration_across_a_wall_clock_step(step_ms, TURN_MS)
+                .expect("a marked turn reports a duration");
+            assert!(
+                (TURN_MS..HOUR_MS as u64).contains(&duration_ms),
+                "a {step_ms}ms clock step reported a {duration_ms}ms turn"
+            );
+        }
+    }
+
+    /// Drives the pair of effects every ACP result ends with and returns the
+    /// `duration_ms` of each `TurnCompleted` they sent. `between` runs after
+    /// the completion, where the daemon's queue drain can land.
+    fn acp_turn_durations(between: impl FnOnce(&Arc<Mutex<SessionSnapshot>>)) -> Vec<Option<u64>> {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43992);
+        let runtime_store = RuntimeSessionStore::new(temp.path().join("state.db"));
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            process.pid,
+            false,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let (event_tx, event_rx) = mpsc::channel();
+        let mut native_thread_id = None;
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "acp-input",
+            "hello",
+            None,
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Auto,
+            None,
+        )
+        .unwrap();
+        runtime_store
+            .mark_provider_input_written("acp-input")
+            .unwrap();
+        {
+            let mut state = snapshot.lock().unwrap();
+            mark_session_busy_for_input(&mut state);
+            state.turns.note_input("acp-input".to_owned());
+        }
+        thread::sleep(Duration::from_millis(5));
+
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut native_thread_id,
+            HarnessEffect::TurnCompleted {
+                local_input_id: "acp-input".to_owned(),
+                status: HarnessTurnStatus::Success,
+            },
+        );
+        between(&snapshot);
+        thread::sleep(Duration::from_millis(5));
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut native_thread_id,
+            HarnessEffect::TurnSettled {
+                status: HarnessTurnStatus::Success,
+            },
+        );
+
+        drop(event_tx);
+        event_rx
+            .iter()
+            .filter_map(|event| match event {
+                ArchcarEvent::TurnCompleted { duration_ms, .. } => Some(duration_ms),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Both events build the same notification id, so the later one replaces
+    /// the earlier banner: if it carries no duration, the user sees none.
+    #[test]
+    fn an_acp_settle_repeats_the_duration_its_completion_reported() {
+        let durations = acp_turn_durations(|_| {});
+        assert_eq!(durations.len(), 2, "{durations:?}");
+        assert!(durations[0].is_some(), "{durations:?}");
+        assert_eq!(durations[0], durations[1]);
+    }
+
+    /// The daemon drains the queue on the completion, so a busy mark for the
+    /// next input can land before the settle. The settle still reports the
+    /// turn that ended, not the one being handed over.
+    #[test]
+    fn an_acp_settle_is_not_timed_from_a_busy_mark_that_landed_after_the_completion() {
+        let durations = acp_turn_durations(|snapshot| {
+            mark_session_busy_for_input(&mut snapshot.lock().unwrap());
+        });
+        assert_eq!(durations.len(), 2, "{durations:?}");
+        assert!(durations[0].is_some(), "{durations:?}");
+        assert_eq!(durations[0], durations[1]);
+    }
+
     /// Registering an ACP agent has to be enough to drive it: the transport
     /// choice and the loop both come from the registry, not from a match on
     /// provider names.

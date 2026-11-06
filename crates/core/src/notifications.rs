@@ -925,6 +925,19 @@ mod tests {
         assert_eq!(done.body, "Done in 4m 12s");
     }
 
+    /// One table for every surface: `models.test.ts` and
+    /// `AgentModelsTests.swift` read this same file, so a banner names a
+    /// model the same way on the desktop, on a phone and in a push.
+    #[test]
+    fn model_labels_match_the_table_every_surface_shares() {
+        let labels: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(include_str!("../tests/fixtures/model_labels.json")).unwrap();
+        assert!(!labels.is_empty());
+        for (model, label) in &labels {
+            assert_eq!(&model_label(model), label, "label for {model}");
+        }
+    }
+
     #[test]
     fn turn_notifications_say_where_what_and_how_long() {
         let context = NotificationContext {

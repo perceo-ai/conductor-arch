@@ -3,17 +3,29 @@ import Testing
 
 @testable import ArchcarKit
 
-/// The desktop's table is the source of truth; this reads it so the two
-/// surfaces cannot offer different models.
-private func desktopModelsFile() throws -> String {
-    let repoRoot = URL(fileURLWithPath: #filePath)
+private var repoRoot: URL {
+    URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent()  // ArchcarKitTests
         .deletingLastPathComponent()  // Tests
         .deletingLastPathComponent()  // ArchcarKit
         .deletingLastPathComponent()  // ios
         .deletingLastPathComponent()  // repository root
-    return try String(
+}
+
+/// The desktop's table is the source of truth; this reads it so the two
+/// surfaces cannot offer different models.
+private func desktopModelsFile() throws -> String {
+    try String(
         contentsOf: repoRoot.appendingPathComponent("desktop/src/lib/models.ts"), encoding: .utf8)
+}
+
+/// One table for every surface: the daemon's push text and the desktop assert
+/// the same file, so a model reads the same wherever its notification lands.
+private func sharedModelLabels() throws -> [String: String] {
+    let data = try Data(
+        contentsOf: repoRoot.appendingPathComponent(
+            "crates/core/tests/fixtures/model_labels.json"))
+    return try JSONDecoder().decode([String: String].self, from: data)
 }
 
 /// Reads a `name: [ … ]` array out of the TypeScript source.
@@ -84,6 +96,18 @@ private func quotedStrings(in fragment: String) -> [String] {
     // Unknown ids are title-cased rather than dropped, so a model the daemon
     // reports but this table has not heard of still renders.
     #expect(AgentModels.label("some-new-model") == "Some New Model")
+}
+
+@Test func labelsMatchTheTableEverySurfaceShares() throws {
+    let labels = try sharedModelLabels()
+    #expect(!labels.isEmpty)
+    for (model, label) in labels {
+        #expect(AgentModels.label(model) == label, "label for \(model)")
+        #expect(EventNotificationDescriptor.modelLabel(model) == label, "banner for \(model)")
+    }
+    for model in AgentModels.models.values.flatMap({ $0 }) {
+        #expect(labels[model] != nil, "\(model) is missing from the shared table")
+    }
 }
 
 @Test func decodesAgentProviders() throws {
