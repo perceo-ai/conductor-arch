@@ -8956,6 +8956,7 @@ exit 1
             &started,
             turn,
             Some("completed".to_owned()),
+            None,
         );
         let event = event_rx.try_recv().unwrap();
         assert!(
