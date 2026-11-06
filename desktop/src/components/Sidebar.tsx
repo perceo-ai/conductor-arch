@@ -1,4 +1,4 @@
-import { createResource, createSignal, For, Show } from "solid-js";
+import { createMemo, createResource, createSignal, For, Show } from "solid-js";
 import {
   nav,
   workspaceAwaitingAcknowledgement,
@@ -305,16 +305,34 @@ function settingsTitle(): string {
   return hint ? `Settings (${hint})` : "Settings";
 }
 
+/** Each of the first nine workspaces' numbered slot: `order[i]` holds
+ * `switch-workspace-${i + 1}`, the pairing App.tsx resolves with `names[N - 1]`.
+ * A repeated name keeps its first slot, as `indexOf` would. */
+export function workspaceSlotMap(order: readonly string[]): Map<string, ShortcutAction> {
+  const slots = new Map<string, ShortcutAction>();
+  for (const [index, name] of order.slice(0, 9).entries()) {
+    if (!slots.has(name)) slots.set(name, `switch-workspace-${index + 1}` as ShortcutAction);
+  }
+  return slots;
+}
+
+// Module-level so every row shares one walk of the sidebar order, recomputed
+// when something that order reads changes rather than once per row.
+const workspaceSlots = createMemo(() =>
+  workspaceSlotMap(
+    sidebarWorkspaceOrder(
+      repositoriesStore.state.order,
+      workspacesStore.state.order,
+      (candidate) => workspacesStore.row(candidate),
+      (candidate) => prefsStore.isPinned(candidate),
+    ),
+  ),
+);
+
 /** The row's numbered slot, counted down the rendered list — the same order
  * `switch-workspace-N` resolves through in App.tsx. */
 function workspaceShortcut(name: string): ShortcutAction | undefined {
-  const index = sidebarWorkspaceOrder(
-    repositoriesStore.state.order,
-    workspacesStore.state.order,
-    (candidate) => workspacesStore.row(candidate),
-    (candidate) => prefsStore.isPinned(candidate),
-  ).indexOf(name);
-  return index >= 0 && index < 9 ? `switch-workspace-${index + 1}` as ShortcutAction : undefined;
+  return workspaceSlots().get(name);
 }
 
 function WorkspaceRow(props: { name: string }) {
@@ -324,6 +342,10 @@ function WorkspaceRow(props: { name: string }) {
   const hasDiffStats = () => ((row()?.additions ?? 0) > 0 || (row()?.deletions ?? 0) > 0);
   const activity = () => workspaceRowActivity(row() ?? {});
   const awaitingAcknowledgement = () => workspaceAwaitingAcknowledgement(props.name);
+  const shortcutHint = () => {
+    const shortcut = workspaceShortcut(props.name);
+    return shortcut ? keyHint(shortcut) : undefined;
+  };
   return (
     <PeekCard
       content={<Show when={row()}>{(details) => <WorkspacePeek row={details()} />}</Show>}
@@ -334,7 +356,7 @@ function WorkspaceRow(props: { name: string }) {
           class="workspace-row-shell"
           classList={{ selected: selected() }}
           {...workspaceDragProps(() => props.name)}
-          data-shortcut={workspaceShortcut(props.name) ? keyHint(workspaceShortcut(props.name)!) : undefined}
+          data-shortcut={shortcutHint()}
           onClick={() => nav.selectWorkspace(props.name)}
           onContextMenu={(e) => openContextMenu(e, workspaceMenuItems(props.name))}
           onKeyDown={(e) => {
