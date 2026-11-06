@@ -130,6 +130,7 @@ export type ArchcarRequest =
   | { type: "list_review_comments"; workspace: string }
   | { type: "get_checks_summary"; workspace: string }
   | { type: "get_settings"; repository?: string }
+  | { type: "get_achievements" }
   | { type: "list_layout_presets" }
   | { type: "save_layout_preset"; preset: LayoutPresetRecord }
   | { type: "delete_layout_preset"; id: string }

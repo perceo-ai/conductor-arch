@@ -106,6 +106,7 @@ export type ArchcarResponse =
   | { type: "review_comments"; workspace: string; comments: ReviewComment[] }
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
+  | { type: "achievements"; summary: AchievementsSummary }
   | { type: "layout_presets"; presets: LayoutPresetRecord[] }
   | { type: "layout_preset_saved"; preset: LayoutPresetRecord }
   | { type: "repository_branches"; repository: string; branches: string[] }
@@ -252,3 +253,42 @@ export interface ServiceDoctorReport {
 
 // --- Background development tasks -----------------------------------------
 // Mirrors crates/core/src/background_tasks.rs.
+
+/** Mirrors `archductor_core::achievements`. Derived on demand by the daemon. */
+export interface AchievementProgress {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  /** What the metric actually counts, shown under "what counts". */
+  counts: string;
+  metric: string;
+  kind: "lifetime" | "best_session";
+  value: number;
+  /** Highest tier earned, 1-based; absent when nothing is earned yet. */
+  tier?: number | null;
+  tier_name?: string | null;
+  next_threshold?: number | null;
+  tier_thresholds: number[];
+  secret: boolean;
+}
+
+export interface DiscoveredName {
+  name: string;
+  discovered: boolean;
+}
+
+export interface DiscoverySummary {
+  total: number;
+  discovered: number;
+  names: DiscoveredName[];
+}
+
+export interface AchievementsSummary {
+  achievements: AchievementProgress[];
+  discovery: DiscoverySummary;
+  metrics: Record<string, number>;
+  unlocked: number;
+  tiers_earned: number;
+  total: number;
+}

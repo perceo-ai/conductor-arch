@@ -1,0 +1,280 @@
+/* Achievements page. Last in the theme import chain on purpose: it only adds
+ * `.ach-*` rules and must not be re-ordered above the shells it sits inside
+ * (page-shell, page-header), which it deliberately reuses rather than
+ * restyling. */
+
+/* Sidebar footer: Settings and Achievements as a pair of icon buttons. The
+ * class is new rather than a reuse of `.sidebar-nav-button`, whose full-width
+ * row treatment (leading accent bar, label spacing) is restated in the later
+ * `polish` pass and would otherwise win over anything declared here. */
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sidebar-footer-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lc-text-muted);
+  cursor: pointer;
+}
+
+.sidebar-footer-button:hover {
+  background: var(--lc-surface-selected);
+  color: var(--lc-text-strong);
+}
+
+.sidebar-footer-button.active {
+  background: var(--lc-surface-selected);
+  color: var(--lc-accent);
+}
+
+.sidebar-footer-icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* `.dashboard-header` is a flex *column*, so the tabs and the rescan button
+ * need their own row or the button lands on a line of its own and doubles the
+ * header's height. */
+.achievements-view .ach-header-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.achievements-view .ach-rescan {
+  margin-left: auto;
+}
+
+.ach-scoreboard {
+  display: flex;
+  gap: 24px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--lc-border);
+  background: var(--lc-surface-muted);
+}
+
+.ach-score {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ach-score-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--lc-accent);
+  align-self: center;
+}
+
+.ach-score-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--lc-text-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.ach-score-label {
+  font-size: 11px;
+  color: var(--lc-text-muted);
+}
+
+.ach-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 16px 24px;
+}
+
+.ach-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--lc-text-muted);
+  margin-bottom: 12px;
+  cursor: pointer;
+}
+
+.ach-group {
+  margin-bottom: 20px;
+}
+
+.ach-group-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--lc-text-muted);
+}
+
+.ach-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.ach-card {
+  border: 1px solid var(--lc-border);
+  border-radius: 6px;
+  background: var(--lc-surface-raised);
+  padding: 10px 12px;
+}
+
+/* Locked cards stay readable but recede, so a wall of them does not compete
+ * with the ones actually earned. */
+.ach-card.locked {
+  opacity: 0.55;
+  background: var(--lc-surface-muted);
+}
+
+.ach-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ach-card-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lc-text-strong);
+}
+
+.ach-tier {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+}
+
+.ach-tier.none {
+  color: var(--lc-text-muted);
+  border-color: var(--lc-border);
+}
+
+.ach-card[data-tier="copper"] .ach-tier {
+  color: #c87f4a;
+}
+.ach-card[data-tier="silver"] .ach-tier {
+  color: #b8bcc2;
+}
+.ach-card[data-tier="gold"] .ach-tier {
+  color: #d4a94f;
+}
+.ach-card[data-tier="diamond"] .ach-tier {
+  color: #7fd4e8;
+}
+.ach-card[data-tier="olympian"] .ach-tier {
+  color: #c89ae8;
+}
+
+.ach-card-desc {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--lc-text-muted);
+}
+
+.ach-card-bar {
+  margin-top: 8px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--lc-border);
+  overflow: hidden;
+}
+
+.ach-card-bar-fill {
+  height: 100%;
+  background: var(--lc-accent);
+}
+
+.ach-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ach-card-value {
+  font-size: 10px;
+  color: var(--lc-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ach-card-more {
+  margin-left: auto;
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 10px;
+  color: var(--lc-text-muted);
+  cursor: pointer;
+}
+
+.ach-card-more:hover {
+  color: var(--lc-text-strong);
+}
+
+.ach-card-counts {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--lc-border);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--lc-text-muted);
+}
+
+.ach-card-tiers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ach-card-tiers .earned {
+  color: var(--lc-text-strong);
+}
+
+.ach-secret-note,
+.ach-discovery-note {
+  font-size: 11px;
+  color: var(--lc-text-muted);
+  margin-bottom: 12px;
+}
+
+.ach-names {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ach-name {
+  font-size: 11px;
+  font-family: var(--lc-font-mono, ui-monospace, monospace);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--lc-border);
+  color: var(--lc-text-muted);
+  background: var(--lc-surface-muted);
+}
+
+.ach-name.discovered {
+  color: var(--lc-text-strong);
+  border-color: var(--lc-accent);
+  background: var(--lc-surface-raised);
+}

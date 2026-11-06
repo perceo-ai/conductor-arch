@@ -473,6 +473,10 @@ pub enum ArchcarRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repository: Option<String>,
     },
+    /// Achievements and workspace-name discovery, derived on demand from
+    /// rows the daemon already keeps. Read-only and nothing depends on it, so
+    /// it is only ever asked for when a human opens the page.
+    GetAchievements,
     ListLayoutPresets,
     SaveLayoutPreset {
         preset: crate::layout_presets::LayoutPreset,
@@ -1260,6 +1264,9 @@ pub enum ArchcarResponse {
         scope: String,
         /// Effective settings serialized as pretty TOML.
         toml: String,
+    },
+    Achievements {
+        summary: crate::achievements::AchievementsSummary,
     },
     LayoutPresets {
         presets: Vec<crate::layout_presets::LayoutPreset>,
@@ -2137,6 +2144,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetSettings { repository } => {
             format!("get_settings repository={}", repository.as_deref().unwrap_or("<global>"))
         }
+        ArchcarRequest::GetAchievements => "get_achievements".to_owned(),
         ArchcarRequest::ListLayoutPresets => "list_layout_presets".to_owned(),
         ArchcarRequest::SaveLayoutPreset { preset } => {
             format!("save_layout_preset id={}", preset.id)
@@ -2872,6 +2880,15 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::Settings { scope, toml } => {
             format!("settings scope={scope} bytes={}", toml.len())
+        }
+        ArchcarResponse::Achievements { summary } => {
+            format!(
+                "achievements unlocked={}/{} names={}/{}",
+                summary.unlocked,
+                summary.total,
+                summary.discovery.discovered,
+                summary.discovery.total
+            )
         }
         ArchcarResponse::LayoutPresets { presets } => {
             format!("layout_presets count={}", presets.len())

@@ -1,3 +1,4 @@
+pub mod achievements;
 pub mod agent_naming;
 pub mod agent_status;
 pub mod agent_tools;

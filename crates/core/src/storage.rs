@@ -493,6 +493,15 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_summary_refresh_state_workspace
           ON summary_refresh_state(workspace_id, scope_type, scope_id);
 
+        -- Which generated workspace names have ever been used on this
+        -- machine. Rows outlive the workspace that earned them: a name stays
+        -- discovered after its workspace is archived or discarded, which is
+        -- the whole point of the achievements discovery list.
+        CREATE TABLE IF NOT EXISTS workspace_name_discoveries (
+          name TEXT PRIMARY KEY,
+          discovered_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS layout_presets (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
