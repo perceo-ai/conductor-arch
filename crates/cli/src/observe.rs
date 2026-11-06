@@ -239,6 +239,13 @@ pub fn run_chat(paths: &AppPaths, store: &WorkspaceStore, args: ChatArgs) -> Res
         }
     };
     let thread = store.get_chat_thread_record(thread_id)?;
+    let process = sessions
+        .iter()
+        .filter(|process| process.chat_thread_id == Some(thread_id))
+        .max_by_key(|process| process.id);
+    let client = ArchcarClient::from_paths(paths);
+    // Before the events: see `SessionSignals::live`.
+    let live = process.and_then(daemon_probe(&client));
     let records = events.list_for_chat_thread(thread_id)?;
     let turns = build_chat_transcript(
         &records,
@@ -248,26 +255,20 @@ pub fn run_chat(paths: &AppPaths, store: &WorkspaceStore, args: ChatArgs) -> Res
             full: args.full,
         },
     );
-    let session = sessions
-        .iter()
-        .filter(|process| process.chat_thread_id == Some(thread_id))
-        .max_by_key(|process| process.id)
-        .map(|process| {
-            let client = ArchcarClient::from_paths(paths);
-            let mut probe = daemon_probe(&client);
-            session_report(
-                store,
-                &ProviderInteractionStore::new(paths.database_path.clone()),
-                SessionSignals {
-                    process,
-                    thread: Some(&thread),
-                    records: &records,
-                    turns: &turns,
-                },
-                now_ms(),
-                &mut probe,
-            )
-        });
+    let session = process.map(|process| {
+        session_report(
+            store,
+            &ProviderInteractionStore::new(paths.database_path.clone()),
+            SessionSignals {
+                process,
+                thread: Some(&thread),
+                live,
+                records: &records,
+                turns: &turns,
+            },
+            now_ms(),
+        )
+    });
     let total = turns.len();
     let shown = select_turns(
         turns,

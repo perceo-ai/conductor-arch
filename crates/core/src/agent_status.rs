@@ -299,6 +299,8 @@ fn session_reports(
 
     let mut reports = Vec::new();
     for (thread_id, process) in newest {
+        // Before the events: see `SessionSignals::live`.
+        let live = probe(&process);
         let records = events.list_for_chat_thread(thread_id)?;
         let turns = build_chat_transcript(
             &records,
@@ -314,11 +316,11 @@ fn session_reports(
             SessionSignals {
                 process: &process,
                 thread: threads.get(&thread_id),
+                live,
                 records: &records,
                 turns: &turns,
             },
             now_ms,
-            probe,
         ));
     }
 
@@ -341,6 +343,13 @@ fn session_reports(
 pub struct SessionSignals<'a> {
     pub process: &'a ProcessRecord,
     pub thread: Option<&'a ChatThreadRecord>,
+    /// The daemon's answer, `None` if it could not say. Ask it before reading
+    /// `records`: a session loop persists a turn's terminal event before it
+    /// marks the session ready, so `records` read after a ready answer hold
+    /// that turn's end. The other way round, events from before the turn ended
+    /// meet the ready mark that came after it, and `derive_activity` reports a
+    /// finished turn as `AwaitingInput`.
+    pub live: Option<LiveProbe>,
     /// The chat thread's provider events, oldest first.
     pub records: &'a [ProviderEventRecord],
     /// The transcript built from `records`.
@@ -352,15 +361,15 @@ pub fn session_report(
     interactions: &ProviderInteractionStore,
     signals: SessionSignals<'_>,
     now_ms: u64,
-    probe: &mut dyn FnMut(&ProcessRecord) -> Option<LiveProbe>,
 ) -> SessionReport {
     let SessionSignals {
         process,
         thread,
+        live,
         records,
         turns,
     } = signals;
-    let (alive, runtime_state, source) = match probe(process) {
+    let (alive, runtime_state, source) = match live {
         Some(live) => (live.alive, live.runtime_state, LivenessSource::Daemon),
         None => (
             process.status == ProcessStatus::Running && crate::platform::process_alive(process.pid),
@@ -545,6 +554,43 @@ mod tests {
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["schema_version"], 1);
         assert_eq!(json["workspaces"][0]["sessions"][0]["state"], "working");
+    }
+
+    /// Failure this guards: `status` read the events, then asked the daemon. A
+    /// turn that ended between the two paired events with no terminal record
+    /// and the loop's ready mark, and a finished turn read as `awaiting_input`.
+    /// The probe here ends the turn the way a session loop does -- terminal
+    /// event first, ready second -- so it lands in exactly that gap.
+    #[test]
+    fn a_turn_ending_during_a_status_read_reports_finished_either_side_of_the_late_mark() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, db_path, process, last_ms) = board_with_a_stale_pid(temp.path());
+        let base_ms = 1_790_757_000_000;
+        let ended = format!(
+            "{FINISHED_TURN}{MID_TOOL_CALL_TURN}{}\n",
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"Clean.","duration_ms":900}"#
+        );
+        let mut turn_is_open = true;
+        let mut probe = |_: &ProcessRecord| {
+            if std::mem::take(&mut turn_is_open) {
+                store_claude_records(&db_path, process.chat_thread_id, &ended, base_ms);
+            }
+            Some(LiveProbe {
+                alive: true,
+                runtime_state: Some(AgentSessionState::WaitingForInput),
+            })
+        };
+
+        // Loop's ready mark is in; the daemon's own mark is still held back.
+        let before_mark = collect_status(&store, &db_path, None, last_ms, &mut probe).unwrap();
+        // The late mark has landed: same runtime state, same answer.
+        let after_mark = collect_status(&store, &db_path, None, last_ms, &mut probe).unwrap();
+
+        for report in [before_mark, after_mark] {
+            let session = &report.workspaces[0].sessions[0];
+            assert_eq!(session.state, AgentActivity::Finished);
+            assert_eq!(session.turn_outcome, Some(TurnOutcome::Success));
+        }
     }
 
     #[test]
