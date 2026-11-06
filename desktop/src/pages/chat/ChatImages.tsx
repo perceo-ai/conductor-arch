@@ -44,6 +44,7 @@ function ChatImage(props: {
     () => (wanted() ? { threadId: props.threadId, itemId: props.itemId, index: props.index } : undefined),
     fetchImage,
   );
+  const toggleLabel = () => (full() ? "Click to shrink" : "Click to enlarge");
   return (
     <Show
       when={wanted()}
@@ -56,7 +57,9 @@ function ChatImage(props: {
       <Show when={source.error}>
         <span class="chat-image-error">Image unavailable: {(source.error as Error).message}</span>
       </Show>
-      <Show when={source()}>
+      {/* Reading an errored resource throws, and nothing above the timeline
+          catches it, so the error has to be ruled out first. */}
+      <Show when={!source.error && source()}>
         {(src) => (
           // Click toggles between the thumbnail the timeline can hold and the
           // image at its own size, which is what a screenshot of a UI needs.
@@ -65,8 +68,16 @@ function ChatImage(props: {
             classList={{ "chat-image-full": full() }}
             src={src()}
             alt={`${props.image.media_type} the agent read`}
-            title={full() ? "Click to shrink" : "Click to enlarge"}
+            title={toggleLabel()}
+            role="button"
+            tabIndex={0}
+            aria-label={toggleLabel()}
             onClick={() => setFull((shown) => !shown)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              setFull((shown) => !shown);
+            }}
           />
         )}
       </Show>
