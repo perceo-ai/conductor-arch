@@ -540,6 +540,17 @@ enum ArchcarCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Achievements and workspace-name discovery for the connected daemon.
+    /// Purely for fun: every number is derived on demand from rows the daemon
+    /// already keeps, so this costs nothing until it is asked for.
+    Achievements {
+        /// Include achievements with no tier earned yet.
+        #[arg(long)]
+        locked: bool,
+        /// List the generated workspace names and which ones are discovered.
+        #[arg(long)]
+        names: bool,
+    },
     /// Background service status for the daemon this client is talking to.
     /// Unlike `archductor service status`, this follows a remote connection,
     /// so it answers for the server rather than for this machine.
@@ -2076,6 +2087,15 @@ fn run_cli() -> Result<()> {
                     print_archcar_response(client.send(ArchcarRequest::SetAutoUpdate {
                         enabled: state == "on",
                     })?);
+                }
+                ArchcarCommand::Achievements { locked, names } => {
+                    match client.send(ArchcarRequest::GetAchievements)? {
+                        ArchcarResponse::Achievements { summary } => {
+                            print!("{}", render_achievements(&summary, locked, names));
+                        }
+                        ArchcarResponse::Error { message } => anyhow::bail!(message),
+                        other => print_archcar_response(other),
+                    }
                 }
                 ArchcarCommand::ServiceDoctor => {
                     print_archcar_response(client.send(ArchcarRequest::ServiceDoctor)?);
@@ -4317,6 +4337,69 @@ fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full:
     }
 }
 
+/// Render the achievements summary. `locked` adds entries with no tier yet
+/// (secret ones stay hidden until their metric moves, same as the desktop
+/// surface), `names` adds the workspace-name discovery list.
+fn render_achievements(
+    summary: &archductor_core::achievements::AchievementsSummary,
+    locked: bool,
+    names: bool,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "achievements {}/{} unlocked, {} tiers earned",
+        summary.unlocked, summary.total, summary.tiers_earned
+    );
+    let _ = writeln!(
+        out,
+        "discovery {}/{} workspace names",
+        summary.discovery.discovered, summary.discovery.total
+    );
+
+    let mut category = String::new();
+    for entry in &summary.achievements {
+        let shown = entry.unlocked() || (locked && !entry.secret);
+        if !shown {
+            continue;
+        }
+        if entry.category != category {
+            category = entry.category.clone();
+            let _ = writeln!(out, "\n[{category}]");
+        }
+        let tier = entry.tier_name.as_deref().unwrap_or("-");
+        let next = match entry.next_threshold {
+            Some(threshold) => format!(" next {threshold}"),
+            None => " maxed".to_owned(),
+        };
+        let _ = writeln!(
+            out,
+            "  {:<9} {:<28} {}{}",
+            tier, entry.name, entry.value, next
+        );
+    }
+
+    let hidden = summary
+        .achievements
+        .iter()
+        .filter(|entry| entry.secret && !entry.unlocked())
+        .count();
+    if hidden > 0 {
+        let _ = writeln!(out, "\n{hidden} secret achievement(s) still hidden");
+    }
+
+    if names {
+        let _ = writeln!(out, "\n[discovery]");
+        for entry in &summary.discovery.names {
+            let mark = if entry.discovered { "x" } else { " " };
+            let _ = writeln!(out, "  [{mark}] {}", entry.name);
+        }
+    }
+    out
+}
+
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
@@ -4751,6 +4834,9 @@ fn print_archcar_response(response: ArchcarResponse) {
         ArchcarResponse::Settings { scope, toml } => {
             println!("settings {scope}");
             print!("{toml}");
+        }
+        ArchcarResponse::Achievements { summary } => {
+            print!("{}", render_achievements(&summary, false, false));
         }
         ArchcarResponse::LayoutPresets { presets } => {
             print!("{}", render_layout_preset_list(&presets, None));
@@ -9047,6 +9133,111 @@ mod tests {
             render_layout_preset_list(&presets, Some("custom-one")),
             "  code\tCode [built-in]\n* custom-one\tMy layout\n"
         );
+    }
+
+    #[test]
+    fn parses_archcar_achievements_flags() {
+        let cli = try_parse([
+            "archductor",
+            "archcar",
+            "achievements",
+            "--locked",
+            "--names",
+        ])
+        .unwrap();
+        let Command::Archcar { command, .. } = cli.command else {
+            panic!("expected an archcar command");
+        };
+        assert!(matches!(
+            command,
+            ArchcarCommand::Achievements {
+                locked: true,
+                names: true
+            }
+        ));
+    }
+
+    #[test]
+    fn renders_unlocked_achievements_and_hides_untouched_secrets() {
+        use archductor_core::achievements::{
+            AchievementKind, AchievementProgress, AchievementsSummary, DiscoveredName,
+            DiscoverySummary,
+        };
+
+        fn entry(
+            id: &str,
+            name: &str,
+            tier: Option<u8>,
+            secret: bool,
+            value: i64,
+        ) -> AchievementProgress {
+            AchievementProgress {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                description: "d".to_owned(),
+                category: "Workspaces".to_owned(),
+                counts: "c".to_owned(),
+                metric: "m".to_owned(),
+                kind: AchievementKind::Lifetime,
+                value,
+                tier,
+                tier_name: tier.map(|_| "Copper".to_owned()),
+                next_threshold: Some(25),
+                tier_thresholds: vec![5, 25, 100, 400, 1500],
+                secret,
+            }
+        }
+
+        let summary = AchievementsSummary {
+            achievements: vec![
+                entry("earned", "Worktree Wrangler", Some(1), false, 7),
+                entry("locked", "Merge Merchant", None, false, 0),
+                entry("hidden", "Red Text Connoisseur", None, true, 0),
+            ],
+            discovery: DiscoverySummary {
+                total: 2,
+                discovered: 1,
+                names: vec![
+                    DiscoveredName {
+                        name: "pipewire".to_owned(),
+                        discovered: true,
+                    },
+                    DiscoveredName {
+                        name: "gentoo".to_owned(),
+                        discovered: false,
+                    },
+                ],
+            },
+            metrics: Default::default(),
+            unlocked: 1,
+            tiers_earned: 1,
+            total: 3,
+        };
+
+        let default = render_achievements(&summary, false, false);
+        assert!(default.contains("achievements 1/3 unlocked, 1 tiers earned"));
+        assert!(default.contains("discovery 1/2 workspace names"));
+        assert!(default.contains("Worktree Wrangler"));
+        assert!(
+            !default.contains("Merge Merchant"),
+            "locked entries are opt-in"
+        );
+        assert!(
+            !default.contains("Red Text Connoisseur"),
+            "untouched secrets stay hidden"
+        );
+        assert!(default.contains("1 secret achievement(s) still hidden"));
+        assert!(!default.contains("[discovery]"));
+
+        let verbose = render_achievements(&summary, true, true);
+        assert!(verbose.contains("Merge Merchant"));
+        assert!(
+            !verbose.contains("Red Text Connoisseur"),
+            "--locked must not reveal secrets"
+        );
+        assert!(verbose.contains("[discovery]"));
+        assert!(verbose.contains("[x] pipewire"));
+        assert!(verbose.contains("[ ] gentoo"));
     }
 
     #[test]

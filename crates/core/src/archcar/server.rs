@@ -2128,6 +2128,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::GetAchievements => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match WorkspaceStore::open_app(&db_path).and_then(|store| store.achievements_summary())
+            {
+                Ok(summary) => ArchcarResponse::Achievements { summary },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::ListLayoutPresets => {
             let db_path = state.lock().unwrap().db_path.clone();
             match WorkspaceStore::open_app(&db_path).and_then(|store| store.list_layout_presets()) {
@@ -5400,6 +5410,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListReviewComments { .. }
             | ArchcarRequest::GetChecksSummary { .. }
             | ArchcarRequest::GetSettings { .. }
+            | ArchcarRequest::GetAchievements
             | ArchcarRequest::ListLayoutPresets
             | ArchcarRequest::ListRepositoryBranches { .. }
             | ArchcarRequest::ListAgentProviders

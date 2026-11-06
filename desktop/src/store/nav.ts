@@ -22,7 +22,13 @@ import { editorDraftStash } from "@/lib/editorDraftStash";
 // reading `activePage` does not couple a component to `selectedChatThread`, etc.
 // This is the fine-grained equivalent of the AppStateEvent selection events.
 
-export type AppPage = "dashboard" | "workspace" | "history" | "settings" | "review";
+export type AppPage =
+  | "dashboard"
+  | "workspace"
+  | "history"
+  | "settings"
+  | "achievements"
+  | "review";
 
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
 const [activePage, setActivePage] = createSignal<AppPage>("dashboard");

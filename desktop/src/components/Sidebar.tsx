@@ -298,6 +298,13 @@ function keyHint(action: ShortcutAction): string | undefined {
   return shortcutForAction(action, parseKeybindingOverrides(prefsStore.state.keybindings));
 }
 
+/** "Settings", plus its shortcut when one is bound — the tooltip now carries
+ * what the button's label used to say. */
+function settingsTitle(): string {
+  const hint = keyHint("goto-settings");
+  return hint ? `Settings (${hint})` : "Settings";
+}
+
 function workspaceShortcut(name: string): ShortcutAction | undefined {
   const active = workspacesStore.state.order.filter(
     (candidate) => workspacesStore.row(candidate)?.status !== "archived",
@@ -589,15 +596,28 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         </Show>
       </div>
 
+      {/* Icon-only pair. What the Settings button used to say in a label now
+          lives in `title`/`aria-label`, so the shortcut hint and the
+          screen-reader name both survive losing the text. */}
       <div class="sidebar-footer">
         <button
-          class="sidebar-nav-button"
+          class="sidebar-footer-button"
           classList={{ active: nav.activePage() === "settings" }}
           data-shortcut={keyHint("goto-settings")}
+          title={settingsTitle()}
+          aria-label="Settings"
           onClick={() => nav.goToPage("settings")}
         >
-          <Icon name="settings" class="sidebar-nav-icon" />
-          <span class="sidebar-nav-label">Settings</span>
+          <Icon name="settings" class="sidebar-footer-icon" />
+        </button>
+        <button
+          class="sidebar-footer-button"
+          classList={{ active: nav.activePage() === "achievements" }}
+          title="Achievements"
+          aria-label="Achievements"
+          onClick={() => nav.goToPage("achievements")}
+        >
+          <Icon name="trophy" class="sidebar-footer-icon" />
         </button>
       </div>
 

@@ -102,7 +102,7 @@ const CODEX_RECOVERY_CONTEXT_MAX_BYTES: usize = 16 * 1024;
 const CODEX_RECOVERY_ITEM_MAX_CHARS: usize = 1200;
 const WORKSPACE_LIFECYCLE_MAX_ATTEMPTS: i64 = 3;
 const WORKSPACE_PORT_START: u16 = 42000;
-const WORKSPACE_CITY_NAMES: [&str; 200] = [
+pub(crate) const WORKSPACE_CITY_NAMES: [&str; 200] = [
     "arch",
     "debian",
     "ubuntu",
@@ -1706,6 +1706,8 @@ impl WorkspaceStore {
             ],
         )?;
         let workspace = self.get_by_path(&path)?;
+        // Discovery is a toy; it does not get to break workspace creation.
+        let _ = self.record_workspace_name_discovery(&workspace.name);
         self.record_workspace_event(
             workspace.id,
             &workspace.name,
@@ -1855,6 +1857,32 @@ impl WorkspaceStore {
             updated_at: workspace.updated_at.clone(),
             workspace,
         })
+    }
+
+    /// Remember that a generated workspace name was used. Best-effort: a
+    /// failure here must never fail workspace creation, which is why the
+    /// caller ignores the result.
+    pub fn record_workspace_name_discovery(&self, name: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO workspace_name_discoveries (name, discovered_at)
+             VALUES (?1, ?2)",
+            params![name, timestamp()],
+        )?;
+        Ok(())
+    }
+
+    /// Names recorded as discovered. Unions in the live `workspaces` rows so
+    /// databases created before the discoveries table still show a history.
+    pub fn discovered_workspace_names(&self) -> Result<std::collections::BTreeSet<String>> {
+        let mut statement = self.conn.prepare(
+            "SELECT name FROM workspace_name_discoveries
+             UNION
+             SELECT name FROM workspaces",
+        )?;
+        let names = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::BTreeSet<String>>>()?;
+        Ok(names)
     }
 
     pub fn workspace_exists_by_name(&self, name: &str) -> Result<bool> {
@@ -13584,6 +13612,13 @@ fn command_exists(program: &str) -> bool {
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+/// The pool generated workspace names are drawn from. The achievements
+/// discovery list is "which of these have I seen?", so it has to be the same
+/// list the generator uses.
+pub fn workspace_name_pool() -> &'static [&'static str] {
+    WORKSPACE_CITY_NAMES.as_slice()
 }
 
 pub(crate) fn timestamp() -> String {
