@@ -8,7 +8,7 @@ use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::{info, warn};
@@ -40,7 +40,6 @@ use crate::provider_adapters::codex_app_server::{
     CodexAppServerThreadStartParams, CodexAppServerTurnStartParams, CodexAppServerTurnSteerParams,
     CodexAppServerUserInput, CodexManagedAdapter, CODEX_APP_SERVER_DEFAULT_ARGS,
 };
-use crate::provider_events::unix_millis;
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
@@ -182,10 +181,14 @@ pub struct TurnGenerations {
     /// generation below one is live work, and one above it may be a busy mark
     /// whose input is still on its way to the session loop.
     retired: BTreeSet<u64>,
-    /// When each live generation was marked busy, in epoch ms, so a
-    /// completion can say how long the turn ran. Entries are dropped as
-    /// `completed` passes them, so this never outgrows the live turns.
+    /// When each live generation was marked busy, on [`monotonic_millis`], so
+    /// a completion can say how long the turn ran. Entries are dropped as
+    /// `completed` passes them and when their input is retired or refused, so
+    /// this never outgrows the live turns.
     started_at_ms: BTreeMap<u64, u64>,
+    /// What the last `TurnCompleted` reported, for the `TurnSettled` that
+    /// closes the same turn. Cleared when the loop takes the next input.
+    reported_duration_ms: Option<u64>,
 }
 
 impl TurnGenerations {
@@ -197,6 +200,12 @@ impl TurnGenerations {
     /// Ties the generation the latest busy mark started to the input it was
     /// for.
     pub(crate) fn note_input(&mut self, local_input_id: String) {
+        // Noted again means refused: the earlier mark opened no turn, so it
+        // must not time the one this input starts instead.
+        for (_, generation) in self.inputs.iter().filter(|(id, _)| *id == local_input_id) {
+            self.started_at_ms.remove(generation);
+        }
+        self.reported_duration_ms = None;
         self.inputs.push_back((local_input_id, self.started));
     }
 
@@ -212,6 +221,8 @@ impl TurnGenerations {
                 .map(|(_, generation)| *generation),
         );
         self.inputs.retain(|(id, _)| id != local_input_id);
+        self.started_at_ms
+            .retain(|generation, _| !self.retired.contains(generation));
         self.catch_up_over_retired();
     }
 
@@ -235,14 +246,14 @@ impl TurnGenerations {
         self.started_at_ms.insert(self.started, now_ms);
     }
 
-    /// Returns the generation this completion finished, and when that
-    /// generation was marked busy. The timestamp is None when the mark
-    /// predates this bookkeeping (a session already live across a daemon
-    /// upgrade), in which case the turn reports no duration rather than a
-    /// wrong one.
+    /// Returns the generation this completion finished, and when its turn
+    /// began: the oldest mark it finished, since anything newer joined a turn
+    /// already running. The timestamp is None when the mark predates this
+    /// bookkeeping (a session already live across a daemon upgrade), in which
+    /// case the turn reports no duration rather than a wrong one.
     fn finish(&mut self, turn: FinishedTurn<'_>) -> (u64, Option<u64>) {
         let finished = match turn {
-            FinishedTurn::Latest => self.started,
+            FinishedTurn::Latest | FinishedTurn::Settled => self.started,
             // An input the session never recorded is one this ledger cannot
             // place; finishing everything keeps the daemon's ready mark, the
             // safety net for a lost `Ready`, from being disabled by it.
@@ -272,12 +283,30 @@ impl TurnGenerations {
         self.taken = self.taken.max(finished);
         self.inputs.retain(|(_, generation)| *generation > finished);
         self.catch_up_over_retired();
-        // Read the start time before pruning: the generation being finished
-        // is exactly the one about to be dropped.
-        let started_at_ms = self.started_at_ms.get(&finished).copied();
+        // Read the start time before pruning: the generations being finished
+        // are exactly the ones about to be dropped.
+        let started_at_ms = self
+            .started_at_ms
+            .range(..=finished)
+            .next()
+            .map(|(_, started_at_ms)| *started_at_ms);
         self.started_at_ms
             .retain(|generation, _| *generation > finished);
         (finished, started_at_ms)
+    }
+
+    /// Finishes `turn` and returns how long it ran, as of `now_ms`. A settle
+    /// repeats what its turn's completion reported: that completion already
+    /// spent the turn's mark, and anything left is a later turn's.
+    fn finish_timed(&mut self, turn: FinishedTurn<'_>, now_ms: u64) -> Option<u64> {
+        let settled = matches!(turn, FinishedTurn::Settled);
+        let (_, started_at_ms) = self.finish(turn);
+        let measured = started_at_ms.map(|started_at_ms| now_ms.saturating_sub(started_at_ms));
+        if settled {
+            return self.reported_duration_ms.take().or(measured);
+        }
+        self.reported_duration_ms = measured;
+        measured
     }
 }
 
@@ -285,6 +314,9 @@ impl TurnGenerations {
 pub(crate) enum FinishedTurn<'a> {
     /// Every input started so far.
     Latest,
+    /// Every input started so far, closing a turn whose `TurnCompleted` may
+    /// already have gone out.
+    Settled,
     /// The turn this input ran in: it, and any later input the provider took
     /// into the same turn.
     Input(&'a str),
@@ -304,7 +336,15 @@ pub(crate) fn mark_session_busy_for_input(state: &mut SessionSnapshot) {
     state.ready = false;
     state.runtime_state = AgentSessionState::Running;
     state.turns.started += 1;
-    state.turns.note_started(unix_millis());
+    state.turns.note_started(monotonic_millis());
+}
+
+/// Milliseconds since the first reading in this process. Turn durations
+/// subtract these rather than wall-clock times, which a clock correction
+/// moves mid-turn. Marks live in memory, so they never outlive the origin.
+fn monotonic_millis() -> u64 {
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// Sends `TurnCompleted`, first recording what it finished so the daemon's
@@ -319,11 +359,11 @@ pub(crate) fn send_turn_completed(
     turn: FinishedTurn<'_>,
     status: Option<String>,
 ) {
-    let now_ms = unix_millis();
-    let duration_ms = snapshot.lock().ok().and_then(|mut state| {
-        let (_, started_at_ms) = state.turns.finish(turn);
-        started_at_ms.map(|started_at_ms| now_ms.saturating_sub(started_at_ms))
-    });
+    let now_ms = monotonic_millis();
+    let duration_ms = snapshot
+        .lock()
+        .ok()
+        .and_then(|mut state| state.turns.finish_timed(turn, now_ms));
     let _ = event_tx.send(ArchcarEvent::TurnCompleted {
         session_id: started.session_id,
         thread_id: started.thread_id,
@@ -1000,7 +1040,7 @@ fn apply_harness_effect(
                 snapshot,
                 event_tx,
                 started,
-                FinishedTurn::Latest,
+                FinishedTurn::Settled,
                 Some(harness_turn_status_label(status).to_owned()),
             );
         }
@@ -4885,6 +4925,26 @@ mod tests {
             turns.finish(FinishedTurn::Input("next-input")),
             (3, Some(9_000))
         );
+    }
+
+    /// A settle with no completion before it is the only report its turn
+    /// gets, and one after the next input must not repeat the last turn's
+    /// figure.
+    #[test]
+    fn a_settle_measures_its_own_turn_when_no_completion_reported_it() {
+        let mut turns = TurnGenerations::default();
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("first".to_owned());
+        assert_eq!(
+            turns.finish_timed(FinishedTurn::Input("first"), 2_000),
+            Some(1_000)
+        );
+
+        turns.started += 1;
+        turns.note_started(5_000);
+        turns.note_input("second".to_owned());
+        assert_eq!(turns.finish_timed(FinishedTurn::Settled, 5_250), Some(250));
     }
 
     /// Runs one turn from busy mark to completion with `step` applied to the

@@ -964,9 +964,9 @@ fn timestamp() -> String {
         .unwrap_or_else(|_| "0".to_owned())
 }
 
-/// Wall-clock milliseconds since the epoch. Shared with the session loop,
-/// which times a turn from its busy mark to its completion.
-pub(crate) fn unix_millis() -> u64 {
+/// Wall-clock milliseconds since the epoch. For when an event happened, not
+/// for how long something took: the clock can be corrected in between.
+fn unix_millis() -> u64 {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)

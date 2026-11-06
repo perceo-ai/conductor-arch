@@ -297,10 +297,25 @@ fn agent_label(context: NotificationContext<'_>) -> Option<String> {
     nonempty(context.provider).map(capitalized)
 }
 
-/// "claude-opus-5" -> "Claude Opus 5", "gpt-5.6-sol" -> "GPT 5.6 Sol",
-/// "claude-sonnet-4-6[1m]" -> "Claude Sonnet 4 6 1M". Mirrors `modelLabel`
-/// in the desktop app closely enough for a notification line.
+/// `modelLabel` in the desktop app, which is the source of truth, and
+/// `AgentModels.label` on iOS. `tests/fixtures/model_labels.json` holds all
+/// three to the same answers.
 fn model_label(model: &str) -> String {
+    match model {
+        "gpt-5.6-sol" => return "GPT 5.6 Sol".to_owned(),
+        "gpt-5.6-terra" => return "GPT 5.6 Terra".to_owned(),
+        "gpt-5.6-luna" => return "GPT 5.6 Luna".to_owned(),
+        "gpt-5.5" => return "GPT 5.5".to_owned(),
+        "gpt-5.4" => return "GPT 5.4".to_owned(),
+        "claude-opus-4-8[1m]" => return "Claude Opus 4.8 1M".to_owned(),
+        "claude-opus-4-7[1m]" => return "Claude Opus 4.7 1M".to_owned(),
+        "claude-opus-4-6[1m]" => return "Claude Opus 4.6 1M".to_owned(),
+        "claude-sonnet-5" => return "Claude Sonnet 5 1M".to_owned(),
+        "claude-sonnet-4-6[1m]" => return "Claude Sonnet 4.6 1M".to_owned(),
+        "claude-sonnet-4-6" => return "Claude Sonnet 4.6".to_owned(),
+        "claude-haiku-4-5" => return "Claude Haiku 4.5".to_owned(),
+        _ => {}
+    }
     let (base, long_context) = match model.strip_suffix("[1m]") {
         Some(base) => (base, true),
         None => (model, false),
