@@ -8843,6 +8843,7 @@ exit 1
                 session_id: 9,
                 thread_id: thread.id,
                 status: Some("completed".to_owned()),
+                duration_ms: None,
             },
         );
 

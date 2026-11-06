@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -40,6 +40,7 @@ use crate::provider_adapters::codex_app_server::{
     CodexAppServerThreadStartParams, CodexAppServerTurnStartParams, CodexAppServerTurnSteerParams,
     CodexAppServerUserInput, CodexManagedAdapter, CODEX_APP_SERVER_DEFAULT_ARGS,
 };
+use crate::provider_events::unix_millis;
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
@@ -181,6 +182,10 @@ pub struct TurnGenerations {
     /// generation below one is live work, and one above it may be a busy mark
     /// whose input is still on its way to the session loop.
     retired: BTreeSet<u64>,
+    /// When each live generation was marked busy, in epoch ms, so a
+    /// completion can say how long the turn ran. Entries are dropped as
+    /// `completed` passes them, so this never outgrows the live turns.
+    started_at_ms: BTreeMap<u64, u64>,
 }
 
 impl TurnGenerations {
@@ -225,7 +230,17 @@ impl TurnGenerations {
         }
     }
 
-    fn finish(&mut self, turn: FinishedTurn<'_>) {
+    /// Records the busy mark's time for the generation it just opened.
+    fn note_started(&mut self, now_ms: u64) {
+        self.started_at_ms.insert(self.started, now_ms);
+    }
+
+    /// Returns the generation this completion finished, and when that
+    /// generation was marked busy. The timestamp is None when the mark
+    /// predates this bookkeeping (a session already live across a daemon
+    /// upgrade), in which case the turn reports no duration rather than a
+    /// wrong one.
+    fn finish(&mut self, turn: FinishedTurn<'_>) -> (u64, Option<u64>) {
         let finished = match turn {
             FinishedTurn::Latest => self.started,
             // An input the session never recorded is one this ledger cannot
@@ -257,6 +272,12 @@ impl TurnGenerations {
         self.taken = self.taken.max(finished);
         self.inputs.retain(|(_, generation)| *generation > finished);
         self.catch_up_over_retired();
+        // Read the start time before pruning: the generation being finished
+        // is exactly the one about to be dropped.
+        let started_at_ms = self.started_at_ms.get(&finished).copied();
+        self.started_at_ms
+            .retain(|generation, _| *generation > finished);
+        (finished, started_at_ms)
     }
 }
 
@@ -283,6 +304,7 @@ pub(crate) fn mark_session_busy_for_input(state: &mut SessionSnapshot) {
     state.ready = false;
     state.runtime_state = AgentSessionState::Running;
     state.turns.started += 1;
+    state.turns.note_started(unix_millis());
 }
 
 /// Sends `TurnCompleted`, first recording what it finished so the daemon's
@@ -297,13 +319,16 @@ pub(crate) fn send_turn_completed(
     turn: FinishedTurn<'_>,
     status: Option<String>,
 ) {
-    if let Ok(mut state) = snapshot.lock() {
-        state.turns.finish(turn);
-    }
+    let now_ms = unix_millis();
+    let duration_ms = snapshot.lock().ok().and_then(|mut state| {
+        let (_, started_at_ms) = state.turns.finish(turn);
+        started_at_ms.map(|started_at_ms| now_ms.saturating_sub(started_at_ms))
+    });
     let _ = event_tx.send(ArchcarEvent::TurnCompleted {
         session_id: started.session_id,
         thread_id: started.thread_id,
         status,
+        duration_ms,
     });
 }
 
@@ -4706,6 +4731,33 @@ fn terminal_device_path_for_pid(process_id: u32) -> Result<PathBuf> {
 mod tests {
     use super::*;
 
+    /// A completion must be able to say how long its own turn ran, including
+    /// when a later turn is already live: the notification names the turn
+    /// that just ended, not the newest one.
+    #[test]
+    fn turn_generations_time_the_turn_they_finish() {
+        let mut turns = TurnGenerations::default();
+
+        turns.started += 1;
+        turns.note_started(1_000);
+        turns.note_input("first".to_owned());
+        turns.started += 1;
+        turns.note_started(5_000);
+        turns.note_input("second".to_owned());
+
+        // The first turn ends while the second is already live: its duration
+        // is measured from its own busy mark, not the newest one.
+        assert_eq!(turns.finish(FinishedTurn::Input("first")), (1, Some(1_000)));
+        assert_eq!(turns.finish(FinishedTurn::Latest), (2, Some(5_000)));
+
+        // Finished generations stop being tracked, so a long-lived session
+        // does not accumulate start times, and a completion with no recorded
+        // mark reports no duration rather than a wrong one.
+        assert!(turns.started_at_ms.is_empty());
+        turns.started += 1;
+        assert_eq!(turns.finish(FinishedTurn::Latest), (3, None));
+    }
+
     /// Registering an ACP agent has to be enough to drive it: the transport
     /// choice and the loop both come from the registry, not from a match on
     /// provider names.
@@ -5832,9 +5884,16 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
                     session_id,
                     thread_id,
                     status,
+                    duration_ms,
                 } if session_id == process.id && thread_id == thread.id => {
                     completed_count += 1;
                     assert_eq!(status.as_deref(), Some("success"));
+                    // Notifications read this ("Done in 4m 12s"), so a real
+                    // managed turn has to carry it, not just the unit test.
+                    assert!(
+                        duration_ms.is_some(),
+                        "a managed turn must report how long it ran"
+                    );
                 }
                 ArchcarEvent::SessionExited { session_id, .. } if session_id == process.id => {
                     break;

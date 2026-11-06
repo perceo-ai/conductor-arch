@@ -3148,9 +3148,13 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             session_id,
             thread_id,
             status,
+            duration_ms,
         } => format!(
-            "turn_completed session_id={session_id} thread_id={thread_id} status={}",
-            status.as_deref().unwrap_or("unknown")
+            "turn_completed session_id={session_id} thread_id={thread_id} status={}{}",
+            status.as_deref().unwrap_or("unknown"),
+            duration_ms
+                .map(|ms| format!(" duration_ms={ms}"))
+                .unwrap_or_default()
         ),
         ArchcarEvent::SessionScreenUpdated { session_id } => {
             format!("session_screen_updated session_id={session_id}")
@@ -3282,6 +3286,11 @@ pub enum ArchcarEvent {
         thread_id: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+        /// How long the finished turn ran, when the session could time it.
+        /// Notifications read it ("Done in 4m 12s"); an older daemon omits
+        /// it, and every surface falls back to the outcome alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     SessionScreenUpdated {
         session_id: i64,
@@ -5105,11 +5114,22 @@ mod tests {
             session_id: 11,
             thread_id: 5,
             status: Some("cancelled".to_owned()),
+            duration_ms: None,
         };
 
         assert_eq!(
             archcar_event_summary(&event),
             "turn_completed session_id=11 thread_id=5 status=cancelled"
+        );
+
+        assert_eq!(
+            archcar_event_summary(&ArchcarEvent::TurnCompleted {
+                session_id: 11,
+                thread_id: 5,
+                status: Some("success".to_owned()),
+                duration_ms: Some(252_000),
+            }),
+            "turn_completed session_id=11 thread_id=5 status=success duration_ms=252000"
         );
     }
 
