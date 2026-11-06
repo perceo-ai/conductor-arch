@@ -5097,6 +5097,23 @@ mod tests {
         assert_eq!(durations[0], durations[1]);
     }
 
+    /// The daemon can drain a *full* queued input between the completion and
+    /// the settle, not just the busy mark above: `note_input` runs too, under
+    /// the same lock. That full drain is what #249 missed — `note_input`
+    /// clears `reported_duration_ms`, so without carrying the duration past
+    /// the race the settle re-measures from the new input's mark instead of
+    /// repeating the completion's own duration.
+    #[test]
+    fn qa_probe_full_queue_drain_between_the_completion_and_the_settle() {
+        let durations = acp_turn_durations(|snapshot| {
+            let mut state = snapshot.lock().unwrap();
+            mark_session_busy_for_input(&mut state);
+            state.turns.note_input("next-input".to_owned());
+        });
+        assert_eq!(durations.len(), 2, "{durations:?}");
+        assert_eq!(durations[0], durations[1]);
+    }
+
     /// Registering an ACP agent has to be enough to drive it: the transport
     /// choice and the loop both come from the registry, not from a match on
     /// provider names.
