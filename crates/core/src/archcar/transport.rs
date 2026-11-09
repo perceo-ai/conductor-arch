@@ -627,20 +627,44 @@ mod tests {
         );
     }
 
+    /// A writer whose every write fails with its error kind.
+    struct FailingWriter(io::ErrorKind);
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_reply_tolerates_each_way_a_hung_up_probe_fails_the_write() {
+        // Which of these a hang-up surfaces as depends on the platform and on
+        // whether the reset was already reported, so each must count.
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::BrokenPipe,
+        ] {
+            let answered = std::thread::spawn(move || {
+                send_reply_line(&mut FailingWriter(kind), "{}");
+                true
+            })
+            .join();
+
+            assert!(
+                matches!(answered, Ok(true)),
+                "a {kind:?} write failed the daemon"
+            );
+        }
+    }
+
     #[test]
     #[should_panic(expected = "writing the reply failed")]
     fn a_reply_that_fails_for_any_other_reason_still_panics() {
-        struct Failing;
-        impl Write for Failing {
-            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        send_reply_line(&mut Failing, "{}");
+        send_reply_line(&mut FailingWriter(io::ErrorKind::PermissionDenied), "{}");
     }
 
     #[cfg(windows)]
