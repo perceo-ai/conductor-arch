@@ -575,9 +575,72 @@ mod tests {
                     message: "x".repeat(4096),
                 },
             };
-            writeln!(writer, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+            send_reply_line(&mut writer, &serde_json::to_string(&reply).unwrap());
             true
         })
+    }
+
+    /// Sends `line` as a daemon does, to a probe that hangs up as soon as it
+    /// has read the envelope opening it checks. Closing with the rest of the
+    /// line unread resets the connection, so this write can fail after the
+    /// probe already has its answer; that is the probe succeeding, not the
+    /// daemon failing. Any other failure panics.
+    fn send_reply_line(writer: &mut impl Write, line: &str) {
+        match writeln!(writer, "{line}") {
+            Ok(()) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                ) => {}
+            Err(err) => panic!("writing the reply failed: {err}"),
+        }
+    }
+
+    #[test]
+    fn a_reply_to_a_probe_that_hung_up_mid_reply_still_counts_as_answered() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let daemon = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // The reply's opening, of which the probe reads only a prefix.
+            stream.write_all(&[b'{'; 64]).unwrap();
+            closed_rx.recv().unwrap();
+            send_reply_line(&mut stream, &"x".repeat(4096));
+            true
+        });
+        let mut probe = std::net::TcpStream::connect(address).unwrap();
+        let mut prefix = [0_u8; 8];
+        probe.read_exact(&mut prefix).unwrap();
+        // Closing with the rest of the opening still unread sends a reset
+        // rather than a FIN, as `probe_pre_lock_daemon` does once it has
+        // compared the prefix; the daemon writes only after it has gone out.
+        drop(probe);
+        closed_tx.send(()).unwrap();
+
+        assert!(
+            daemon.join().unwrap(),
+            "the daemon failed on the probe hanging up"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "writing the reply failed")]
+    fn a_reply_that_fails_for_any_other_reason_still_panics() {
+        struct Failing;
+        impl Write for Failing {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        send_reply_line(&mut Failing, "{}");
     }
 
     #[cfg(windows)]
