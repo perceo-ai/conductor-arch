@@ -168,21 +168,50 @@ describe("applyEvent chat attention", () => {
 });
 
 describe("applyEvent native notifications", () => {
-  it("sends OS notifications only while the window is unfocused", async () => {
+  it("notifies unless the finished chat is the one on screen", async () => {
     const { applyEvent } = await import("./reducer");
     const { nav } = await import("./nav");
+    const { threadsStore } = await import("./threads");
 
-    // Focused: the user is watching the chat; no banner on top of it.
+    threadsStore.setThreads("antix", [
+      {
+        id: 2,
+        provider: "claude",
+        title: "fix the parser",
+        status: "idle",
+        model: "claude-opus-5",
+        fast_mode: false,
+        updated_at: "1",
+      },
+    ]);
     nav.setWindowFocused(true);
-    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "completed" });
+    nav.selectWorkspace("antix");
+    nav.selectChatThread(2);
+
+    // The chat you are looking at narrates its own turn ending.
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "success" });
     expect(api.notify).not.toHaveBeenCalled();
 
-    nav.setWindowFocused(false);
-    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "completed" });
+    // A turn finishing in a chat that is not on screen is the whole reason to
+    // run several at once, focused window or not.
+    applyEvent({ type: "turn_completed", session_id: 12, thread_id: 7, status: "success" });
     expect(api.notify).toHaveBeenCalledTimes(1);
-    expect(api.notify).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "Chat finished" }),
-    );
+
+    nav.setWindowFocused(false);
+    applyEvent({
+      type: "turn_completed",
+      session_id: 11,
+      thread_id: 2,
+      status: "success",
+      duration_ms: 252_000,
+    });
+    expect(api.notify).toHaveBeenCalledTimes(2);
+    // The thread list supplies the workspace, title and model.
+    expect(api.notify).toHaveBeenLastCalledWith({
+      id: "turn-11-2-success",
+      title: "antix \u00b7 fix the parser",
+      body: "Done in 4m 12s \u00b7 Claude Opus 5",
+    });
   });
 });
 

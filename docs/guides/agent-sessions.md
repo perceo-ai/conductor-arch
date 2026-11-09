@@ -293,6 +293,37 @@ The CLI has no equivalent yet. It has no long-running command that watches a
 chat finish; `archductor status` shows each agent's state (`working`,
 `finished`, `awaiting_input`) when you ask.
 
+## How much usage is left
+
+**Settings → Usage** shows the plan quota left for each provider signed in on
+the daemon's machine, as one bar per limit window — the same numbers Claude
+Code shows behind `/usage`, without opening a session to ask.
+
+Archductor reads the credentials each provider's CLI already stored on that
+machine and asks that provider's own account endpoint. Nothing extra to log
+into, and no API key of Archductor's own.
+
+| Provider | What it reports |
+| --- | --- |
+| Claude Code | Weekly and session windows, per-model scoped windows, and extra usage credits when they are enabled. With only `ANTHROPIC_API_KEY` set there is no plan quota, so it says so instead. |
+| Codex | The ChatGPT plan's rolling windows. An API-key sign-in, stored or through `OPENAI_API_KEY` or `OPENAI_API_TOKEN`, bills per token and has no plan quota, so it says so instead. |
+| Devin | Daily and weekly quota, plus ACUs on plans that meter them. |
+
+A provider that is not signed in says that rather than showing an empty bar.
+The daemon caches one snapshot for a minute so every client shares it, and
+clients asking at the same moment share one set of provider requests;
+**Refresh** probes again. If the request itself fails, the pane says why and
+offers **Try again**, keeping any bars it already had. On macOS, a Keychain
+lookup that gets no answer within 12 seconds reports an error for Claude Code
+only.
+
+From the CLI:
+
+```bash
+archductor archcar usage             # one block per provider
+archductor archcar usage --refresh   # skip the cache
+```
+
 ## MCP
 
 Archductor is an MCP server, so an agent can query and drive Archductor itself.

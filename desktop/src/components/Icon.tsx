@@ -29,6 +29,7 @@ export type IconName =
   | "file-code"
   | "file-text"
   | "folder"
+  | "gauge"
   | "grip-vertical"
   | "git-merge"
   | "git-compare"
@@ -78,6 +79,7 @@ const PATHS: Record<IconName, () => JSX.Element> = {
   "arrow-up-circle": () => <><circle cx="12" cy="12" r="10" /><path d="m16 12-4-4-4 4" /><path d="M12 16V8" /></>,
   "arrow-down": () => <><path d="M12 5v14" /><path d="m19 12-7 7-7-7" /></>,
   "arrow-down-circle": () => <><circle cx="12" cy="12" r="10" /><path d="M12 8v8" /><path d="m8 12 4 4 4-4" /></>,
+  gauge: () => <><path d="m12 14 4-4" /><path d="M3.34 19a10 10 0 1 1 17.32 0" /></>,
   // "Transfer to another daemon": the sideways twin of the copy-down arrow.
   "arrow-right-circle": () => <><circle cx="12" cy="12" r="10" /><path d="M8 12h8" /><path d="m12 8 4 4-4 4" /></>,
   // Dashed ring: "nothing here yet", visually lighter than any solid ring so an

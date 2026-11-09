@@ -171,6 +171,89 @@ impl ProjectionRenderClass {
 /// background card.
 pub const BACKGROUND_AGENT_TASK_SUBTYPE: &str = "background_task:agent";
 
+/// An image a provider event carries, named by what it is rather than by its
+/// bytes.
+///
+/// A screenshot arrives as base64 inside the tool result, so a projection that
+/// inlined it would push megabytes through every timeline refresh during a
+/// streaming turn. The item carries this description instead; a client that
+/// wants to draw the image asks for the bytes by index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProjectionImage {
+    /// MIME type the provider declared, e.g. `image/png`.
+    pub media_type: String,
+    /// Size of the decoded image in bytes, for a client that wants to warn
+    /// before fetching a large one.
+    pub bytes: usize,
+}
+
+/// Every image block anywhere inside a provider event, in document order.
+///
+/// Walked rather than read from a fixed path: claude nests images under
+/// `message.content[].content[]` for a tool result but sends them at
+/// `message.content[]` when a human attaches one, and MCP tools wrap theirs
+/// another level down again. The shape that matters is the block itself —
+/// `type: "image"` with base64 in `source.data`.
+pub fn projection_images(value: &Value) -> Vec<ProjectionImage> {
+    let mut found = Vec::new();
+    collect_image_blocks(value, &mut found);
+    found
+        .into_iter()
+        .map(|(media_type, data)| ProjectionImage {
+            media_type: media_type.to_owned(),
+            bytes: base64_decoded_len(data),
+        })
+        .collect()
+}
+
+/// The base64 payload and media type of one image inside a provider event,
+/// indexed the way [`projection_images`] ordered them.
+pub fn projection_image_data(value: &Value, index: usize) -> Option<(String, String)> {
+    let mut found = Vec::new();
+    collect_image_blocks(value, &mut found);
+    found
+        .get(index)
+        .map(|(media_type, data)| ((*media_type).to_owned(), (*data).to_owned()))
+}
+
+fn collect_image_blocks<'a>(value: &'a Value, out: &mut Vec<(&'a str, &'a str)>) {
+    match value {
+        Value::Object(entries) => {
+            if entries.get("type").and_then(Value::as_str) == Some("image") {
+                let media_type = value
+                    .pointer("/source/media_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("image/png");
+                if let Some(data) = value.pointer("/source/data").and_then(Value::as_str) {
+                    out.push((media_type, data));
+                    return;
+                }
+            }
+            for nested in entries.values() {
+                collect_image_blocks(nested, out);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                collect_image_blocks(nested, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Decoded size of a base64 string, without decoding it.
+fn base64_decoded_len(data: &str) -> usize {
+    let len = data.trim_end().len();
+    let padding = data
+        .trim_end()
+        .bytes()
+        .rev()
+        .take_while(|b| *b == b'=')
+        .count();
+    len / 4 * 3 - padding.min(2)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderProjectionEvent {
     pub canonical_id: String,
@@ -184,6 +267,8 @@ pub struct ProviderProjectionEvent {
     pub parent_id: Option<String>,
     pub nested_thread_id: Option<String>,
     pub raw_payload: Option<Value>,
+    /// Images this event carries, described but not inlined.
+    pub images: Vec<ProjectionImage>,
     pub background_agent: bool,
 }
 
@@ -202,6 +287,9 @@ pub struct ProviderProjectionItem {
     pub nested_thread_id: Option<String>,
     pub raw_payload: Option<String>,
     pub inspectable: bool,
+    /// Images the tool result held, in the order a client should draw them.
+    /// The bytes are fetched by index; see [`ProjectionImage`].
+    pub images: Vec<ProjectionImage>,
     /// A background card for a subagent, not a shell command.
     pub background_agent: bool,
 }
@@ -266,6 +354,11 @@ pub fn render_provider_event_projection(
         if let Some(index) = positions.get(&id).copied() {
             if item.body.trim().is_empty() && !items[index].body.trim().is_empty() {
                 item.body = items[index].body.clone();
+            }
+            // A tool result carries the image; a later status update for the
+            // same card does not, and must not erase it.
+            if item.images.is_empty() {
+                item.images = items[index].images.clone();
             }
             items[index] = ProviderProjectionItem {
                 sequence: items[index].sequence,
@@ -390,6 +483,7 @@ fn provider_projection_event_from_record(
     let body = provider_projection_record_body(record, turn_duration_ms);
     ProviderProjectionEvent {
         canonical_id: provider_projection_canonical_id(record),
+        images: projection_images(&record.raw_json),
         sequence: record.received_sequence.max(0) as u64,
         timeline_seq: record.timeline_seq,
         category,
@@ -519,7 +613,9 @@ fn provider_turn_terminal_label(phase: ProviderEventPhase) -> &'static str {
     }
 }
 
-fn format_provider_turn_duration(duration_ms: u64) -> String {
+/// "840ms", "18.3s", "4m 12s". Shared with notifications, so a banner and the
+/// turn row in the chat read the same duration.
+pub(crate) fn format_provider_turn_duration(duration_ms: u64) -> String {
     if duration_ms < 1_000 {
         return format!("{duration_ms}ms");
     }
@@ -740,6 +836,7 @@ fn projection_item_from_event(
         nested_thread_id: event.nested_thread_id,
         raw_payload,
         inspectable,
+        images: event.images,
         background_agent: event.background_agent,
     }
 }
@@ -847,6 +944,7 @@ fn projection_item_content_hash(item: &ProviderProjectionItem) -> u64 {
     item.title.hash(&mut hasher);
     item.body.hash(&mut hasher);
     item.raw_payload.hash(&mut hasher);
+    item.images.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1515,6 +1613,65 @@ mod tests {
                 .all(|item| !item.body.contains("[Image:") && !item.title.contains("[Image:")),
             "the dimensions note never reaches the transcript"
         );
+    }
+
+    #[test]
+    fn an_image_tool_result_names_its_image_without_inlining_the_bytes() {
+        // The desktop draws the image from these refs; the base64 never rides
+        // along in the projection, which refreshes on every streamed token.
+        let native = include_str!("../tests/fixtures/claude_stream/image_read.jsonl");
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let mut latest = BTreeMap::new();
+
+        for (sequence, event) in parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let mut draft =
+                event.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: sequence as u64,
+                    schema_version: 1,
+                    adapter_version: "claude-projection-test".to_owned(),
+                });
+            draft.provider_sequence = Some(sequence as i64);
+            let record = store.upsert_event(&draft).unwrap();
+            latest.insert(record.identity_key.clone(), record);
+        }
+        let records = latest.into_values().collect::<Vec<ProviderEventRecord>>();
+        let projection = provider_projection_from_records(&records);
+
+        let card = projection
+            .items
+            .iter()
+            .find(|item| !item.images.is_empty())
+            .expect("the read that produced the image carries it");
+        assert!(
+            card.title.contains("01-home-light.png"),
+            "the image belongs to the read card: {}",
+            card.title
+        );
+        assert_eq!(
+            card.images,
+            vec![ProjectionImage {
+                media_type: "image/png".to_owned(),
+                bytes: 16,
+            }]
+        );
+
+        // What the fetch RPC hands back for that card, found by canonical id
+        // the same way the daemon finds it.
+        let bytes = records
+            .iter()
+            .filter(|record| provider_projection_canonical_id(record) == card.id)
+            .find_map(|record| projection_image_data(&record.raw_json, 0))
+            .expect("the bytes stay available on the stored event");
+        assert_eq!(bytes.0, "image/png");
+        assert_eq!(bytes.1, "iVBORw0KGgoAAAANSUhEUg==");
     }
 
     #[test]

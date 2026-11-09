@@ -39,6 +39,16 @@ export type ArchcarResponse =
   | { type: "sync_applied"; applied: SyncAction[] }
   | { type: "chat_threads"; workspace: string; threads: ArchcarChatThread[] }
   | { type: "chat_projection"; thread_id: number; items: ArchcarProjectionItem[] }
+  | {
+      type: "chat_image";
+      thread_id: number;
+      item_id: string;
+      index: number;
+      /** MIME type the provider declared, e.g. `image/png`. */
+      media_type: string;
+      /** The image, base64-encoded exactly as the provider sent it. */
+      data: string;
+    }
   | { type: "chat_transcripts"; workspace: string; transcripts: ArchcarChatTranscriptSummary[] }
   | { type: "chat_transcript"; thread_id: number; title: string; messages: ArchcarChatTranscriptMessage[] }
   | { type: "context_plans"; workspace: string; plans: ArchcarContextPlan[] }
@@ -111,6 +121,7 @@ export type ArchcarResponse =
   | { type: "layout_preset_saved"; preset: LayoutPresetRecord }
   | { type: "repository_branches"; repository: string; branches: string[] }
   | { type: "agent_providers"; providers: AgentProviderSummary[] }
+  | { type: "provider_usage"; providers: ProviderUsageReport[]; collected_at: number }
   | { type: "prompt_packs"; repository: string; packs: string[]; active?: string }
   | { type: "settings_source"; scope: string; layer: string; toml: string }
   | { type: "settings_saved"; scope: string; layer: string }
@@ -254,6 +265,32 @@ export interface ServiceDoctorReport {
 // --- Background development tasks -----------------------------------------
 // Mirrors crates/core/src/background_tasks.rs.
 
+/** Mirrors `archductor_core::provider_usage`. One bar in the usage settings. */
+export interface UsageMeter {
+  /** Window name as the provider words it: "This week", "Fable", "Today". */
+  label: string;
+  /** 0-100, percent *used*: a full bar means no headroom left. */
+  percent_used: number;
+  detail?: string | null;
+  /** Epoch seconds, like every other archcar timestamp. */
+  resets_at?: number | null;
+  severity: "normal" | "warning" | "critical" | string;
+}
+
+export interface ProviderUsageReport {
+  provider_key: string;
+  display_name: string;
+  /** ok | unauthenticated | unsupported | error. */
+  status: string;
+  plan?: string | null;
+  account?: string | null;
+  /** Why there are no meters, or a note alongside them. */
+  message?: string | null;
+  meters: UsageMeter[];
+  manage_url?: string | null;
+  checked_at: number;
+}
+
 /** Mirrors `archductor_core::achievements`. Derived on demand by the daemon. */
 export interface AchievementProgress {
   id: string;
@@ -271,6 +308,8 @@ export interface AchievementProgress {
   next_threshold?: number | null;
   tier_thresholds: number[];
   secret: boolean;
+  /** Whether a surface may show this entry. Absent from older daemons. */
+  revealed?: boolean;
 }
 
 export interface DiscoveredName {

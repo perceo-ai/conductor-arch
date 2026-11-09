@@ -25,3 +25,35 @@ export function sidebarWorkspaceNames(
   // reshuffle while an agent updates a row.
   return [...listed.filter(isPinned), ...listed.filter((name) => !isPinned(name))];
 }
+
+/**
+ * The sidebar's workspaces, top to bottom, flattened across project groups.
+ *
+ * This is what `mod+1`..`mod+9` and next/prev workspace count through: the
+ * numbers have to read down the list the eye sees, not the order the daemon
+ * happened to create the rows in. So it walks the repositories in sidebar
+ * order, and within each the same pinned-first order the group renders, then
+ * appends any workspace whose repository has no group (a stale or unlisted
+ * repo) so it still keeps a keyboard path.
+ *
+ * The sidebar's text filter is deliberately ignored: a slot that moved while
+ * someone typed in the filter box would be a slot nobody could aim at.
+ */
+export function sidebarWorkspaceOrder(
+  repositories: readonly string[],
+  order: readonly string[],
+  row: (name: string) => SidebarRowFields | undefined,
+  isPinned: (name: string) => boolean,
+): string[] {
+  const flat: string[] = [];
+  for (const repository of repositories) {
+    flat.push(...sidebarWorkspaceNames(order, row, repository, () => true, isPinned));
+  }
+  const grouped = new Set(flat);
+  for (const name of order) {
+    const fields = row(name);
+    if (!fields || fields.status === "archived" || grouped.has(name)) continue;
+    flat.push(name);
+  }
+  return flat;
+}

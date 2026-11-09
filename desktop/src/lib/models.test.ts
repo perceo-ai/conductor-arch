@@ -1,5 +1,13 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { agentModelOptions, firstModel, modelLabel, providerLabel } from "./models";
+import { MODELS, agentModelOptions, firstModel, modelLabel, providerLabel } from "./models";
+
+// One table for every surface: the daemon's push text and the iOS app assert
+// the same file, so a model reads the same wherever its notification lands.
+const SHARED_LABELS: Record<string, string> = JSON.parse(
+  readFileSync(join(process.cwd(), "../crates/core/tests/fixtures/model_labels.json"), "utf8"),
+);
 
 describe("model catalogue", () => {
   it("starts Codex on a concrete 5.6 model", () => {
@@ -108,6 +116,18 @@ describe("model catalogue", () => {
         group: "Claude Code",
       },
     ]);
+  });
+
+  it("labels models from the table every surface shares", () => {
+    for (const [model, label] of Object.entries(SHARED_LABELS)) {
+      expect(modelLabel(model), model).toBe(label);
+    }
+  });
+
+  it("keeps every selectable model in the shared table", () => {
+    for (const model of Object.values(MODELS).flat()) {
+      expect(SHARED_LABELS, model).toHaveProperty([model]);
+    }
   });
 
   it("labels known providers", () => {

@@ -28,6 +28,7 @@ archductor status                    # workspaces at a glance: run script, agent
 archductor remote status             # which daemon this machine talks to
 archductor service status            # is the background service installed and running
 archductor archcar providers         # every agent this build knows, and how far it drives each
+archductor archcar usage             # plan quota left per signed-in provider; --refresh to re-probe
 archductor archcar inventory-snapshot  # repositories, workspaces, and active chats in one request
 ```
 
@@ -385,6 +386,21 @@ archductor history show <process-id>          # saved messages; `chat --session 
 archductor import conductor --source <path>   # migrate from a Conductor setup
 archductor open fix-auth --editor cursor      # open in an editor
 ```
+
+## Achievements
+
+```bash
+archductor archcar achievements            # earned badges and the discovery score
+archductor archcar achievements --locked   # also list badges with no tier yet
+archductor archcar achievements --names    # also list the workspace-name pool
+```
+
+Every number is derived on demand from what the connected daemon already keeps,
+so a remote connection shows that machine's achievements. `--locked` does not
+spoil secret badges: they stay hidden until their first tier is earned, and only
+a count of them is shown. `--names` marks each generated workspace name `[x]`
+once it has been used on that daemon; custom names do not count. In the desktop
+app, the same page is the trophy button in the sidebar.
 
 ## Scripting notes
 

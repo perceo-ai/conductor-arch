@@ -64,7 +64,7 @@ public enum ArchcarEvent: Sendable {
     case sessionStarted(sessionID: Int64, threadID: Int64, workspace: String, kind: SessionKind, pid: Int)
     case sessionReady(sessionID: Int64, threadID: Int64)
     case sessionCapabilitiesChanged(sessionID: Int64, threadID: Int64, capabilities: RawJSON)
-    case turnCompleted(sessionID: Int64, threadID: Int64, status: String?)
+    case turnCompleted(sessionID: Int64, threadID: Int64, status: String?, durationMS: UInt64?)
     case sessionScreenUpdated(sessionID: Int64)
     case sessionMessagesUpdated(threadID: Int64)
     case chatQueueUpdated(threadID: Int64)
@@ -100,6 +100,7 @@ extension ArchcarEvent: Decodable {
         case scopeID = "scope_id", taskID = "task_id"
         case sessionID = "session_id", threadID = "thread_id"
         case exitCode = "exit_code", planMode = "plan_mode", planPath = "plan_path"
+        case durationMS = "duration_ms"
         case oldName = "old_name", newName = "new_name"
     }
 
@@ -130,7 +131,10 @@ extension ArchcarEvent: Decodable {
             self = .turnCompleted(
                 sessionID: try c.decode(Int64.self, forKey: .sessionID),
                 threadID: try c.decode(Int64.self, forKey: .threadID),
-                status: try c.decodeIfPresent(String.self, forKey: .status))
+                status: try c.decodeIfPresent(String.self, forKey: .status),
+                // Absent from an older daemon; the turn then reports its
+                // outcome without a duration.
+                durationMS: try c.decodeIfPresent(UInt64.self, forKey: .durationMS))
         case "session_screen_updated":
             self = .sessionScreenUpdated(sessionID: try c.decode(Int64.self, forKey: .sessionID))
         case "session_messages_updated":

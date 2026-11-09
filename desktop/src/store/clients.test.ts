@@ -112,6 +112,70 @@ describe("clientsStore navigation", () => {
   });
 });
 
+describe("clientsStore achievements across a switch", () => {
+  /** Each daemon answers with its own score; the laptop's inventory can be down. */
+  async function onDevboxAchievements(laptop: { inventoryDown?: boolean; achievementsDown?: boolean }) {
+    const answer = api.request.getMockImplementation()!;
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "get_achievements") {
+        if (activeClient === "laptop" && laptop.achievementsDown) throw new Error("laptop down");
+        const unlocked = activeClient === "laptop" ? 2 : 1;
+        return { type: "achievements", summary: { unlocked, achievements: [] } };
+      }
+      const inventory = ["get_inventory_snapshot", "list_workspaces", "list_repositories"];
+      if (activeClient === "laptop" && laptop.inventoryDown && inventory.includes(req.type)) {
+        throw new Error("inventory down");
+      }
+      return answer(req);
+    });
+    const mod = await import("./index");
+    await mod.refreshInventory();
+    await mod.clientsStore.activate("devbox");
+    mod.nav.goToPage("achievements");
+    await mod.achievementsStore.load();
+    expect(mod.achievementsStore.summary()?.unlocked).toBe(1);
+    return mod;
+  }
+
+  const laptopAchievementRequests = () =>
+    api.request.mock.calls.filter(([req]) => req.type === "get_achievements").length - 1;
+
+  it("a failed inventory pull keeps the page up, and it shows the new daemon's badges", async () => {
+    const { achievementsStore, clientsStore, nav } = await onDevboxAchievements({
+      inventoryDown: true,
+    });
+
+    await clientsStore.activate("laptop");
+
+    // The page is still mounted, so its onMount will not load for us.
+    expect(nav.activePage()).toBe("achievements");
+    await vi.waitFor(() => expect(achievementsStore.summary()?.unlocked).toBe(2));
+  });
+
+  it("a daemon that cannot answer at all shows the error, not the old badges", async () => {
+    const { achievementsStore, clientsStore, nav } = await onDevboxAchievements({
+      inventoryDown: true,
+      achievementsDown: true,
+    });
+
+    await clientsStore.activate("laptop");
+
+    expect(nav.activePage()).toBe("achievements");
+    await vi.waitFor(() => expect(achievementsStore.error()).toBe("laptop down"));
+    expect(achievementsStore.summary()).toBeUndefined();
+  });
+
+  it("clears the cache on a switch without fetching for a page nobody is on", async () => {
+    const { achievementsStore, clientsStore, nav } = await onDevboxAchievements({});
+    nav.goToDashboard();
+
+    await clientsStore.activate("laptop");
+
+    expect(achievementsStore.summary()).toBeUndefined();
+    expect(laptopAchievementRequests()).toBe(0);
+  });
+});
+
 describe("clientsStore failed switches", () => {
   /**
    * A switch pauses tab persistence until the new daemon's restore runs. When

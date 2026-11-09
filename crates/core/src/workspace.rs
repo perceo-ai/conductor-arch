@@ -1871,17 +1871,19 @@ impl WorkspaceStore {
         Ok(())
     }
 
-    /// Names recorded as discovered. Unions in the live `workspaces` rows so
-    /// databases created before the discoveries table still show a history.
+    /// Pool names recorded as discovered, plus any live workspace holding one.
+    /// Custom names are dropped here so that every count of discoveries, the
+    /// Discovery tab and Cartographer alike, reads the same set.
     pub fn discovered_workspace_names(&self) -> Result<std::collections::BTreeSet<String>> {
         let mut statement = self.conn.prepare(
             "SELECT name FROM workspace_name_discoveries
              UNION
              SELECT name FROM workspaces",
         )?;
-        let names = statement
+        let mut names = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<std::collections::BTreeSet<String>>>()?;
+        names.retain(|name| workspace_name_pool().contains(&name.as_str()));
         Ok(names)
     }
 

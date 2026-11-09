@@ -1,0 +1,21 @@
+{
+  "gpt-5.6-sol": "GPT 5.6 Sol",
+  "gpt-5.6-terra": "GPT 5.6 Terra",
+  "gpt-5.6-luna": "GPT 5.6 Luna",
+  "gpt-5.5": "GPT 5.5",
+  "gpt-5.4": "GPT 5.4",
+  "claude-fable-5": "Claude Fable 5",
+  "claude-opus-5": "Claude Opus 5",
+  "claude-opus-4-8[1m]": "Claude Opus 4.8 1M",
+  "claude-opus-4-7[1m]": "Claude Opus 4.7 1M",
+  "claude-opus-4-6[1m]": "Claude Opus 4.6 1M",
+  "claude-sonnet-5": "Claude Sonnet 5 1M",
+  "claude-sonnet-4-6[1m]": "Claude Sonnet 4.6 1M",
+  "claude-sonnet-4-6": "Claude Sonnet 4.6",
+  "claude-haiku-4-5": "Claude Haiku 4.5",
+  "gpt-6": "GPT 6",
+  "GPT-6-mini": "GPT 6 Mini",
+  "claude-opus-6[1m]": "Claude Opus 6 1M",
+  "some-new-model": "Some New Model",
+  "some_new-model": "Some New Model"
+}

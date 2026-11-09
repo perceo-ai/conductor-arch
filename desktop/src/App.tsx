@@ -32,6 +32,7 @@ import { openExternal } from "./bridge/client";
 import { ACCENT_HEX } from "./store/prefs";
 import { installExternalLinkHandler, workspaceFilePath } from "./lib/externalLinks";
 import { openFileInCenter } from "./pages/openFileBridge";
+import { sidebarWorkspaceOrder } from "./lib/sidebarWorkspaces";
 import {
   parseKeybindingOverrides,
   resolveShortcut,
@@ -190,8 +191,19 @@ export default function App() {
     return false;
   }
 
+  // The sidebar's top-to-bottom order, which is what the numbered slots and
+  // next/prev both count through — see `sidebarWorkspaceOrder`.
+  function keyboardWorkspaceOrder(): string[] {
+    return sidebarWorkspaceOrder(
+      repositoriesStore.state.order,
+      workspacesStore.state.order,
+      (name) => workspacesStore.row(name),
+      (name) => prefsStore.isPinned(name),
+    );
+  }
+
   function moveWorkspace(delta: 1 | -1) {
-    const names = workspacesStore.state.order.filter((name) => workspacesStore.row(name)?.status !== "archived");
+    const names = keyboardWorkspaceOrder();
     if (names.length === 0) return;
     const current = nav.selectedWorkspace();
     const index = current ? names.indexOf(current) : -1;
@@ -203,7 +215,7 @@ export default function App() {
   function selectWorkspaceSlot(action: ShortcutAction) {
     const match = /^switch-workspace-(\d)$/.exec(action);
     if (!match) return false;
-    const names = workspacesStore.state.order.filter((name) => workspacesStore.row(name)?.status !== "archived");
+    const names = keyboardWorkspaceOrder();
     const name = names[Number(match[1]) - 1];
     if (!name) return true;
     nav.selectWorkspace(name);
