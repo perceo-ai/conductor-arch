@@ -1671,7 +1671,12 @@ impl ClaudeStreamParser {
                 .filter(|_| string_at(&draft.raw_json, &["type"]).as_deref() == Some("user"))
                 .and_then(|id| self.todo_lists_by_use_id.get(id).cloned())
                 .or_else(|| tool_result_text(&draft.raw_json))
-                .map(|text| claude_async_agent_launch_body(&text).unwrap_or(text)),
+                // Only an `Agent` call's result is a launch receipt; a Read of
+                // a saved receipt, or any other tool's output, is shown as is.
+                .map(|text| match draft.tool_name.as_deref() {
+                    Some("Agent") => claude_async_agent_launch_body(&text).unwrap_or(text),
+                    _ => text,
+                }),
             ClaudeProviderEventKind::BackgroundTask => claude_task_body(&draft.raw_json),
             ClaudeProviderEventKind::Result => string_at(&draft.raw_json, &["result"]),
             _ => None,
@@ -1828,10 +1833,6 @@ fn message_content_text(value: &Value, block_type: &str, field: &str) -> Option<
     (!text.is_empty()).then_some(text)
 }
 
-/// The text of every tool result in a user record. `content` is a plain
-/// string for most built-in tools but an array of blocks for MCP tools, Agent
-/// reports, and tool searches; reading only strings left those cards showing
-/// the call's input instead of what came back.
 /// The receipt claude hands back when an `Agent` call was backgrounded. It is
 /// addressed to the model, not to a reader: it says never to quote it, carries
 /// the internal `agentId` resume handle and the task's output path, and says
@@ -1843,6 +1844,10 @@ fn claude_async_agent_launch_body(text: &str) -> Option<String> {
         .then(|| "Working in the background.".to_owned())
 }
 
+/// The text of every tool result in a user record. `content` is a plain
+/// string for most built-in tools but an array of blocks for MCP tools, Agent
+/// reports, and tool searches; reading only strings left those cards showing
+/// the call's input instead of what came back.
 fn tool_result_text(value: &Value) -> Option<String> {
     let text = value
         .pointer("/message/content")?
@@ -3241,6 +3246,44 @@ mod tests {
         assert_eq!(
             events[1].normalized_payload["body"],
             "Loaded mcp__archivum__record_work"
+        );
+    }
+
+    #[test]
+    fn only_an_agent_result_is_replaced_as_a_launch_receipt() {
+        // Reading a saved launch receipt returns the receipt's own text. That
+        // is the file the user asked for, not a backgrounded agent, so the card
+        // keeps it verbatim; only the Agent call's own result is summarized.
+        let receipt =
+            "Async agent launched successfully.\\nagentId: a1\\noutput_file: /tmp/a1.output";
+        let native = format!(
+            concat!(
+                r#"{{"type":"assistant","session_id":"s1","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_read","name":"Read","input":{{"file_path":"/tmp/receipt.txt"}}}},{{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{{"description":"two step","run_in_background":true}}}}]}}}}"#,
+                "\n",
+                r#"{{"type":"user","session_id":"s1","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_read","content":"{receipt}"}}]}}}}"#,
+                "\n",
+                r#"{{"type":"user","session_id":"s1","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_agent","content":[{{"type":"text","text":"{receipt}"}}]}}]}},"tool_use_result":{{"isAsync":true,"status":"async_launched"}}}}"#,
+                "\n",
+            ),
+            receipt = receipt,
+        );
+
+        let drafts = parse_claude_stream_json_lines(&native).unwrap();
+        let results = drafts
+            .iter()
+            .filter(|draft| draft.kind == ClaudeProviderEventKind::ToolResult)
+            .map(|draft| (draft.tool_name.as_deref(), draft.content_delta.as_deref()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            results,
+            [
+                (
+                    Some("Read"),
+                    Some("Async agent launched successfully.\nagentId: a1\noutput_file: /tmp/a1.output"),
+                ),
+                (Some("Agent"), Some("Working in the background.")),
+            ]
         );
     }
 
