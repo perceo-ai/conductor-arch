@@ -45,10 +45,15 @@ public enum AgentModels {
         case "claude-sonnet-4-6": return "Claude Sonnet 4.6"
         case "claude-haiku-4-5": return "Claude Haiku 4.5"
         default:
-            return model
-                .split(separator: "-")
-                .map { $0.prefix(1).uppercased() + $0.dropFirst() }
-                .joined(separator: " ")
+            let longContext = model.hasSuffix("[1m]")
+            let base = longContext ? String(model.dropLast(4)) : model
+            var parts = base.split(whereSeparator: { $0 == "-" || $0 == "_" })
+                .map { part -> String in
+                    part.lowercased() == "gpt"
+                        ? "GPT" : part.prefix(1).uppercased() + part.dropFirst()
+                }
+            if longContext { parts.append("1M") }
+            return parts.joined(separator: " ")
         }
     }
 }

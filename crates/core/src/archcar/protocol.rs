@@ -282,6 +282,17 @@ pub enum ArchcarRequest {
     GetChatProjection {
         thread_id: i64,
     },
+    /// Bytes of one image a projected timeline item carries.
+    ///
+    /// The projection names a card's images but never inlines them, so a
+    /// surface that draws one asks for it here, by the card's id and the
+    /// image's position in that card. Kept out of the projection so a chat
+    /// full of screenshots still refreshes in kilobytes.
+    GetChatImage {
+        thread_id: i64,
+        item_id: String,
+        index: usize,
+    },
     /// Recent non-empty chats offered as attachable context on the new-chat
     /// screen.
     ListChatTranscripts {
@@ -496,6 +507,13 @@ pub enum ArchcarRequest {
     /// each one. Clients render provider pickers from this rather than
     /// hardcoding a provider list that drifts from the registry.
     ListAgentProviders,
+    /// How much plan quota is left for each agent provider signed in on this
+    /// machine. The daemon caches a snapshot briefly; `refresh` forces a fresh
+    /// probe.
+    GetProviderUsage {
+        #[serde(default)]
+        refresh: bool,
+    },
     /// List the prompt-pack names available for a repository and which is active.
     ListPromptPacks {
         repository: String,
@@ -1093,6 +1111,15 @@ pub enum ArchcarResponse {
         thread_id: i64,
         items: Vec<ArchcarProjectionItem>,
     },
+    ChatImage {
+        thread_id: i64,
+        item_id: String,
+        index: usize,
+        /// MIME type the provider declared, e.g. `image/png`.
+        media_type: String,
+        /// The image, base64-encoded exactly as the provider sent it.
+        data: String,
+    },
     ChatTranscripts {
         workspace: String,
         transcripts: Vec<ArchcarChatTranscriptSummary>,
@@ -1280,6 +1307,12 @@ pub enum ArchcarResponse {
     },
     AgentProviders {
         providers: Vec<AgentProviderSummary>,
+    },
+    ProviderUsage {
+        providers: Vec<crate::provider_usage::ProviderUsageReport>,
+        /// Epoch seconds the snapshot was collected; older than now means it
+        /// came from the daemon's short-lived cache.
+        collected_at: i64,
     },
     PromptPacks {
         repository: String,
@@ -1674,6 +1707,20 @@ pub struct ArchcarProjectionItem {
     /// idle. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub background_agent: bool,
+    /// Images the card holds, described rather than inlined; fetch the bytes
+    /// with `GetChatImage`. Omitted when there are none, so a daemon that
+    /// predates it stays wire-compatible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ArchcarProjectionImage>,
+}
+
+/// An image a timeline card carries: what it is, not its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchcarProjectionImage {
+    /// MIME type the provider declared, e.g. `image/png`.
+    pub media_type: String,
+    /// Decoded size in bytes.
+    pub bytes: usize,
 }
 
 /// One workspace timeline event (creation, branch change, session lifecycle,
@@ -1999,6 +2046,11 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::GetChatProjection { thread_id } => {
             format!("get_chat_projection thread_id={thread_id}")
         }
+        ArchcarRequest::GetChatImage {
+            thread_id,
+            item_id,
+            index,
+        } => format!("get_chat_image thread_id={thread_id} item_id={item_id} index={index}"),
         ArchcarRequest::ListChatTranscripts { workspace, limit } => format!(
             "list_chat_transcripts workspace={workspace} limit={}",
             limit
@@ -2160,6 +2212,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
             format!("list_repository_branches repository={repository}")
         }
         ArchcarRequest::ListAgentProviders => "list_agent_providers".to_owned(),
+        ArchcarRequest::GetProviderUsage { .. } => "get_provider_usage".to_owned(),
         ArchcarRequest::ListPromptPacks { repository } => {
             format!("list_prompt_packs repository={repository}")
         }
@@ -2721,6 +2774,16 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         ArchcarResponse::ChatProjection { thread_id, items } => {
             format!("chat_projection thread_id={thread_id} items={}", items.len())
         }
+        ArchcarResponse::ChatImage {
+            thread_id,
+            item_id,
+            media_type,
+            data,
+            ..
+        } => format!(
+            "chat_image thread_id={thread_id} item_id={item_id} media_type={media_type} base64_len={}",
+            data.len()
+        ),
         ArchcarResponse::ChatTranscripts {
             workspace,
             transcripts,
@@ -2866,6 +2929,11 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
             "agent_providers count={} managed={}",
             providers.len(),
             providers.iter().filter(|provider| provider.managed).count()
+        ),
+        ArchcarResponse::ProviderUsage { providers, collected_at } => format!(
+            "provider_usage count={} ok={} collected_at={collected_at}",
+            providers.len(),
+            providers.iter().filter(|report| report.status == "ok").count()
         ),
         ArchcarResponse::PromptPacks { repository, packs, active } => format!(
             "prompt_packs repository={repository} count={} active={}",
@@ -3129,9 +3197,13 @@ pub fn archcar_event_summary(event: &ArchcarEvent) -> String {
             session_id,
             thread_id,
             status,
+            duration_ms,
         } => format!(
-            "turn_completed session_id={session_id} thread_id={thread_id} status={}",
-            status.as_deref().unwrap_or("unknown")
+            "turn_completed session_id={session_id} thread_id={thread_id} status={}{}",
+            status.as_deref().unwrap_or("unknown"),
+            duration_ms
+                .map(|ms| format!(" duration_ms={ms}"))
+                .unwrap_or_default()
         ),
         ArchcarEvent::SessionScreenUpdated { session_id } => {
             format!("session_screen_updated session_id={session_id}")
@@ -3263,6 +3335,11 @@ pub enum ArchcarEvent {
         thread_id: i64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
+        /// How long the finished turn ran, when the session could time it.
+        /// Notifications read it ("Done in 4m 12s"); an older daemon omits
+        /// it, and every surface falls back to the outcome alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     SessionScreenUpdated {
         session_id: i64,
@@ -5086,11 +5163,22 @@ mod tests {
             session_id: 11,
             thread_id: 5,
             status: Some("cancelled".to_owned()),
+            duration_ms: None,
         };
 
         assert_eq!(
             archcar_event_summary(&event),
             "turn_completed session_id=11 thread_id=5 status=cancelled"
+        );
+
+        assert_eq!(
+            archcar_event_summary(&ArchcarEvent::TurnCompleted {
+                session_id: 11,
+                thread_id: 5,
+                status: Some("success".to_owned()),
+                duration_ms: Some(252_000),
+            }),
+            "turn_completed session_id=11 thread_id=5 status=success duration_ms=252000"
         );
     }
 

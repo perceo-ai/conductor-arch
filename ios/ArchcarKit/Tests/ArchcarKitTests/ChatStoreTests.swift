@@ -298,7 +298,7 @@ private func connectedStore(
     #expect(ChatStore.refreshKind(for: .sessionMessagesUpdated(threadID: 8), thread: 7) == nil)
     #expect(ChatStore.refreshKind(for: .chatQueueUpdated(threadID: 7), thread: 7) == .queue)
     #expect(
-        ChatStore.refreshKind(for: .turnCompleted(sessionID: 1, threadID: 7, status: nil), thread: 7)
+        ChatStore.refreshKind(for: .turnCompleted(sessionID: 1, threadID: 7, status: nil, durationMS: nil), thread: 7)
             == .timeline)
     #expect(
         ChatStore.refreshKind(

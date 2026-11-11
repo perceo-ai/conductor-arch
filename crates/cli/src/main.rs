@@ -544,7 +544,8 @@ enum ArchcarCommand {
     /// Purely for fun: every number is derived on demand from rows the daemon
     /// already keeps, so this costs nothing until it is asked for.
     Achievements {
-        /// Include achievements with no tier earned yet.
+        /// Include achievements with no tier earned yet. Secret ones stay
+        /// hidden until their first tier.
         #[arg(long)]
         locked: bool,
         /// List the generated workspace names and which ones are discovered.
@@ -864,6 +865,12 @@ enum ArchcarCommand {
     },
     /// List every agent this build knows and how completely it drives each.
     Providers,
+    /// Show how much plan quota is left for each signed-in agent provider.
+    Usage {
+        /// Skip the daemon's short-lived cache and probe the providers again.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// List a repository's available prompt packs and the active one.
     PromptPacks {
         repository: String,
@@ -2791,6 +2798,11 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::Providers => {
                     print_archcar_response(client.send(ArchcarRequest::ListAgentProviders)?);
                 }
+                ArchcarCommand::Usage { refresh } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::GetProviderUsage { refresh })?,
+                    );
+                }
                 ArchcarCommand::PromptPacks { repository } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListPromptPacks { repository })?,
@@ -4306,6 +4318,17 @@ fn format_chat_projection(thread_id: i64, items: &[ArchcarProjectionItem], full:
     out
 }
 
+/// Human-readable size of an image the terminal is only naming.
+fn format_image_bytes(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full: bool) -> String {
     let indent = "  ".repeat(depth);
     let is_text = matches!(
@@ -4317,6 +4340,15 @@ fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full:
     if !title.is_empty() {
         line.push(' ');
         line.push_str(title.lines().next().unwrap_or_default());
+    }
+    // A terminal cannot draw the image, so say it is there and how big it is.
+    // The desktop timeline renders the same bytes inline.
+    for image in &item.images {
+        line.push_str(&format!(
+            " [{} {}]",
+            image.media_type,
+            format_image_bytes(image.bytes)
+        ));
     }
     let body = item.body.trim_end();
     if full {
@@ -4338,7 +4370,7 @@ fn format_chat_projection_item(item: &ArchcarProjectionItem, depth: usize, full:
 }
 
 /// Render the achievements summary. `locked` adds entries with no tier yet
-/// (secret ones stay hidden until their metric moves, same as the desktop
+/// (secret ones stay hidden until their first tier, same as the desktop
 /// surface), `names` adds the workspace-name discovery list.
 fn render_achievements(
     summary: &archductor_core::achievements::AchievementsSummary,
@@ -4361,7 +4393,7 @@ fn render_achievements(
 
     let mut category = String::new();
     for entry in &summary.achievements {
-        let shown = entry.unlocked() || (locked && !entry.secret);
+        let shown = entry.is_revealed() && (locked || entry.unlocked());
         if !shown {
             continue;
         }
@@ -4384,7 +4416,7 @@ fn render_achievements(
     let hidden = summary
         .achievements
         .iter()
-        .filter(|entry| entry.secret && !entry.unlocked())
+        .filter(|entry| !entry.is_revealed())
         .count();
     if hidden > 0 {
         let _ = writeln!(out, "\n{hidden} secret achievement(s) still hidden");
@@ -4403,6 +4435,18 @@ fn render_achievements(
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
+        // Base64 image bytes are not something to spill into a terminal; the
+        // line says what arrived so a caller can confirm the fetch worked.
+        ArchcarResponse::ChatImage {
+            item_id,
+            index,
+            media_type,
+            data,
+            ..
+        } => println!(
+            "{item_id}[{index}]: {media_type}, {} base64 chars",
+            data.len()
+        ),
         ArchcarResponse::McpRegistration { clients } => {
             for client in clients {
                 let state = if !client.installed {
@@ -4851,6 +4895,42 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("repository_branches {repository} {}", branches.len());
             for b in branches {
                 println!("{b}");
+            }
+        }
+        ArchcarResponse::ProviderUsage {
+            providers,
+            collected_at,
+        } => {
+            println!(
+                "provider_usage {} collected_at={collected_at}",
+                providers.len()
+            );
+            for report in providers {
+                println!(
+                    "{:<14} {:<14} {}",
+                    report.provider_key,
+                    report.status,
+                    report
+                        .plan
+                        .as_deref()
+                        .or(report.message.as_deref())
+                        .unwrap_or("")
+                );
+                for meter in &report.meters {
+                    let resets = meter
+                        .resets_at
+                        .map(|at| format!(" resets_at={at}"))
+                        .unwrap_or_default();
+                    let detail = meter
+                        .detail
+                        .as_deref()
+                        .map(|detail| format!(" ({detail})"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {:<22} {:>3}% used {}{resets}{detail}",
+                        meter.label, meter.percent_used, meter.severity
+                    );
+                }
             }
         }
         ArchcarResponse::AgentProviders { providers } => {
@@ -8718,6 +8798,7 @@ mod tests {
             timeline_seq: None,
             parent_id: parent_id.map(ToOwned::to_owned),
             background_agent: false,
+            images: Vec::new(),
         }
     }
 
@@ -9185,6 +9266,9 @@ mod tests {
                 next_threshold: Some(25),
                 tier_thresholds: vec![5, 25, 100, 400, 1500],
                 secret,
+                // What an older daemon deserializes to: the renderer must
+                // decide from `secret` and `tier`, not trust this field.
+                revealed: false,
             }
         }
 
@@ -9193,6 +9277,8 @@ mod tests {
                 entry("earned", "Worktree Wrangler", Some(1), false, 7),
                 entry("locked", "Merge Merchant", None, false, 0),
                 entry("hidden", "Red Text Connoisseur", None, true, 0),
+                // The metric moved but no tier is earned: still a secret.
+                entry("tempted", "Permission Denied Any%", None, true, 3),
             ],
             discovery: DiscoverySummary {
                 total: 2,
@@ -9211,11 +9297,11 @@ mod tests {
             metrics: Default::default(),
             unlocked: 1,
             tiers_earned: 1,
-            total: 3,
+            total: 4,
         };
 
         let default = render_achievements(&summary, false, false);
-        assert!(default.contains("achievements 1/3 unlocked, 1 tiers earned"));
+        assert!(default.contains("achievements 1/4 unlocked, 1 tiers earned"));
         assert!(default.contains("discovery 1/2 workspace names"));
         assert!(default.contains("Worktree Wrangler"));
         assert!(
@@ -9226,7 +9312,7 @@ mod tests {
             !default.contains("Red Text Connoisseur"),
             "untouched secrets stay hidden"
         );
-        assert!(default.contains("1 secret achievement(s) still hidden"));
+        assert!(default.contains("2 secret achievement(s) still hidden"));
         assert!(!default.contains("[discovery]"));
 
         let verbose = render_achievements(&summary, true, true);
@@ -9234,6 +9320,10 @@ mod tests {
         assert!(
             !verbose.contains("Red Text Connoisseur"),
             "--locked must not reveal secrets"
+        );
+        assert!(
+            !verbose.contains("Permission Denied Any%"),
+            "a positive value below the first threshold is not a reveal"
         );
         assert!(verbose.contains("[discovery]"));
         assert!(verbose.contains("[x] pipewire"));

@@ -103,12 +103,114 @@ afterEach(() => {
   setLiveItems(null);
   pending = null;
   setSession({ runtime_state: "ready", ready: true });
+  vi.unstubAllGlobals();
 });
+
+/** Records what Timeline observes, so a test can report a resize by hand. */
+function stubResizeObserver() {
+  const observed: { callback: () => void; targets: Element[]; disconnected: boolean }[] = [];
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      entry = { callback: () => {}, targets: [] as Element[], disconnected: false };
+      constructor(callback: () => void) {
+        this.entry.callback = callback;
+        observed.push(this.entry);
+      }
+      observe(target: Element) {
+        this.entry.targets.push(target);
+      }
+      unobserve() {}
+      disconnect() {
+        this.entry.disconnected = true;
+      }
+    },
+  );
+  return observed;
+}
+
+/** jsdom lays nothing out, so the scroller's size has to be stated. */
+function setScrollMetrics(
+  el: HTMLElement,
+  metrics: { scrollTop: number; clientHeight: number; scrollHeight: number },
+) {
+  Object.defineProperty(el, "clientHeight", { configurable: true, value: metrics.clientHeight });
+  Object.defineProperty(el, "scrollHeight", { configurable: true, value: metrics.scrollHeight });
+  el.scrollTop = metrics.scrollTop;
+}
 
 describe("Timeline", () => {
   it("mounts", () => {
     items = [projectionItem({ id: "a", body: "hello" })];
     expect(mount().querySelector(".chat-timeline-scroll")).toBeTruthy();
+  });
+
+  describe("when the content grows without a new message", () => {
+    async function mountScroller() {
+      const observed = stubResizeObserver();
+      items = [projectionItem({ id: "a", body: "hello" })];
+      const el = mount().querySelector<HTMLElement>(".chat-timeline-scroll")!;
+      // Let the scrolls queued at mount land before watching for new ones.
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const scrollTo = vi.fn();
+      el.scrollTo = scrollTo as unknown as typeof el.scrollTo;
+      return { el, scrollTo, observed };
+    }
+
+    it("stays on the bottom when the reader was following it", async () => {
+      const { el, scrollTo, observed } = await mountScroller();
+      expect(observed[0]?.targets).toEqual([el.querySelector(".chat-messages")]);
+      setScrollMetrics(el, { scrollTop: 600, clientHeight: 300, scrollHeight: 900 });
+      el.dispatchEvent(new Event("scroll"));
+
+      // An image finished loading: taller content, no new message, no scroll.
+      setScrollMetrics(el, { scrollTop: 600, clientHeight: 300, scrollHeight: 1400 });
+      observed[0].callback();
+
+      expect(scrollTo).toHaveBeenCalledWith({ top: 1100, behavior: "instant" });
+    });
+
+    it("stays pinned when a second image lands before the first scroll settles", async () => {
+      const { el, observed } = await mountScroller();
+      // What the browser does here: `.chat-timeline-scroll` sets `scroll-behavior:
+      // smooth`, so anything but "instant" starts an animation, and its scroll
+      // events report the positions on the way there.
+      el.scrollTo = ((options: ScrollToOptions) => {
+        const target = options.top ?? 0;
+        el.scrollTop =
+          options.behavior === "instant" ? target : el.scrollTop + (target - el.scrollTop) / 2;
+        el.dispatchEvent(new Event("scroll"));
+      }) as typeof el.scrollTo;
+      setScrollMetrics(el, { scrollTop: 600, clientHeight: 300, scrollHeight: 900 });
+      el.dispatchEvent(new Event("scroll"));
+
+      setScrollMetrics(el, { scrollTop: el.scrollTop, clientHeight: 300, scrollHeight: 1400 });
+      observed[0].callback();
+      setScrollMetrics(el, { scrollTop: el.scrollTop, clientHeight: 300, scrollHeight: 1900 });
+      observed[0].callback();
+
+      expect(el.scrollTop).toBe(1600);
+    });
+
+    it("leaves a reader who scrolled up where they are", async () => {
+      const { el, scrollTo, observed } = await mountScroller();
+      setScrollMetrics(el, { scrollTop: 100, clientHeight: 300, scrollHeight: 900 });
+      el.dispatchEvent(new Event("scroll"));
+
+      setScrollMetrics(el, { scrollTop: 100, clientHeight: 300, scrollHeight: 1400 });
+      observed[0].callback();
+
+      expect(scrollTo).not.toHaveBeenCalled();
+    });
+
+    it("stops observing when the timeline goes away", async () => {
+      const { observed } = await mountScroller();
+
+      dispose?.();
+      dispose = undefined;
+
+      expect(observed[0].disconnected).toBe(true);
+    });
   });
 
   it("renders the plan once when the card was lifted from the last message", () => {
@@ -212,7 +314,7 @@ describe("Timeline", () => {
     expect(el.querySelector(".chat-timeline-reveal-older")).toBeNull();
   });
 
-  it("nests a subagent's rows inside its Agent card until the card is opened", () => {
+  it("nests a subagent's rows inside its Agent card, open from the start", () => {
     setSession({ runtime_state: "running", ready: false });
     items = [
       projectionItem({
@@ -246,17 +348,70 @@ describe("Timeline", () => {
     // the main agent talking.
     expect(scroll.querySelectorAll(":scope > .chat-inline-event")).toHaveLength(1);
     expect(el.querySelectorAll(".chat-agent-text")).toHaveLength(1);
-    expect(el.textContent).not.toContain("The allowlist lives");
-    // While it runs, the header says what the subagent is doing.
-    expect(el.querySelector(".chat-inline-event-latest")?.textContent).toContain("rg render_class");
 
-    el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
-
+    // The subagent's work is the point of the card, so it is already showing.
     const nested = el.querySelector(".chat-inline-event-nested")!;
     expect(nested.textContent).toContain("rg render_class");
     expect(nested.querySelector(".chat-nested-text")?.textContent).toContain(
       "The allowlist lives in chatFormat.ts.",
     );
+
+    // Closing it puts the running card's latest step back in the header.
+    el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
+    expect(el.querySelector(".chat-inline-event-nested")).toBeNull();
+    expect(el.textContent).not.toContain("The allowlist lives");
+    expect(el.querySelector(".chat-inline-event-latest")?.textContent).toContain("rg render_class");
+  });
+
+  // A backgrounded delegation: claude finishes the Agent call the moment the
+  // agent is launched, then streams the agent's work under that finished card
+  // while a separate task card tracks it. The work still has to read as the
+  // subagent's, under the card that delegated.
+  it("shows a backgrounded subagent's work under its finished Agent card", () => {
+    items = [
+      projectionItem({
+        id: "agent",
+        render_class: "tool_card",
+        title: "Agent two step",
+        body: "Working in the background.",
+      }),
+      projectionItem({
+        id: "task",
+        render_class: "background_card",
+        title: "two step",
+        body: "`notes.md` has 2 lines.",
+        status: "running",
+      }),
+      projectionItem({
+        id: "child-ls",
+        render_class: "command_card",
+        title: "Bash ls",
+        body: "notes.md\none.txt",
+        parent_id: "agent",
+      }),
+      projectionItem({
+        id: "child-text",
+        render_class: "nested_transcript_card",
+        title: "Subagent",
+        body: "The directory holds two files.",
+        parent_id: "agent",
+      }),
+    ];
+
+    const el = mount();
+    const scroll = el.querySelector(".chat-messages")!;
+    // The Agent card and the task card, each at the top level.
+    expect(scroll.querySelectorAll(":scope > .chat-inline-event")).toHaveLength(2);
+
+    // The delegation opens on its own work, and the launch line is all the
+    // card itself has to say.
+    const nested = el.querySelector(".chat-inline-event-nested")!;
+    expect(nested.textContent).toContain("Bash ls");
+    expect(nested.querySelector(".chat-nested-text")?.textContent).toContain(
+      "The directory holds two files.",
+    );
+    expect(el.textContent).toContain("Working in the background.");
+    expect(el.textContent).not.toContain("agentId");
   });
 
   it("shows the subagent's action count in the collapsed Agent card header", () => {
@@ -454,5 +609,67 @@ describe("Timeline", () => {
     ];
 
     expect(mount().querySelector(".chat-inline-event-spinner")).toBeNull();
+  });
+
+  describe("a card that delegated to a subagent", () => {
+    // The whole point of these rows: a subagent's reads and writes are the
+    // work, and before this they sat behind a "+" that looked exactly like
+    // every other tool call's.
+    function delegationItems() {
+      return [
+        projectionItem({
+          id: "agent",
+          render_class: "tool_card",
+          title: "Agent Count .rs files",
+          body: "<tools-used-before-summary>Bash</tools-used-before-summary>\n\nFound one file.",
+          status: "complete",
+        }),
+        projectionItem({
+          id: "ask",
+          parent_id: "agent",
+          render_class: "subagent_card",
+          title: "Asked subagent",
+          body: "Count the .rs files.",
+          status: "complete",
+        }),
+        projectionItem({
+          id: "ran",
+          parent_id: "agent",
+          render_class: "command_card",
+          title: "Ran cargo test --lib",
+          body: "1",
+          status: "complete",
+        }),
+      ];
+    }
+
+    it("shows what the subagent ran without anyone clicking", () => {
+      items = delegationItems();
+      const nested = mount().querySelector(".chat-inline-event-nested");
+      expect(nested).not.toBeNull();
+      expect(nested!.textContent).toContain("cargo test --lib");
+    });
+
+    it("reads as a subagent rather than as one more tool use", () => {
+      items = delegationItems();
+      const card = mount().querySelector(".chat-inline-event-delegation");
+      expect(card).not.toBeNull();
+      expect(card!.querySelector(".chat-inline-event-action")?.textContent).toBe("Subagent");
+      expect(card!.querySelector(".chat-inline-event-chip-label")?.textContent).toBe("Count .rs files");
+    });
+
+    it("can still be collapsed, and an ordinary tool card stays shut", () => {
+      items = delegationItems();
+      const el = mount();
+      (el.querySelector(".chat-inline-event-delegation .chat-inline-event-expander") as HTMLButtonElement).click();
+      expect(el.querySelector(".chat-inline-event-nested")).toBeNull();
+
+      dispose?.();
+      host?.remove();
+      items = [
+        projectionItem({ id: "t", render_class: "tool_card", title: "ToolSearch select:Read", body: "Loaded Read" }),
+      ];
+      expect(mount().querySelector(".chat-inline-event-body")).toBeNull();
+    });
   });
 });

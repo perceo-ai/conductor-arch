@@ -1375,8 +1375,58 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                             timeline_seq: item.timeline_seq,
                             parent_id: item.parent_id,
                             background_agent: item.background_agent,
+                            images: item
+                                .images
+                                .into_iter()
+                                .map(|image| crate::archcar::protocol::ArchcarProjectionImage {
+                                    media_type: image.media_type,
+                                    bytes: image.bytes,
+                                })
+                                .collect(),
                         })
                         .collect(),
+                    }
+                }
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        ArchcarRequest::GetChatImage {
+            thread_id,
+            item_id,
+            index,
+        } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id) {
+                // The projection is keyed by canonical id, and so is the card
+                // the client asked about, so the right record is the one whose
+                // canonical id matches. Several records share it (a tool call
+                // and its result); the images live on the one that has any.
+                Ok(records) => {
+                    let found = records
+                        .iter()
+                        .filter(|record| {
+                            crate::provider_projection::provider_projection_canonical_id(record)
+                                == item_id
+                        })
+                        .find_map(|record| {
+                            crate::provider_projection::projection_image_data(
+                                &record.raw_json,
+                                index,
+                            )
+                        });
+                    match found {
+                        Some((media_type, data)) => ArchcarResponse::ChatImage {
+                            thread_id,
+                            item_id,
+                            index,
+                            media_type,
+                            data,
+                        },
+                        None => ArchcarResponse::Error {
+                            message: format!("no image {index} on timeline item {item_id}"),
+                        },
                     }
                 }
                 Err(err) => ArchcarResponse::Error {
@@ -2214,6 +2264,13 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         ArchcarRequest::ListAgentProviders => ArchcarResponse::AgentProviders {
             providers: crate::archcar::protocol::agent_provider_summaries(),
         },
+        ArchcarRequest::GetProviderUsage { refresh } => {
+            let (providers, collected_at) = crate::provider_usage::provider_usage_snapshot(refresh);
+            ArchcarResponse::ProviderUsage {
+                providers,
+                collected_at,
+            }
+        }
         ArchcarRequest::ListPromptPacks { repository } => {
             let db_path = state.lock().unwrap().db_path.clone();
             let result: anyhow::Result<(Vec<String>, Option<String>)> =
@@ -5414,6 +5471,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListLayoutPresets
             | ArchcarRequest::ListRepositoryBranches { .. }
             | ArchcarRequest::ListAgentProviders
+            | ArchcarRequest::GetProviderUsage { .. }
             | ArchcarRequest::ListPromptPacks { .. }
             | ArchcarRequest::GetSettingsSource { .. }
             | ArchcarRequest::GetSetupReadiness { .. }
@@ -5773,10 +5831,18 @@ fn repository_summaries(db_path: &Path) -> Result<Vec<ArchcarRepositorySummary>>
         })
 }
 
+/// A workspace's chats for the clients, in creation order (`id` ascending).
+///
+/// The store lists chats newest-touched first because its own callers want "the
+/// latest chat", but a client renders this list as a strip of tabs: ordering it
+/// by recency makes tabs swap places under the pointer every time an agent
+/// writes a line, so a chat is never where it was a moment ago and no numbered
+/// or positional aim is possible. Creation order never moves.
 fn chat_threads_for_workspace(db_path: &Path, workspace: &str) -> Result<Vec<ArchcarChatThread>> {
     WorkspaceStore::open_app(db_path)
         .and_then(|store| store.list_chat_threads(workspace))
-        .map(|threads| {
+        .map(|mut threads| {
+            threads.sort_by_key(|thread| thread.id);
             threads
                 .into_iter()
                 .map(|t| {
@@ -8802,6 +8868,7 @@ exit 1
                 session_id: 9,
                 thread_id: thread.id,
                 status: Some("completed".to_owned()),
+                duration_ms: None,
             },
         );
 
@@ -8897,6 +8964,7 @@ exit 1
             &started,
             turn,
             Some("completed".to_owned()),
+            None,
         );
         let event = event_rx.try_recv().unwrap();
         assert!(
@@ -12333,6 +12401,33 @@ default = true
             database_path: root.join("data/archductor.db"),
             logs_dir: state_dir.join("logs"),
         }
+    }
+
+    #[test]
+    fn chat_threads_list_in_creation_order_not_by_recency() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &temp.path().join("logs"), temp.path());
+        let first = store
+            .create_chat_thread("berlin", "codex", "Chat 1", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "codex", "Chat 2", None)
+            .unwrap();
+        let third = store
+            .create_chat_thread("berlin", "codex", "Chat 3", None)
+            .unwrap();
+        // Touching the oldest chat is what used to yank its tab to the front.
+        store
+            .update_chat_thread_title(first.id, "Chat 1 renamed")
+            .unwrap();
+
+        let listed = chat_threads_for_workspace(&db_path, "berlin").unwrap();
+        assert_eq!(
+            listed.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![first.id, second.id, third.id],
+            "tabs must keep creation order however recently a chat was touched"
+        );
     }
 
     fn seeded_workspace_store(db_path: &Path, logs_dir: &Path, root: &Path) -> WorkspaceStore {

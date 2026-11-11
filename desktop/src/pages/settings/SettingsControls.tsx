@@ -2,7 +2,7 @@ import {  Show,  type JSX } from "solid-js";
 import Icon, { type IconName } from "@/components/Icon";
 import PeekCard, { type PeekTriggerProps } from "@/components/PeekCard";
 
-export type SettingsSection = "general" | "appearance" | "clients" | "agents" | "repository" | "advanced";
+export type SettingsSection = "general" | "appearance" | "clients" | "agents" | "usage" | "repository" | "advanced";
 
 // Shared settings chrome: the section list, the nav button, and the row/section\n// wrappers every settings pane is built from.
 export const SETTINGS_SECTIONS: Array<{
@@ -25,6 +25,14 @@ export const SETTINGS_SECTIONS: Array<{
     keywords: ["pair", "pairing", "phone", "mobile", "ios", "iphone", "ipad", "qr", "remote", "daemon", "token", "service", "mcp"],
   },
   { id: "agents", label: "Agents", group: "Agents & environment", icon: "brain", keywords: ["model", "skills", "mcp", "environment", "recovery"] },
+  {
+    id: "usage",
+    label: "Usage",
+    group: "Agents & environment",
+    icon: "gauge",
+    // People come here asking "how much do I have left", not "show me usage".
+    keywords: ["quota", "limit", "limits", "left", "remaining", "credits", "plan", "rate limit", "tokens", "billing"],
+  },
   { id: "repository", label: "Repository behavior", group: "Repositories", icon: "folder", keywords: ["git", "worktree", "branch", "push", "remote"] },
   { id: "advanced", label: "Advanced", group: "More", icon: "wrench", keywords: ["toml", "config", "settings file", "logs", "update", "daemon", "version"] },
 ];

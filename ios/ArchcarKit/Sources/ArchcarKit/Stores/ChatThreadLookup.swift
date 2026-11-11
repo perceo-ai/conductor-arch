@@ -52,6 +52,21 @@ public enum ChatThreadLookup {
         }
     }
 
+    /// The chat `threadID` names, and the workspace that owns it, from the
+    /// snapshot the chat list already holds. What turns a bare thread id into
+    /// "antix \u{b7} fix the parser / Done in 4m 12s" without a round trip.
+    public static func chat(
+        forThread threadID: Int64,
+        in chatThreads: [String: [ChatThread]]
+    ) -> (workspace: String, thread: ChatThread)? {
+        for workspace in chatThreads.keys.sorted() {
+            if let thread = chatThreads[workspace]?.first(where: { $0.id == threadID }) {
+                return (workspace, thread)
+            }
+        }
+        return nil
+    }
+
     /// Resolves a tap against the active daemon's snapshot. A tap stamped with
     /// a different daemon is `.notFound` without looking: matching its thread
     /// number here would open an unrelated chat, which is worse than none.
@@ -135,5 +150,17 @@ extension WorkspacesStore {
     /// See ``ChatThreadLookup/workspaceName(forThread:in:)``.
     public func workspaceName(forThread threadID: Int64) -> String? {
         ChatThreadLookup.workspaceName(forThread: threadID, in: chatThreads)
+    }
+
+    /// The notification context for the chat `threadID` names: its workspace,
+    /// title and agent, as far as the loaded snapshot knows them.
+    public func notificationContext(forThread threadID: Int64?) -> NotificationContext {
+        guard
+            let threadID,
+            let chat = ChatThreadLookup.chat(forThread: threadID, in: chatThreads)
+        else {
+            return NotificationContext()
+        }
+        return NotificationContext(workspace: chat.workspace, thread: chat.thread)
     }
 }

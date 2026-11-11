@@ -466,7 +466,12 @@ fn tool_entry(
         .trim_start_matches("<tool_use_error>")
         .trim_end_matches("</tool_use_error>");
     let (text, arg_clipped) = clip(&one_line(&relative(arg)), TOOL_ARG_LIMIT, options.full);
-    let (result, result_clipped) = if result.trim().is_empty() {
+    // An image result may have no text at all: without this the card reads as
+    // a tool that returned nothing. The desktop draws the image; a transcript
+    // can only name it, after any text so clipping cannot take the name.
+    let (result, result_clipped) = if result.trim().is_empty() && !item.images.is_empty() {
+        (Some(image_result_marker(&item.images)), false)
+    } else if result.trim().is_empty() {
         (None, false)
     } else {
         let (result, clipped) = clip(
@@ -474,7 +479,12 @@ fn tool_entry(
             TOOL_RESULT_LIMIT,
             options.full,
         );
-        (Some(result), clipped)
+        if item.images.is_empty() {
+            (Some(result), clipped)
+        } else {
+            let marker = image_result_marker(&item.images);
+            (Some(format!("{result} {marker}")), clipped)
+        }
     };
     let failed = tool_error
         || matches!(
@@ -499,6 +509,31 @@ fn tool_entry(
         truncated: arg_clipped || result_clipped,
         nested: false,
         at_ms: None,
+    }
+}
+
+/// What a transcript says in place of an image it cannot draw.
+fn image_result_marker(images: &[crate::provider_projection::ProjectionImage]) -> String {
+    images
+        .iter()
+        .map(|image| {
+            format!(
+                "[{} {}]",
+                image.media_type,
+                transcript_image_size(image.bytes)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn transcript_image_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -847,6 +882,69 @@ pub(crate) mod tests {
         assert!(!json.contains("s up by number"), "{json}");
         assert!(!json.contains("thinking_delta"), "{json}");
         assert!(!json.contains("stream_event"), "{json}");
+    }
+
+    #[test]
+    fn an_image_result_is_named_rather_than_reading_as_an_empty_tool() {
+        // An image tool result has no text, so without a marker the entry
+        // looks like a Read that returned nothing. A terminal cannot draw it;
+        // the desktop timeline renders the same bytes inline.
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"look at the shot"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","session_id":"s1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_img","name":"Read","input":{"file_path":"/work/ws/shot.png"}}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_img","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUg=="}}]}]}}"#,
+        );
+        let records = records_from_claude(native, 1_790_757_000_000);
+        let turns = build_chat_transcript(&records, &options(Path::new("/work/ws")));
+
+        let read = turns
+            .iter()
+            .flat_map(|turn| turn.entries.iter())
+            .find(|entry| entry.tool.as_deref() == Some("Read"))
+            .expect("the read is in the transcript");
+        assert_eq!(read.text, "shot.png");
+        assert_eq!(read.result.as_deref(), Some("[image/png 16 B]"));
+
+        // The bytes themselves never reach a transcript.
+        let json = serde_json::to_string(&turns).unwrap();
+        assert!(!json.contains("iVBORw0KGgo"), "{json}");
+    }
+
+    #[test]
+    fn an_image_result_with_text_keeps_both() {
+        // A browser capture answers with a description and a screenshot; the
+        // text must not hide that there was an image, clipped or not.
+        let result_for = |text: &str| {
+            let native = [
+                r#"{"type":"user","session_id":"s1","message":{"role":"user","content":[{"type":"text","text":"look at the page"}]}}"#.to_owned(),
+                r#"{"type":"assistant","session_id":"s1","message":{"id":"m1","role":"assistant","content":[{"type":"tool_use","id":"toolu_img","name":"Read","input":{"file_path":"/work/ws/shot.png"}}]}}"#.to_owned(),
+                format!(
+                    r#"{{"type":"user","session_id":"s1","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_img","content":[{{"type":"text","text":"{text}"}},{{"type":"image","source":{{"type":"base64","media_type":"image/png","data":"iVBORw0KGgoAAAANSUhEUg=="}}}}]}}]}}}}"#
+                ),
+            ]
+            .join("\n");
+            let records = records_from_claude(&native, 1_790_757_000_000);
+            let turns = build_chat_transcript(&records, &options(Path::new("/work/ws")));
+            turns
+                .iter()
+                .flat_map(|turn| turn.entries.iter())
+                .find(|entry| entry.tool.as_deref() == Some("Read"))
+                .expect("the read is in the transcript")
+                .result
+                .clone()
+                .expect("the result is kept")
+        };
+
+        assert_eq!(
+            result_for("captured the page"),
+            "captured the page [image/png 16 B]"
+        );
+
+        let clipped = result_for(&"x".repeat(TOOL_RESULT_LIMIT + 50));
+        assert!(clipped.contains("...[+50 chars]"), "{clipped}");
+        assert!(clipped.ends_with(" [image/png 16 B]"), "{clipped}");
     }
 
     #[test]

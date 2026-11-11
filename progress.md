@@ -27,6 +27,34 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Provider usage in Settings (2026-11-05)
+
+**Settings → Usage** shows how much plan quota is left for each provider signed
+in on the daemon's machine, one bar per limit window, and `archductor archcar
+usage` prints the same snapshot (`--refresh` skips the cache).
+
+Each provider CLI knows its own quota but will not print it non-interactively,
+so `crates/core/src/provider_usage.rs` reads the credentials that CLI already
+stored and calls the provider's own account endpoint, the way the CLI's own
+`/usage` does:
+
+- Claude Code — OAuth token (macOS keychain, else `~/.claude/.credentials.json`)
+  against `api.anthropic.com/api/oauth/usage`. `ANTHROPIC_API_KEY` alone reports
+  no plan quota. The keychain lookup stops after 12 seconds, and passing that
+  is an error for Claude only.
+- Codex — `~/.codex/auth.json`; ChatGPT sign-ins report their rolling windows,
+  an API-key sign-in (stored, or `OPENAI_API_KEY`/`OPENAI_API_TOKEN`) reports
+  that it has no plan quota instead.
+- Devin — `credentials.toml` against the Connect `GetUserStatus` RPC. That
+  server parses the client version as semver and answers 500 otherwise.
+
+Probes run in parallel behind a 60-second daemon-side cache, with secrets passed
+to `curl` through a stdin config so they never reach argv. A provider that
+cannot answer reports a status and a reason rather than an empty bar. Concurrent
+cache misses share one collection; `--refresh` always starts its own, and a
+slower older collection never replaces a newer snapshot. A failed request shows
+in the pane with a retry, keeping any bars already drawn.
+
 ## Workspace tabs and splits (2026-10-31)
 
 Opened workspaces stay open as browser-style tabs above the workspace view, and

@@ -45,6 +45,10 @@ export function providerLabel(
   return PROVIDER_LABELS[provider] ?? provider;
 }
 
+/**
+ * The canonical label. The daemon's `model_label` and iOS `AgentModels.label`
+ * mirror it, and all three assert crates/core/tests/fixtures/model_labels.json.
+ */
 export function modelLabel(model: string): string {
   if (model === "gpt-5.6-sol") return "GPT 5.6 Sol";
   if (model === "gpt-5.6-terra") return "GPT 5.6 Terra";
@@ -58,11 +62,16 @@ export function modelLabel(model: string): string {
   if (model === "claude-sonnet-4-6[1m]") return "Claude Sonnet 4.6 1M";
   if (model === "claude-sonnet-4-6") return "Claude Sonnet 4.6";
   if (model === "claude-haiku-4-5") return "Claude Haiku 4.5";
-  return model
-    .split("-")
+  const longContext = model.endsWith("[1m]");
+  const base = longContext ? model.slice(0, -"[1m]".length) : model;
+  const parts = base
+    .split(/[-_]/)
     .filter(Boolean)
-    .map((part) => part[0]?.toUpperCase() + part.slice(1))
-    .join(" ");
+    .map((part) =>
+      part.toLowerCase() === "gpt" ? "GPT" : part[0]?.toUpperCase() + part.slice(1),
+    );
+  if (longContext) parts.push("1M");
+  return parts.join(" ");
 }
 
 export interface AgentModelOption {
