@@ -221,7 +221,10 @@ export function delegationVerbChip(title: string): { verb: string; chip: string 
  */
 export function stripSubagentFraming(text: string): string {
   let out = text.replace(/^\s*\[Subagent hand-back][\s\S]*?The report follows:[ \t]*\n?/, "");
-  out = out.replace(/^agentId:[^\n]*\n?/m, "");
+  // Only the trailing handle, the last line before an optional usage block. No
+  // `m` flag: with it `$` matches at every line end, so an `agentId:` line in
+  // the report itself (a YAML field, say) would be stripped instead.
+  out = out.replace(/(^|\n)agentId:[^\n]*\n?(?=(?:<usage>[\s\S]*<\/usage>)?\s*$)/, "$1");
   out = out.replace(/<usage>[\s\S]*?<\/usage>\s*$/, "");
   return out.replace(/\n{3,}/g, "\n\n").trimEnd();
 }
