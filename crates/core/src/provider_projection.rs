@@ -1909,6 +1909,9 @@ mod tests {
     const SUBAGENTS_AND_BACKGROUND_TASKS: &str =
         include_str!("../tests/fixtures/claude_stream/subagents_and_background_tasks.jsonl");
 
+    const BACKGROUND_SUBAGENT: &str =
+        include_str!("../tests/fixtures/claude_stream/background_subagent.jsonl");
+
     const BACKGROUND_AGENT_AND_COMMAND: &str = concat!(
         r#"{"type":"system","subtype":"init","session_id":"sess_bg","uuid":"init_1","cwd":"/w","model":"claude-fixture","tools":["Bash","Agent"],"mcp_servers":[],"plugins":[]}"#,
         "\n",
@@ -2018,6 +2021,73 @@ mod tests {
         assert!(agent
             .body
             .starts_with("The allowlist lives in chatFormat.ts."));
+    }
+
+    #[test]
+    fn a_backgrounded_subagents_work_nests_under_its_agent_card() {
+        let chat = chat_items_for_claude_fixture(BACKGROUND_SUBAGENT);
+        let agent = chat
+            .iter()
+            .find(|item| item.title == "Agent two step")
+            .expect("an Agent card");
+
+        // The launch receipt is addressed to the model — it carries the
+        // internal resume handle and says never to quote it — so the row says
+        // what the reader needs instead.
+        assert_eq!(agent.body, "Working in the background.");
+
+        let children = chat
+            .iter()
+            .filter(|item| item.parent_id.as_deref() == Some(agent.id.as_str()))
+            .map(|item| (item.render_class, item.title.as_str(), item.body.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            children,
+            vec![
+                (
+                    ProjectionRenderClass::CommandCard,
+                    "Bash ls",
+                    "notes.md\none.txt"
+                ),
+                (
+                    ProjectionRenderClass::NestedTranscriptCard,
+                    "Subagent",
+                    "The directory holds two files, `notes.md` and `one.txt`."
+                ),
+                (
+                    ProjectionRenderClass::CommandCard,
+                    "Bash wc -l one.txt",
+                    "       2 one.txt"
+                ),
+                (
+                    ProjectionRenderClass::NestedTranscriptCard,
+                    "Subagent",
+                    "`one.txt` has 2 lines."
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_backgrounded_subagents_thinking_leaves_the_main_agents_reasoning_alone() {
+        let chat = chat_items_for_claude_fixture(BACKGROUND_SUBAGENT);
+
+        // A subagent's thinking-only message arrives whole, with no
+        // `message_start` of its own. Keyed on the main thread's open message
+        // it merged into the main agent's reasoning card and dragged that card
+        // inside the subagent's; both now stay where they belong.
+        let reasoning = chat
+            .iter()
+            .filter(|item| item.render_class == ProjectionRenderClass::ReasoningCard)
+            .map(|item| (item.body.as_str(), item.parent_id.is_some()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasoning,
+            vec![
+                ("Thought for ~311 tokens", false),
+                ("Thought for ~210 tokens", false),
+            ]
+        );
     }
 
     #[test]
