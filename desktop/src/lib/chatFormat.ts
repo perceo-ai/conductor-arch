@@ -139,7 +139,13 @@ function readableCommandTargets(command: string): string {
 // Archductor-internal blocks injected into prompts/responses that must not be
 // shown to the user (port of core's strip_archductor_metadata_block +
 // hidden-instruction/attachment stripping, applied at render time).
-const BLOCK_TAGS = ["archductor_metadata", "archductor_hidden_instruction"];
+const BLOCK_TAGS = [
+  "archductor_metadata",
+  "archductor_hidden_instruction",
+  // Claude wraps a subagent's report in a list of the tools it used. The rows
+  // above the report already say what it ran, in more detail and in order.
+  "tools-used-before-summary",
+];
 
 export function stripArchductorMetadata(text: string): string {
   let out = text;
@@ -167,4 +173,55 @@ export function isTerminalCard(item: ArchcarProjectionItem): boolean {
     item.render_class === "process_card" ||
     item.render_class === "background_card"
   );
+}
+
+
+/**
+ * True when a card's nested rows are a subagent's conversation rather than its
+ * own output — the card delegated, and what is inside is another agent's work.
+ */
+export function carriesSubagentWork(
+  nested: readonly { render_class: string; title: string }[],
+): boolean {
+  return nested.some(
+    (row) => row.render_class === "subagent_card" || row.render_class === "nested_transcript_card",
+  );
+}
+
+// How providers title the call that starts a subagent. The prefix is plumbing;
+// what follows is the subagent's own description, which is the part worth
+// reading.
+const DELEGATION_PREFIXES = ["Agent", "Task", "Subagent"];
+
+/**
+ * The header for a card that handed work to a subagent. "Used `Agent Count .rs
+ * files`" made delegation look like any other tool call in a column of them;
+ * this says who is working instead.
+ */
+export function delegationVerbChip(title: string): { verb: string; chip: string } {
+  const trimmed = title.trim();
+  const space = trimmed.indexOf(" ");
+  const first = space === -1 ? trimmed : trimmed.slice(0, space);
+  const chip = DELEGATION_PREFIXES.includes(first) && space !== -1 ? trimmed.slice(space + 1).trim() : trimmed;
+  return { verb: "Subagent", chip };
+}
+
+/**
+ * A subagent's report, without the plumbing Claude wraps it in.
+ *
+ * What comes back is: a "[Subagent hand-back] …" safety frame explaining that
+ * the text is model output, then the report, then an `agentId:` handle for
+ * resuming the agent and a `<usage>` block of token counts. Only the middle is
+ * the subagent's answer, and the frame is longer than most reports — in the
+ * card it buried a one-line result under six lines of boilerplate.
+ *
+ * The frame is dropped, not trusted: it is removed only as a prefix ending at
+ * its own "The report follows:" marker, so a forged frame further down the
+ * report cannot cut the text above it.
+ */
+export function stripSubagentFraming(text: string): string {
+  let out = text.replace(/^\s*\[Subagent hand-back][\s\S]*?The report follows:[ \t]*\n?/, "");
+  out = out.replace(/^agentId:[^\n]*\n?/m, "");
+  out = out.replace(/<usage>[\s\S]*?<\/usage>\s*$/, "");
+  return out.replace(/\n{3,}/g, "\n\n").trimEnd();
 }

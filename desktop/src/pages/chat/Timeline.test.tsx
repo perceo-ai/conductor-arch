@@ -314,7 +314,7 @@ describe("Timeline", () => {
     expect(el.querySelector(".chat-timeline-reveal-older")).toBeNull();
   });
 
-  it("nests a subagent's rows inside its Agent card until the card is opened", () => {
+  it("nests a subagent's rows inside its Agent card, open from the start", () => {
     setSession({ runtime_state: "running", ready: false });
     items = [
       projectionItem({
@@ -348,17 +348,19 @@ describe("Timeline", () => {
     // the main agent talking.
     expect(scroll.querySelectorAll(":scope > .chat-inline-event")).toHaveLength(1);
     expect(el.querySelectorAll(".chat-agent-text")).toHaveLength(1);
-    expect(el.textContent).not.toContain("The allowlist lives");
-    // While it runs, the header says what the subagent is doing.
-    expect(el.querySelector(".chat-inline-event-latest")?.textContent).toContain("rg render_class");
 
-    el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
-
+    // The subagent's work is the point of the card, so it is already showing.
     const nested = el.querySelector(".chat-inline-event-nested")!;
     expect(nested.textContent).toContain("rg render_class");
     expect(nested.querySelector(".chat-nested-text")?.textContent).toContain(
       "The allowlist lives in chatFormat.ts.",
     );
+
+    // Closing it puts the running card's latest step back in the header.
+    el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
+    expect(el.querySelector(".chat-inline-event-nested")).toBeNull();
+    expect(el.textContent).not.toContain("The allowlist lives");
+    expect(el.querySelector(".chat-inline-event-latest")?.textContent).toContain("rg render_class");
   });
 
   it("shows the subagent's action count in the collapsed Agent card header", () => {
@@ -556,5 +558,67 @@ describe("Timeline", () => {
     ];
 
     expect(mount().querySelector(".chat-inline-event-spinner")).toBeNull();
+  });
+
+  describe("a card that delegated to a subagent", () => {
+    // The whole point of these rows: a subagent's reads and writes are the
+    // work, and before this they sat behind a "+" that looked exactly like
+    // every other tool call's.
+    function delegationItems() {
+      return [
+        projectionItem({
+          id: "agent",
+          render_class: "tool_card",
+          title: "Agent Count .rs files",
+          body: "<tools-used-before-summary>Bash</tools-used-before-summary>\n\nFound one file.",
+          status: "complete",
+        }),
+        projectionItem({
+          id: "ask",
+          parent_id: "agent",
+          render_class: "subagent_card",
+          title: "Asked subagent",
+          body: "Count the .rs files.",
+          status: "complete",
+        }),
+        projectionItem({
+          id: "ran",
+          parent_id: "agent",
+          render_class: "command_card",
+          title: "Ran cargo test --lib",
+          body: "1",
+          status: "complete",
+        }),
+      ];
+    }
+
+    it("shows what the subagent ran without anyone clicking", () => {
+      items = delegationItems();
+      const nested = mount().querySelector(".chat-inline-event-nested");
+      expect(nested).not.toBeNull();
+      expect(nested!.textContent).toContain("cargo test --lib");
+    });
+
+    it("reads as a subagent rather than as one more tool use", () => {
+      items = delegationItems();
+      const card = mount().querySelector(".chat-inline-event-delegation");
+      expect(card).not.toBeNull();
+      expect(card!.querySelector(".chat-inline-event-action")?.textContent).toBe("Subagent");
+      expect(card!.querySelector(".chat-inline-event-chip-label")?.textContent).toBe("Count .rs files");
+    });
+
+    it("can still be collapsed, and an ordinary tool card stays shut", () => {
+      items = delegationItems();
+      const el = mount();
+      (el.querySelector(".chat-inline-event-delegation .chat-inline-event-expander") as HTMLButtonElement).click();
+      expect(el.querySelector(".chat-inline-event-nested")).toBeNull();
+
+      dispose?.();
+      host?.remove();
+      items = [
+        projectionItem({ id: "t", render_class: "tool_card", title: "ToolSearch select:Read", body: "Loaded Read" }),
+      ];
+      expect(mount().querySelector(".chat-inline-event-body")).toBeNull();
+    });
   });
 });
