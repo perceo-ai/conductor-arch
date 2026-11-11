@@ -15,12 +15,15 @@ import { TurnForkAction } from "./MessageActions";
 import {
   formatActionCount,
   formatReasoningText,
+  carriesSubagentWork,
+  delegationVerbChip,
   inlineEventVerbChip,
   isDiffCard,
   isInlineEventClass,
   isSubagentAction,
   isTerminalCard,
   stripArchductorMetadata,
+  stripSubagentFraming,
 } from "@/lib/chatFormat";
 import { NESTED_WINDOW_SIZE, NESTED_WINDOW_STEP, showsRunning, timelineWindow } from "@/lib/timeline";
 
@@ -52,6 +55,9 @@ function UserBubble(props: {
   );
 }
 
+/** Not a projected class: the icon key for a card that delegated to a subagent. */
+const DELEGATION_RENDER_CLASS = "delegation_card";
+
 export function eventIcon(renderClass: string): IconName {
   if (renderClass === "command_card" || renderClass === "process_card" || renderClass === "background_card")
     return "terminal";
@@ -60,6 +66,7 @@ export function eventIcon(renderClass: string): IconName {
   if (renderClass === "reasoning_card") return "brain";
   if (renderClass === "skill_card" || renderClass === "tool_card" || renderClass === "plugin_card") return "wrench";
   if (renderClass === "subagent_card" || renderClass === "nested_transcript_card") return "bolt";
+  if (renderClass === DELEGATION_RENDER_CLASS) return "users";
   return "wrench";
 }
 
@@ -79,10 +86,18 @@ function InlineCard(props: {
   nested: ArchcarProjectionItem[];
   renderNested: (item: ArchcarProjectionItem) => JSX.Element;
 }) {
-  const [open, setOpen] = createSignal(false);
+  // null until someone clicks: a delegation card opens itself, every other card
+  // stays shut. A click pins the choice either way.
+  const [toggled, setToggled] = createSignal<boolean | null>(null);
   const [nestedCount, setNestedCount] = createSignal(NESTED_WINDOW_SIZE);
   const nestedWindow = () => timelineWindow(props.nested, nestedCount());
-  const parsed = () => inlineEventVerbChip(props.item.render_class, props.item.title);
+  const delegation = () => carriesSubagentWork(props.nested);
+  const open = () => toggled() ?? delegation();
+  const setOpen = (next: (previous: boolean) => boolean) => setToggled(next(open()));
+  const parsed = () =>
+    delegation()
+      ? delegationVerbChip(props.item.title)
+      : inlineEventVerbChip(props.item.render_class, props.item.title);
   const verb = () => parsed().verb;
   const chip = () => parsed().chip;
   const hasNested = () => props.nested.length > 0;
@@ -104,7 +119,8 @@ function InlineCard(props: {
       class="chat-inline-event"
       classList={{
         "chat-inline-event-failed": props.item.status === "failed",
-        "chat-inline-event-running": props.running
+        "chat-inline-event-running": props.running,
+        "chat-inline-event-delegation": delegation()
       }}
     >
       <div class="chat-inline-event-header">
@@ -118,7 +134,10 @@ function InlineCard(props: {
             <span class="chat-inline-event-expander-glyph">{open() ? "−" : "+"}</span>
           </Show>
         </button>
-        <Icon name={eventIcon(props.item.render_class)} class="chat-inline-event-icon" />
+        <Icon
+          name={delegation() ? eventIcon(DELEGATION_RENDER_CLASS) : eventIcon(props.item.render_class)}
+          class="chat-inline-event-icon"
+        />
         <span class="chat-inline-event-action">{verb()}</span>
         <Show when={chip()}>
           <span class="chat-inline-event-chip">
@@ -167,7 +186,7 @@ function InlineCard(props: {
             {/* A subagent's report is prose, written for the parent agent. */}
             <div
               class="chat-nested-text markdown-body"
-              innerHTML={renderMarkdown(stripArchductorMetadata(props.item.body))}
+              innerHTML={renderMarkdown(stripSubagentFraming(stripArchductorMetadata(props.item.body)))}
             />
           </Match>
           <Match when={isDiffCard(props.item)}>

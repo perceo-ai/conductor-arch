@@ -168,6 +168,19 @@ button.chat-inline-event-expander label {
     padding: 0;
 }
 
+/* A card that handed work to a subagent. In a column of identical tool rows
+   the delegation was indistinguishable from a one-line ToolSearch, so it reads
+   as its own thing: accent icon, and a rail down the subagent's rows. */
+.chat-inline-event-delegation > .chat-inline-event-header .chat-inline-event-icon {
+    color: var(--lc-accent);
+}
+.chat-inline-event-delegation > .chat-inline-event-header .chat-inline-event-action {
+    color: #d8d8d8;
+}
+.chat-inline-event-delegation > .chat-inline-event-nested {
+    border-left-color: var(--lc-accent);
+}
+
 /* A subagent's rows, inside the Agent card that spawned them. */
 .chat-inline-event-nested {
     border-left: 1px solid #2a2a2a;
