@@ -1557,7 +1557,14 @@ impl ClaudeStreamParser {
             | ClaudeProviderEventKind::ContentBlockDelta
             | ClaudeProviderEventKind::ContentBlockStop
             | ClaudeProviderEventKind::Reasoning => {
-                draft.provider_message_id = self.current_message_id.clone();
+                // A thinking-only assistant message is reasoning, and a
+                // subagent's arrives whole — no `message_start`, so
+                // `current_message_id` is still the main thread's message.
+                // Keyed on that, the subagent's thinking merged into the main
+                // agent's own reasoning card and dragged it inside the
+                // subagent's card. The message's own id keeps them apart.
+                draft.provider_message_id = string_at(&draft.raw_json, &["message", "id"])
+                    .or_else(|| self.current_message_id.clone());
             }
             _ => {}
         }
@@ -1663,7 +1670,8 @@ impl ClaudeStreamParser {
                 .as_ref()
                 .filter(|_| string_at(&draft.raw_json, &["type"]).as_deref() == Some("user"))
                 .and_then(|id| self.todo_lists_by_use_id.get(id).cloned())
-                .or_else(|| tool_result_text(&draft.raw_json)),
+                .or_else(|| tool_result_text(&draft.raw_json))
+                .map(|text| claude_async_agent_launch_body(&text).unwrap_or(text)),
             ClaudeProviderEventKind::BackgroundTask => claude_task_body(&draft.raw_json),
             ClaudeProviderEventKind::Result => string_at(&draft.raw_json, &["result"]),
             _ => None,
@@ -1824,6 +1832,17 @@ fn message_content_text(value: &Value, block_type: &str, field: &str) -> Option<
 /// string for most built-in tools but an array of blocks for MCP tools, Agent
 /// reports, and tool searches; reading only strings left those cards showing
 /// the call's input instead of what came back.
+/// The receipt claude hands back when an `Agent` call was backgrounded. It is
+/// addressed to the model, not to a reader: it says never to quote it, carries
+/// the internal `agentId` resume handle and the task's output path, and says
+/// nothing about the work. The card's own nested rows and the task card carry
+/// that, so the row says only that the agent is working.
+fn claude_async_agent_launch_body(text: &str) -> Option<String> {
+    text.trim_start()
+        .starts_with("Async agent launched successfully")
+        .then(|| "Working in the background.".to_owned())
+}
+
 fn tool_result_text(value: &Value) -> Option<String> {
     let text = value
         .pointer("/message/content")?

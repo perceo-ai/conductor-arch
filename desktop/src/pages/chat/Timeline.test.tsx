@@ -363,6 +363,57 @@ describe("Timeline", () => {
     expect(el.querySelector(".chat-inline-event-latest")?.textContent).toContain("rg render_class");
   });
 
+  // A backgrounded delegation: claude finishes the Agent call the moment the
+  // agent is launched, then streams the agent's work under that finished card
+  // while a separate task card tracks it. The work still has to read as the
+  // subagent's, under the card that delegated.
+  it("shows a backgrounded subagent's work under its finished Agent card", () => {
+    items = [
+      projectionItem({
+        id: "agent",
+        render_class: "tool_card",
+        title: "Agent two step",
+        body: "Working in the background.",
+      }),
+      projectionItem({
+        id: "task",
+        render_class: "background_card",
+        title: "two step",
+        body: "`notes.md` has 2 lines.",
+        status: "running",
+      }),
+      projectionItem({
+        id: "child-ls",
+        render_class: "command_card",
+        title: "Bash ls",
+        body: "notes.md\none.txt",
+        parent_id: "agent",
+      }),
+      projectionItem({
+        id: "child-text",
+        render_class: "nested_transcript_card",
+        title: "Subagent",
+        body: "The directory holds two files.",
+        parent_id: "agent",
+      }),
+    ];
+
+    const el = mount();
+    const scroll = el.querySelector(".chat-messages")!;
+    // The Agent card and the task card, each at the top level.
+    expect(scroll.querySelectorAll(":scope > .chat-inline-event")).toHaveLength(2);
+
+    // The delegation opens on its own work, and the launch line is all the
+    // card itself has to say.
+    const nested = el.querySelector(".chat-inline-event-nested")!;
+    expect(nested.textContent).toContain("Bash ls");
+    expect(nested.querySelector(".chat-nested-text")?.textContent).toContain(
+      "The directory holds two files.",
+    );
+    expect(el.textContent).toContain("Working in the background.");
+    expect(el.textContent).not.toContain("agentId");
+  });
+
   it("shows the subagent's action count in the collapsed Agent card header", () => {
     items = [
       projectionItem({ id: "agent", render_class: "tool_card", title: "Agent Audit the renderer", body: "" }),
