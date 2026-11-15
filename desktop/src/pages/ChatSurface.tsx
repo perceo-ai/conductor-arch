@@ -19,6 +19,7 @@ import { registerOpenFile, registerOpenCommit } from "./openFileBridge";
 import { usePane } from "./paneContext";
 import Icon from "@/components/Icon";
 import { ThreadTab, FileTab } from "./chat/ChatTabs";
+import { ClosedChatsMenu } from "./chat/ClosedChatsMenu";
 import { Timeline } from "./chat/Timeline";
 import { Composer } from "./chat/Composer";
 import { FileView, CommitView } from "./chat/FileViews";
@@ -175,6 +176,14 @@ export default function ChatSurface(props: { workspace: string }) {
     }
   }
 
+  // A chat reopened from the restore menu should land where the user is
+  // looking, so it is selected rather than merely added to the strip.
+  async function openRestoredThread(threadId: number) {
+    const list = await threadsStore.refresh(props.workspace);
+    const restored = list.find((thread) => thread.id === threadId);
+    if (restored) selectThread(restored);
+  }
+
   async function closeThread(thread: ArchcarChatThread) {
     try {
       await send({ type: "close_chat_thread", thread_id: thread.id });
@@ -250,6 +259,13 @@ export default function ChatSurface(props: { workspace: string }) {
             </Show>
           </div>
         </div>
+        {/* Pinned outside the scroller, beside the new-chat button: a chat
+            closed by a mis-keyed shortcut is only archived, and this is the one
+            place in the app that can bring it back. */}
+        <ClosedChatsMenu
+          workspace={props.workspace}
+          onRestored={(threadId) => void openRestoredThread(threadId)}
+        />
         {/* Pinned outside the scroller: opening a new chat must not require
             scrolling past every tab you already have. */}
         <button

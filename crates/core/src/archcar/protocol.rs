@@ -279,6 +279,12 @@ pub enum ArchcarRequest {
     ListChatThreads {
         workspace: String,
     },
+    /// Chats closed in this workspace, most recently closed first, offered for
+    /// restore. Closing a chat only marks it, so every one of these can be
+    /// reopened with its whole history by `ReopenChatThread`.
+    ListClosedChatThreads {
+        workspace: String,
+    },
     GetChatProjection {
         thread_id: i64,
     },
@@ -2042,6 +2048,9 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::ApplySync { .. } => "apply_sync".to_owned(),
         ArchcarRequest::ListChatThreads { workspace } => {
             format!("list_chat_threads workspace={workspace}")
+        }
+        ArchcarRequest::ListClosedChatThreads { workspace } => {
+            format!("list_closed_chat_threads workspace={workspace}")
         }
         ArchcarRequest::GetChatProjection { thread_id } => {
             format!("get_chat_projection thread_id={thread_id}")

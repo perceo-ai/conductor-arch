@@ -1348,6 +1348,15 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                 },
             }
         }
+        ArchcarRequest::ListClosedChatThreads { workspace } => {
+            let db_path = state.lock().unwrap().db_path.clone();
+            match closed_chat_threads_for_workspace(&db_path, &workspace) {
+                Ok(threads) => ArchcarResponse::ChatThreads { workspace, threads },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::GetChatProjection { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
             match ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id) {
@@ -5843,26 +5852,37 @@ fn chat_threads_for_workspace(db_path: &Path, workspace: &str) -> Result<Vec<Arc
         .and_then(|store| store.list_chat_threads(workspace))
         .map(|mut threads| {
             threads.sort_by_key(|thread| thread.id);
-            threads
-                .into_iter()
-                .map(|t| {
-                    let harness = crate::workspace::SessionHarnessOptions::from_metadata(
-                        t.harness_metadata.as_deref(),
-                    );
-                    ArchcarChatThread {
-                        id: t.id,
-                        provider: t.provider,
-                        title: t.title,
-                        status: t.status,
-                        model: t.model,
-                        effort_mode: harness.effort_mode,
-                        fast_mode: harness.fast_mode,
-                        updated_at: t.updated_at,
-                        archived_at: t.archived_at,
-                    }
-                })
-                .collect()
+            threads.into_iter().map(chat_thread_summary).collect()
         })
+}
+
+/// A workspace's closed chats, for the restore picker.
+///
+/// Unlike the tab strip above, the store's order is kept: this list is read
+/// most-recently-closed first, because that is the chat the user just lost.
+fn closed_chat_threads_for_workspace(
+    db_path: &Path,
+    workspace: &str,
+) -> Result<Vec<ArchcarChatThread>> {
+    WorkspaceStore::open_app(db_path)
+        .and_then(|store| store.list_closed_chat_threads(workspace))
+        .map(|threads| threads.into_iter().map(chat_thread_summary).collect())
+}
+
+fn chat_thread_summary(thread: crate::workspace::ChatThreadRecord) -> ArchcarChatThread {
+    let harness =
+        crate::workspace::SessionHarnessOptions::from_metadata(thread.harness_metadata.as_deref());
+    ArchcarChatThread {
+        id: thread.id,
+        provider: thread.provider,
+        title: thread.title,
+        status: thread.status,
+        model: thread.model,
+        effort_mode: harness.effort_mode,
+        fast_mode: harness.fast_mode,
+        updated_at: thread.updated_at,
+        archived_at: thread.archived_at,
+    }
 }
 
 /// Repositories, workspaces, and each workspace's chat threads, as one bundle.
@@ -7979,6 +7999,124 @@ mod tests {
         let _ = handle
             .command_tx
             .send(crate::archcar::session::SessionCommand::Kill);
+    }
+
+    /// The restore round trip a user makes from the chat tab bar: a chat closed
+    /// days ago is invisible to the tab strip but offered by the closed-chats
+    /// list, and reopening it puts it back in the strip.
+    #[test]
+    fn a_closed_chat_is_listed_for_restore_and_comes_back_reopened() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let repo_path = init_repo(temp.path().join("demo"));
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs")).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        let kept = store
+            .create_chat_thread("berlin", "codex", "Still open", None)
+            .unwrap();
+        let lost = store
+            .create_chat_thread("berlin", "codex", "Yesterday's work", None)
+            .unwrap();
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir: temp.path().join("logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+        }));
+
+        let closed = dispatch_request(
+            ArchcarRequest::CloseChatThread { thread_id: lost.id },
+            &state,
+        );
+        assert!(matches!(closed, ArchcarResponse::Ack));
+
+        let tabs = dispatch_request(
+            ArchcarRequest::ListChatThreads {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        let ArchcarResponse::ChatThreads { threads, .. } = tabs else {
+            panic!("expected chat threads response");
+        };
+        assert_eq!(
+            threads.iter().map(|thread| thread.id).collect::<Vec<_>>(),
+            vec![kept.id]
+        );
+
+        let restorable = dispatch_request(
+            ArchcarRequest::ListClosedChatThreads {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        let ArchcarResponse::ChatThreads { threads, .. } = restorable else {
+            panic!("expected chat threads response");
+        };
+        assert_eq!(
+            threads.iter().map(|thread| thread.id).collect::<Vec<_>>(),
+            vec![lost.id],
+            "the closed chat is the one offered for restore"
+        );
+        assert_eq!(threads[0].title, "Yesterday's work");
+        assert!(threads[0].archived_at.is_some());
+
+        let reopened = dispatch_request(
+            ArchcarRequest::ReopenChatThread { thread_id: lost.id },
+            &state,
+        );
+        assert!(matches!(reopened, ArchcarResponse::Ack));
+
+        let tabs = dispatch_request(
+            ArchcarRequest::ListChatThreads {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        let ArchcarResponse::ChatThreads { threads, .. } = tabs else {
+            panic!("expected chat threads response");
+        };
+        assert!(
+            threads.iter().any(|thread| thread.id == lost.id),
+            "a reopened chat is back in the tab strip"
+        );
+        let restorable = dispatch_request(
+            ArchcarRequest::ListClosedChatThreads {
+                workspace: "berlin".to_owned(),
+            },
+            &state,
+        );
+        let ArchcarResponse::ChatThreads { threads, .. } = restorable else {
+            panic!("expected chat threads response");
+        };
+        assert!(
+            threads.is_empty(),
+            "a reopened chat leaves the restore list"
+        );
     }
 
     #[test]
