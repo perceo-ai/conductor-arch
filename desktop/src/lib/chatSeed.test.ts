@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { firstModel } from "./models";
+import { MODELS, firstModel } from "./models";
 import { seedForSelectedThread } from "./chatSeed";
 
 // A brand-new workspace's first chat is created by the backend with no model,
@@ -34,9 +34,10 @@ describe("seedForSelectedThread", () => {
 
   it("follows a changed default for the next new workspace", async () => {
     const { prefsStore } = await import("@/store/prefs");
-    prefsStore.setDefaultModel("gpt-5.5");
+    const chosen = MODELS.codex[1];
+    prefsStore.setDefaultModel(chosen);
     const thread = { id: 2, provider: "codex", model: null };
-    expect(seedForSelectedThread(thread, {}, prefsStore.seedModelFor)).toBe("gpt-5.5");
+    expect(seedForSelectedThread(thread, {}, prefsStore.seedModelFor)).toBe(chosen);
   });
 
   it("falls back to the provider's first model when the default is another provider's", async () => {

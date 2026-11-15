@@ -190,6 +190,12 @@ Default design direction:
 - Check `git status --short` before edits and before final response.
 - Do not revert user or other-agent changes unless explicitly asked.
 - Use `rg`/`rg --files` for search.
+- The selectable model list has one source: `model-corpus.json`. Edit that and
+  run `node scripts/generate-model-corpus.mjs`; never hand-edit the generated
+  regions in `desktop/src/lib/models.ts`, `ios/.../AgentModels.swift`,
+  `crates/core/src/model_registry.rs`, `crates/core/src/notifications.rs`, or
+  `crates/core/tests/fixtures/model_labels.json`. CI runs the generator with
+  `--check`.
 - Keep changes scoped to the requested task.
 - Run written tests plus relevant CLI smoke for the change.
 - If a change to the desktop app affects visible UI, run or build enough to

@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { firstModel } from "@/lib/models";
 
 // prefs drives the default model new chats start on. Runs in the node env where
 // localStorage is absent, so this also exercises the no-localStorage fallback.
@@ -11,7 +12,11 @@ describe("prefsStore", () => {
   it("defaults to a concrete codex model", async () => {
     const { prefsStore } = await import("./prefs");
     expect(prefsStore.state.defaultProvider).toBe("codex");
-    expect(prefsStore.state.defaultModel).toBe("gpt-5.6-sol");
+    // Pinned to the corpus rather than a literal: the id moves whenever the
+    // provider retires a model, and a stale literal here would be the only
+    // thing still claiming the old one works.
+    expect(prefsStore.state.defaultModel).toBe(firstModel("codex"));
+    expect(prefsStore.state.defaultModel).not.toBe("");
   });
 
   it("derives the provider when the default model changes", async () => {
@@ -27,7 +32,7 @@ describe("prefsStore", () => {
     // Same provider as the default → use the exact default model.
     expect(prefsStore.seedModelFor("claude")).toBe("claude-sonnet-5");
     // Different provider → fall back to that provider's first model.
-    expect(prefsStore.seedModelFor("codex")).toBe("gpt-5.6-sol");
+    expect(prefsStore.seedModelFor("codex")).toBe(firstModel("codex"));
   });
 
   it("defaults appearance to dark / amber / cozy", async () => {

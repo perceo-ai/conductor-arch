@@ -1,7 +1,25 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { MODELS, agentModelOptions, firstModel, modelLabel, providerLabel } from "./models";
+import {
+  CHAT_PROVIDERS,
+  MODELS,
+  agentModelOptions,
+  firstModel,
+  modelLabel,
+  providerLabel,
+} from "./models";
+
+// The generated mirrors are only trustworthy if something asserts them against
+// their source, so these read model-corpus.json rather than restating the list.
+interface ModelCorpus {
+  providers: Record<string, { default?: string; models: { id: string; label: string }[] }>;
+  retired: { id: string }[];
+}
+
+const CORPUS: ModelCorpus = JSON.parse(
+  readFileSync(join(process.cwd(), "../model-corpus.json"), "utf8"),
+);
 
 // One table for every surface: the daemon's push text and the iOS app assert
 // the same file, so a model reads the same wherever its notification lands.
@@ -10,112 +28,32 @@ const SHARED_LABELS: Record<string, string> = JSON.parse(
 );
 
 describe("model catalogue", () => {
-  it("starts Codex on a concrete 5.6 model", () => {
-    expect(firstModel("codex")).toBe("gpt-5.6-sol");
-    expect(modelLabel(firstModel("codex"))).toBe("GPT 5.6 Sol");
+  it("offers exactly the models the corpus declares, in order", () => {
+    const expected = CHAT_PROVIDERS.flatMap((provider) =>
+      CORPUS.providers[provider].models.map((model) => ({
+        provider,
+        model: model.id,
+        value: `${provider}:${model.id}`,
+        label: model.label,
+        group: providerLabel(provider),
+      })),
+    );
+
+    expect(agentModelOptions()).toEqual(expected);
   });
 
-  it("groups selectable models by provider", () => {
-    expect(agentModelOptions()).toEqual([
-      {
-        provider: "codex",
-        model: "gpt-5.6-sol",
-        value: "codex:gpt-5.6-sol",
-        label: "GPT 5.6 Sol",
-        group: "Codex",
-      },
-      {
-        provider: "codex",
-        model: "gpt-5.6-terra",
-        value: "codex:gpt-5.6-terra",
-        label: "GPT 5.6 Terra",
-        group: "Codex",
-      },
-      {
-        provider: "codex",
-        model: "gpt-5.6-luna",
-        value: "codex:gpt-5.6-luna",
-        label: "GPT 5.6 Luna",
-        group: "Codex",
-      },
-      {
-        provider: "codex",
-        model: "gpt-5.5",
-        value: "codex:gpt-5.5",
-        label: "GPT 5.5",
-        group: "Codex",
-      },
-      {
-        provider: "codex",
-        model: "gpt-5.4",
-        value: "codex:gpt-5.4",
-        label: "GPT 5.4",
-        group: "Codex",
-      },
-      {
-        provider: "claude",
-        model: "claude-fable-5",
-        value: "claude:claude-fable-5",
-        label: "Claude Fable 5",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-opus-5",
-        value: "claude:claude-opus-5",
-        label: "Claude Opus 5",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-opus-4-8[1m]",
-        value: "claude:claude-opus-4-8[1m]",
-        label: "Claude Opus 4.8 1M",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-opus-4-7[1m]",
-        value: "claude:claude-opus-4-7[1m]",
-        label: "Claude Opus 4.7 1M",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-opus-4-6[1m]",
-        value: "claude:claude-opus-4-6[1m]",
-        label: "Claude Opus 4.6 1M",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-sonnet-5",
-        value: "claude:claude-sonnet-5",
-        label: "Claude Sonnet 5 1M",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-sonnet-4-6[1m]",
-        value: "claude:claude-sonnet-4-6[1m]",
-        label: "Claude Sonnet 4.6 1M",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-sonnet-4-6",
-        value: "claude:claude-sonnet-4-6",
-        label: "Claude Sonnet 4.6",
-        group: "Claude Code",
-      },
-      {
-        provider: "claude",
-        model: "claude-haiku-4-5",
-        value: "claude:claude-haiku-4-5",
-        label: "Claude Haiku 4.5",
-        group: "Claude Code",
-      },
-    ]);
+  it("starts each provider on the model the corpus defaults to", () => {
+    for (const [provider, entry] of Object.entries(CORPUS.providers)) {
+      if (!entry.default) continue;
+      expect(firstModel(provider), provider).toBe(entry.default);
+    }
+  });
+
+  it("offers no model the corpus lists as retired", () => {
+    const retired = new Set(CORPUS.retired.map((entry) => entry.id));
+    for (const model of Object.values(MODELS).flat()) {
+      expect(retired.has(model), model).toBe(false);
+    }
   });
 
   it("labels models from the table every surface shares", () => {
