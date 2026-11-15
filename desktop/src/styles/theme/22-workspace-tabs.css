@@ -203,6 +203,24 @@ button.ws-tab-shell {
     color: #8a8a8a;
     font-size: 12px;
 }
+.ws-closed-chats-error {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    color: #f0a3a3;
+    font-size: 12px;
+}
+.ws-closed-chats-retry {
+    align-self: flex-start;
+    padding: 2px 8px;
+    border: 1px solid #5a5a5a;
+    border-radius: 4px;
+    background: transparent;
+    color: #e4e4e4;
+    font-size: 12px;
+    cursor: pointer;
+}
 .ws-tab-shell:hover .ws-tab-label,
 .ws-tab-shell:hover .ws-tab-close-icon {
     color: #c6c6c6;
