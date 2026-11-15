@@ -1,0 +1,111 @@
+name: Model Corpus Refresh
+
+# Reads what the vendors currently publish and proposes the change as a PR.
+#
+# The Model Corpus job in ci.yml only proves the mirrors match the source, and
+# the weekly `--max-age` nag only proves somebody looked recently. Neither of
+# them looks at the vendors. This does, once a week:
+#
+#   Claude - refreshed outright from the models API, which really enumerates.
+#   Codex  - reported only. There is no enumeration endpoint and the docs page
+#            is a JS app, so a scrape is not trustworthy enough to rewrite the
+#            picker from; a human reads the report and edits the corpus.
+#
+# Nothing here ever lands on main by itself: the Claude half arrives as a PR.
+
+on:
+  schedule:
+    - cron: "41 7 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: model-corpus-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No stored credentials, as everywhere else here; the push below uses
+          # the job's token explicitly so it cannot leak into later steps.
+          persist-credentials: false
+
+      - name: Read the vendors
+        id: refresh
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set +e
+          node scripts/refresh-model-corpus.mjs --report "$RUNNER_TEMP/report.md"
+          status=$?
+          set -e
+          case "$status" in
+            0) echo "outcome=unchanged" >>"$GITHUB_OUTPUT" ;;
+            10) echo "outcome=changed" >>"$GITHUB_OUTPUT" ;;
+            20) echo "outcome=review" >>"$GITHUB_OUTPUT" ;;
+            *)
+              echo "refresh failed with status $status" >&2
+              exit "$status"
+              ;;
+          esac
+
+      - name: Regenerate the mirrors
+        if: steps.refresh.outputs.outcome == 'changed'
+        run: node scripts/generate-model-corpus.mjs
+
+      - name: Open a pull request
+        if: steps.refresh.outputs.outcome == 'changed'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="model-corpus/refresh-$(date -u +%Y-%m-%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add model-corpus.json desktop/src/lib/models.ts \
+            ios/ArchcarKit/Sources/ArchcarKit/Stores/AgentModels.swift \
+            crates/core/src/model_registry.rs crates/core/src/notifications.rs \
+            crates/core/tests/fixtures/model_labels.json
+          git commit -m "chore(models): refresh the model corpus from the vendors"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/$branch"
+          {
+            echo "## What"
+            echo
+            echo "Weekly vendor read. The corpus and its generated mirrors changed."
+            echo
+            cat "$RUNNER_TEMP/report.md"
+            echo
+            echo "## Why"
+            echo
+            echo "Archductor passes \`--model <id>\` to the provider CLI without validating it,"
+            echo "so a model the vendor retired fails at the provider rather than in the picker."
+            echo
+            echo "## User Impact"
+            echo
+            echo "The model picker offers what the providers currently accept."
+            echo
+            echo "## Review notes"
+            echo
+            echo "Check the labels on any newly added model: they are suggested, not published."
+          } >"$RUNNER_TEMP/body.md"
+          gh pr create --title "chore(models): refresh the model corpus" \
+            --body-file "$RUNNER_TEMP/body.md" --base main --head "$branch"
+
+      - name: Codex needs a human
+        if: steps.refresh.outputs.outcome == 'review'
+        run: |
+          cat "$RUNNER_TEMP/report.md"
+          echo "::error::The Codex model list and model-corpus.json disagree. Edit the corpus by hand."
+          exit 1

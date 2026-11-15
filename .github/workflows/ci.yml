@@ -198,6 +198,11 @@ jobs:
       - name: Generator tests
         run: bash tests/model-corpus-test.sh
 
+      # The weekly refresh reads a vendor docs page, so its parsing is the part
+      # that rots silently; these pin it without touching the network.
+      - name: Refresh parser tests
+        run: node --test tests/refresh-model-corpus.test.mjs
+
       # Only on the weekly run: neither provider CLI can enumerate its models,
       # so the one freshness signal available is how long ago a human last read
       # the vendors' model pages. Failing a PR for that would punish the wrong
