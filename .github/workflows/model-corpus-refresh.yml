@@ -12,6 +12,13 @@ name: Model Corpus Refresh
 #            picker from; a human reads the report and edits the corpus.
 #
 # Nothing here ever lands on main by itself: the Claude half arrives as a PR.
+#
+# That PR is pushed and opened with the job's GITHUB_TOKEN, and GitHub starts
+# no `pull_request` workflows for events that token creates. So after opening
+# it this job dispatches ci.yml on the refresh branch itself: workflow_dispatch
+# is the one trigger GITHUB_TOKEN may start, and a run on the branch reports
+# its checks (archductor/ci-gate included) on the PR's head commit. No PAT or
+# App token is involved.
 
 on:
   schedule:
@@ -33,6 +40,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      # Only to dispatch ci.yml on the refresh branch; see the header.
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,6 +73,43 @@ jobs:
         if: steps.refresh.outputs.outcome == 'changed'
         run: node scripts/generate-model-corpus.mjs
 
+      # Its own step, with no git or gh in it, so the description can be
+      # rendered and checked without pushing anything. It needs the five
+      # headings ci.yml's PR Description job greps for.
+      - name: Write the pull request description
+        if: steps.refresh.outputs.outcome == 'changed'
+        run: |
+          {
+            echo "## Summary"
+            echo
+            echo "Weekly vendor read. The corpus and its generated mirrors changed."
+            echo
+            echo "## What Changed"
+            echo
+            echo "model-corpus.json was refreshed from the Claude models API, and"
+            echo "scripts/generate-model-corpus.mjs rewrote the desktop, iOS, Rust and fixture"
+            echo "mirrors from it. Check the labels on any newly added model: they are"
+            echo "suggested, not published."
+            echo
+            echo "## Why"
+            echo
+            echo "Archductor passes \`--model <id>\` to the provider CLI without validating it,"
+            echo "so a model the vendor retired fails at the provider rather than in the picker."
+            echo
+            echo "## User Impact"
+            echo
+            echo "The model picker offers what the providers currently accept."
+            echo
+            echo "## Validation"
+            echo
+            echo "What this run checked, per provider:"
+            echo
+            cat "$RUNNER_TEMP/report.md"
+            echo
+            echo "The mirrors were regenerated from the refreshed corpus, and CI is dispatched"
+            echo "on this branch after the PR opens (workflow_dispatch), so its checks report here."
+          } >"$RUNNER_TEMP/body.md"
+
       - name: Open a pull request
         if: steps.refresh.outputs.outcome == 'changed'
         env:
@@ -80,28 +126,12 @@ jobs:
           git commit -m "chore(models): refresh the model corpus from the vendors"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "HEAD:refs/heads/$branch"
-          {
-            echo "## What"
-            echo
-            echo "Weekly vendor read. The corpus and its generated mirrors changed."
-            echo
-            cat "$RUNNER_TEMP/report.md"
-            echo
-            echo "## Why"
-            echo
-            echo "Archductor passes \`--model <id>\` to the provider CLI without validating it,"
-            echo "so a model the vendor retired fails at the provider rather than in the picker."
-            echo
-            echo "## User Impact"
-            echo
-            echo "The model picker offers what the providers currently accept."
-            echo
-            echo "## Review notes"
-            echo
-            echo "Check the labels on any newly added model: they are suggested, not published."
-          } >"$RUNNER_TEMP/body.md"
           gh pr create --title "chore(models): refresh the model corpus" \
             --body-file "$RUNNER_TEMP/body.md" --base main --head "$branch"
+          # The push and the PR above start no pull_request run (GITHUB_TOKEN),
+          # so start CI on the branch explicitly; its checks land on this commit.
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$branch"
+          echo "Dispatched ci.yml on $branch ($(git rev-parse HEAD))."
 
       - name: Codex needs a human
         if: steps.refresh.outputs.outcome == 'review'
