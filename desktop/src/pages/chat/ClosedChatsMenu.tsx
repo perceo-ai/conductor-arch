@@ -16,9 +16,14 @@ import Icon from "@/components/Icon";
  * at the moment something has to come back.
  *
  * The component outlives a workspace switch (ChatSurface only swaps its
- * `workspace` prop), so every reply is checked against the request generation
- * that asked for it: a list or restore for workspace A that lands after the
- * switch to B is dropped instead of showing A's chats under B.
+ * `workspace` prop), so every reply is checked against a generation: a list or
+ * restore for workspace A that lands after the switch to B is dropped instead
+ * of showing A's chats under B. Lists and restores use separate counters,
+ * because reopening the menu re-lists, and that must not orphan a restore
+ * still in flight for the same workspace.
+ *
+ * The daemon reports a failed request as a resolved `{ type: "error" }`
+ * reply, not a rejection, so both paths check the reply type as well.
  */
 type ListState =
   | { status: "idle" }
@@ -40,15 +45,19 @@ export function ClosedChatsMenu(props: {
   const [anchor, setAnchor] = createSignal<DOMRect | null>(null);
   let trigger: HTMLButtonElement | undefined;
   let menu: HTMLDivElement | undefined;
-  // Bumped on every list request and every workspace switch; a reply whose
-  // generation is no longer current belongs to a request nobody wants.
+  // Bumped on every list request and every workspace switch; a list reply
+  // whose generation is no longer current belongs to a request nobody wants.
   let generation = 0;
+  // Bumped only on a workspace switch. A restore outlives closing and
+  // reopening the menu (which re-lists), but not leaving its workspace.
+  let workspaceGeneration = 0;
 
   createEffect(
     on(
       () => props.workspace,
       () => {
         generation += 1;
+        workspaceGeneration += 1;
         setOpen(false);
         setList({ status: "idle" });
         setRestoreError(null);
@@ -108,11 +117,14 @@ export function ClosedChatsMenu(props: {
         workspace: props.workspace,
       });
       if (requested !== generation) return;
-      setList(
-        res.type === "chat_threads"
-          ? { status: "loaded", threads: res.threads }
-          : { status: "error", message: `unexpected reply: ${res.type}` },
-      );
+      if (res.type === "chat_threads") {
+        setList({ status: "loaded", threads: res.threads });
+      } else {
+        setList({
+          status: "error",
+          message: res.type === "error" ? res.message : `unexpected reply: ${res.type}`,
+        });
+      }
     } catch (err) {
       if (requested !== generation) return;
       setList({ status: "error", message: errorMessage(err) });
@@ -130,19 +142,23 @@ export function ClosedChatsMenu(props: {
   }
 
   async function restore(thread: ArchcarChatThread) {
-    const requested = generation;
+    const requested = workspaceGeneration;
     setRestoreError(null);
+    let failure: string | null = null;
     try {
-      await send({ type: "reopen_chat_thread", thread_id: thread.id });
+      const res = await send({ type: "reopen_chat_thread", thread_id: thread.id });
+      if (res.type === "error") failure = res.message || "the daemon refused";
     } catch (err) {
-      if (requested !== generation) return;
-      setRestoreError(`Could not restore "${thread.title}": ${errorMessage(err)}`);
+      failure = errorMessage(err);
+    }
+    // Reopened (or refused) in the workspace that listed it; if the user has
+    // since switched away, the parent would search the wrong workspace, and a
+    // reopened chat is simply back in its own tab strip when they return.
+    if (requested !== workspaceGeneration) return;
+    if (failure !== null) {
+      setRestoreError(`Could not restore "${thread.title}": ${failure}`);
       return;
     }
-    // Reopened in the workspace that listed it; if the user has since switched
-    // away, the parent would search the wrong workspace, and the chat is
-    // simply back in its own tab strip when they return.
-    if (requested !== generation) return;
     setOpen(false);
     props.onRestored(thread.id);
   }

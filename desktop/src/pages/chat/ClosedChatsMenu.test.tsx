@@ -231,7 +231,7 @@ describe("ClosedChatsMenu", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it("reports a failed restore and keeps the menu open", async () => {
+  it("reports a rejected restore and keeps the menu open", async () => {
     const restored = vi.fn();
     send.mockImplementation(async (req: { type: string }) => {
       if (req.type === "reopen_chat_thread") throw new Error("thread is gone");
@@ -254,6 +254,120 @@ describe("ClosedChatsMenu", () => {
       "thread is gone",
     );
     expect(items()).toHaveLength(1);
+    expect(restored).not.toHaveBeenCalled();
+  });
+
+  it("reports a restore the daemon refused and keeps the chat listed", async () => {
+    // The daemon answers a failed reopen with a resolved error reply, never a
+    // rejection; treating that as success told the parent to open a chat that
+    // was still closed.
+    const restored = vi.fn();
+    send.mockImplementation(async (req: { type: string }) =>
+      req.type === "reopen_chat_thread"
+        ? { type: "error", message: "chat thread 7 not found" }
+        : {
+            type: "chat_threads",
+            workspace: "berlin",
+            threads: [thread({ id: 7, title: "Yesterday's work" })],
+          },
+    );
+    const host = mount(() => <ClosedChatsMenu workspace="berlin" onRestored={restored} />);
+
+    trigger(host)!.click();
+    await vi.waitFor(() => expect(items().length).toBe(1));
+    document.querySelector<HTMLElement>(".ws-closed-chat-item")!.click();
+    await vi.waitFor(() =>
+      expect(document.querySelector(".ws-closed-chats-error")).not.toBeNull(),
+    );
+
+    expect(document.querySelector(".ws-closed-chats-error")!.textContent).toContain(
+      "chat thread 7 not found",
+    );
+    expect(items()).toHaveLength(1);
+    expect(restored).not.toHaveBeenCalled();
+  });
+
+  it("shows the daemon's message when listing is refused", async () => {
+    send.mockResolvedValueOnce({ type: "error", message: "workspace berlin is not known" });
+    const host = mount(() => <ClosedChatsMenu workspace="berlin" onRestored={() => {}} />);
+
+    trigger(host)!.click();
+    await vi.waitFor(() =>
+      expect(document.querySelector(".ws-closed-chats-error")).not.toBeNull(),
+    );
+
+    expect(document.querySelector(".ws-closed-chats-error")!.textContent).toContain(
+      "workspace berlin is not known",
+    );
+    expect(document.querySelector(".ws-closed-chats-retry")).not.toBeNull();
+  });
+
+  it("still reports a restore that lands after the menu was closed and reopened", async () => {
+    // Reopening the menu re-lists, which advances the list generation; a
+    // restore still in flight for the same workspace must not be mistaken for
+    // a stale reply, or the reopened chat never reaches the tab strip.
+    const restored = vi.fn();
+    let finishRestore: (value: unknown) => void = () => {};
+    send.mockImplementation((req: { type: string }) =>
+      req.type === "reopen_chat_thread"
+        ? new Promise((resolve) => {
+            finishRestore = resolve;
+          })
+        : Promise.resolve({
+            type: "chat_threads",
+            workspace: "berlin",
+            threads: [thread({ id: 7, title: "Yesterday's work" })],
+          }),
+    );
+    const host = mount(() => <ClosedChatsMenu workspace="berlin" onRestored={restored} />);
+
+    trigger(host)!.click();
+    await vi.waitFor(() => expect(items().length).toBe(1));
+    document.querySelector<HTMLElement>(".ws-closed-chat-item")!.click();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({ type: "reopen_chat_thread", thread_id: 7 }),
+    );
+    trigger(host)!.click();
+    expect(document.querySelector(".ws-closed-chats-menu")).toBeNull();
+    trigger(host)!.click();
+    await vi.waitFor(() => expect(items().length).toBe(1));
+
+    finishRestore({ type: "ack" });
+    await vi.waitFor(() => expect(restored).toHaveBeenCalled());
+
+    expect(restored).toHaveBeenCalledTimes(1);
+    expect(restored).toHaveBeenCalledWith(7);
+  });
+
+  it("drops a restore that lands after the user switched workspace", async () => {
+    // The chat is reopened in the workspace that listed it; telling the parent
+    // would make it search the new workspace for a chat that is not there.
+    const restored = vi.fn();
+    let finishRestore: (value: unknown) => void = () => {};
+    send.mockImplementation((req: { type: string }) =>
+      req.type === "reopen_chat_thread"
+        ? new Promise((resolve) => {
+            finishRestore = resolve;
+          })
+        : Promise.resolve({
+            type: "chat_threads",
+            workspace: "berlin",
+            threads: [thread({ id: 7, title: "Berlin chat" })],
+          }),
+    );
+    const [workspace, setWorkspace] = createSignal("berlin");
+    const host = mount(() => <ClosedChatsMenu workspace={workspace()} onRestored={restored} />);
+
+    trigger(host)!.click();
+    await vi.waitFor(() => expect(items().length).toBe(1));
+    document.querySelector<HTMLElement>(".ws-closed-chat-item")!.click();
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith({ type: "reopen_chat_thread", thread_id: 7 }),
+    );
+    setWorkspace("paris");
+    finishRestore({ type: "ack" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
     expect(restored).not.toHaveBeenCalled();
   });
 });
