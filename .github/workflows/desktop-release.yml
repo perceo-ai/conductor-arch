@@ -83,6 +83,13 @@ jobs:
       # Rust tests for the crates the desktop UI depends on (archcar RPCs + CLI),
       # plus a CLI smoke of the read RPCs. The full GTK workspace suite runs in
       # ci.yml; the GTK app is being retired.
+      # Read-only, and deliberately before the long jobs: a release that ships a
+      # model the provider has retired breaks every chat started on it, and the
+      # tag is already cut by the time this runs, so the only safe move is to
+      # fail the build rather than rewrite anything.
+      - name: Model corpus is in sync and ships nothing retired
+        run: node scripts/generate-model-corpus.mjs --check
+
       - name: Rust tests (core + cli)
         run: cargo test --locked -p archductor-core -p archductor
 

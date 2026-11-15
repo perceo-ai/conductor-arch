@@ -7,21 +7,32 @@ import Foundation
 /// and fails if the two drift, because a phone offering a model the desktop
 /// dropped would send `set_session_model` with a value the provider rejects.
 public enum AgentModels {
+    // generated from model-corpus.json by scripts/generate-model-corpus.mjs (models)
     public static let models: [String: [String]] = [
-        "codex": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
+        "codex": [
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-astra",
+            "gpt-6-luna",
+        ],
         "claude": [
+            "claude-fable-5-1",
             "claude-fable-5",
+            "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8[1m]",
             "claude-opus-4-7[1m]",
             "claude-opus-4-6[1m]",
+            "claude-sonnet-5-5",
             "claude-sonnet-5",
             "claude-sonnet-4-6[1m]",
             "claude-sonnet-4-6",
-            "claude-haiku-4-5"
+            "claude-haiku-5-5",
+            "claude-haiku-4-5",
         ],
-        "shell": []
+        "shell": [],
     ]
+    // end generated from model-corpus.json (models)
 
     public static let efforts = ["low", "medium", "high"]
 
@@ -32,18 +43,19 @@ public enum AgentModels {
     /// Human label, matching the desktop's `modelLabel`.
     public static func label(_ model: String) -> String {
         switch model {
-        case "gpt-5.6-sol": return "GPT 5.6 Sol"
-        case "gpt-5.6-terra": return "GPT 5.6 Terra"
-        case "gpt-5.6-luna": return "GPT 5.6 Luna"
-        case "gpt-5.5": return "GPT 5.5"
-        case "gpt-5.4": return "GPT 5.4"
+        // generated from model-corpus.json by scripts/generate-model-corpus.mjs (labels)
+        case "claude-fable-5-1": return "Claude Fable 5.1"
+        case "claude-opus-5-5": return "Claude Opus 5.5"
         case "claude-opus-4-8[1m]": return "Claude Opus 4.8 1M"
         case "claude-opus-4-7[1m]": return "Claude Opus 4.7 1M"
         case "claude-opus-4-6[1m]": return "Claude Opus 4.6 1M"
+        case "claude-sonnet-5-5": return "Claude Sonnet 5.5"
         case "claude-sonnet-5": return "Claude Sonnet 5 1M"
         case "claude-sonnet-4-6[1m]": return "Claude Sonnet 4.6 1M"
         case "claude-sonnet-4-6": return "Claude Sonnet 4.6"
+        case "claude-haiku-5-5": return "Claude Haiku 5.5"
         case "claude-haiku-4-5": return "Claude Haiku 4.5"
+        // end generated from model-corpus.json (labels)
         default:
             let longContext = model.hasSuffix("[1m]")
             let base = longContext ? String(model.dropLast(4)) : model

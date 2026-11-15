@@ -13,6 +13,13 @@ page.
 - A **turn** is everything the agent does between one of your messages and the
   next. One tool call is not a turn.
 
+Closing a chat only archives it. The transcript, tool calls and provider events
+all stay, so a chat closed by a mis-keyed `mod+w` is recoverable: the clock-arrow
+button beside the new-chat `+` lists this workspace's closed chats, newest first,
+and picking one puts it back in the tab strip with its history. From the CLI the
+same pair is `archcar closed-chats <workspace>` and `archcar reopen-chat
+<thread-id>`. Only deleting the workspace destroys a chat.
+
 Several sessions in one workspace is normal and share the branch on purpose.
 Several workspaces is how you keep work independently reviewable. Do not reach
 for a second workspace when what you want is a second chat.

@@ -210,6 +210,8 @@ archductor archcar chat-projection <thread-id>          # the timeline the deskt
 archductor archcar chat-projection <thread-id> --full   # every body in full: command output, subagent reports
 archductor archcar create-chat fix-auth
 archductor archcar close-chat <thread-id>
+archductor archcar closed-chats fix-auth                # chats closed here, newest first
+archductor archcar reopen-chat <thread-id>              # bring one back with its history
 archductor archcar fork-chat <thread-id> --through-message-id <id>
 
 archductor archcar queue list <thread-id>

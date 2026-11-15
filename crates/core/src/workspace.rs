@@ -7649,6 +7649,26 @@ mutation($threadId: ID!) {{
         Ok(threads)
     }
 
+    /// Closed chats in a workspace, most recently closed first, for the restore
+    /// picker beside the new-chat button.
+    ///
+    /// Ordered by when the chat was closed rather than by creation order: the
+    /// tab strip is ordered by creation so tabs never move under the pointer,
+    /// but this list is read top-down to find the chat you just lost.
+    pub fn list_closed_chat_threads(&self, workspace_name: &str) -> Result<Vec<ChatThreadRecord>> {
+        let workspace = self.get_by_name(workspace_name)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, workspace_id, provider, title, status, native_thread_id, harness_metadata, created_at, updated_at, archived_at, model
+             FROM chat_threads
+             WHERE workspace_id = ?1 AND status = 'closed'
+             ORDER BY COALESCE(archived_at, updated_at) DESC, id DESC",
+        )?;
+        let threads = stmt
+            .query_map([workspace.id], row_to_chat_thread)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(threads)
+    }
+
     /// Recent non-empty chats in a workspace, newest first, for the new-chat
     /// transcript picker. Closed/archived chats stay listed: they are exactly
     /// the history a fresh chat wants to inherit.
@@ -29387,6 +29407,75 @@ spotlight_testing = true
         assert_eq!(reopened.native_thread_id.as_deref(), Some("codex-thread-1"));
         assert_eq!(reopened.archived_at, None);
         assert_eq!(store.list_chat_messages(thread.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn list_closed_chat_threads_lists_only_closed_chats() {
+        let (_temp, store) = test_workspace_store();
+        let kept = store
+            .create_chat_thread("berlin", "codex", "Still open", None)
+            .unwrap();
+        let closed = store
+            .create_chat_thread("berlin", "codex", "Yesterday's work", None)
+            .unwrap();
+        store.close_chat_thread(closed.id).unwrap();
+
+        let listed = store.list_closed_chat_threads("berlin").unwrap();
+        assert_eq!(
+            listed.iter().map(|thread| thread.id).collect::<Vec<_>>(),
+            vec![closed.id],
+            "only the closed chat belongs in the restore list"
+        );
+        assert_eq!(listed[0].title, "Yesterday's work");
+        assert!(listed[0].archived_at.is_some());
+        assert!(
+            !store
+                .list_chat_threads("berlin")
+                .unwrap()
+                .iter()
+                .any(|thread| thread.id == closed.id),
+            "a closed chat stays out of the tab strip"
+        );
+        assert!(store
+            .list_chat_threads("berlin")
+            .unwrap()
+            .iter()
+            .any(|thread| thread.id == kept.id),);
+
+        store.reopen_chat_thread(closed.id).unwrap();
+        assert!(
+            store.list_closed_chat_threads("berlin").unwrap().is_empty(),
+            "a reopened chat leaves the restore list"
+        );
+    }
+
+    #[test]
+    fn list_closed_chat_threads_orders_most_recently_closed_first() {
+        let (_temp, store) = test_workspace_store();
+        let older = store
+            .create_chat_thread("berlin", "codex", "Closed last week", None)
+            .unwrap();
+        let newer = store
+            .create_chat_thread("berlin", "codex", "Closed just now", None)
+            .unwrap();
+        store.close_chat_thread(older.id).unwrap();
+        store.close_chat_thread(newer.id).unwrap();
+        // Both closes land in the same epoch second, so backdate one to prove
+        // the list really orders by when the chat was closed.
+        store
+            .conn
+            .execute(
+                "UPDATE chat_threads SET archived_at = '1700000000' WHERE id = ?1",
+                [older.id],
+            )
+            .unwrap();
+
+        let listed = store.list_closed_chat_threads("berlin").unwrap();
+        assert_eq!(
+            listed.iter().map(|thread| thread.id).collect::<Vec<_>>(),
+            vec![newer.id, older.id],
+            "the most recently closed chat is the one you most likely want back"
+        );
     }
 
     #[test]

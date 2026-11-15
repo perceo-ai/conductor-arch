@@ -3,21 +3,32 @@
 // set_session_model / set_session_effort. Shared by the composer (per-chat
 // switching) and Settings (default-model preference).
 
+// generated from model-corpus.json by scripts/generate-model-corpus.mjs (models)
 export const MODELS: Record<string, string[]> = {
-  codex: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4"],
+  codex: [
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6-astra",
+    "gpt-6-luna",
+  ],
   claude: [
+    "claude-fable-5-1",
     "claude-fable-5",
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-opus-4-8[1m]",
     "claude-opus-4-7[1m]",
     "claude-opus-4-6[1m]",
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-sonnet-4-6[1m]",
     "claude-sonnet-4-6",
+    "claude-haiku-5-5",
     "claude-haiku-4-5",
   ],
   shell: [],
 };
+// end generated from model-corpus.json (models)
 
 export const EFFORTS = ["low", "medium", "high"];
 
@@ -50,18 +61,19 @@ export function providerLabel(
  * mirror it, and all three assert crates/core/tests/fixtures/model_labels.json.
  */
 export function modelLabel(model: string): string {
-  if (model === "gpt-5.6-sol") return "GPT 5.6 Sol";
-  if (model === "gpt-5.6-terra") return "GPT 5.6 Terra";
-  if (model === "gpt-5.6-luna") return "GPT 5.6 Luna";
-  if (model === "gpt-5.5") return "GPT 5.5";
-  if (model === "gpt-5.4") return "GPT 5.4";
+  // generated from model-corpus.json by scripts/generate-model-corpus.mjs (labels)
+  if (model === "claude-fable-5-1") return "Claude Fable 5.1";
+  if (model === "claude-opus-5-5") return "Claude Opus 5.5";
   if (model === "claude-opus-4-8[1m]") return "Claude Opus 4.8 1M";
   if (model === "claude-opus-4-7[1m]") return "Claude Opus 4.7 1M";
   if (model === "claude-opus-4-6[1m]") return "Claude Opus 4.6 1M";
+  if (model === "claude-sonnet-5-5") return "Claude Sonnet 5.5";
   if (model === "claude-sonnet-5") return "Claude Sonnet 5 1M";
   if (model === "claude-sonnet-4-6[1m]") return "Claude Sonnet 4.6 1M";
   if (model === "claude-sonnet-4-6") return "Claude Sonnet 4.6";
+  if (model === "claude-haiku-5-5") return "Claude Haiku 5.5";
   if (model === "claude-haiku-4-5") return "Claude Haiku 4.5";
+  // end generated from model-corpus.json (labels)
   const longContext = model.endsWith("[1m]");
   const base = longContext ? model.slice(0, -"[1m]".length) : model;
   const parts = base

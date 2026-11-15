@@ -302,18 +302,19 @@ fn agent_label(context: NotificationContext<'_>) -> Option<String> {
 /// three to the same answers.
 fn model_label(model: &str) -> String {
     match model {
-        "gpt-5.6-sol" => return "GPT 5.6 Sol".to_owned(),
-        "gpt-5.6-terra" => return "GPT 5.6 Terra".to_owned(),
-        "gpt-5.6-luna" => return "GPT 5.6 Luna".to_owned(),
-        "gpt-5.5" => return "GPT 5.5".to_owned(),
-        "gpt-5.4" => return "GPT 5.4".to_owned(),
+        // generated from model-corpus.json by scripts/generate-model-corpus.mjs (labels)
+        "claude-fable-5-1" => return "Claude Fable 5.1".to_owned(),
+        "claude-opus-5-5" => return "Claude Opus 5.5".to_owned(),
         "claude-opus-4-8[1m]" => return "Claude Opus 4.8 1M".to_owned(),
         "claude-opus-4-7[1m]" => return "Claude Opus 4.7 1M".to_owned(),
         "claude-opus-4-6[1m]" => return "Claude Opus 4.6 1M".to_owned(),
+        "claude-sonnet-5-5" => return "Claude Sonnet 5.5".to_owned(),
         "claude-sonnet-5" => return "Claude Sonnet 5 1M".to_owned(),
         "claude-sonnet-4-6[1m]" => return "Claude Sonnet 4.6 1M".to_owned(),
         "claude-sonnet-4-6" => return "Claude Sonnet 4.6".to_owned(),
+        "claude-haiku-5-5" => return "Claude Haiku 5.5".to_owned(),
         "claude-haiku-4-5" => return "Claude Haiku 4.5".to_owned(),
+        // end generated from model-corpus.json (labels)
         _ => {}
     }
     let (base, long_context) = match model.strip_suffix("[1m]") {

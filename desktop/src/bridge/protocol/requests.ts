@@ -75,6 +75,8 @@ export type ArchcarRequest =
   | { type: "get_sync_plan"; selection?: SyncSelection }
   | { type: "apply_sync"; selection?: SyncSelection }
   | { type: "list_chat_threads"; workspace: string }
+  // Closed chats offered for restore; answered with `chat_threads`.
+  | { type: "list_closed_chat_threads"; workspace: string }
   | { type: "get_chat_projection"; thread_id: number }
   | { type: "get_chat_image"; thread_id: number; item_id: string; index: number }
   | { type: "list_chat_transcripts"; workspace: string; limit?: number }

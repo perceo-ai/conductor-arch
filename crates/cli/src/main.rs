@@ -623,6 +623,13 @@ enum ArchcarCommand {
     ChatThreads {
         workspace: String,
     },
+    /// List a workspace's closed chats, most recently closed first.
+    ///
+    /// Closing a chat only archives it, so any of these can be brought back
+    /// whole with `reopen-chat <thread-id>`.
+    ClosedChats {
+        workspace: String,
+    },
     /// Print the projected chat timeline for a thread.
     ChatProjection {
         thread_id: i64,
@@ -2174,6 +2181,11 @@ fn run_cli() -> Result<()> {
                 ArchcarCommand::ChatThreads { workspace } => {
                     print_archcar_response(
                         client.send(ArchcarRequest::ListChatThreads { workspace })?,
+                    );
+                }
+                ArchcarCommand::ClosedChats { workspace } => {
+                    print_archcar_response(
+                        client.send(ArchcarRequest::ListClosedChatThreads { workspace })?,
                     );
                 }
                 ArchcarCommand::ChatProjection { thread_id, full } => {
@@ -9112,6 +9124,20 @@ mod tests {
                 "{args:?} must keep working while a remote daemon is configured"
             );
         }
+    }
+
+    /// The desktop's restore picker needs a CLI equivalent: listing a
+    /// workspace's closed chats is how `reopen-chat` gets a thread id.
+    #[test]
+    fn closed_chats_lists_one_workspaces_restorable_chats() {
+        let listed = command_of(&["archductor", "archcar", "closed-chats", "berlin"]);
+        let Command::Archcar {
+            command: ArchcarCommand::ClosedChats { workspace },
+        } = listed
+        else {
+            panic!("expected archcar closed-chats");
+        };
+        assert_eq!(workspace, "berlin");
     }
 
     #[test]

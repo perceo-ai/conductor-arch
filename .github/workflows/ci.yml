@@ -176,6 +176,41 @@ jobs:
           # (template-injection, unpinned-uses, etc.) still run.
           online-audits: false
 
+  model-corpus:
+    name: Model Corpus
+    needs: [preflight]
+    if: needs.preflight.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.preflight.outputs.checkout_ref }}
+          persist-credentials: false
+
+      # The mirrors are generated, so a hand edit to any of them is a bug; this
+      # is also the gate that refuses to ship a model the corpus records as
+      # retired, which the daemon would otherwise pass straight to the CLI.
+      - name: Check generated mirrors match model-corpus.json
+        run: node scripts/generate-model-corpus.mjs --check
+
+      - name: Generator tests
+        run: bash tests/model-corpus-test.sh
+
+      # The weekly refresh reads a vendor docs page, so its parsing is the part
+      # that rots silently; these pin it without touching the network.
+      - name: Refresh parser tests
+        run: node --test tests/refresh-model-corpus.test.mjs
+
+      # Only on the weekly run: neither provider CLI can enumerate its models,
+      # so the one freshness signal available is how long ago a human last read
+      # the vendors' model pages. Failing a PR for that would punish the wrong
+      # person, so this nags on the schedule instead.
+      - name: Fail if nobody has re-read the vendor model lists lately
+        if: github.event_name == 'schedule'
+        run: node scripts/generate-model-corpus.mjs --check --max-age 60
+
   dependency-scan:
     name: Dependency Scan
     needs: [preflight]
