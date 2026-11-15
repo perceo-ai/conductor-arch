@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Refreshes model-corpus.json from what the vendors currently publish, then
-// regenerates the mirrors. Run weekly by .github/workflows/model-corpus.yml,
+// regenerates the mirrors. Run weekly by .github/workflows/model-corpus-refresh.yml,
 // which opens a PR with whatever this changes.
 //
 //   node scripts/refresh-model-corpus.mjs
@@ -97,8 +97,14 @@ export function suggestLabel(id) {
  *
  * A provider missing from `fetched` was not read this run (no credentials, or
  * a failed request) and is left exactly as it was.
+ *
+ * `checked_on` is the one freshness date `--max-age` reads, so it only moves
+ * when every provider that offers models was actually confirmed this run:
+ * refreshed (in `fetched`) or read and found to agree (in `confirmed`, which
+ * is how Codex's clean drift report counts). Advancing it on a Claude-only
+ * refresh would let an unread Codex list pass the staleness nag forever.
  */
-export function mergeCorpus(corpus, fetched, today) {
+export function mergeCorpus(corpus, fetched, today, { confirmed = [] } = {}) {
   const next = structuredClone(corpus);
   next.retired = next.retired ?? [];
 
@@ -142,7 +148,11 @@ export function mergeCorpus(corpus, fetched, today) {
     }
   }
 
-  next.checked_on = today;
+  const unchecked = Object.entries(next.providers)
+    .filter(([, entry]) => (entry.models ?? []).length > 0)
+    .map(([provider]) => provider)
+    .filter((provider) => !(provider in fetched) && !confirmed.includes(provider));
+  if (unchecked.length === 0) next.checked_on = today;
   return next;
 }
 
@@ -152,7 +162,23 @@ async function fetchText(url) {
   return res.text();
 }
 
+const USAGE = `Usage: node scripts/refresh-model-corpus.mjs [--report <path>]
+
+Reads the vendors' current model lists and folds them into model-corpus.json.
+  Claude  refreshed from the models API (needs ANTHROPIC_API_KEY)
+  Codex   compared against ${CODEX_DOCS}; reported, never rewritten
+
+  --report <path>  also write the markdown report to <path>
+  --help           print this and exit
+
+Exit status: 0 nothing to do, 10 corpus changed, 20 Codex needs a human.
+`;
+
 async function main() {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    process.stdout.write(USAGE);
+    return;
+  }
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const corpusPath = join(repoRoot, "model-corpus.json");
   const corpus = JSON.parse(readFileSync(corpusPath, "utf8"));
@@ -189,7 +215,8 @@ async function main() {
 
   let changed = false;
   if (fetched.claude) {
-    const next = mergeCorpus(corpus, fetched, today);
+    const confirmed = codex.clean && !codex.error ? ["codex"] : [];
+    const next = mergeCorpus(corpus, fetched, today, { confirmed });
     const serialized = `${JSON.stringify(next, null, 2)}\n`;
     if (serialized !== readFileSync(corpusPath, "utf8")) {
       writeFileSync(corpusPath, serialized);

@@ -109,6 +109,7 @@ function corpus() {
       shell: { models: [] },
     },
     retired: [],
+    checked_on: "2026-01-01",
   };
 }
 
@@ -169,4 +170,31 @@ test("moves the default when the old default is gone", () => {
   const next = mergeCorpus(corpus(), { codex: ["gpt-6-luna"] }, "2026-11-20");
 
   assert.equal(next.providers.codex.default, "gpt-6-luna");
+});
+
+test("does not mark the corpus checked when a provider went unread", () => {
+  // A weekly run that refreshed Claude but could not read (or disagreed with)
+  // the Codex page must not reset the --max-age clock for Codex too.
+  const next = mergeCorpus(corpus(), { claude: ["claude-opus-5"] }, "2026-11-20");
+
+  assert.equal(next.checked_on, "2026-01-01");
+});
+
+test("marks the corpus checked once every provider was refreshed or confirmed", () => {
+  const next = mergeCorpus(corpus(), { claude: ["claude-opus-5"] }, "2026-11-20", {
+    confirmed: ["codex"],
+  });
+
+  assert.equal(next.checked_on, "2026-11-20");
+});
+
+test("ignores providers that offer no models when deciding freshness", () => {
+  // `shell` has nothing to check, so it can never hold the date back.
+  const next = mergeCorpus(
+    corpus(),
+    { claude: ["claude-opus-5"], codex: ["gpt-6.1-sol", "gpt-6-luna"] },
+    "2026-11-20",
+  );
+
+  assert.equal(next.checked_on, "2026-11-20");
 });
