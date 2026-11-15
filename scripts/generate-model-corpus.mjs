@@ -164,6 +164,10 @@ const rustRegistry = () => {
     if (def) {
       lines.push(`pub const ${name.toUpperCase()}_DEFAULT_MODEL: &str = ${quoted(def)};`);
     }
+    // rustfmt would collapse a short array onto one line, which would make
+    // `cargo fmt` and this generator fight over the same file: each would
+    // "fix" the other's output and both CI gates could never be green at once.
+    lines.push("#[rustfmt::skip]");
     lines.push(`pub const ${constName}: &[&str] = &[`);
     lines.push(...ids.map((id) => `    ${quoted(id)},`));
     lines.push("];");

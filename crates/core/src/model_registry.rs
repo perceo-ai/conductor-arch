@@ -3,6 +3,7 @@ pub const CLAUDE_PROVIDER: &str = "claude";
 
 // generated from model-corpus.json by scripts/generate-model-corpus.mjs (models)
 pub const CODEX_DEFAULT_MODEL: &str = "gpt-6.1-sol";
+#[rustfmt::skip]
 pub const CODEX_MODEL_CHOICES: &[&str] = &[
     "gpt-6.1-sol",
     "gpt-6.1-terra",
@@ -11,6 +12,7 @@ pub const CODEX_MODEL_CHOICES: &[&str] = &[
 ];
 
 pub const CLAUDE_DEFAULT_MODEL: &str = "claude-fable-5-1";
+#[rustfmt::skip]
 pub const CLAUDE_MODEL_CHOICES: &[&str] = &[
     "claude-fable-5-1",
     "claude-fable-5",
