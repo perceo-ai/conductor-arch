@@ -211,16 +211,27 @@ public enum WorkspaceTransfer {
 
         var targetWorkspace: String
         var targetThread: Int64?
-        if let existing, let name = existing["name"]?.string, restored, moving != nil {
-            // A restored workspace's chats are the conversation as it was when
-            // it left: adopting one would drop everything said since, and its
-            // old handover would read as this leg's. Close them and seed the
-            // current conversation. Mirrors `reseed_restored_workspace` (CLI).
+        // This leg's chat is the one seeded with *this* transcript, found by
+        // content rather than by whether this pass restored, so a return trip
+        // interrupted after its restore still finds (or seeds) the current
+        // conversation on retry. Mirrors the adopt arm of `create_on_target`.
+        var carrying: Int64?
+        if let existing, let name = existing["name"]?.string, moving != nil, !transcript.isEmpty {
+            carrying = try await threadCarrying(transcript, in: name, on: target)
+        }
+        let reseed = moving != nil && carrying == nil && (!transcript.isEmpty || restored)
+        if let existing, let name = existing["name"]?.string, let carrying {
             targetWorkspace = name
-            let stale = try ok(await target.send("list_chat_threads", ["workspace": .string(name)]))
-            for thread in stale["threads"]?.array ?? [] where thread["archived_at"]?.string == nil {
-                if let id = thread["id"]?.int {
-                    _ = try ok(await target.send("close_chat_thread", ["thread_id": .number(Double(id))]))
+            targetThread = carrying
+        } else if let existing, let name = existing["name"]?.string, reseed {
+            targetWorkspace = name
+            if restored {
+                // The restored copy's chats are the conversation as it left.
+                let stale = try ok(await target.send("list_chat_threads", ["workspace": .string(name)]))
+                for thread in stale["threads"]?.array ?? [] where thread["archived_at"]?.string == nil {
+                    if let id = thread["id"]?.int {
+                        _ = try ok(await target.send("close_chat_thread", ["thread_id": .number(Double(id))]))
+                    }
                 }
             }
             var seedFields: [String: JSONValue] = [
@@ -306,6 +317,23 @@ public enum WorkspaceTransfer {
     }
 
     // MARK: - Helpers (each mirrors the desktop function of the same purpose)
+
+    /// The live chat whose seeded rows are exactly `transcript`.
+    static func threadCarrying(_ transcript: [JSONValue], in workspace: String, on target: Endpoint) async throws -> Int64? {
+        let listed = try await target.send("list_chat_threads", ["workspace": .string(workspace)])
+        guard listed.type == "chat_threads" else { return nil }
+        let wanted = transcript.map { [$0["role"]?.string ?? "", $0["content"]?.string ?? ""] }
+        for thread in listed["threads"]?.array ?? [] where thread["archived_at"]?.string == nil {
+            guard let id = thread["id"]?.int else { continue }
+            let snapshot = try await target.send("get_chat_snapshot", snapshotFields(id))
+            guard snapshot.type == "chat_snapshot" else { continue }
+            let seeded = (snapshot["snapshot"]?["messages"]?.array ?? [])
+                .filter { $0["source"]?.string == seededSource }
+                .map { [$0["role"]?.string ?? "", $0["content"]?.string ?? ""] }
+            if seeded == wanted { return id }
+        }
+        return nil
+    }
 
     /// One transcript line as the import and seed requests take it.
     static func transcriptRow(_ message: JSONValue) -> JSONValue {

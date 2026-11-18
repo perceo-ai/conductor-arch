@@ -6989,14 +6989,22 @@ fn create_on_target(
                     "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
                     existing.name, target.label, existing.branch
                 );
-                // A restored workspace's chats are the conversation as it was
-                // when the workspace left. Adopting one would drop everything
-                // said since, and its old handover message would read as this
-                // leg's delivery. Close them and seed the current one instead.
-                let thread = if restored && spec.provider.is_some() {
-                    Some(reseed_restored_workspace(target, &existing.name, &spec)?)
-                } else {
-                    target_thread_for(target, &existing.name)?
+                // This leg's chat is the one seeded with *this* transcript —
+                // identified by content, not by whether this pass restored, so
+                // a return trip interrupted after the restore still finds (or
+                // seeds) the current conversation on retry. A chat from an
+                // earlier leg cannot match: the source's transcript has grown
+                // since by at least the handover it received. Any other chat
+                // is stale: adopting it would drop what was said since, and
+                // its old handover would read as this leg's delivery.
+                let thread = match (&spec.provider, spec.transcript.is_empty()) {
+                    (None, _) => target_thread_for(target, &existing.name)?,
+                    (Some(_), true) if !restored => target_thread_for(target, &existing.name)?,
+                    (Some(_), true) => Some(reseed_workspace(target, &existing.name, &spec, true)?),
+                    (Some(_), false) => match thread_carrying(target, &existing.name, spec.transcript)? {
+                        Some(id) => Some(id),
+                        None => Some(reseed_workspace(target, &existing.name, &spec, restored)?),
+                    },
                 };
                 return Ok((existing.name, thread));
             }
@@ -7405,13 +7413,56 @@ fn create_target_thread(
     }
 }
 
-/// Close a restored workspace's stale chats and seed the moving conversation
-/// into a fresh one. Closing is reversible (closed chats can be reopened).
-fn reseed_restored_workspace(
+/// The live chat in `workspace` whose seeded rows are exactly `transcript`.
+fn thread_carrying(
+    target: &TransferEndpoint,
+    workspace: &str,
+    transcript: &[archductor_core::archcar::protocol::ArchcarChatTranscriptMessage],
+) -> Result<Option<i64>> {
+    let threads = match target.client.send(ArchcarRequest::ListChatThreads {
+        workspace: workspace.to_owned(),
+    })? {
+        ArchcarResponse::ChatThreads { threads, .. } => threads,
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+        _ => return Ok(None),
+    };
+    for thread in threads.iter().filter(|thread| thread.archived_at.is_none()) {
+        if let ArchcarResponse::ChatSnapshot { snapshot } =
+            target.client.send(ArchcarRequest::GetChatSnapshot {
+                thread_id: thread.id,
+                include_provider_events: Some(false),
+            })?
+        {
+            let seeded = snapshot
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.source == archductor_core::workspace::FORKED_MESSAGE_SOURCE
+                })
+                .map(|message| (message.role.as_str(), message.content.as_str()));
+            if seeded.eq(transcript
+                .iter()
+                .map(|message| (message.role.as_str(), message.content.as_str())))
+            {
+                return Ok(Some(thread.id));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Seed the moving conversation into a fresh chat, first closing the
+/// workspace's other chats when it was just restored (they are the
+/// conversation as it left). Closing is reversible.
+fn reseed_workspace(
     target: &TransferEndpoint,
     workspace: &str,
     spec: &TargetWorkspaceSpec<'_>,
+    close_stale: bool,
 ) -> Result<i64> {
+    if !close_stale {
+        return seed_chat(target, workspace, spec);
+    }
     if let ArchcarResponse::ChatThreads { threads, .. } =
         target.client.send(ArchcarRequest::ListChatThreads {
             workspace: workspace.to_owned(),
@@ -7430,6 +7481,14 @@ fn reseed_restored_workspace(
             }
         }
     }
+    seed_chat(target, workspace, spec)
+}
+
+fn seed_chat(
+    target: &TransferEndpoint,
+    workspace: &str,
+    spec: &TargetWorkspaceSpec<'_>,
+) -> Result<i64> {
     match target.client.send(ArchcarRequest::SeedChatThread {
         workspace: workspace.to_owned(),
         transcript: spec.transcript.to_vec(),

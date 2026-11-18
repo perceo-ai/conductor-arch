@@ -15,6 +15,9 @@ private actor TwoDaemons {
     var restorable = true
     var delivered = false
     var sameIdentity = false
+    /// The target's existing chat holds an older conversation, not a seeded
+    /// copy of this transfer's transcript.
+    var staleChat = false
     var seededTranscript: Int?
     var queuedThread: Int64?
 
@@ -110,10 +113,16 @@ private actor TwoDaemons {
                 "id": 11, "provider": "codex", "title": "Parser port", "updated_at": "9",
             ])])])
         case "get_chat_snapshot":
-            let messages: JSONValue = delivered
-                ? .array([.object(["role": "user", "source": "user",
-                                   "content": .string("\(WorkspaceTransfer.preamblePrefix)A to B")])])
-                : .array([])
+            var rows: [JSONValue] = []
+            if !staleChat {
+                // What an import seeds: the source transcript, verbatim.
+                rows.append(.object(["role": "user", "source": "fork", "content": "port the parser"]))
+            }
+            if delivered {
+                rows.append(.object(["role": "user", "source": "user",
+                                     "content": .string("\(WorkspaceTransfer.preamblePrefix)A to B")]))
+            }
+            let messages: JSONValue = .array(rows)
             return .object(["type": "chat_snapshot", "snapshot": .object(["thread_id": 11, "messages": messages])])
         case "ensure_chat_thread_session":
             return .object(["type": "session_spawn_queued", "workspace": "parser", "kind": "codex"])
@@ -174,7 +183,10 @@ private let fast = WorkspaceTransfer.Timing(pollInterval: .milliseconds(1), poll
 
     @Test func takesAWorkspaceBackByRestoringItsArchivedOriginal() async throws {
         let daemons = TwoDaemons()
-        await daemons.configure { $0.targetWorkspace = ("archived", $0.pushed) }
+        await daemons.configure {
+            $0.targetWorkspace = ("archived", $0.pushed)
+            $0.staleChat = true
+        }
         let (source, target) = endpoints(daemons)
         try await WorkspaceTransfer.run(workspace: "parser", from: source, to: target, timing: fast)
         let order = await daemons.order
@@ -196,6 +208,23 @@ private let fast = WorkspaceTransfer.Timing(pollInterval: .milliseconds(1), poll
             try await WorkspaceTransfer.run(workspace: "parser", from: source, to: target, timing: fast)
         }
         #expect(await !daemons.archivedSource)
+    }
+
+    @Test func seedsTheCurrentConversationWhenAReturnTripWasInterruptedAfterItsRestore() async throws {
+        // Restored on an earlier attempt that then failed: active now, so this
+        // pass restores nothing, but its chat is still the stale one.
+        let daemons = TwoDaemons()
+        await daemons.configure {
+            $0.targetWorkspace = ("active", $0.pushed)
+            $0.staleChat = true
+            $0.delivered = true
+        }
+        let (source, target) = endpoints(daemons)
+        try await WorkspaceTransfer.run(workspace: "parser", from: source, to: target, timing: fast)
+        let order = await daemons.order
+        #expect(!order.contains("dst:restore_workspace"))
+        #expect(await daemons.seededTranscript == 1)
+        #expect(!order.contains("dst:close_chat_thread"))
     }
 
     @Test func doesNotHandTheChatOverTwice() async throws {

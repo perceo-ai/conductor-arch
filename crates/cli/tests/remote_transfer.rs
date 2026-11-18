@@ -764,6 +764,89 @@ fn remote_transfer_restores_an_archived_target_that_holds_the_branch() {
     wait_for_captured_turns(&fixture.target.capture, 2);
 }
 
+/// A return trip interrupted after its restore, re-run.
+///
+/// The first attempt restored the workspace and then stopped (an older target
+/// refusing `SeedChatThread`, a dropped link). On the retry it is active, so
+/// nothing is restored this pass — but its chat is still the conversation as
+/// it left. Keying the reseed off "this pass restored" adopted that stale chat
+/// and let its old handover suppress this leg's (Greptile, #267). The leg's
+/// chat is now found by content, so the retry seeds the current conversation.
+#[test]
+fn remote_transfer_retry_after_an_interrupted_restore_carries_the_current_conversation() {
+    let fixture = Fixture::start(TargetSetup::WithClone);
+    let args = [
+        "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
+    ];
+    fixture.operator(&args).assert().success();
+    wait_for_captured_turns(&fixture.target.capture, 1);
+    let first_leg_thread = fixture.target_store().list_chat_threads("berlin").unwrap()[0].id;
+
+    let resumed = fixture.target_session_id("berlin");
+    fixture
+        .target
+        .app()
+        .args(["archcar", "kill", &resumed.to_string()])
+        .assert()
+        .success();
+    fixture.wait_for_target_session_exit(resumed);
+    fixture
+        .target
+        .app()
+        .args(["workspace", "archive", "berlin"])
+        .assert()
+        .success();
+
+    let source_store = fixture.source_store();
+    let source_thread = source_store.list_chat_threads("berlin").unwrap()[0].id;
+    source_store
+        .append_chat_message(source_thread, "agent", "parser wired", "agent")
+        .unwrap();
+    source_store
+        .append_chat_message(source_thread, "user", "also handle unicode", "user")
+        .unwrap();
+
+    // Where an interrupted return trip leaves the target: restored, stale chat.
+    fixture
+        .target
+        .app()
+        .args(["workspace", "restore", "berlin"])
+        .assert()
+        .success();
+
+    let rerun = fixture.operator(&args).assert().success();
+    let stdout = String::from_utf8(rerun.get_output().stdout.clone()).unwrap();
+    assert!(
+        !stdout.contains("restoring it"),
+        "nothing should need restoring on the retry; got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("carried the current conversation into a new chat"),
+        "the retry should seed the current conversation; got:\n{stdout}"
+    );
+
+    let target_store = fixture.target_store();
+    let live = target_store.list_chat_threads("berlin").unwrap();
+    let carried = live
+        .iter()
+        .find(|thread| thread.id != first_leg_thread)
+        .expect("a fresh chat carrying the current conversation");
+    let contents: Vec<String> = target_store
+        .list_chat_messages(carried.id)
+        .unwrap()
+        .into_iter()
+        .map(|message| message.content)
+        .collect();
+    assert!(
+        contents
+            .iter()
+            .any(|content| content == "also handle unicode"),
+        "the retry dropped what was said after the first leg: {contents:?}"
+    );
+    // The stale chat's old handover must not stand in for this leg's.
+    wait_for_captured_turns(&fixture.target.capture, 2);
+}
+
 /// Adoption proves the *workspace* is this transfer's, not which chat in it is
 /// the imported one. An operator's own chat, opened in the target after an
 /// interrupted transfer and therefore the most recently touched, used to

@@ -204,6 +204,34 @@ async function importedThreadIn(
   return seeded ?? live[0]?.id;
 }
 
+/** The live chat in `workspace` whose seeded rows are exactly `transcript`.
+ * Mirrors `thread_carrying` in crates/cli/src/main.rs. */
+async function threadCarrying(
+  transport: (req: ArchcarRequest) => Promise<ArchcarResponse>,
+  workspace: string,
+  transcript: { role: string; content: string }[],
+): Promise<number | undefined> {
+  const listed = await transport({ type: "list_chat_threads", workspace });
+  if (listed.type !== "chat_threads") return undefined;
+  for (const thread of listed.threads) {
+    if (thread.archived_at) continue;
+    const snapshot = await transport({
+      type: "get_chat_snapshot",
+      thread_id: thread.id,
+      include_provider_events: false,
+    });
+    if (snapshot.type !== "chat_snapshot") continue;
+    const seeded = snapshot.snapshot.messages.filter((m) => m.source === SEEDED_MESSAGE_SOURCE);
+    if (
+      seeded.length === transcript.length &&
+      seeded.every((m, i) => m.role === transcript[i].role && m.content === transcript[i].content)
+    ) {
+      return thread.id;
+    }
+  }
+  return undefined;
+}
+
 const TRANSFER_POLL_INTERVAL_MS = 250;
 const TRANSFER_POLL_TIMEOUT_MS = 60_000;
 
@@ -934,15 +962,30 @@ export const actions = {
 
     let targetWorkspace: string;
     let targetThread: number | undefined;
-    if (existing && restoredFromArchive && moving) {
-      // A restored workspace's chats are the conversation as it was when it
-      // left: adopting one would drop everything said since, and its old
-      // handover would read as this leg's. Close them and seed the current
-      // conversation instead. Mirrors `reseed_restored_workspace` in the CLI.
+    // This leg's chat is the one seeded with *this* transcript — identified by
+    // content, not by whether this pass restored, so a return trip interrupted
+    // after the restore still finds (or seeds) the current conversation on
+    // retry. An earlier leg's chat cannot match: the source's transcript has
+    // grown since by at least the handover it received. Mirrors the adopt arm
+    // of `create_on_target` in crates/cli/src/main.rs.
+    const carrying =
+      existing && moving && transcript.length > 0
+        ? await threadCarrying(sendTarget, existing.name, transcript)
+        : undefined;
+    const reseed =
+      existing && moving && carrying === undefined && (transcript.length > 0 || restoredFromArchive);
+    if (existing && carrying !== undefined) {
       targetWorkspace = existing.name;
-      const stale = ensureOk(await sendTarget({ type: "list_chat_threads", workspace: existing.name }));
-      for (const thread of stale.type === "chat_threads" ? stale.threads : []) {
-        if (!thread.archived_at) ensureOk(await sendTarget({ type: "close_chat_thread", thread_id: thread.id }));
+      targetThread = carrying;
+    } else if (existing && moving && reseed) {
+      targetWorkspace = existing.name;
+      if (restoredFromArchive) {
+        // The restored copy's chats are the conversation as it left. Closing
+        // is reversible.
+        const stale = ensureOk(await sendTarget({ type: "list_chat_threads", workspace: existing.name }));
+        for (const thread of stale.type === "chat_threads" ? stale.threads : []) {
+          if (!thread.archived_at) ensureOk(await sendTarget({ type: "close_chat_thread", thread_id: thread.id }));
+        }
       }
       const seeded = ensureOk(
         await sendTarget({

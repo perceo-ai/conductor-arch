@@ -50,7 +50,11 @@ transfer now send `RestoreWorkspace` to the target and re-run adoption. The
 restored copy's chats are stale (the conversation as it left), so they are
 closed and the current conversation is seeded into a fresh chat through a new
 `SeedChatThread` RPC; adopting the stale chat would drop what was said since,
-and its old handover would suppress this leg's (found by Greptile on #267). If that copy is
+and its old handover would suppress this leg's (found by Greptile on #267). The
+leg's chat is found by content (the live chat whose seeded rows equal this
+transcript), not by "this pass restored", so a return trip interrupted after
+its restore still carries the current conversation on retry; an adopted target
+with none of the conversation now gets it seeded instead of a refusal. If that copy is
 not at the pushed commit, it still refuses, now saying it was restored. There
 is no fast-forward RPC yet, so a workspace that returns *with new commits*
 still needs a manual pull on the target.
