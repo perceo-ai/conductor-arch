@@ -3147,6 +3147,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetRemoteAccess => remote_access_response(false, state),
         ArchcarRequest::RotateRemoteToken => remote_access_response(true, state),
+        // `saved` is left false: which peers a client has saved is the
+        // client's knowledge, not this daemon's.
+        ArchcarRequest::DiscoverTailscalePeers { port } => {
+            match crate::archcar::tailscale::discover(port, &[]) {
+                Ok(peers) => ArchcarResponse::TailscalePeers { peers },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterNotificationDevice {
             platform,
             token,
@@ -5489,6 +5499,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetUpdateStatus
             | ArchcarRequest::ServiceDoctor
             | ArchcarRequest::GetRemoteAccess
+            | ArchcarRequest::DiscoverTailscalePeers { .. }
             | ArchcarRequest::ListBackgroundTasks { .. }
             | ArchcarRequest::GetBackgroundTask { .. }
             | ArchcarRequest::ListTasks { .. }

@@ -154,6 +154,7 @@ export type ArchcarResponse =
   | { type: "update_applied"; update: AppliedDaemonUpdate }
   | { type: "service_doctor_report"; report: ServiceDoctorReport }
   | { type: "remote_access"; listen?: string; token: string; token_path: string }
+  | { type: "tailscale_peers"; peers: import("../client").TailscalePeer[] }
   | { type: "mcp_registration"; clients: McpClientRegistration[] }
   | { type: "background_task_saved"; task: BackgroundTask }
   | { type: "background_tasks"; tasks: BackgroundTask[] }

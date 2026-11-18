@@ -146,6 +146,38 @@ archductor remote remove home
 
 The label is what appears in the app's switcher.
 
+### Finding daemons on Tailscale
+
+If this machine is on a tailnet, Archductor suggests the daemons it can see
+there instead of making you type addresses:
+
+```bash
+archductor remote discover          # add --json for scripts, --port to probe another port
+```
+
+```text
+build-box            100.64.0.7       Tailscale SSH
+  archductor remote connect ssh://build-box.tail1234.ts.net --label 'build-box'
+home-nas             100.64.0.9       archcar on :7420
+  archductor remote connect home-nas.tail1234.ts.net:7420 --token <token> --label 'home-nas'
+```
+
+In the app, the client switcher lists the same peers as **Connect <host>
+(Tailscale)**, and **Add client…** shows them above the form.
+
+- A peer is suggested when it advertises **Tailscale SSH** (`tailscale set
+  --ssh` on that machine) or answers on the archcar listener port. SSH is
+  preferred: it needs no token, so the app connects in one click.
+- A listener-only peer still needs its token; picking it fills in the address
+  and asks for the token from `archductor service token` on that machine.
+- The listener probe sends a deliberately wrong token and looks for archcar's
+  fixed "authentication failed" reply, so nothing secret leaves this machine.
+- Phones and offline peers are skipped; saved clients are not suggested again.
+
+Once connected, a peer is a saved client like any other, so it shows up as a
+**Transfer to …** target (see [Moving a workspace between
+daemons](#moving-a-workspace-between-daemons)).
+
 ## Working against a remote
 
 Most commands behave the same; paths are the exception, because they resolve on

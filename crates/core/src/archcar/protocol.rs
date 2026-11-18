@@ -877,6 +877,12 @@ pub enum ArchcarRequest {
     /// Remote access details for setting up a client on another machine.
     GetRemoteAccess,
     RotateRemoteToken,
+    /// Archductor daemons on the serving machine's tailnet. Lets a client that
+    /// cannot run `tailscale` itself (the phone) find peers to pair with.
+    DiscoverTailscalePeers {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        port: Option<u16>,
+    },
     // ---- Background development tasks -------------------------------------
     StartBackgroundTask {
         input: StartBackgroundTask,
@@ -1405,6 +1411,9 @@ pub enum ArchcarResponse {
     },
     ServiceDoctorReport {
         report: ServiceDoctorReport,
+    },
+    TailscalePeers {
+        peers: Vec<crate::archcar::tailscale::TailscalePeer>,
     },
     RemoteAccess {
         /// Address the daemon is currently listening on, when it has a remote
@@ -2491,6 +2500,10 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::UninstallService => "uninstall_service".to_owned(),
         ArchcarRequest::GetRemoteAccess => "get_remote_access".to_owned(),
         ArchcarRequest::RotateRemoteToken => "rotate_remote_token".to_owned(),
+        ArchcarRequest::DiscoverTailscalePeers { port } => format!(
+            "discover_tailscale_peers port={}",
+            port.map(|p| p.to_string()).unwrap_or_else(|| "default".to_owned())
+        ),
         ArchcarRequest::RegisterNotificationDevice {
             platform,
             token,
@@ -3062,6 +3075,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
                 .collect::<Vec<_>>()
                 .join(" ")
         ),
+        ArchcarResponse::TailscalePeers { peers } => {
+            format!("tailscale_peers count={}", peers.len())
+        }
         // The token is a credential: report its length, never its value.
         ArchcarResponse::RemoteAccess { listen, token, .. } => format!(
             "remote_access listen={} token_chars={}",

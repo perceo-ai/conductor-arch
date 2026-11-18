@@ -832,7 +832,7 @@ export const actions = {
     // Step 3: create on the target, or adopt what an earlier attempt left there.
     // `import_workspace_from_remote` writes through whichever daemon serves it,
     // so pointing the request at the target is all it takes.
-    const onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
+    let onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
     if (onTarget.type !== "workspaces") throw new Error(`could not list workspaces on ${input.toLabel}`);
     // Adopt only this transfer's own earlier attempt. A branch or a workspace
     // name is not an identity — two repositories routinely share both — and an
@@ -853,12 +853,27 @@ export const actions = {
     // adoptable but it still *holds its branch*, so it has to be seen here or
     // the import collides with it and the daemon suffixes its way into a second
     // worktree with a second agent on the same conversation.
-    const inRepository = onTarget.workspaces.filter(
+    let inRepository = onTarget.workspaces.filter(
       (w) => !!targetRepository && w.repository_name === targetRepository,
     );
-    const archivedOnBranch = inRepository.find(
+    let archivedOnBranch = inRepository.find(
       (w) => w.branch === source.branch && w.status === "archived",
     );
+    // A workspace coming back to a daemon it was transferred off finds its old
+    // self there, archived on this branch. Restore it and look again; the
+    // adoption checks below then take it, or refuse if that copy has moved on.
+    // Mirrors the restore pass in `create_on_target` (crates/cli/src/main.rs).
+    if (archivedOnBranch) {
+      ensureOk(await sendTarget({ type: "restore_workspace", workspace: archivedOnBranch.name }));
+      onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
+      if (onTarget.type !== "workspaces") throw new Error(`could not list workspaces on ${input.toLabel}`);
+      inRepository = onTarget.workspaces.filter(
+        (w) => !!targetRepository && w.repository_name === targetRepository,
+      );
+      archivedOnBranch = inRepository.find(
+        (w) => w.branch === source.branch && w.status === "archived",
+      );
+    }
     if (archivedOnBranch) {
       throw new Error(
         `${archivedOnBranch.name} on ${input.toLabel} is archived but still holds branch ${archivedOnBranch.branch}, the branch this transfer moves. It cannot be resumed while archived, and importing alongside it would put a second worktree on a -v2 branch with another agent replaying this conversation — so nothing has been changed. Restore it there to continue the transfer into it, or delete it if it is finished with.`,

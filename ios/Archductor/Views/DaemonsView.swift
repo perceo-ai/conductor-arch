@@ -6,12 +6,16 @@ struct DaemonsView: View {
     @Environment(\.palette) private var palette
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.dark
     @State private var pairing = false
+    @State private var suggestions: [TailscalePeer] = []
+    @State private var discoveryNote: String?
+    @State private var pairingSuggestion: TailscalePeer?
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     daemons
+                    tailnetSection
                     appearanceSection
                     securityNote
                 }
@@ -22,6 +26,11 @@ struct DaemonsView: View {
             .navigationTitle("More")
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $pairing) { PairDaemonView() }
+            .sheet(item: $pairingSuggestion) { PairDaemonView(suggestion: $0) }
+            // Re-asked whenever the active daemon or the saved list changes:
+            // both decide which peers are worth offering.
+            .task(id: "\(model.activeDaemon?.id ?? "")|\(model.saved.count)") { await discover() }
+            .refreshable { await discover() }
         }
     }
 
@@ -62,6 +71,66 @@ struct DaemonsView: View {
                 .buttonStyle(.plain)
                 .panel(fill: \.surface)
             }
+        }
+    }
+
+    /// Archductor daemons on the active daemon's tailnet, offered for pairing.
+    @ViewBuilder
+    private var tailnetSection: some View {
+        if !suggestions.isEmpty || discoveryNote != nil {
+            VStack(alignment: .leading, spacing: 7) {
+                SectionHeading(text: "On your tailnet")
+                VStack(spacing: 6) {
+                    ForEach(suggestions) { peer in
+                        Button {
+                            pairingSuggestion = peer
+                        } label: {
+                            HStack(spacing: 9) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(peer.hostName)
+                                        .font(Typeface.bodyStrong)
+                                        .foregroundStyle(palette.textStrong)
+                                        .lineLimit(1)
+                                    Text(peer.address.description)
+                                        .font(Typeface.monoSmall)
+                                        .foregroundStyle(palette.textMuted)
+                                        .lineLimit(1)
+                                }
+                                Spacer(minLength: 6)
+                                Text("Pair")
+                                    .font(Typeface.secondary)
+                                    .foregroundStyle(palette.accent)
+                            }
+                            .padding(.horizontal, Metrics.rowInset)
+                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .panel(fill: \.surfaceRaised, border: \.border)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if let discoveryNote {
+                        Text(discoveryNote)
+                            .font(Typeface.secondary)
+                            .foregroundStyle(palette.textMuted)
+                    }
+                }
+            }
+        }
+    }
+
+    private func discover() async {
+        guard model.session != nil else {
+            suggestions = []
+            discoveryNote = nil
+            return
+        }
+        do {
+            suggestions = try await model.tailscaleSuggestions()
+            discoveryNote = nil
+        } catch {
+            suggestions = []
+            discoveryNote = UserFacingMessage.describing(error)
         }
     }
 

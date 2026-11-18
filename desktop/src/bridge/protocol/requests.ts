@@ -155,6 +155,7 @@ export type ArchcarRequest =
   | { type: "install_service"; input: { listen?: string; archcar_path?: string } }
   | { type: "uninstall_service" }
   | { type: "get_remote_access" }
+  | { type: "discover_tailscale_peers"; port?: number }
   | { type: "rotate_remote_token" }
   // Archductor's own MCP server, registered with the agent CLIs on this device.
   | { type: "get_mcp_registration" }

@@ -252,6 +252,22 @@ enum RemoteCommand {
     },
     /// List the saved clients, marking the active one.
     List,
+    /// Suggest Archductor daemons on this machine's tailnet.
+    ///
+    /// Reads `tailscale status`, probes each online peer's archcar listener
+    /// with a deliberately wrong token (a real daemon answers with its fixed
+    /// rejection, so no credential is sent), and notes which peers offer
+    /// Tailscale SSH. Each suggestion comes with the `remote connect` line to
+    /// run: `ssh://` when available (no token), else `host:port` (needs the
+    /// server's `archductor service token`).
+    Discover {
+        /// Listener port to probe. Defaults to 7420.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Print the suggestions as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Switch to a saved client by name or id.
     Use {
         /// Client name or id; `local` or `this-machine` selects the local daemon.
@@ -3749,6 +3765,7 @@ fn run_cli() -> Result<()> {
                     );
                 }
             }
+            RemoteCommand::Discover { port, json } => run_remote_discover(&paths, port, json)?,
             RemoteCommand::Use { client, no_verify } => {
                 let key = client.trim();
                 let mut clients = remote::load_clients(&paths)?;
@@ -4147,6 +4164,58 @@ fn change_scope(commit: Option<String>, default: WorkspaceChangeScope) -> Worksp
 
 /// Contact a daemon before pointing this machine at it, so a typo or a dead
 /// host fails here instead of leaving every surface talking to nothing.
+fn run_remote_discover(paths: &AppPaths, port: Option<u16>, json: bool) -> Result<()> {
+    let saved: Vec<String> = remote::load_clients(paths)?
+        .clients
+        .into_iter()
+        .map(|client| client.address)
+        .collect();
+    let peers = archductor_core::archcar::tailscale::discover(port, &saved)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&peers)?);
+        return Ok(());
+    }
+    if peers.is_empty() {
+        println!("No Archductor daemons found on your tailnet.");
+        println!(
+            "On the other machine, enable Tailscale SSH (`tailscale set --ssh`) or run \
+             `archductor service install --listen 0.0.0.0:7420`."
+        );
+        return Ok(());
+    }
+    for peer in &peers {
+        let mut how = Vec::new();
+        if peer.archcar_listener {
+            how.push(format!("archcar on :{}", peer.listener_port));
+        }
+        if peer.tailscale_ssh {
+            how.push("Tailscale SSH".to_owned());
+        }
+        let saved = if peer.saved { "  (saved)" } else { "" };
+        println!(
+            "{:<20} {:<16} {}{saved}",
+            peer.host_name,
+            peer.ip,
+            how.join(", ")
+        );
+        if !peer.saved {
+            let token = if peer.needs_token {
+                " --token <token>"
+            } else {
+                ""
+            };
+            // Host names carry spaces and apostrophes ("Sam’s MacBook Pro");
+            // quote so the printed line pastes straight into a shell.
+            let label = format!("'{}'", peer.host_name.replace('\'', "'\\''"));
+            println!(
+                "  archductor remote connect {}{token} --label {label}",
+                peer.suggested_address
+            );
+        }
+    }
+    Ok(())
+}
+
 fn verify_client(address: &str, token: &str) -> Result<()> {
     let client = if let Some(target) = remote::parse_ssh_address(address) {
         ArchcarClient::ssh(target?)
@@ -5167,6 +5236,18 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("remote listen={}", listen.as_deref().unwrap_or("disabled"));
             println!("token stored in {token_path}");
             println!("{token}");
+        }
+        ArchcarResponse::TailscalePeers { peers } => {
+            for peer in peers {
+                println!(
+                    "{} {} listener={} tailscale_ssh={} {}",
+                    peer.host_name,
+                    peer.ip,
+                    peer.archcar_listener,
+                    peer.tailscale_ssh,
+                    peer.suggested_address
+                );
+            }
         }
         ArchcarResponse::BackgroundTaskSaved { task } => {
             println!(
@@ -6870,52 +6951,88 @@ fn create_on_target(
     target: &TransferEndpoint,
     spec: TargetWorkspaceSpec<'_>,
 ) -> Result<(String, Option<i64>)> {
-    match existing_target_workspace(
-        target,
-        &spec.repository_url,
-        &spec.branch,
-        &spec.name,
-        spec.source_commit.as_deref(),
-    )? {
-        TargetWorkspaceMatch::Adopt(existing) => {
-            println!(
-                "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
-                existing.name, target.label, existing.branch
-            );
-            let thread = target_thread_for(target, &existing.name)?;
-            return Ok((existing.name, thread));
+    // At most one pass restores: a workspace coming back to a daemon it was
+    // transferred off is still there, archived, holding this branch. Restoring
+    // it and re-checking is the round trip; the checks below then adopt it (or
+    // refuse, if that copy has commits of its own).
+    let mut restored = false;
+    loop {
+        match existing_target_workspace(
+            target,
+            &spec.repository_url,
+            &spec.branch,
+            &spec.name,
+            spec.source_commit.as_deref(),
+        )? {
+            TargetWorkspaceMatch::Retired { name, branch } if !restored => {
+                println!(
+                    "`{name}` on {} is archived on branch {branch} — this workspace is coming back; \
+                     restoring it",
+                    target.label
+                );
+                if let ArchcarResponse::Error { message } = target.client.send(
+                    ArchcarRequest::RestoreWorkspace {
+                        workspace: name.clone(),
+                    },
+                )? {
+                    anyhow::bail!(
+                        "restoring `{name}` on {} failed: {message}. Nothing else has been changed \
+                         there; restore or delete it on that machine and re-run the transfer",
+                        target.label
+                    );
+                }
+                restored = true;
+                continue;
+            }
+            TargetWorkspaceMatch::Adopt(existing) => {
+                println!(
+                    "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
+                    existing.name, target.label, existing.branch
+                );
+                let thread = target_thread_for(target, &existing.name)?;
+                return Ok((existing.name, thread));
+            }
+            TargetWorkspaceMatch::Diverged { name, branch, head } if restored => anyhow::bail!(
+                "restored `{name}` on {} to take this workspace back, but it is at {} on branch \
+                 {branch}, not the {} this transfer pushed — the work moved on after it left, and \
+                 there is no fast-forward step yet. `{name}` is active there again; pull \
+                 {branch} into it on that machine and re-run the transfer",
+                target.label,
+                head.as_deref().unwrap_or("an unknown commit"),
+                spec.source_commit.as_deref().unwrap_or("commit"),
+            ),
+            TargetWorkspaceMatch::Diverged { name, branch, head } => anyhow::bail!(
+                "`{name}` on {} is on branch {branch} but at {}, not the {} this transfer pushed — \
+                 that daemon's copy of this branch has its own commits. Importing a second workspace \
+                 onto one branch is what this command exists to prevent, and re-seeding its chat \
+                 would start that work twice, so nothing has been changed. If the transfer already \
+                 completed there is nothing to re-run; otherwise move or rename `{name}` on {} and \
+                 retry",
+                target.label,
+                head.as_deref().unwrap_or("an unknown commit"),
+                spec.source_commit.as_deref().unwrap_or("commit"),
+                target.label
+            ),
+            TargetWorkspaceMatch::Retired { name, branch } => anyhow::bail!(
+                "`{name}` on {} is archived but still holds branch {branch}, the branch this \
+                 transfer moves. It cannot be resumed while archived, and importing alongside it \
+                 would put a second worktree on a `-v2` branch with another agent replaying this \
+                 conversation — so nothing has been changed. Restore it there \
+                 (`archductor workspace restore {name}`) to continue the transfer into it, or \
+                 delete it if it is finished with",
+                target.label
+            ),
+            TargetWorkspaceMatch::NameTaken { name, used_by } => anyhow::bail!(
+                "{} already uses the workspace name `{name}` for {used_by}, and it keeps those \
+                 names unique — so importing would quietly rename this transfer's workspace *and* \
+                 its branch to `-v2` forms, leaving something a retry could no longer recognise. \
+                 Nothing has been changed. Give it a free name with `--name <name>` (and \
+                 `--branch <branch>` if that collides too), or clear the one on {} first",
+                target.label,
+                target.label
+            ),
+            TargetWorkspaceMatch::Absent => break,
         }
-        TargetWorkspaceMatch::Diverged { name, branch, head } => anyhow::bail!(
-            "`{name}` on {} is on branch {branch} but at {}, not the {} this transfer pushed — \
-             that daemon's copy of this branch has its own commits. Importing a second workspace \
-             onto one branch is what this command exists to prevent, and re-seeding its chat \
-             would start that work twice, so nothing has been changed. If the transfer already \
-             completed there is nothing to re-run; otherwise move or rename `{name}` on {} and \
-             retry",
-            target.label,
-            head.as_deref().unwrap_or("an unknown commit"),
-            spec.source_commit.as_deref().unwrap_or("commit"),
-            target.label
-        ),
-        TargetWorkspaceMatch::Retired { name, branch } => anyhow::bail!(
-            "`{name}` on {} is archived but still holds branch {branch}, the branch this \
-             transfer moves. It cannot be resumed while archived, and importing alongside it \
-             would put a second worktree on a `-v2` branch with another agent replaying this \
-             conversation — so nothing has been changed. Restore it there \
-             (`archductor workspace restore {name}`) to continue the transfer into it, or \
-             delete it if it is finished with",
-            target.label
-        ),
-        TargetWorkspaceMatch::NameTaken { name, used_by } => anyhow::bail!(
-            "{} already uses the workspace name `{name}` for {used_by}, and it keeps those \
-             names unique — so importing would quietly rename this transfer's workspace *and* \
-             its branch to `-v2` forms, leaving something a retry could no longer recognise. \
-             Nothing has been changed. Give it a free name with `--name <name>` (and \
-             `--branch <branch>` if that collides too), or clear the one on {} first",
-            target.label,
-            target.label
-        ),
-        TargetWorkspaceMatch::Absent => {}
     }
 
     if let Some(dest) = spec.clone_into {

@@ -12,6 +12,21 @@ export interface UpdateReady {
 }
 
 /** One saved daemon, as the renderer sees it — no token. */
+/** Mirrors `TailscalePeer` in electron/tailscale.ts. */
+export interface TailscalePeer {
+  host_name: string;
+  dns_name: string;
+  ip: string;
+  os: string;
+  archcar_listener: boolean;
+  listener_port: number;
+  tailscale_ssh: boolean;
+  transport: "ssh" | "tcp";
+  suggested_address: string;
+  needs_token: boolean;
+  saved: boolean;
+}
+
 export interface ClientSummary {
   id: string;
   label: string;
@@ -166,8 +181,13 @@ const api = {
   clientsList: (): Promise<ClientsResult> => ipcRenderer.invoke("clients:list"),
 
   /** Save a daemon and switch to it; verifies before committing the switch. */
-  clientsAdd: (opts: { label?: string; address: string; token: string }): Promise<ClientsResult> =>
+  clientsAdd: (opts: { label?: string; address: string; token?: string }): Promise<ClientsResult> =>
     ipcRenderer.invoke("clients:add", opts),
+
+  /** Archductor daemons on this machine's tailnet, for the switcher to suggest. */
+  clientsDiscoverTailscale: (): Promise<
+    { ok: true; peers: TailscalePeer[] } | { ok: false; error: string }
+  > => ipcRenderer.invoke("clients:discover-tailscale"),
 
   /** Switch to a saved client, or to this machine with null. */
   clientsActivate: (id: string | null): Promise<ClientsResult> =>

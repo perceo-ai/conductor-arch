@@ -5,7 +5,9 @@ import {
   type ClientSummary,
   type ClientsResult,
   type SelectedDaemon,
+  type TailscalePeer,
 } from "@/bridge/client";
+import { dialogs } from "./dialogs";
 import { logAction, logState } from "@/lib/log";
 import { achievementsStore } from "./achievements";
 import { actions } from "./actions";
@@ -32,6 +34,10 @@ interface ClientsState {
   envAddress: string | null;
   busy: boolean;
   loaded: boolean;
+  /** Daemons found on this machine's tailnet that are not saved yet. */
+  suggestions: TailscalePeer[];
+  /** Why discovery found nothing to try (Tailscale missing, stopped, …). */
+  discoveryError: string | null;
 }
 
 const [state, setState] = createStore<ClientsState>({
@@ -40,6 +46,8 @@ const [state, setState] = createStore<ClientsState>({
   envAddress: null,
   busy: false,
   loaded: false,
+  suggestions: [],
+  discoveryError: null,
 });
 
 const lastWorkspaceByClient = new Map<string, string>();
@@ -227,7 +235,7 @@ export const clientsStore = {
   },
 
   /** Save a daemon and switch to it. Main verifies before committing. */
-  async add(opts: { label?: string; address: string; token: string }): Promise<boolean> {
+  async add(opts: { label?: string; address: string; token?: string }): Promise<boolean> {
     logAction("add client", { address: opts.address });
     rememberCurrentWorkspace(state.activeId);
     const restoreAlreadyOwed = nav.awaitingTabRestore();
@@ -251,6 +259,41 @@ export const clientsStore = {
     if (!ok && wasActive) {
       if (!restoreAlreadyOwed) nav.cancelTabRestore();
       else if (!switchAlreadyPending) nav.undeclareDaemonSwitch();
+    }
+    return ok;
+  },
+
+  /**
+   * Look for Archductor daemons on the tailnet. Quiet by design: no Tailscale
+   * on this machine is normal, so the reason is kept for the UI, not toasted.
+   */
+  async discoverTailscale(): Promise<void> {
+    try {
+      const res = await bridge.discoverTailscale();
+      if (res.ok) {
+        setState({ suggestions: res.peers.filter((p) => !p.saved), discoveryError: null });
+      } else {
+        setState({ suggestions: [], discoveryError: res.error });
+      }
+    } catch (err) {
+      setState({ suggestions: [], discoveryError: (err as Error).message });
+    }
+  },
+
+  /**
+   * Connect to a suggested peer. SSH needs nothing more, so it connects in one
+   * step; the TCP listener needs the server's token, so the form opens
+   * prefilled for it.
+   */
+  async connectSuggestion(peer: TailscalePeer): Promise<boolean> {
+    if (peer.needs_token) {
+      dialogs.open({ kind: "add-client", address: peer.suggested_address, label: peer.host_name });
+      return false;
+    }
+    const ok = await this.add({ label: peer.host_name, address: peer.suggested_address });
+    if (ok) {
+      setState("suggestions", (rows) => rows.filter((p) => p.suggested_address !== peer.suggested_address));
+      toastsStore.push(`Connected to ${peer.host_name} over Tailscale SSH`);
     }
     return ok;
   },

@@ -803,9 +803,12 @@ describe("actions.transferWorkspace", () => {
       name?: string;
       /** Branch of the pre-placed workspace; defaults to the source's. */
       branch?: string;
+      /** `restore_workspace` really un-archives the pre-placed workspace. */
+      restorable?: boolean;
     } = {},
   ) {
     let imported = opts.existing ?? false;
+    let status = opts.status ?? "active";
     let delivered = opts.delivered ?? false;
     handlers.dst = (req) => {
       switch (req.type) {
@@ -818,7 +821,7 @@ describe("actions.transferWorkspace", () => {
                     ...targetWorkspace,
                     name: opts.name ?? targetWorkspace.name,
                     branch: opts.branch ?? targetWorkspace.branch,
-                    status: opts.status ?? "active",
+                    status,
                     repository_name: opts.repository ?? "app-here",
                   },
                 ]
@@ -841,6 +844,9 @@ describe("actions.transferWorkspace", () => {
             token: opts.identity ?? "tok-dst",
             token_path: opts.identityPath ?? "/dst/archcar.token",
           };
+        case "restore_workspace":
+          if (opts.restorable) status = "active";
+          return { type: "workspace_updated", name: "parser" };
         case "import_workspace_from_remote":
           imported = true;
           return {
@@ -1090,6 +1096,20 @@ describe("actions.transferWorkspace", () => {
     expect(order).not.toContain("dst:import_workspace_from_remote");
     expect(order).not.toContain("dst:queue_chat_input");
     expect(order).not.toContain("src:archive_workspace");
+  });
+
+  it("takes a workspace back by restoring its archived original on the target", async () => {
+    // A -> B -> A: the first leg archived the original on A. The return leg
+    // used to refuse until someone restored it there by hand.
+    routeSource({ liveSession: false });
+    routeTarget({ existing: true, status: "archived", restorable: true });
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    expect(order).toContain("dst:restore_workspace");
+    expect(order).not.toContain("dst:import_workspace_from_remote");
+    expect(order).toContain("src:archive_workspace");
   });
 
   it("hands over to the imported chat, not whichever is newest", async () => {

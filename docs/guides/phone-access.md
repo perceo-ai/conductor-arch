@@ -50,6 +50,30 @@ No desktop nearby? Use **Or enter it by hand** with the address from
 non-loopback address makes the app ask you to confirm you understand the token
 is sent in the clear.
 
+### Pair the other daemons on your tailnet
+
+Once one daemon is paired, **More → On your tailnet** lists the other
+Archductor daemons that daemon can see on Tailscale (pull to refresh). The
+phone cannot run `tailscale` itself, so it asks the paired daemon, which is on
+the same tailnet. Only daemons with phone access enabled (a TCP listener) are
+listed, since the phone has no SSH transport; already-paired ones are left
+out. Tap one to open the pairing sheet with its name and address filled in,
+then scan its pairing code or paste its token. The paired daemon needs this
+release or later to answer.
+
+## Move a workspace to another daemon
+
+With two or more daemons paired, a workspace's toolbar has a **Transfer**
+menu listing the others. A transfer runs from the phone — the daemons never
+talk to each other — and does what `archductor remote transfer` does: stops
+the workspace's agents (it asks first if one is mid-turn), commits and pushes
+its branch, recreates it on the other daemon with its latest chat, hands that
+chat to a fresh session there, and archives the original. Moving a workspace
+back to a daemon it came from restores that archived original rather than
+making a second copy. See [Moving a workspace between
+daemons](remote-daemon.md#moving-a-workspace-between-daemons) for the details
+and refusals.
+
 ## Enable push notifications
 
 The iOS app asks for notification permission and registers its APNs device token

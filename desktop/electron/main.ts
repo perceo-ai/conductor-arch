@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import {
   ArchcarBridge,
+  isSshAddress,
   loadClients,
   loadRemoteConfig,
   remoteHandlerBlock,
@@ -14,6 +15,7 @@ import {
   upsertClient,
 } from "./archcar.js";
 import { parseGithubRepos } from "./githubRepos.js";
+import { discoverTailscalePeers } from "./tailscale.js";
 import {
   buildPairingPayload,
   pairingWindowHtml,
@@ -570,8 +572,12 @@ ipcMain.handle(
   "clients:add",
   async (_evt, opts: { label?: string; address?: string; token?: string } | undefined) => {
     const address = opts?.address?.trim();
-    const token = opts?.token?.trim();
-    if (!address || !token) return { ok: false, error: "address and token are required" };
+    const token = opts?.token?.trim() ?? "";
+    // An ssh:// client authenticates as the SSH identity; only TCP needs a token.
+    if (!address) return { ok: false, error: "address is required" };
+    if (!token && !isSshAddress(address)) {
+      return { ok: false, error: "a host:port address needs the server's token (archductor service token)" };
+    }
     if (envRemoteAddress()) {
       return {
         ok: false,
@@ -593,6 +599,17 @@ ipcMain.handle(
     }
   },
 );
+
+// Archductor daemons on this machine's tailnet that are worth suggesting.
+// Runs here, not on the daemon: the tailnet that matters is the client's.
+ipcMain.handle("clients:discover-tailscale", async () => {
+  try {
+    const saved = loadClients().clients.map((c) => c.address);
+    return { ok: true, peers: await discoverTailscalePeers(saved) };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
+});
 
 ipcMain.handle("clients:activate", async (_evt, id: string | null) => {
   if (envRemoteAddress()) {

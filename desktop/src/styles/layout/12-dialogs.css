@@ -381,3 +381,12 @@
   align-items: center;
   gap: 8px;
 }
+
+/* Add client: a daemon found on the tailnet, with its connect button. */
+.dialog-suggestion-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+}

@@ -662,9 +662,11 @@ fn remote_transfer_refuses_to_re_seed_a_target_that_has_moved_on() {
 /// `["berlin [archived] branch=lc/berlin", "berlin-v2 [active] branch=lc/berlin-v2"]`
 /// and *two* delivered turns — a second worktree and a second agent replaying
 /// the same conversation, reported as success. An archived row still holds its
-/// branch, so it can neither be adopted nor imported around.
+/// branch, so it cannot be imported around. It *is* the workspace coming back,
+/// though — the round trip A → B → A lands exactly here — so the transfer
+/// restores it and adopts it, which still means one worktree and one turn.
 #[test]
-fn remote_transfer_refuses_when_an_archived_target_still_holds_the_branch() {
+fn remote_transfer_restores_an_archived_target_that_holds_the_branch() {
     let fixture = Fixture::start(TargetSetup::WithClone);
     let args = [
         "remote", "transfer", "berlin", "--from", "src", "--to", "dst", "--force",
@@ -689,26 +691,27 @@ fn remote_transfer_refuses_when_an_archived_target_still_holds_the_branch() {
         .assert()
         .success();
 
-    let refusal = fixture.operator(&args).assert().failure();
-    let stderr = String::from_utf8(refusal.get_output().stderr.clone()).unwrap();
+    let rerun = fixture.operator(&args).assert().success();
+    let stdout = String::from_utf8(rerun.get_output().stdout.clone()).unwrap();
     assert!(
-        stderr.contains("is archived but still holds branch lc/berlin"),
-        "the re-run should refuse an archived holder of the branch; got:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("workspace restore"),
-        "the refusal should say how to continue; got:\n{stderr}"
+        stdout.contains("restoring it"),
+        "the re-run should restore the archived holder of the branch; got:\n{stdout}"
     );
 
     let on_target: Vec<String> = fixture
         .target_workspaces()
         .into_iter()
-        .map(|workspace| format!("{}:{}", workspace.name, workspace.branch))
+        .map(|workspace| {
+            format!(
+                "{}:{}:{}",
+                workspace.name, workspace.branch, workspace.status
+            )
+        })
         .collect();
     assert_eq!(
         on_target,
-        vec!["berlin:lc/berlin".to_owned()],
-        "the re-run imported a second workspace on a suffixed branch"
+        vec!["berlin:lc/berlin:active".to_owned()],
+        "the re-run should restore the one workspace, not import a second on a suffixed branch"
     );
     let turns = fs::read_to_string(&fixture.target.capture).unwrap_or_default();
     assert_eq!(
