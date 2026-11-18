@@ -15,6 +15,8 @@ private actor TwoDaemons {
     var restorable = true
     var delivered = false
     var sameIdentity = false
+    var seededTranscript: Int?
+    var queuedThread: Int64?
 
     let pushed = "abc1234def"
 
@@ -89,6 +91,13 @@ private actor TwoDaemons {
         case "restore_workspace":
             if restorable, let ws = targetWorkspace { targetWorkspace = ("active", ws.head) }
             return .object(["type": "workspace_updated", "name": "parser"])
+        case "close_chat_thread":
+            return .object(["type": "ack"])
+        case "seed_chat_thread":
+            seededTranscript = fields["transcript"]?.array.count
+            return .object(["type": "chat_thread_created", "thread": .object([
+                "id": 12, "provider": "codex", "title": "Parser port", "status": "open", "updated_at": "10",
+            ])])
         case "get_recent_commits":
             return .object(["type": "recent_commits", "workspace": "parser",
                             "log": .string("\(targetWorkspace?.head ?? pushed) msg")])
@@ -109,6 +118,7 @@ private actor TwoDaemons {
         case "ensure_chat_thread_session":
             return .object(["type": "session_spawn_queued", "workspace": "parser", "kind": "codex"])
         case "queue_chat_input":
+            queuedThread = fields["thread_id"]?.int
             delivered = true
             return .object(["type": "queued_chat_input"])
         default:
@@ -170,6 +180,11 @@ private let fast = WorkspaceTransfer.Timing(pollInterval: .milliseconds(1), poll
         let order = await daemons.order
         #expect(order.contains("dst:restore_workspace"))
         #expect(!order.contains("dst:import_workspace_from_remote"))
+        // The restored copy's own chat is stale: the current conversation is
+        // seeded fresh, and that chat is the one handed the turn.
+        #expect(order.contains("dst:close_chat_thread"))
+        #expect(await daemons.seededTranscript == 1)
+        #expect(await daemons.queuedThread == 12)
         #expect(await daemons.archivedSource)
     }
 

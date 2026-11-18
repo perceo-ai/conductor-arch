@@ -847,6 +847,13 @@ describe("actions.transferWorkspace", () => {
         case "restore_workspace":
           if (opts.restorable) status = "active";
           return { type: "workspace_updated", name: "parser" };
+        case "close_chat_thread":
+          return { type: "ack" };
+        case "seed_chat_thread":
+          return {
+            type: "chat_thread_created",
+            thread: { id: 12, provider: "codex", title: "Parser port", status: "open", updated_at: "10" },
+          };
         case "import_workspace_from_remote":
           imported = true;
           return {
@@ -1109,6 +1116,14 @@ describe("actions.transferWorkspace", () => {
 
     expect(order).toContain("dst:restore_workspace");
     expect(order).not.toContain("dst:import_workspace_from_remote");
+    // The restored workspace's own chat is the conversation as it left; the
+    // current one is seeded fresh and that is the chat handed the turn.
+    expect(order).toContain("dst:close_chat_thread");
+    expect(order).toContain("dst:seed_chat_thread");
+    const queued = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "queue_chat_input",
+    );
+    expect(queued?.[1]).toMatchObject({ thread_id: 12 });
     expect(order).toContain("src:archive_workspace");
   });
 

@@ -170,9 +170,11 @@ public enum WorkspaceTransfer {
         }
         // Coming back to a daemon it was moved off: its old self is there,
         // archived, holding this branch. Restore it and look again.
+        var restored = false
         if let archived = archivedOnBranch(), let name = archived["name"]?.string {
             _ = try ok(await target.send("restore_workspace", ["workspace": .string(name)]))
             onTarget = try await inRepository()
+            restored = true
         }
         if let archived = archivedOnBranch() {
             throw Failure.refused(
@@ -209,7 +211,30 @@ public enum WorkspaceTransfer {
 
         var targetWorkspace: String
         var targetThread: Int64?
-        if let existing, let name = existing["name"]?.string {
+        if let existing, let name = existing["name"]?.string, restored, moving != nil {
+            // A restored workspace's chats are the conversation as it was when
+            // it left: adopting one would drop everything said since, and its
+            // old handover would read as this leg's. Close them and seed the
+            // current conversation. Mirrors `reseed_restored_workspace` (CLI).
+            targetWorkspace = name
+            let stale = try ok(await target.send("list_chat_threads", ["workspace": .string(name)]))
+            for thread in stale["threads"]?.array ?? [] where thread["archived_at"]?.string == nil {
+                if let id = thread["id"]?.int {
+                    _ = try ok(await target.send("close_chat_thread", ["thread_id": .number(Double(id))]))
+                }
+            }
+            var seedFields: [String: JSONValue] = [
+                "workspace": .string(name),
+                "transcript": .array(transcript.map(transcriptRow)),
+            ]
+            if let chatTitle { seedFields["chat_title"] = .string(chatTitle) }
+            if let provider { seedFields["provider"] = .string(provider) }
+            let seeded = try ok(await target.send("seed_chat_thread", seedFields))
+            guard seeded.type == "chat_thread_created", let id = seeded["thread"]?["id"]?.int else {
+                throw Failure.refused("could not carry the conversation into \(name) on \(target.label)")
+            }
+            targetThread = id
+        } else if let existing, let name = existing["name"]?.string {
             targetWorkspace = name
             targetThread = try await importedThread(in: name, on: target)
         } else {
@@ -227,13 +252,7 @@ public enum WorkspaceTransfer {
                 "branch": .string(branch),
                 "source_branch": .string(branch),
                 "name": .string(workspace),
-                "transcript": .array(transcript.map { message in
-                    .object([
-                        "role": message["role"] ?? "",
-                        "content": message["content"] ?? "",
-                        "created_at": message["created_at"] ?? "",
-                    ])
-                }),
+                "transcript": .array(transcript.map(transcriptRow)),
             ]
             if let sourceCommit { fields["source_commit"] = .string(sourceCommit) }
             if let base = row["base_ref"]?.string { fields["base_ref"] = .string(base) }
@@ -287,6 +306,15 @@ public enum WorkspaceTransfer {
     }
 
     // MARK: - Helpers (each mirrors the desktop function of the same purpose)
+
+    /// One transcript line as the import and seed requests take it.
+    static func transcriptRow(_ message: JSONValue) -> JSONValue {
+        .object([
+            "role": message["role"] ?? "",
+            "content": message["content"] ?? "",
+            "created_at": message["created_at"] ?? "",
+        ])
+    }
 
     static func ok(_ response: JSONValue) throws -> JSONValue {
         if response.type == "error" {

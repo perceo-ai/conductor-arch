@@ -143,10 +143,13 @@ pub fn suggest(
     if !archcar_listener && !tailscale_ssh {
         return None;
     }
-    let host = if dns_name.is_empty() {
-        ip.clone()
-    } else {
+    // An IPv6 literal is bracketed, or its last group reads as a port.
+    let host = if !dns_name.is_empty() {
         dns_name.clone()
+    } else if ip.contains(':') {
+        format!("[{ip}]")
+    } else {
+        ip.clone()
     };
     let (transport, suggested_address) = if tailscale_ssh {
         (Transport::Ssh, format!("ssh://{host}"))
@@ -347,6 +350,29 @@ mod tests {
         }
         let peer = suggest(&peers[1], false, 7420, &["builder:7420".to_owned()]).unwrap();
         assert!(!peer.saved);
+    }
+
+    #[test]
+    fn ipv6_only_peers_get_a_bracketed_address() {
+        let raw = RawPeer {
+            host_name: "v6box".into(),
+            tailscale_ips: vec!["fd7a::2".into()],
+            online: true,
+            ssh_host_keys: Some(vec!["k".into()]),
+            ..RawPeer::default()
+        };
+        assert_eq!(
+            suggest(&raw, true, 7420, &[]).unwrap().suggested_address,
+            "ssh://[fd7a::2]"
+        );
+        let tcp = RawPeer {
+            ssh_host_keys: None,
+            ..raw
+        };
+        assert_eq!(
+            suggest(&tcp, true, 7420, &[]).unwrap().suggested_address,
+            "[fd7a::2]:7420"
+        );
     }
 
     #[test]

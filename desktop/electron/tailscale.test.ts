@@ -67,6 +67,12 @@ describe("tailscale discovery", () => {
     expect(suggest(devbox, false, 7420, ["builder:7420"])!.saved).toBe(false);
   });
 
+  it("brackets an IPv6-only peer's address", () => {
+    const raw = { HostName: "v6box", TailscaleIPs: ["fd7a::2"], Online: true, sshHostKeys: ["k"] };
+    expect(suggest(raw, true, 7420, [])!.suggested_address).toBe("ssh://[fd7a::2]");
+    expect(suggest({ ...raw, sshHostKeys: null }, true, 7420, [])!.suggested_address).toBe("[fd7a::2]:7420");
+  });
+
   it("strips every decoration from an address", () => {
     expect(addressHost("ssh://u@h.example:2222/bin/a")).toBe("h.example");
     expect(addressHost("h:7420")).toBe("h");

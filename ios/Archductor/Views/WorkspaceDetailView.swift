@@ -133,11 +133,20 @@ struct WorkspaceDetailView: View {
         } message: {
             Text(transferError ?? "")
         }
+        // While it moves, nothing here may touch the source: a turn sent now
+        // would restart its agent after the transcript and branch were taken,
+        // and the final archive would strand that work.
+        .disabled(transferring != nil)
+        .navigationBarBackButtonHidden(transferring != nil)
         .overlay {
             if let transferring {
-                ProgressView("Moving to \(transferring.label)…")
-                    .padding(18)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                ZStack {
+                    Color.black.opacity(0.25).ignoresSafeArea()
+                    ProgressView("Moving to \(transferring.label)…")
+                        .padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .contentShape(Rectangle())
             }
         }
         .task {

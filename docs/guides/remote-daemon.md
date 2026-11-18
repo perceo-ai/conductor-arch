@@ -363,6 +363,18 @@ In order, the transfer:
    Error: the session started for `fix-auth` on frankfurt stopped before taking the conversation, so it was never delivered; `fix-auth` on the source has been left alone — fix the agent there and re-run
    ```
 
+### Moving a workspace back
+
+A transfer archives the workspace it moved off, and that archived copy still
+holds the branch. Moving the workspace back to that daemon restores the copy
+rather than refusing or importing a second one. Its own chats are the
+conversation as it was when it left, so they are closed (reopen them from the
+workspace's closed chats if you want them) and the conversation as it is now is
+carried into a fresh chat, which the resumed agent picks up. If the copy is not
+at the commit the transfer pushed, the transfer stops and says so; pull the
+branch into it on that machine and run it again. This needs the target daemon
+on this release or later.
+
 ### When a transfer stops part-way
 
 Anything that fails after step 1 prints what exists now, so you can see what a

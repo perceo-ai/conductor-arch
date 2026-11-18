@@ -560,6 +560,18 @@ pub enum ArchcarRequest {
         provider: String,
         title: String,
     },
+    /// A new chat in an existing workspace, pre-filled with a carried
+    /// conversation — the transcript half of `ImportWorkspaceFromRemote`, for
+    /// a transfer whose target workspace already exists (a return trip).
+    SeedChatThread {
+        workspace: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        transcript: Vec<ArchcarChatTranscriptMessage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        chat_title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+    },
     /// Copy a conversation up to a message into a new chat.
     ///
     /// `new_workspace` is the difference between Conductor's two fork actions:
@@ -2258,6 +2270,14 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         ArchcarRequest::CreateChatThread { workspace, provider, .. } => {
             format!("create_chat_thread workspace={workspace} provider={provider}")
         }
+        ArchcarRequest::SeedChatThread {
+            workspace,
+            transcript,
+            ..
+        } => format!(
+            "seed_chat_thread workspace={workspace} messages={}",
+            transcript.len()
+        ),
         ArchcarRequest::ForkChatThread {
             thread_id,
             through_message_id,

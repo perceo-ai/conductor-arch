@@ -29,7 +29,11 @@ struct DaemonsView: View {
             .sheet(item: $pairingSuggestion) { PairDaemonView(suggestion: $0) }
             // Re-asked whenever the active daemon or the saved list changes:
             // both decide which peers are worth offering.
-            .task(id: "\(model.activeDaemon?.id ?? "")|\(model.saved.count)") { await discover() }
+            // The connection is part of the key: switching daemons sets the
+            // active one before its session connects, and discovery needs it.
+            .task(id: "\(model.activeDaemon?.id ?? "")|\(model.saved.count)|\(model.session != nil)") {
+                await discover()
+            }
             .refreshable { await discover() }
         }
     }

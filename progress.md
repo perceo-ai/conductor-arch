@@ -45,8 +45,12 @@ them.
 
 Round trips now restore. Moving a workspace back to a daemon it came from used
 to refuse, because the archived original there still holds the branch, and the
-advice ("restore it there") had no remote CLI verb. CLI and desktop transfer
-now send `RestoreWorkspace` to the target and re-run adoption. If that copy is
+advice ("restore it there") had no remote CLI verb. CLI, desktop, and phone
+transfer now send `RestoreWorkspace` to the target and re-run adoption. The
+restored copy's chats are stale (the conversation as it left), so they are
+closed and the current conversation is seeded into a fresh chat through a new
+`SeedChatThread` RPC; adopting the stale chat would drop what was said since,
+and its old handover would suppress this leg's (found by Greptile on #267). If that copy is
 not at the pushed commit, it still refuses, now saying it was restored. There
 is no fast-forward RPC yet, so a workspace that returns *with new commits*
 still needs a manual pull on the target.

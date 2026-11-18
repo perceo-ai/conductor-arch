@@ -863,8 +863,10 @@ export const actions = {
     // self there, archived on this branch. Restore it and look again; the
     // adoption checks below then take it, or refuse if that copy has moved on.
     // Mirrors the restore pass in `create_on_target` (crates/cli/src/main.rs).
+    let restoredFromArchive = false;
     if (archivedOnBranch) {
       ensureOk(await sendTarget({ type: "restore_workspace", workspace: archivedOnBranch.name }));
+      restoredFromArchive = true;
       onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
       if (onTarget.type !== "workspaces") throw new Error(`could not list workspaces on ${input.toLabel}`);
       inRepository = onTarget.workspaces.filter(
@@ -932,7 +934,30 @@ export const actions = {
 
     let targetWorkspace: string;
     let targetThread: number | undefined;
-    if (existing) {
+    if (existing && restoredFromArchive && moving) {
+      // A restored workspace's chats are the conversation as it was when it
+      // left: adopting one would drop everything said since, and its old
+      // handover would read as this leg's. Close them and seed the current
+      // conversation instead. Mirrors `reseed_restored_workspace` in the CLI.
+      targetWorkspace = existing.name;
+      const stale = ensureOk(await sendTarget({ type: "list_chat_threads", workspace: existing.name }));
+      for (const thread of stale.type === "chat_threads" ? stale.threads : []) {
+        if (!thread.archived_at) ensureOk(await sendTarget({ type: "close_chat_thread", thread_id: thread.id }));
+      }
+      const seeded = ensureOk(
+        await sendTarget({
+          type: "seed_chat_thread",
+          workspace: existing.name,
+          transcript,
+          chat_title: chatTitle,
+          provider: moving.provider,
+        }),
+      );
+      if (seeded.type !== "chat_thread_created") {
+        throw new Error(`could not carry the conversation into ${existing.name} on ${input.toLabel}`);
+      }
+      targetThread = seeded.thread.id;
+    } else if (existing) {
       targetWorkspace = existing.name;
       targetThread = await importedThreadIn(sendTarget, existing.name);
     } else {

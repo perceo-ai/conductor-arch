@@ -6989,7 +6989,15 @@ fn create_on_target(
                     "`{}` is already on {} (branch {}); keeping it rather than importing a second copy",
                     existing.name, target.label, existing.branch
                 );
-                let thread = target_thread_for(target, &existing.name)?;
+                // A restored workspace's chats are the conversation as it was
+                // when the workspace left. Adopting one would drop everything
+                // said since, and its old handover message would read as this
+                // leg's delivery. Close them and seed the current one instead.
+                let thread = if restored && spec.provider.is_some() {
+                    Some(reseed_restored_workspace(target, &existing.name, &spec)?)
+                } else {
+                    target_thread_for(target, &existing.name)?
+                };
                 return Ok((existing.name, thread));
             }
             TargetWorkspaceMatch::Diverged { name, branch, head } if restored => anyhow::bail!(
@@ -7392,6 +7400,58 @@ fn create_target_thread(
         ),
         other => anyhow::bail!(
             "unexpected response opening a chat on the target: {}",
+            archductor_core::archcar::protocol::archcar_response_summary(&other)
+        ),
+    }
+}
+
+/// Close a restored workspace's stale chats and seed the moving conversation
+/// into a fresh one. Closing is reversible (closed chats can be reopened).
+fn reseed_restored_workspace(
+    target: &TransferEndpoint,
+    workspace: &str,
+    spec: &TargetWorkspaceSpec<'_>,
+) -> Result<i64> {
+    if let ArchcarResponse::ChatThreads { threads, .. } =
+        target.client.send(ArchcarRequest::ListChatThreads {
+            workspace: workspace.to_owned(),
+        })?
+    {
+        for thread in threads.iter().filter(|thread| thread.archived_at.is_none()) {
+            if let ArchcarResponse::Error { message } =
+                target.client.send(ArchcarRequest::CloseChatThread {
+                    thread_id: thread.id,
+                })?
+            {
+                anyhow::bail!(
+                    "closing a stale chat in `{workspace}` on {} failed: {message}",
+                    target.label
+                );
+            }
+        }
+    }
+    match target.client.send(ArchcarRequest::SeedChatThread {
+        workspace: workspace.to_owned(),
+        transcript: spec.transcript.to_vec(),
+        chat_title: spec.chat_title.clone(),
+        provider: spec.provider.clone(),
+    })? {
+        ArchcarResponse::ChatThreadCreated { thread } => {
+            println!(
+                "carried the current conversation into a new chat in `{workspace}` on {}",
+                target.label
+            );
+            Ok(thread.id)
+        }
+        ArchcarResponse::Error { message } if message.contains("unknown variant") => anyhow::bail!(
+            "{} is too old to take a conversation into a workspace it already has; update it \
+             (`archductor remote update`) and re-run the transfer",
+            target.label
+        ),
+        ArchcarResponse::Error { message } => anyhow::bail!("{}: {message}", target.label),
+        other => anyhow::bail!(
+            "unexpected response seeding the chat on {}: {}",
+            target.label,
             archductor_core::archcar::protocol::archcar_response_summary(&other)
         ),
     }

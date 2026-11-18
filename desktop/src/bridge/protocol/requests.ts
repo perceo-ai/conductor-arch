@@ -218,6 +218,13 @@ export type ArchcarRequest =
   | { type: "list_diff_contributions"; workspace: string }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
   | {
+      type: "seed_chat_thread";
+      workspace: string;
+      transcript?: { role: string; content: string; created_at: string }[];
+      chat_title?: string;
+      provider?: string;
+    }
+  | {
       type: "import_workspace_from_remote";
       repository_url: string;
       branch: string;

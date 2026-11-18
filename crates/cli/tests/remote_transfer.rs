@@ -664,7 +664,9 @@ fn remote_transfer_refuses_to_re_seed_a_target_that_has_moved_on() {
 /// the same conversation, reported as success. An archived row still holds its
 /// branch, so it cannot be imported around. It *is* the workspace coming back,
 /// though — the round trip A → B → A lands exactly here — so the transfer
-/// restores it and adopts it, which still means one worktree and one turn.
+/// restores it and adopts it — still one worktree — and carries the
+/// conversation as it is *now* into a fresh chat, so the return leg neither
+/// drops what was said since nor mistakes the old handover for this one.
 #[test]
 fn remote_transfer_restores_an_archived_target_that_holds_the_branch() {
     let fixture = Fixture::start(TargetSetup::WithClone);
@@ -673,6 +675,8 @@ fn remote_transfer_restores_an_archived_target_that_holds_the_branch() {
     ];
     fixture.operator(&args).assert().success();
     wait_for_captured_turns(&fixture.target.capture, 1);
+
+    let first_leg_thread = fixture.target_store().list_chat_threads("berlin").unwrap()[0].id;
 
     // Archiving refuses while the resumed agent is still running, so stop it
     // the way an operator would before retiring the workspace.
@@ -690,6 +694,25 @@ fn remote_transfer_restores_an_archived_target_that_holds_the_branch() {
         .args(["workspace", "archive", "berlin"])
         .assert()
         .success();
+
+    // The conversation moves on at the source after the first leg. The return
+    // leg has to carry that, not hand the restored workspace's stale chat a
+    // fresh turn (or skip the turn because its old handover looks delivered).
+    let source_store = fixture.source_store();
+    let source_thread = source_store
+        .list_chat_threads("berlin")
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("the source has a chat");
+    // An agent row makes the transcript read the chat table (instead of the
+    // provider projection), which is how these lines become part of it.
+    source_store
+        .append_chat_message(source_thread.id, "agent", "parser wired", "agent")
+        .unwrap();
+    source_store
+        .append_chat_message(source_thread.id, "user", "also handle unicode", "user")
+        .unwrap();
 
     let rerun = fixture.operator(&args).assert().success();
     let stdout = String::from_utf8(rerun.get_output().stdout.clone()).unwrap();
@@ -713,12 +736,32 @@ fn remote_transfer_restores_an_archived_target_that_holds_the_branch() {
         vec!["berlin:lc/berlin:active".to_owned()],
         "the re-run should restore the one workspace, not import a second on a suffixed branch"
     );
-    let turns = fs::read_to_string(&fixture.target.capture).unwrap_or_default();
+    let target_store = fixture.target_store();
+    let live = target_store.list_chat_threads("berlin").unwrap();
     assert_eq!(
-        turns.lines().count(),
+        live.len(),
         1,
-        "a second agent was started on the same conversation:\n{turns}"
+        "the restored workspace's stale chat should be closed, leaving only the carried one"
     );
+    assert_ne!(
+        live[0].id, first_leg_thread,
+        "the return leg should hand over in a fresh chat, not the stale one"
+    );
+    let carried: Vec<String> = target_store
+        .list_chat_messages(live[0].id)
+        .unwrap()
+        .into_iter()
+        .map(|message| message.content)
+        .collect();
+    assert!(
+        carried
+            .iter()
+            .any(|content| content == "also handle unicode"),
+        "the return leg dropped what was said after the first leg: {carried:?}"
+    );
+    // One handover per leg: the stale chat's earlier delivery must not
+    // suppress this one.
+    wait_for_captured_turns(&fixture.target.capture, 2);
 }
 
 /// Adoption proves the *workspace* is this transfer's, not which chat in it is

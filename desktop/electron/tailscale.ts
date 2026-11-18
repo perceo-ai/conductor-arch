@@ -83,7 +83,8 @@ export function suggest(
   const dnsName = (raw.DNSName ?? "").replace(/\.+$/, "");
   const tailscaleSsh = (raw.sshHostKeys ?? []).length > 0;
   if (!archcarListener && !tailscaleSsh) return null;
-  const host = dnsName || ip;
+  // An IPv6 literal is bracketed, or its last group reads as a port.
+  const host = dnsName || (ip.includes(":") ? `[${ip}]` : ip);
   const transport = tailscaleSsh ? "ssh" : "tcp";
   const names = [ip, dnsName, raw.HostName ?? ""].filter(Boolean).map((n) => n.toLowerCase());
   const saved = savedAddresses.some((address) => {
