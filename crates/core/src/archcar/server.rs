@@ -2447,24 +2447,34 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             match WorkspaceStore::open_app(&db_path)
                 .and_then(|s| s.create_chat_thread(&workspace, &provider, &title, None))
             {
-                Ok(t) => {
-                    let harness = crate::workspace::SessionHarnessOptions::from_metadata(
-                        t.harness_metadata.as_deref(),
-                    );
-                    ArchcarResponse::ChatThreadCreated {
-                        thread: ArchcarChatThread {
-                            id: t.id,
-                            provider: t.provider,
-                            title: t.title,
-                            status: t.status,
-                            model: t.model,
-                            effort_mode: harness.effort_mode,
-                            fast_mode: harness.fast_mode,
-                            updated_at: t.updated_at,
-                            archived_at: t.archived_at,
-                        },
-                    }
-                }
+                Ok(t) => chat_thread_created(t),
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
+        // A transfer coming back to a workspace it was moved off: the restored
+        // workspace's own chats are the conversation as it was when it left,
+        // so the current one is seeded into a fresh thread instead.
+        ArchcarRequest::SeedChatThread {
+            workspace,
+            transcript,
+            chat_title,
+            provider,
+        } => {
+            let messages: Vec<(String, String)> = transcript
+                .iter()
+                .map(|message| (message.role.clone(), message.content.clone()))
+                .collect();
+            match open_lifecycle_workspace_store(state).and_then(|s| {
+                s.seed_imported_chat(
+                    &workspace,
+                    provider.as_deref().unwrap_or("codex"),
+                    chat_title.as_deref().unwrap_or("Transferred chat"),
+                    &messages,
+                )
+            }) {
+                Ok(t) => chat_thread_created(t),
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
                 },
@@ -3147,6 +3157,16 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetRemoteAccess => remote_access_response(false, state),
         ArchcarRequest::RotateRemoteToken => remote_access_response(true, state),
+        // `saved` is left false: which peers a client has saved is the
+        // client's knowledge, not this daemon's.
+        ArchcarRequest::DiscoverTailscalePeers { port } => {
+            match crate::archcar::tailscale::discover(port, &[]) {
+                Ok(peers) => ArchcarResponse::TailscalePeers { peers },
+                Err(err) => ArchcarResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         ArchcarRequest::RegisterNotificationDevice {
             platform,
             token,
@@ -5245,6 +5265,24 @@ fn import_workspace_from_remote(
     })
 }
 
+fn chat_thread_created(t: crate::workspace::ChatThreadRecord) -> ArchcarResponse {
+    let harness =
+        crate::workspace::SessionHarnessOptions::from_metadata(t.harness_metadata.as_deref());
+    ArchcarResponse::ChatThreadCreated {
+        thread: ArchcarChatThread {
+            id: t.id,
+            provider: t.provider,
+            title: t.title,
+            status: t.status,
+            model: t.model,
+            effort_mode: harness.effort_mode,
+            fast_mode: harness.fast_mode,
+            updated_at: t.updated_at,
+            archived_at: t.archived_at,
+        },
+    }
+}
+
 /// Fork a chat, optionally into a workspace created for it.
 ///
 /// The workspace has to exist before the fork can land in it, and workspace
@@ -5489,6 +5527,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::GetUpdateStatus
             | ArchcarRequest::ServiceDoctor
             | ArchcarRequest::GetRemoteAccess
+            | ArchcarRequest::DiscoverTailscalePeers { .. }
             | ArchcarRequest::ListBackgroundTasks { .. }
             | ArchcarRequest::GetBackgroundTask { .. }
             | ArchcarRequest::ListTasks { .. }

@@ -338,6 +338,35 @@ public actor DaemonSession {
         }
     }
 
+    /// Sends `{"type": type, …fields}` and returns the response payload as raw
+    /// JSON — `error` payloads included, because some flows (workspace
+    /// transfer) branch on which error came back. Only a rejected token and
+    /// transport failures throw.
+    public func requestRaw(_ type: String, _ fields: [String: JSONValue] = [:]) async throws -> JSONValue {
+        let connection = ArchcarConnection(address: address, token: token)
+        defer { Task { await connection.close() } }
+        try await connection.open()
+        let lines = await connection.lines
+        var payload = fields
+        payload["type"] = .string(type)
+        let envelope: JSONValue = .object(["id": .string(UUID().uuidString), "payload": .object(payload)])
+        var line = try JSONEncoder().encode(envelope)
+        line.append(0x0A)
+        try await connection.send(line)
+        guard let reply = try await firstLine(of: lines) else {
+            try Task.checkCancellation()
+            throw DaemonSessionError.closedWithoutResponse
+        }
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: reply)
+        let body = decoded["payload"] ?? .null
+        if decoded["id"]?.string == "auth", body.type == "error",
+           body["message"]?.string?.contains("authentication failed") == true
+        {
+            throw DaemonSessionError.authenticationFailed
+        }
+        return body
+    }
+
     private func firstLine(of lines: AsyncStream<Data>) async throws -> Data? {
         try await withThrowingTaskGroup(of: Data?.self) { group in
             group.addTask {

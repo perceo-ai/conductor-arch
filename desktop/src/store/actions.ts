@@ -204,6 +204,34 @@ async function importedThreadIn(
   return seeded ?? live[0]?.id;
 }
 
+/** The live chat in `workspace` whose seeded rows are exactly `transcript`.
+ * Mirrors `thread_carrying` in crates/cli/src/main.rs. */
+async function threadCarrying(
+  transport: (req: ArchcarRequest) => Promise<ArchcarResponse>,
+  workspace: string,
+  transcript: { role: string; content: string }[],
+): Promise<number | undefined> {
+  const listed = await transport({ type: "list_chat_threads", workspace });
+  if (listed.type !== "chat_threads") return undefined;
+  for (const thread of listed.threads) {
+    if (thread.archived_at) continue;
+    const snapshot = await transport({
+      type: "get_chat_snapshot",
+      thread_id: thread.id,
+      include_provider_events: false,
+    });
+    if (snapshot.type !== "chat_snapshot") continue;
+    const seeded = snapshot.snapshot.messages.filter((m) => m.source === SEEDED_MESSAGE_SOURCE);
+    if (
+      seeded.length === transcript.length &&
+      seeded.every((m, i) => m.role === transcript[i].role && m.content === transcript[i].content)
+    ) {
+      return thread.id;
+    }
+  }
+  return undefined;
+}
+
 const TRANSFER_POLL_INTERVAL_MS = 250;
 const TRANSFER_POLL_TIMEOUT_MS = 60_000;
 
@@ -832,7 +860,7 @@ export const actions = {
     // Step 3: create on the target, or adopt what an earlier attempt left there.
     // `import_workspace_from_remote` writes through whichever daemon serves it,
     // so pointing the request at the target is all it takes.
-    const onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
+    let onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
     if (onTarget.type !== "workspaces") throw new Error(`could not list workspaces on ${input.toLabel}`);
     // Adopt only this transfer's own earlier attempt. A branch or a workspace
     // name is not an identity — two repositories routinely share both — and an
@@ -853,12 +881,29 @@ export const actions = {
     // adoptable but it still *holds its branch*, so it has to be seen here or
     // the import collides with it and the daemon suffixes its way into a second
     // worktree with a second agent on the same conversation.
-    const inRepository = onTarget.workspaces.filter(
+    let inRepository = onTarget.workspaces.filter(
       (w) => !!targetRepository && w.repository_name === targetRepository,
     );
-    const archivedOnBranch = inRepository.find(
+    let archivedOnBranch = inRepository.find(
       (w) => w.branch === source.branch && w.status === "archived",
     );
+    // A workspace coming back to a daemon it was transferred off finds its old
+    // self there, archived on this branch. Restore it and look again; the
+    // adoption checks below then take it, or refuse if that copy has moved on.
+    // Mirrors the restore pass in `create_on_target` (crates/cli/src/main.rs).
+    let restoredFromArchive = false;
+    if (archivedOnBranch) {
+      ensureOk(await sendTarget({ type: "restore_workspace", workspace: archivedOnBranch.name }));
+      restoredFromArchive = true;
+      onTarget = ensureOk(await sendTarget({ type: "list_workspaces" }));
+      if (onTarget.type !== "workspaces") throw new Error(`could not list workspaces on ${input.toLabel}`);
+      inRepository = onTarget.workspaces.filter(
+        (w) => !!targetRepository && w.repository_name === targetRepository,
+      );
+      archivedOnBranch = inRepository.find(
+        (w) => w.branch === source.branch && w.status === "archived",
+      );
+    }
     if (archivedOnBranch) {
       throw new Error(
         `${archivedOnBranch.name} on ${input.toLabel} is archived but still holds branch ${archivedOnBranch.branch}, the branch this transfer moves. It cannot be resumed while archived, and importing alongside it would put a second worktree on a -v2 branch with another agent replaying this conversation — so nothing has been changed. Restore it there to continue the transfer into it, or delete it if it is finished with.`,
@@ -917,7 +962,45 @@ export const actions = {
 
     let targetWorkspace: string;
     let targetThread: number | undefined;
-    if (existing) {
+    // This leg's chat is the one seeded with *this* transcript — identified by
+    // content, not by whether this pass restored, so a return trip interrupted
+    // after the restore still finds (or seeds) the current conversation on
+    // retry. An earlier leg's chat cannot match: the source's transcript has
+    // grown since by at least the handover it received. Mirrors the adopt arm
+    // of `create_on_target` in crates/cli/src/main.rs.
+    const carrying =
+      existing && moving && transcript.length > 0
+        ? await threadCarrying(sendTarget, existing.name, transcript)
+        : undefined;
+    const reseed =
+      existing && moving && carrying === undefined && (transcript.length > 0 || restoredFromArchive);
+    if (existing && carrying !== undefined) {
+      targetWorkspace = existing.name;
+      targetThread = carrying;
+    } else if (existing && moving && reseed) {
+      targetWorkspace = existing.name;
+      if (restoredFromArchive) {
+        // The restored copy's chats are the conversation as it left. Closing
+        // is reversible.
+        const stale = ensureOk(await sendTarget({ type: "list_chat_threads", workspace: existing.name }));
+        for (const thread of stale.type === "chat_threads" ? stale.threads : []) {
+          if (!thread.archived_at) ensureOk(await sendTarget({ type: "close_chat_thread", thread_id: thread.id }));
+        }
+      }
+      const seeded = ensureOk(
+        await sendTarget({
+          type: "seed_chat_thread",
+          workspace: existing.name,
+          transcript,
+          chat_title: chatTitle,
+          provider: moving.provider,
+        }),
+      );
+      if (seeded.type !== "chat_thread_created") {
+        throw new Error(`could not carry the conversation into ${existing.name} on ${input.toLabel}`);
+      }
+      targetThread = seeded.thread.id;
+    } else if (existing) {
       targetWorkspace = existing.name;
       targetThread = await importedThreadIn(sendTarget, existing.name);
     } else {

@@ -9,6 +9,7 @@ import SwiftUI
 struct WorkspaceDetailView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.palette) private var palette
+    @Environment(\.dismiss) private var dismiss
     let workspace: WorkspaceSummary
 
     @State private var panel: Panel = .chat
@@ -17,6 +18,12 @@ struct WorkspaceDetailView: View {
     @State private var files: FilesStore?
     @State private var terminal: TerminalStore?
     @State private var creating = false
+    /// Where a confirmed transfer is going, and whether to stop live agents.
+    @State private var transferTarget: SavedDaemon?
+    @State private var transferring: SavedDaemon?
+    @State private var transferError: String?
+    /// Set when the source refused because an agent is still running.
+    @State private var liveSessionTarget: SavedDaemon?
 
     enum Panel: String, CaseIterable, Identifiable {
         case chat = "Chat"
@@ -80,6 +87,68 @@ struct WorkspaceDetailView: View {
         .background(palette.bg)
         .navigationTitle(workspace.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                let others = model.saved.filter { $0.id != model.activeDaemon?.id }
+                if !others.isEmpty {
+                    Menu {
+                        ForEach(others) { daemon in
+                            Button("Transfer to \(daemon.label)") { transferTarget = daemon }
+                        }
+                    } label: {
+                        Image(systemName: "arrow.right.circle")
+                    }
+                    .disabled(transferring != nil)
+                    .accessibilityLabel("Transfer workspace")
+                }
+            }
+        }
+        .confirmationDialog(
+            "Transfer \(workspace.name)?",
+            isPresented: Binding(get: { transferTarget != nil }, set: { if !$0 { transferTarget = nil } }),
+            titleVisibility: .visible,
+            presenting: transferTarget
+        ) { daemon in
+            Button("Move to \(daemon.label)") { startTransfer(to: daemon, force: false) }
+        } message: { daemon in
+            Text("Pushes its branch, recreates it on \(daemon.label) with its latest chat, then archives it here. The worktree here stays on disk.")
+        }
+        .alert(
+            "An agent is still running",
+            isPresented: Binding(get: { liveSessionTarget != nil }, set: { if !$0 { liveSessionTarget = nil } }),
+            presenting: liveSessionTarget
+        ) { daemon in
+            Button("Stop it and transfer", role: .destructive) { startTransfer(to: daemon, force: true) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text(transferError ?? "")
+        }
+        .alert(
+            "Transfer stopped",
+            isPresented: Binding(
+                get: { transferError != nil && liveSessionTarget == nil },
+                set: { if !$0 { transferError = nil } })
+        ) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(transferError ?? "")
+        }
+        // While it moves, nothing here may touch the source: a turn sent now
+        // would restart its agent after the transcript and branch were taken,
+        // and the final archive would strand that work.
+        .disabled(transferring != nil)
+        .navigationBarBackButtonHidden(transferring != nil)
+        .overlay {
+            if let transferring {
+                ZStack {
+                    Color.black.opacity(0.25).ignoresSafeArea()
+                    ProgressView("Moving to \(transferring.label)…")
+                        .padding(18)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .contentShape(Rectangle())
+            }
+        }
         .task {
             guard store == nil, let session = model.session else { return }
             let store = ChatStore(session: session, workspace: workspace.name)
@@ -98,6 +167,23 @@ struct WorkspaceDetailView: View {
             // turn that writes files updates the changes list without a pull.
             guard let review else { return }
             await review.observe()
+        }
+    }
+
+    private func startTransfer(to daemon: SavedDaemon, force: Bool) {
+        transferring = daemon
+        transferError = nil
+        Task {
+            defer { transferring = nil }
+            do {
+                try await model.transfer(workspace: workspace.name, to: daemon, force: force)
+                dismiss()
+            } catch WorkspaceTransfer.Failure.liveSession(let message) {
+                transferError = message
+                liveSessionTarget = daemon
+            } catch {
+                transferError = UserFacingMessage.describing(error)
+            }
         }
     }
 

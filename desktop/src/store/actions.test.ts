@@ -803,9 +803,15 @@ describe("actions.transferWorkspace", () => {
       name?: string;
       /** Branch of the pre-placed workspace; defaults to the source's. */
       branch?: string;
+      /** `restore_workspace` really un-archives the pre-placed workspace. */
+      restorable?: boolean;
+      /** The pre-placed workspace's chat holds an older conversation, not a
+       * seeded copy of this transfer's transcript. */
+      staleChat?: boolean;
     } = {},
   ) {
     let imported = opts.existing ?? false;
+    let status = opts.status ?? "active";
     let delivered = opts.delivered ?? false;
     handlers.dst = (req) => {
       switch (req.type) {
@@ -818,7 +824,7 @@ describe("actions.transferWorkspace", () => {
                     ...targetWorkspace,
                     name: opts.name ?? targetWorkspace.name,
                     branch: opts.branch ?? targetWorkspace.branch,
-                    status: opts.status ?? "active",
+                    status,
                     repository_name: opts.repository ?? "app-here",
                   },
                 ]
@@ -840,6 +846,16 @@ describe("actions.transferWorkspace", () => {
             type: "remote_access",
             token: opts.identity ?? "tok-dst",
             token_path: opts.identityPath ?? "/dst/archcar.token",
+          };
+        case "restore_workspace":
+          if (opts.restorable) status = "active";
+          return { type: "workspace_updated", name: "parser" };
+        case "close_chat_thread":
+          return { type: "ack" };
+        case "seed_chat_thread":
+          return {
+            type: "chat_thread_created",
+            thread: { id: 12, provider: "codex", title: "Parser port", status: "open", updated_at: "10" },
           };
         case "import_workspace_from_remote":
           imported = true;
@@ -873,16 +889,20 @@ describe("actions.transferWorkspace", () => {
             type: "chat_snapshot",
             snapshot: {
               thread_id: 11,
-              messages: delivered
-                ? [
-                    {
-                      id: 1,
-                      role: "user",
-                      source: "user_send",
-                      content: `This conversation moved from daemon src to dst; the branch is at ${PUSHED}.`,
-                    },
-                  ]
-                : [],
+              messages: [
+                // What an import seeds: the source transcript, verbatim.
+                ...(opts.staleChat ? [] : [{ id: 0, role: "user", source: "fork", content: "port it" }]),
+                ...(delivered
+                  ? [
+                      {
+                        id: 1,
+                        role: "user",
+                        source: "user_send",
+                        content: `This conversation moved from daemon src to dst; the branch is at ${PUSHED}.`,
+                      },
+                    ]
+                  : []),
+              ],
               events: [],
               provider_events: [],
               queued_inputs: [],
@@ -1092,6 +1112,45 @@ describe("actions.transferWorkspace", () => {
     expect(order).not.toContain("src:archive_workspace");
   });
 
+  it("takes a workspace back by restoring its archived original on the target", async () => {
+    // A -> B -> A: the first leg archived the original on A. The return leg
+    // used to refuse until someone restored it there by hand.
+    routeSource({ liveSession: false });
+    routeTarget({ existing: true, status: "archived", restorable: true, staleChat: true });
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    expect(order).toContain("dst:restore_workspace");
+    expect(order).not.toContain("dst:import_workspace_from_remote");
+    // The restored workspace's own chat is the conversation as it left; the
+    // current one is seeded fresh and that is the chat handed the turn.
+    expect(order).toContain("dst:close_chat_thread");
+    expect(order).toContain("dst:seed_chat_thread");
+    const queued = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "queue_chat_input",
+    );
+    expect(queued?.[1]).toMatchObject({ thread_id: 12 });
+    expect(order).toContain("src:archive_workspace");
+  });
+
+  it("seeds the current conversation when a return trip was interrupted after its restore", async () => {
+    // The first attempt restored the workspace and then failed (say, an old
+    // target refused `seed_chat_thread`). On retry it is active, so nothing is
+    // restored this pass — but its chat is still the stale one, and must not
+    // be adopted or have its old handover mistaken for this leg's.
+    routeSource({ liveSession: false });
+    routeTarget({ existing: true, staleChat: true, delivered: true });
+    const { actions } = await import("./actions");
+
+    await actions.transferWorkspace(input);
+
+    expect(order).not.toContain("dst:restore_workspace");
+    expect(order).toContain("dst:seed_chat_thread");
+    // Not restored this pass: the operator's chats there are left open.
+    expect(order).not.toContain("dst:close_chat_thread");
+  });
+
   it("hands over to the imported chat, not whichever is newest", async () => {
     // Adoption proves the workspace is ours, not which chat in it is the
     // imported one. An operator's own chat, opened after an interrupted
@@ -1257,18 +1316,23 @@ describe("actions.transferWorkspace", () => {
     expect(order).toContain("src:archive_workspace");
   });
 
-  it("does not archive the source when an adopted target has none of the conversation", async () => {
+  it("seeds the conversation into an adopted target that has none of it before archiving", async () => {
     // Was: the resume step was skipped for a chatless target and the archive
-    // ran anyway, reporting success while the work never arrived.
+    // ran anyway, reporting success while the work never arrived. It then
+    // refused outright; with `seed_chat_thread` the conversation is carried in
+    // and handed over first, and only then is the source archived.
     routeSource({ liveSession: false });
     routeTarget({ existing: true, threads: [] });
     const { actions } = await import("./actions");
 
-    const err = await actions.transferWorkspace(input).catch((e) => e);
+    await actions.transferWorkspace(input);
 
-    expect((err as Error).message).toContain("has none of the conversation");
-    expect(order).not.toContain("src:archive_workspace");
-    expect(order).not.toContain("dst:queue_chat_input");
+    expect(order).toContain("dst:seed_chat_thread");
+    const queued = api.requestClient.mock.calls.find(
+      (c) => (c[1] as { type: string }).type === "queue_chat_input",
+    );
+    expect(queued?.[1]).toMatchObject({ thread_id: 12 });
+    expect(order.indexOf("dst:queue_chat_input")).toBeLessThan(order.indexOf("src:archive_workspace"));
   });
 
   it("opens a thread and sends the continuation prompt for an empty source chat", async () => {

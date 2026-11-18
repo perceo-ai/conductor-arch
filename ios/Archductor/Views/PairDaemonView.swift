@@ -16,6 +16,15 @@ struct PairDaemonView: View {
 
     private enum Field: Hashable { case label, address, token }
 
+    init() {}
+
+    /// Opened from a Tailscale suggestion: the name and address are known,
+    /// only the token (or the pairing code) is still needed.
+    init(suggestion: TailscalePeer) {
+        _label = State(initialValue: suggestion.hostName)
+        _addressText = State(initialValue: suggestion.address.description)
+    }
+
     private var address: DaemonAddress? { DaemonAddress(addressText) }
     private var needsAcknowledgement: Bool { address.map { !$0.isLoopback } ?? false }
     private var canSave: Bool {

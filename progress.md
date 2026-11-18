@@ -27,6 +27,63 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## Tailscale daemon discovery (2026-11-17)
+
+Daemons on this machine's tailnet are suggested as clients. `archductor remote
+discover [--json] [--port N]` (core `archcar::tailscale`) and the desktop
+(`electron/tailscale.ts`, a mirror with the same fixture tests) read `tailscale
+status --json`, skip offline and mobile peers, and suggest a peer that
+advertises Tailscale SSH (`ssh://host`, no token, preferred) or whose archcar
+listener answers a deliberately wrong token with archcar's fixed rejection
+(`host:7420`, needs the token). The client switcher lists unsaved peers as
+"Connect <host> (Tailscale)"; SSH ones connect in one click, TCP ones open Add
+client prefilled. Add client also lists them, and now accepts token-less
+`ssh://` addresses (main used to demand a token, so the desktop could not add
+an SSH client at all). Connected peers are ordinary saved clients, so the
+existing Transfer to … / `remote transfer` flow covers moving work between
+them.
+
+Round trips now restore. Moving a workspace back to a daemon it came from used
+to refuse, because the archived original there still holds the branch, and the
+advice ("restore it there") had no remote CLI verb. CLI, desktop, and phone
+transfer now send `RestoreWorkspace` to the target and re-run adoption. The
+restored copy's chats are stale (the conversation as it left), so they are
+closed and the current conversation is seeded into a fresh chat through a new
+`SeedChatThread` RPC; adopting the stale chat would drop what was said since,
+and its old handover would suppress this leg's (found by Greptile on #267). The
+leg's chat is found by content (the live chat whose seeded rows equal this
+transcript), not by "this pass restored", so a return trip interrupted after
+its restore still carries the current conversation on retry; an adopted target
+with none of the conversation now gets it seeded instead of a refusal. If that copy is
+not at the pushed commit, it still refuses, now saying it was restored. There
+is no fast-forward RPC yet, so a workspace that returns *with new commits*
+still needs a manual pull on the target.
+
+The phone has both too. A new read-only daemon RPC,
+`discover_tailscale_peers`, runs the same core discovery on the daemon's host
+(the phone cannot run `tailscale`), and More → On your tailnet offers unsaved
+listener peers for pairing with the address prefilled. Workspace transfer is a
+Swift port of the desktop orchestration (`ArchcarKit/Transfer`), run from the
+phone against two `DaemonSession`s over a raw-JSON request path, with a
+Transfer menu on the workspace screen and a "stop it and transfer" retry for
+live agents.
+
+Live (2026-11-17, perceo-control Linux 0.14.17 and a MacBook 0.13.8, both
+Tailscale SSH): discovery found both and preferred `ssh://`; `remote connect`
+verified both with no token; the CLI moved a scratch workspace between them
+both ways. The phone's Swift transfer code, run on the Mac over TCP + token as
+the app does, moved one perceo-control → MacBook (7.3 s) → back (3.6 s), the
+return restoring the archived original on its own. A daemon built from this
+branch answered `discover_tailscale_peers` with perceo-control's phone address.
+
+Checks (run on the MacBook, since the Linux dev box has no Rust/pnpm): cargo fmt
+and clippy on the touched crates clean; Rust 6 discovery tests, 293 archcar,
+and the CLI suites including 15 transfer integration tests (one updated from
+"refuses" to "restores") pass; desktop typecheck, 1156 tests, and production
+build pass; ArchcarKit's 10 new Swift tests pass and the iOS app builds for the
+simulator. Not done: an interactive Electron or on-device iPhone run, and the
+fast-forward RPC for a workspace that returns with new commits.
+
 ## Provider usage in Settings (2026-11-05)
 
 **Settings → Usage** shows how much plan quota is left for each provider signed

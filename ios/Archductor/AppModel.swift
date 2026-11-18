@@ -139,6 +139,33 @@ final class AppModel {
         saved = await directory.all()
     }
 
+    /// Daemons on the active daemon's tailnet that this phone could pair with.
+    /// Asked of the daemon because the phone cannot run `tailscale` itself.
+    func tailscaleSuggestions() async throws -> [TailscalePeer] {
+        guard let session else { return [] }
+        return try await TailscaleDiscovery.suggestions(via: session, excluding: saved)
+    }
+
+    /// Move a workspace off the active daemon onto another paired one. The
+    /// phone runs the whole transfer; the daemons never talk to each other.
+    @discardableResult
+    func transfer(workspace: String, to daemon: SavedDaemon, force: Bool = false) async throws -> String {
+        guard let session, let from = activeDaemon else {
+            throw WorkspaceTransfer.Failure.refused("Connect to a daemon first.")
+        }
+        guard let token = try await directory.token(for: daemon.id), !token.isEmpty else {
+            throw WorkspaceTransfer.Failure.refused("No saved token for \(daemon.label). Pair it again.")
+        }
+        let target = DaemonSession(address: daemon.address, token: token)
+        let name = try await WorkspaceTransfer.run(
+            workspace: workspace,
+            from: WorkspaceTransfer.Endpoint(label: from.label, session: session),
+            to: WorkspaceTransfer.Endpoint(label: daemon.label, session: target),
+            force: force)
+        await workspaces?.refresh()
+        return name
+    }
+
     func disconnect() async {
         observation?.cancel()
         observation = nil

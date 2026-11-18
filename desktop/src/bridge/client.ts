@@ -35,6 +35,23 @@ export interface ClientSummary {
   address: string;
 }
 
+/** A tailnet peer worth offering as a client. Mirrors electron/tailscale.ts. */
+export interface TailscalePeer {
+  host_name: string;
+  dns_name: string;
+  ip: string;
+  os: string;
+  archcar_listener: boolean;
+  listener_port: number;
+  tailscale_ssh: boolean;
+  /** `ssh` connects with no token; `tcp` needs the server's token. */
+  transport: "ssh" | "tcp";
+  suggested_address: string;
+  needs_token: boolean;
+  /** A saved client already points at this peer. */
+  saved: boolean;
+}
+
 export type ClientsResult =
   | {
       ok: true;
@@ -60,7 +77,8 @@ interface ArchductorApi {
   >;
   pathExists(p: string): Promise<{ exists: boolean }>;
   clientsList(): Promise<ClientsResult>;
-  clientsAdd(opts: { label?: string; address: string; token: string }): Promise<ClientsResult>;
+  clientsAdd(opts: { label?: string; address: string; token?: string }): Promise<ClientsResult>;
+  clientsDiscoverTailscale(): Promise<{ ok: true; peers: TailscalePeer[] } | { ok: false; error: string }>;
   clientsActivate(id: string | null): Promise<ClientsResult>;
   clientsRemove(id: string): Promise<ClientsResult>;
   clientsRename(opts: { id: string; label: string }): Promise<ClientsResult>;
@@ -111,7 +129,8 @@ export const remoteDaemon = {
 /** Saved daemons this machine can switch between. Tokens stay in main. */
 export const clients = {
   list: () => api().clientsList(),
-  add: (opts: { label?: string; address: string; token: string }) => api().clientsAdd(opts),
+  add: (opts: { label?: string; address: string; token?: string }) => api().clientsAdd(opts),
+  discoverTailscale: () => api().clientsDiscoverTailscale(),
   activate: (id: string | null) => api().clientsActivate(id),
   remove: (id: string) => api().clientsRemove(id),
   rename: (opts: { id: string; label: string }) => api().clientsRename(opts),

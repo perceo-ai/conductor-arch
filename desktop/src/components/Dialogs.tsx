@@ -35,7 +35,11 @@ export default function Dialogs() {
           </Match>
           <Match when={s().kind === "add-client"}>
             <Modal title="Add client" onClose={close}>
-              <AddClientForm onDone={close} />
+              <AddClientForm
+                address={(s() as { address?: string }).address}
+                label={(s() as { label?: string }).label}
+                onDone={close}
+              />
             </Modal>
           </Match>
           <Match when={s().kind === "create-workspace"}>

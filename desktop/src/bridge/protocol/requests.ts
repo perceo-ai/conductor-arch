@@ -155,6 +155,7 @@ export type ArchcarRequest =
   | { type: "install_service"; input: { listen?: string; archcar_path?: string } }
   | { type: "uninstall_service" }
   | { type: "get_remote_access" }
+  | { type: "discover_tailscale_peers"; port?: number }
   | { type: "rotate_remote_token" }
   // Archductor's own MCP server, registered with the agent CLIs on this device.
   | { type: "get_mcp_registration" }
@@ -216,6 +217,13 @@ export type ArchcarRequest =
     }
   | { type: "list_diff_contributions"; workspace: string }
   | { type: "create_chat_thread"; workspace: string; provider: string; title: string }
+  | {
+      type: "seed_chat_thread";
+      workspace: string;
+      transcript?: { role: string; content: string; created_at: string }[];
+      chat_title?: string;
+      provider?: string;
+    }
   | {
       type: "import_workspace_from_remote";
       repository_url: string;

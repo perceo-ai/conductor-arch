@@ -11,7 +11,11 @@ import PeekCard from "./PeekCard";
 // the CLI reads), so switching here also moves `archductor archcar …`.
 
 export default function ClientSwitcher() {
-  onMount(() => void clientsStore.refresh());
+  onMount(() => {
+    void clientsStore.refresh();
+    // Quiet: no Tailscale here simply means no suggestions.
+    void clientsStore.discoverTailscale();
+  });
 
   const items = (): ContextMenuItem[] => {
     const state = clientsStore.state;
@@ -25,6 +29,13 @@ export default function ClientSwitcher() {
         label: `${client.id === state.activeId ? "✓ " : ""}${client.label}`,
         icon: "cloud" as const,
         run: () => void clientsStore.activate(client.id),
+      })),
+      // Daemons on the tailnet that are not saved yet. SSH ones connect in a
+      // click; TCP ones open Add client prefilled, since they need a token.
+      ...state.suggestions.map((peer) => ({
+        label: `Connect ${peer.host_name} (Tailscale${peer.needs_token ? ", needs token" : ""})`,
+        icon: "cloud" as const,
+        run: () => void clientsStore.connectSuggestion(peer),
       })),
       {
         label: "Add client…",
@@ -82,7 +93,10 @@ export default function ClientSwitcher() {
                 : `Switch client; current client is ${clientsStore.activeLabel()}`
             }
             onClick={(e) => {
-              if (!clientsStore.pinned()) openContextMenu(e, items());
+              if (!clientsStore.pinned()) {
+                openContextMenu(e, items());
+                void clientsStore.discoverTailscale();
+              }
             }}
             onKeyDown={(e) => {
               if (typeof peek.onKeyDown === "function") peek.onKeyDown(e);
