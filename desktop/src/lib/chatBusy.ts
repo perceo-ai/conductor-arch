@@ -24,14 +24,16 @@ export function activeSubagentCount(projection: readonly BusyItem[]): number {
   let n = 0;
   for (const item of projection) {
     if (item.status !== "running") continue;
-    // A backgrounded Claude agent shows up only as a background card: its
-    // Agent tool call returns at once, and the main turn ends while it works.
-    // A backgrounded shell command gets the same card; the daemon marks which
-    // is which, and a dev server left running is not the chat still working.
-    if (item.render_class === "background_card") {
-      if (item.background_agent) n += 1;
+    // The daemon marks the card a backgrounded agent runs on, whichever class
+    // it is: a Claude subagent's work lands on its `Agent` tool card, while a
+    // task with no tool card of its own gets a plain background card. A
+    // backgrounded shell command gets that same class unmarked — a dev server
+    // left running is not the chat still working.
+    if (item.background_agent) {
+      n += 1;
       continue;
     }
+    if (item.render_class === "background_card") continue;
     if (!SUBAGENT_RENDER_CLASSES.has(item.render_class)) continue;
     // A `subagent_card` nested under an Agent card is the prompt the subagent
     // was given. The daemon projects it from a user record that has no
