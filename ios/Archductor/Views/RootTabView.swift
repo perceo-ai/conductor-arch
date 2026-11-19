@@ -2,7 +2,7 @@ import ArchcarKit
 import SwiftUI
 
 struct RootTabView: View {
-    enum RootTab: Hashable { case workspaces, chats, more }
+    enum RootTab: Hashable { case attention, workspaces, chats, more }
 
     @Environment(AppModel.self) private var model
     @Environment(\.colorScheme) private var systemScheme
@@ -15,10 +15,13 @@ struct RootTabView: View {
     @State private var showMissingChat = false
 
     var body: some View {
-        // Three tabs, not four: Review used to be a placeholder promising the
+        // Review is not a tab: it used to be a placeholder promising the
         // panels that now live inside a workspace, which is where the desktop
-        // keeps them too.
+        // keeps them too. Attention leads because it is the triage surface.
         TabView(selection: $selection) {
+            AttentionView()
+                .tabItem { Label("Attention", systemImage: "bell.badge") }
+                .tag(RootTab.attention)
             WorkspacesView()
                 .tabItem { Label("Workspaces", systemImage: "square.stack.3d.up") }
                 .tag(RootTab.workspaces)
