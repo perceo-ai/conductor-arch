@@ -119,6 +119,7 @@ turn shows its request and last `--steps` (10) steps. `--full` turns clipping
 off.
 
 `chat --json` is JSON Lines: a `chat` record, then one `turn` record per turn.
+The embedded `session.state` can now be `stalled`; this document's `schema_version` stays 1.
 
 ```json
 {"type":"chat","schema_version":1,"workspace":"fix-auth","thread_id":12,"title":"Fix token expiry","provider":"claude","session":{...same as a status session...},"turns_total":4,"turns_shown":2,"other_threads":[11,10]}
