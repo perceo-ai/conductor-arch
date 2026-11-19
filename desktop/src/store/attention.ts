@@ -3,6 +3,7 @@ import { send } from "@/bridge/client";
 import type { AttentionItem } from "@/bridge/protocol";
 import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
 import { nav } from "./nav";
+import { workspacesStore } from "./workspaces";
 
 // The cross-project attention queue: what needs the human, across every
 // workspace, most urgent first. The daemon derives and sorts it (a total order,
@@ -28,6 +29,12 @@ const [items, setItems] = createSignal<AttentionItem[]>([]);
 const [generatedAt, setGeneratedAt] = createSignal<string>();
 const [loading, setLoading] = createSignal(false);
 const [error, setError] = createSignal<string>();
+// True once any fetch for the current daemon has come back (even a failed one),
+// so the page can tell "still waiting for the first answer" from "answered".
+const [settled, setSettled] = createSignal(false);
+// A refetch is queued or owed behind one in flight. While true, the list on
+// screen is known to be out of date and must not be presented as final.
+const [owed, setOwed] = createSignal(false);
 
 let watchers = 0;
 // Something changed since the last good read; the next open must refetch.
@@ -43,9 +50,12 @@ async function fetchQueue(): Promise<void> {
   try {
     const response = await send({ type: "list_attention" });
     if (daemonChangedSince(epoch)) return;
+    setSettled(true);
     if (response.type === "error") {
+      stale = true;
       setError(response.message);
     } else if (response.type !== "attention") {
+      stale = true;
       setError(`unexpected response: ${response.type}`);
     } else {
       setItems(response.queue.items);
@@ -54,6 +64,10 @@ async function fetchQueue(): Promise<void> {
     }
   } catch (err) {
     if (daemonChangedSince(epoch)) return;
+    // Nothing was read, so reopening the page must try again; with the daemon
+    // down no event will arrive to mark it stale for us.
+    stale = true;
+    setSettled(true);
     // The last good list stays on screen; only the error is added.
     setError(err instanceof Error ? err.message : String(err));
   }
@@ -62,6 +76,7 @@ async function fetchQueue(): Promise<void> {
 function run(): Promise<void> {
   if (inFlight) {
     rerun = true;
+    setOwed(true);
     return inFlight;
   }
   const request = fetchQueue().finally(() => {
@@ -78,8 +93,10 @@ function run(): Promise<void> {
 
 function schedule(): void {
   if (timer !== undefined) return;
+  setOwed(true);
   timer = setTimeout(() => {
     timer = undefined;
+    setOwed(false);
     void run();
   }, ATTENTION_DEBOUNCE_MS);
 }
@@ -89,6 +106,8 @@ export const attentionStore = {
   generatedAt,
   loading,
   error,
+  settled,
+  owed,
 
   /** Fetch now, sharing a request already in flight. */
   refresh(): Promise<void> {
@@ -114,16 +133,29 @@ export const attentionStore = {
       if (released) return;
       released = true;
       watchers -= 1;
+      // Three of the queue's kinds are decided by the clock (idle, stalled, a
+      // finished task expiring), so a quiet fleet emits no event that would
+      // mark it stale. Reopening therefore always refetches.
+      stale = true;
       if (watchers === 0 && timer !== undefined) {
         clearTimeout(timer);
         timer = undefined;
-        stale = true;
+        setOwed(false);
       }
     };
   },
 
+  /**
+   * A background task started without a workspace is reported against its
+   * repository's name; there is no workspace to open for it.
+   */
+  canOpen(item: AttentionItem): boolean {
+    return workspacesStore.row(item.workspace) !== undefined;
+  },
+
   /** Land on the thing itself: its workspace, and its chat when it names one. */
   selectItem(item: AttentionItem): void {
+    if (!attentionStore.canOpen(item)) return;
     nav.selectWorkspace(item.workspace);
     if (item.thread_id != null) nav.selectChatThread(item.thread_id);
   },
@@ -133,6 +165,7 @@ export const attentionStore = {
     setItems([]);
     setGeneratedAt(undefined);
     setError(undefined);
+    setSettled(false);
     stale = true;
     if (watchers > 0) void run();
   },
@@ -149,5 +182,7 @@ export const attentionStore = {
     setGeneratedAt(undefined);
     setError(undefined);
     setLoading(false);
+    setSettled(false);
+    setOwed(false);
   },
 };

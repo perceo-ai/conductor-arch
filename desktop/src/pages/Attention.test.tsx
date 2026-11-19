@@ -33,6 +33,11 @@ vi.mock("@/store/nav", async (orig) => {
 
 const { AttentionPage } = await import("./Attention");
 const { attentionStore } = await import("@/store/attention");
+const { workspacesStore } = await import("@/store/workspaces");
+
+function knowWorkspaces(...names: string[]) {
+  workspacesStore.setAll(names.map((name) => ({ name }) as never));
+}
 
 let dispose: (() => void) | undefined;
 function mount() {
@@ -48,6 +53,7 @@ afterEach(() => {
   dispose = undefined;
   attentionStore.reset();
   document.body.innerHTML = "";
+  workspacesStore.setAll([]);
   selectWorkspace.mockClear();
   selectChatThread.mockClear();
 });
@@ -92,6 +98,7 @@ describe("Attention page", () => {
   });
 
   it("navigates to the item's workspace and thread when a row is activated", async () => {
+    knowWorkspaces("alpha");
     items = [item({ workspace: "alpha", thread_id: 42 })];
     const host = mount();
     await settle();
@@ -101,11 +108,51 @@ describe("Attention page", () => {
   });
 
   it("opens just the workspace when the item names no thread", async () => {
+    knowWorkspaces("alpha");
     items = [item({ workspace: "alpha", thread_id: null })];
     const host = mount();
     await settle();
     (host.querySelector("[data-attention-row]") as HTMLElement).click();
     expect(selectWorkspace).toHaveBeenCalledWith("alpha");
     expect(selectChatThread).not.toHaveBeenCalled();
+  });
+
+  it("does not navigate for an item whose workspace does not exist, and says why", async () => {
+    knowWorkspaces("alpha");
+    items = [
+      item({
+        kind: "task_finished",
+        workspace: "repo-only",
+        rank: 2,
+        headline: "Background task failed: x",
+        detail: "No workspace was created for this task",
+      }),
+    ];
+    const host = mount();
+    await settle();
+    const row = host.querySelector("[data-attention-row]") as HTMLButtonElement;
+    expect(row.disabled).toBe(true);
+    expect(row.textContent).toContain("No workspace was created for this task");
+    row.click();
+    expect(selectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("shows a placeholder, not blank space, until the first answer lands", async () => {
+    items = [];
+    const host = mount();
+    expect(host.textContent).toContain("Checking");
+    expect(host.textContent).not.toContain("Nothing needs you");
+    await settle();
+    expect(host.textContent).toContain("Nothing needs you");
+  });
+
+  it("has a refresh button that refetches", async () => {
+    items = [];
+    const host = mount();
+    await settle();
+    const before = send.mock.calls.length;
+    (host.querySelector(".attention-refresh") as HTMLButtonElement).click();
+    await settle();
+    expect(send.mock.calls.length).toBe(before + 1);
   });
 });

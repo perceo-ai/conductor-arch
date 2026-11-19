@@ -1,4 +1,4 @@
-import { For, Show, createMemo, onCleanup, onMount } from "solid-js";
+import { For, Show, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import Icon from "@/components/Icon";
 import { attentionStore } from "@/store/attention";
 import { relativeTime } from "@/lib/relativeTime";
@@ -11,6 +11,11 @@ import type { AttentionItem, AttentionKind } from "@/bridge/protocol";
 // surface, with no cards inside cards.
 
 type Tone = "urgent" | "soon" | "quiet";
+
+// THE URGENCY TAXONOMY IS A SHARED PRESENTATION CONTRACT. Every client (this
+// page, the iOS app) groups items by `rank` into the same three tiers with the
+// same cut points: rank 0-1 "Needs you now", 2-4 "Worth a look", 5+ "When you
+// have a moment". Do not invent another grouping on a new surface.
 
 /** Presentation comes from the item's own `kind` and `rank`, not from the CLI's marks. */
 function toneOf(item: AttentionItem): Tone {
@@ -49,8 +54,14 @@ const TONE_LABEL: Record<Tone, string> = {
   quiet: "When you have a moment",
 };
 
+/** How often the "as of" age is recomputed; it must not freeze at "just now". */
+const ASOF_TICK_MS = 30_000;
+
 export function AttentionPage() {
+  const [now, setNow] = createSignal(Date.now());
   onMount(() => {
+    const tick = setInterval(() => setNow(Date.now()), ASOF_TICK_MS);
+    onCleanup(() => clearInterval(tick));
     const unwatch = attentionStore.watch();
     onCleanup(unwatch);
   });
@@ -71,9 +82,19 @@ export function AttentionPage() {
     <div class="page-shell attention-view">
       <div class="page-header dashboard-header">
         <div class="dashboard-title">Attention</div>
-        <Show when={attentionStore.generatedAt()}>
-          {(at) => <div class="attention-asof">As of {relativeTime(at())}</div>}
-        </Show>
+        <div class="attention-header-row">
+          <Show when={attentionStore.generatedAt()}>
+            {(at) => <div class="attention-asof">As of {relativeTime(at(), now())}</div>}
+          </Show>
+          <button
+            type="button"
+            class="ui-button-secondary attention-refresh"
+            onClick={() => void attentionStore.refresh()}
+            disabled={attentionStore.loading()}
+          >
+            {attentionStore.loading() ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
       </div>
 
       <Show when={attentionStore.error()}>
@@ -83,7 +104,11 @@ export function AttentionPage() {
       <Show
         when={attentionStore.items().length > 0}
         fallback={
-          <Show when={!attentionStore.loading() || attentionStore.generatedAt()}>
+          // Empty is only a fact once an answer is in and none is owed.
+          <Show
+            when={attentionStore.settled() && !attentionStore.loading() && !attentionStore.owed()}
+            fallback={<div class="empty-state">Checking…</div>}
+          >
             <div class="empty-state">Nothing needs you right now.</div>
           </Show>
         }
@@ -102,11 +127,15 @@ export function AttentionPage() {
                       data-kind={item.kind}
                       data-tone={toneOf(item)}
                       title={KIND_LABEL[item.kind]}
+                      disabled={!attentionStore.canOpen(item)}
                       onClick={() => attentionStore.selectItem(item)}
                     >
                       <Icon name={KIND_ICON[item.kind]} class="attention-row-icon" />
                       <span class="attention-row-workspace">{item.workspace}</span>
                       <span class="attention-row-headline">{item.headline}</span>
+                      <Show when={item.detail}>
+                        <span class="attention-row-detail">{item.detail}</span>
+                      </Show>
                     </button>
                   )}
                 </For>

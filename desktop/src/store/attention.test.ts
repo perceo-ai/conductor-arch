@@ -115,4 +115,56 @@ describe("attentionStore", () => {
     expect(attentionStore.error()).toBeUndefined();
     expect(attentionStore.items()).toEqual([]);
   });
+
+  it("stays retryable after a failed fetch: reopening the page tries again", async () => {
+    send.mockRejectedValueOnce(new Error("daemon down"));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attentionStore.error()).toBe("daemon down");
+    unwatch();
+
+    send.mockResolvedValue(queueOf([item()]));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(attentionStore.error()).toBeUndefined();
+    expect(attentionStore.items()).toHaveLength(1);
+  });
+
+  it("stays retryable after the daemon answers with an error", async () => {
+    send.mockResolvedValueOnce({ type: "error", message: "boom" });
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    unwatch();
+    send.mockResolvedValue(queueOf([]));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(attentionStore.error()).toBeUndefined();
+  });
+
+  it("refetches on every reopen even when no event arrived (the queue is clock-derived)", async () => {
+    send.mockResolvedValue(queueOf([item()]));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    unwatch();
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    unwatch();
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports a refetch as owed from the moment it is queued, so empty is not shown as fact", async () => {
+    send.mockResolvedValue(queueOf([]));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attentionStore.owed()).toBe(false);
+    attentionStore.invalidate();
+    expect(attentionStore.owed()).toBe(true);
+    await vi.advanceTimersByTimeAsync(ATTENTION_DEBOUNCE_MS + 1);
+    expect(attentionStore.owed()).toBe(false);
+  });
 });
+
