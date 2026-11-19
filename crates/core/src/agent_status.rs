@@ -35,10 +35,14 @@ const STOPPED_SESSIONS_PER_WORKSPACE: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivity {
-    /// Alive and mid-turn: thinking, streaming, or running a tool.
+    /// Alive and mid-turn: thinking, streaming, or running a tool. Excludes
+    /// sessions reported as `Stalled`; a client counting working agents must
+    /// add those back if it wants every mid-turn agent.
     Working,
     /// Alive and mid-turn, but nothing observable has happened for longer than
-    /// the stall threshold: suspected stuck, not proven.
+    /// the stall threshold: suspected stuck, not proven. A long silent tool
+    /// (a 15-minute build) trips it, so clients should present it as "might
+    /// be stuck", not "stuck".
     Stalled,
     /// Alive and blocked on a human: a permission prompt, a question, a plan to
     /// approve, or a fresh session that has not been given a task.
@@ -920,6 +924,30 @@ mod tests {
         assert_eq!(
             derive_activity(true, None, 0, Some(TurnOutcome::Success)),
             AgentActivity::Finished
+        );
+    }
+
+    #[test]
+    fn a_daemon_probed_session_idle_past_the_threshold_is_reported_stalled() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, db_path, process, last_ms) = board_with_a_stale_pid(temp.path());
+        let now_ms = last_ms + (THRESHOLD + 5) * 1000;
+        let probe = LiveProbe {
+            alive: true,
+            runtime_state: Some(AgentSessionState::ToolRunning),
+        };
+
+        let report = collect_status(&store, &db_path, None, now_ms, &mut |_| Some(probe)).unwrap();
+        let session = &report.workspaces[0].sessions[0];
+        assert_eq!(session.session_id, process.id);
+        assert_eq!(session.state, AgentActivity::Stalled);
+        assert_eq!(report.workspaces[0].state, Some(AgentActivity::Stalled));
+
+        // The same silence with no daemon answer (PID fallback) is not a stall.
+        let report = collect_status(&store, &db_path, None, now_ms, &mut |_| None).unwrap();
+        assert_ne!(
+            report.workspaces[0].sessions[0].state,
+            AgentActivity::Stalled
         );
     }
 

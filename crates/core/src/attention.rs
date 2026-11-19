@@ -520,23 +520,19 @@ mod tests {
 
     #[test]
     fn stalled_session_produces_a_stalled_item_ranked_with_failures() {
-        let stalled = workspace("zeta", vec![session(1, AgentActivity::Stalled)]);
+        // "alpha" sorts before "beta" by name, so the stalled item leads only
+        // if Stalled genuinely ties SessionFailed at rank 1.
+        let stalled = workspace("alpha", vec![session(1, AgentActivity::Stalled)]);
         let failed = workspace("beta", vec![session(2, AgentActivity::Failed)]);
-        let finished = workspace(
-            "alpha",
-            vec![{
-                let mut s = session(3, AgentActivity::Finished);
-                s.alive = false;
-                s
-            }],
-        );
-        let queue = derive_attention(&report(vec![finished, stalled, failed]), &[], NOW_MS);
+        let queue = derive_attention(&report(vec![failed, stalled]), &[], NOW_MS);
         assert_eq!(
             pairs(&queue),
             vec![
+                (AttentionKind::Stalled, "alpha"),
                 (AttentionKind::SessionFailed, "beta"),
-                (AttentionKind::Stalled, "zeta"),
             ]
         );
+        assert_eq!(queue.items[0].headline, "Agent looks stuck");
+        assert_eq!(queue.items[0].rank, queue.items[1].rank);
     }
 }
