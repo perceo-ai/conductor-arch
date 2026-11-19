@@ -136,6 +136,27 @@ describe("commands that change files", () => {
     expect(verb("Bash cat src/a.ts 2>/dev/null")).toBe("Read");
   });
 
+  it("finds a sed write however the script is spelled", () => {
+    const verb = (title: string) => inlineEventVerbChip("command_card", title).verb;
+    // A filename may follow `w` directly, and a script may be attached to -e.
+    expect(verb("Bash sed -n '1wout.txt' src/a.ts")).toBe("Ran");
+    expect(verb("Bash sed -e's/a/b/w out.txt' src/a.ts")).toBe("Ran");
+    expect(verb("Bash sed --expression='1e date' src/a.ts")).toBe("Ran");
+    expect(verb("Bash sed -ni 's/a/b/' src/a.ts")).toBe("Ran");
+    // Printing scripts in the same spellings are still reads.
+    expect(verb("Bash sed -e'1,5p' -n src/a.ts")).toBe("Read");
+    expect(verb("Bash sed -n '/^fn /p' src/a.rs")).toBe("Read");
+    expect(verb("Bash sed 's|old|new|g' src/a.ts")).toBe("Read");
+  });
+
+  it("does not read through a command nested in the line", () => {
+    const verb = (title: string) => inlineEventVerbChip("command_card", title).verb;
+    expect(verb("Bash cat <(tee backup.txt < src/a.ts)")).toBe("Ran");
+    expect(verb("Bash (tee backup.txt < src/a.ts)")).toBe("Ran");
+    // Quoted, a parenthesis is just text.
+    expect(verb(`Bash rg "fn main(" src`)).toBe("Read");
+  });
+
   it("still reads a pipeline of reads, and quoted operators, as a read", () => {
     expect(inlineEventVerbChip("command_card", "Bash rg render_class src | head -20")).toEqual({
       verb: "Read",

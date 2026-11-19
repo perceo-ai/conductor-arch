@@ -223,14 +223,7 @@ function isReadOnlyWords(words: string[]): boolean {
     case "find":
       return !args.some((arg) => FIND_ACTIONS.has(arg));
     case "sed":
-      // -i edits in place; a script's w/e commands write a file or run one;
-      // a -f script cannot be inspected.
-      return !args.some(
-        (arg) =>
-          /^-[^-]*[if]/.test(arg) ||
-          /^--(?:in-place|file)(?:=|$)/.test(arg) ||
-          (!arg.startsWith("-") && /(?:^|[\s;{}/0-9$])[wWe](?:[\s;}]|$)/.test(arg)),
-      );
+      return isReadOnlySed(args);
     case "git":
       return /^(?:diff|grep|log|show|status)$/.test(sub ?? "") && !args.some((arg) => /^--output(?:=|$)/.test(arg));
     case "gh":
@@ -245,11 +238,78 @@ function isReadOnlyWords(words: string[]): boolean {
   }
 }
 
+// sed options that change nothing about what the command can touch.
+const SED_SHORT_FLAGS = new Set(["n", "E", "r", "s", "u", "z"]);
+const SED_LONG_FLAGS = new Set([
+  "--quiet",
+  "--silent",
+  "--regexp-extended",
+  "--separate",
+  "--unbuffered",
+  "--null-data",
+  "--posix",
+  "--sandbox",
+]);
+
+/**
+ * True for a sed that only prints. Its options are read the way sed reads
+ * them — a script may be attached to `-e` or be the first operand — and each
+ * script must have a shape known to print: an addressed `p`/`q`/`d`/`=`/`l`, or
+ * an `s///` whose flags write nothing. Anything else (-i, -f, a `w` or `e`
+ * command however it is spelled) is not a read.
+ */
+function isReadOnlySed(args: string[]): boolean {
+  const scripts: string[] = [];
+  let operands = false;
+  let first: string | null = null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (operands || arg === "-" || !arg.startsWith("-")) {
+      if (first === null) first = arg;
+      continue;
+    }
+    if (arg === "--") {
+      operands = true;
+    } else if (arg.startsWith("--")) {
+      const [name, value] = arg.split(/=(.*)/s, 2);
+      if (name === "--expression") {
+        const script = value ?? args[++i];
+        if (script === undefined) return false;
+        scripts.push(script);
+      } else if (!SED_LONG_FLAGS.has(arg)) {
+        return false;
+      }
+    } else {
+      for (let j = 1; j < arg.length; j++) {
+        if (arg[j] === "e") {
+          const script = arg.slice(j + 1) || args[++i];
+          if (script === undefined) return false;
+          scripts.push(script);
+          break;
+        }
+        if (!SED_SHORT_FLAGS.has(arg[j])) return false;
+      }
+    }
+  }
+  if (!scripts.length && first !== null) scripts.push(first);
+  return scripts.length > 0 && scripts.every((script) => script.split(/[;\n]/).every(isPrintingSedCommand));
+}
+
+const SED_ADDRESS = String.raw`(?:\d+|\$|\/(?:[^\\/]|\\.)*\/)`;
+const SED_PRINT = new RegExp(String.raw`^${SED_ADDRESS}?(?:\s*,\s*(?:${SED_ADDRESS}|[+~]\d+))?\s*!?\s*[pPqd=l]?$`);
+// `s` with any delimiter; flags limited to the ones that write nothing.
+const SED_SUBSTITUTE = /^(?:\d+(?:,\d+)?)?\s*s(.)(?:(?!\1)[^\\]|\\.)*\1(?:(?!\1)[^\\]|\\.)*\1[gpiIm0-9]*$/;
+
+function isPrintingSedCommand(command: string): boolean {
+  const trimmed = command.trim();
+  return SED_PRINT.test(trimmed) || SED_SUBSTITUTE.test(trimmed);
+}
+
 /**
  * A command line's simple commands, each as its words with quotes removed,
  * split on unquoted `|`, `;`, `&`, `&&`, `||` and newlines. Null when the line
  * does something the words do not show: a redirection into a file, a command
- * substitution, or a quote left open. `2>&1` and `>/dev/null` write no file and
+ * or process substitution, a subshell, or a quote left open. `2>&1` and `>/dev/null` write no file and
  * are let through.
  */
 function simpleCommands(line: string): string[][] | null {
@@ -290,6 +350,9 @@ function simpleCommands(line: string): string[][] | null {
     if (ch === "'" || ch === '"') {
       quote = ch;
       inWord = true;
+    } else if (ch === "(") {
+      // `<(…)`, `=(…)` and subshells run a command of their own.
+      return null;
     } else if (ch === ">") {
       const harmless = line.slice(i).match(/^>>?\s*(?:&\d+|\/dev\/null)(?=[\s|;&]|$)/);
       if (!harmless) return null;
