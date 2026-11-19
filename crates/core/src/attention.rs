@@ -122,7 +122,15 @@ pub fn derive_attention(
         let queued = workspace.sessions.iter().any(|s| s.queued_inputs > 0);
         for session in &workspace.sessions {
             let ids = Some((session.session_id, session.thread_id));
-            if session.state == AgentActivity::AwaitingInput || session.pending_interactions > 0 {
+            // A pending ask only counts while the session is alive. The asks
+            // of a dead session can never be answered — their native request
+            // ids died with the process — and the daemon only expires them on
+            // a `SessionExited` event it was running to see, so a restart can
+            // leave a `pending` row behind forever. `derive_activity` already
+            // requires liveness for `AwaitingInput` for the same reason.
+            if session.state == AgentActivity::AwaitingInput
+                || (session.alive && session.pending_interactions > 0)
+            {
                 items.push(item(
                     AttentionKind::AgentAsked,
                     workspace,
@@ -498,9 +506,29 @@ mod tests {
     #[test]
     fn pending_interaction_alone_is_agent_asked() {
         let mut s = session(1, AgentActivity::Working);
+        s.alive = true;
         s.pending_interactions = 1;
         let queue = derive_attention(&report(vec![workspace("alpha", vec![s])]), &[], NOW_MS);
         assert_eq!(pairs(&queue), vec![(AttentionKind::AgentAsked, "alpha")]);
+    }
+
+    #[test]
+    fn pending_interaction_on_a_dead_session_is_not_agent_asked() {
+        // An agent parked on a permission prompt plus a daemon restart: the
+        // ask is still `pending` in the store but can never be answered, and
+        // the daemon that would have expired it is gone. Such a row must not
+        // lead the queue forever.
+        let mut s = session(1, AgentActivity::Stopped);
+        s.alive = false;
+        s.pending_interactions = 1;
+        let queue = derive_attention(&report(vec![workspace("alpha", vec![s])]), &[], NOW_MS);
+        assert!(
+            !queue
+                .items
+                .iter()
+                .any(|i| i.kind == AttentionKind::AgentAsked),
+            "unanswerable ask led the queue: {queue:?}"
+        );
     }
 
     #[test]

@@ -136,6 +136,7 @@ impl Drop for QueueDrainGuard {
 pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
     let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
     let provider_events = ProviderEventStore::new(&paths.database_path);
+    let mut reconciled: Vec<i64> = Vec::new();
     for workspace in store.list()? {
         let records = store.list_sessions(&workspace.name)?;
         for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
@@ -155,10 +156,41 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
                 } else {
                     let _ = store.mark_session_process_exited(record.id, None)?;
                 }
+                reconciled.push(record.id);
             }
         }
     }
+    expire_pending_interactions_of_reconciled_sessions(paths, &reconciled);
     Ok(())
+}
+
+/// A pending ask can only be answered on the connection it arrived on, so the
+/// asks of a session that died with the previous daemon are unanswerable. The
+/// running daemon expires them when it sees `SessionExited`, but across a
+/// restart nobody was listening — and a pending ask the queue still believes
+/// in puts an unanswerable question at the top of the attention queue forever.
+/// Only sessions this reconcile just declared dead are swept: a session whose
+/// process is still alive is left alone.
+fn expire_pending_interactions_of_reconciled_sessions(paths: &AppPaths, reconciled: &[i64]) {
+    if reconciled.is_empty() {
+        return;
+    }
+    let store = ProviderInteractionStore::new(paths.database_path.clone());
+    let Ok(pending) = store.list(None, true) else {
+        return;
+    };
+    for interaction in pending
+        .into_iter()
+        .filter(|interaction| reconciled.contains(&interaction.session_id))
+    {
+        if let Err(err) = store.expire(&interaction.id) {
+            warn!(
+                interaction = %interaction.id,
+                error = %format!("{err:#}"),
+                "archcar could not expire a pending interaction at startup"
+            );
+        }
+    }
 }
 
 fn archcar_process_alive(pid: u32) -> bool {
@@ -12536,6 +12568,52 @@ default = true
             .unwrap()
             .iter()
             .any(|event| event.phase == ProviderEventPhase::Interrupted));
+    }
+
+    #[test]
+    fn reconcile_startup_expires_pending_asks_of_sessions_it_declared_dead() {
+        // An agent parked on a permission prompt when the daemon went down.
+        // Its request id died with the process, so the ask is unanswerable —
+        // and a pending ask would otherwise lead the attention queue forever.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CLAUDE).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        let interactions = ProviderInteractionStore::new(paths.database_path.clone());
+        let pending = interactions
+            .register(interaction_draft_for(
+                thread.id,
+                process.id,
+                ProviderInteractionKind::Permission,
+                "req-1",
+            ))
+            .unwrap();
+        assert_eq!(
+            pending.status,
+            crate::provider_interactions::ProviderInteractionStatus::Pending
+        );
+
+        reconcile_managed_sessions_on_startup(&paths).unwrap();
+
+        assert_ne!(
+            store.get_process_record(process.id).unwrap().status,
+            ProcessStatus::Running,
+            "the session was not reconciled at all"
+        );
+        assert!(
+            interactions.list(None, true).unwrap().is_empty(),
+            "a dead session's ask stayed pending"
+        );
+        assert_eq!(
+            interactions.get(&pending.id).unwrap().unwrap().status,
+            crate::provider_interactions::ProviderInteractionStatus::Expired
+        );
     }
 
     #[test]
