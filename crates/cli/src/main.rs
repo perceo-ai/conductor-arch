@@ -9,9 +9,9 @@ use archductor_core::archcar::protocol::{
     ArchcarInputDelivery, ArchcarInputKind, ArchcarMessage, ArchcarProjectionItem, ArchcarRequest,
     ArchcarResponse, QueuedArchcarInput, WorkspaceChangeScope, WorkspaceGitAction,
 };
-use archductor_core::attention::AttentionKind;
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::attention::AttentionKind;
 use archductor_core::background_tasks::{BackgroundAgentSpec, StartBackgroundTask};
 use archductor_core::chat_attachments::MAX_CHAT_ATTACHMENT_BYTES;
 use archductor_core::doctor;
