@@ -5,6 +5,7 @@ import WorkspacePanes from "./WorkspacePanes";
 import { HistoryPage } from "./History";
 import { SettingsPage } from "./Settings";
 import { AchievementsPage } from "./Achievements";
+import { AttentionPage } from "./Attention";
 
 // Each page is a self-contained shell; only the page matching nav.activePage()
 // is mounted (see PageStack), so unmounted pages cost nothing.
@@ -31,6 +32,9 @@ export function PageStack() {
       </Show>
       <Show when={page() === "achievements"}>
         <AchievementsPage />
+      </Show>
+      <Show when={page() === "attention"}>
+        <AttentionPage />
       </Show>
     </div>
   );

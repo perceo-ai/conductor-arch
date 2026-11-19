@@ -36,6 +36,7 @@ export type { Appearance } from "./appearance";
 export { layoutStore } from "./layout";
 export { layoutPresetsStore } from "./layoutPresets";
 export { achievementsStore } from "./achievements";
+export { attentionStore } from "./attention";
 export { updateMetrics, metricsEnabled } from "./metrics";
 export { uiStore } from "./ui";
 export { restoreTabsForActiveDaemon } from "./clients";
