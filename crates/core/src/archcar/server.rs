@@ -4103,21 +4103,18 @@ fn chat_transcript_from_projection(
         .collect()
 }
 
-/// Open the app store and map any failure to a protocol error response. Keeps
-/// the workspace-intelligence handlers to their happy path.
 /// The attention queue. The report is built exactly as `archductor status`
 /// builds it (`collect_status`, no workspace filter); only the probe differs:
-/// the CLI has to ask the daemon over the socket, the daemon asks its own
-/// session table, which is what `GetSessionStatus` answers from.
+/// the CLI asks the daemon over the socket, the daemon reads its own session
+/// table. A session it does not hold answers `None`, so `read_session` falls
+/// back to the recorded PID. This must stay read-only: it runs for every
+/// thread on the board, unattended, so it never restores or terminates.
 fn list_attention(state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
-    let db_path = state.lock().unwrap().db_path.clone();
-    let built = WorkspaceStore::open_app(&db_path).and_then(|store| {
+    with_store(state, |store| {
+        let db_path = state.lock().unwrap().db_path.clone();
         let now = crate::agent_status::now_ms();
         let mut probe = |process: &crate::workspace::ProcessRecord| {
-            // A session the daemon does not hold: only the PID can say.
-            let handle = load_or_restore_session_handle(state, process.id)
-                .ok()
-                .flatten()?;
+            let handle = state.lock().unwrap().sessions.get(&process.id).cloned()?;
             let snapshot = handle.snapshot.lock().unwrap().clone();
             Some(crate::agent_status::LiveProbe {
                 alive: !crate::agent_status::session_is_terminal(
@@ -4127,18 +4124,16 @@ fn list_attention(state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
                 runtime_state: Some(snapshot.runtime_state),
             })
         };
-        let report = crate::agent_status::collect_status(&store, &db_path, None, now, &mut probe)?;
+        let report = crate::agent_status::collect_status(store, &db_path, None, now, &mut probe)?;
         let tasks = store.list_background_tasks(false)?;
-        Ok(crate::attention::derive_attention(&report, &tasks, now))
-    });
-    match built {
-        Ok(queue) => ArchcarResponse::Attention { queue },
-        Err(err) => ArchcarResponse::Error {
-            message: err.to_string(),
-        },
-    }
+        Ok(ArchcarResponse::Attention {
+            queue: crate::attention::derive_attention(&report, &tasks, now),
+        })
+    })
 }
 
+/// Open the app store and map any failure to a protocol error response. Keeps
+/// the workspace-intelligence handlers to their happy path.
 fn with_store(
     state: &Arc<Mutex<ServerState>>,
     body: impl FnOnce(&WorkspaceStore) -> Result<ArchcarResponse>,
@@ -11642,9 +11637,40 @@ default = true
             panic!("list_attention got {attention:?}");
         };
         assert!(
-            queue.items.iter().all(|item| item.workspace == "berlin"),
-            "unexpected items {queue:?}"
+            queue.items.is_empty(),
+            "nothing needs attention yet: {queue:?}"
         );
+        {
+            let store = WorkspaceStore::open_app(&db_path).unwrap();
+            let background = store
+                .start_background_task(crate::background_tasks::StartBackgroundTask {
+                    repository: "demo".to_owned(),
+                    prompt: "do the thing".to_owned(),
+                    title: Some("Wire attention".to_owned()),
+                    workspace_name: Some("oslo".to_owned()),
+                    branch: None,
+                    base_ref: None,
+                    provider: "claude".to_owned(),
+                    run_checks: false,
+                    open_pr: false,
+                    draft_pr: true,
+                    extra_agents: Vec::new(),
+                })
+                .unwrap();
+            store.cancel_background_task(background.id).unwrap();
+        }
+        let attention = dispatch_request(ArchcarRequest::ListAttention {}, &state);
+        let ArchcarResponse::Attention { queue } = attention else {
+            panic!("list_attention got {attention:?}");
+        };
+        let finished: Vec<_> = queue
+            .items
+            .iter()
+            .filter(|item| item.kind == crate::attention::AttentionKind::TaskFinished)
+            .collect();
+        assert_eq!(finished.len(), 1, "{queue:?}");
+        assert_eq!(finished[0].repository, "demo");
+        assert!(finished[0].headline.contains("cancelled"), "{queue:?}");
 
         let drafted = dispatch_request(
             ArchcarRequest::DraftSummary {

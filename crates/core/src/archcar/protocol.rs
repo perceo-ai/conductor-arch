@@ -5516,7 +5516,18 @@ mod tests {
         };
         let encoded = serde_json::to_string(&response).unwrap();
         assert!(encoded.contains("\"type\":\"attention\""), "{encoded}");
-        assert!(encoded.contains("\"kind\":\"agent_asked\""), "{encoded}");
+        assert_eq!(
+            encoded,
+            concat!(
+                r#"{"type":"attention","queue":{"generated_at":"2026-11-19T00:00:00Z","items":["#,
+                r#"{"kind":"agent_asked","workspace":"berlin","repository":"conductor","#,
+                r#""thread_id":3,"session_id":11,"headline":"Approve rm -rf target","#,
+                r#""detail":null,"rank":0},"#,
+                r#"{"kind":"stalled","workspace":"oslo","repository":"conductor","#,
+                r#""thread_id":null,"session_id":12,"headline":"No progress","#,
+                r#""detail":"12m","rank":2}]}}"#
+            )
+        );
         let decoded: ArchcarResponse = serde_json::from_str(&encoded).unwrap();
         assert!(matches!(decoded, ArchcarResponse::Attention { queue: q } if q == queue));
         assert_eq!(archcar_response_summary(&response), "attention count=2");
