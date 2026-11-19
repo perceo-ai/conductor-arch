@@ -276,6 +276,10 @@ pub struct ProviderProjectionEvent {
     /// Images this event carries, described but not inlined.
     pub images: Vec<ProjectionImage>,
     pub background_agent: bool,
+    /// For a background *agent* task record: the canonical id of the `Agent`
+    /// tool card that started it. The task and the tool call are one piece of
+    /// work, so the card for the task folds into the tool's card.
+    pub background_agent_card_for: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,9 +357,16 @@ pub fn render_provider_event_projection(
 
     let mut items = Vec::<ProviderProjectionItem>::new();
     let mut positions = HashMap::<String, usize>::new();
+    // background card id → the `Agent` card it duplicates.
+    let mut background_agent_folds = Vec::<(String, String)>::new();
 
     for event in events {
         let id = canonical_projection_id(&event);
+        if let Some(agent_id) = event.background_agent_card_for.clone() {
+            if !background_agent_folds.iter().any(|(card, _)| card == &id) {
+                background_agent_folds.push((id.clone(), agent_id));
+            }
+        }
         let mut item = projection_item_from_event(id.clone(), event);
         if let Some(index) = positions.get(&id).copied() {
             if item.body.trim().is_empty() && !items[index].body.trim().is_empty() {
@@ -378,6 +389,8 @@ pub fn render_provider_event_projection(
         }
     }
 
+    fold_background_agent_cards(&mut items, &positions, &background_agent_folds);
+
     items.sort_by(|left, right| {
         left.sequence
             .cmp(&right.sequence)
@@ -386,6 +399,52 @@ pub fn render_provider_event_projection(
     let signature = projection_signature(&items);
 
     ProviderProjection { items, signature }
+}
+
+/// Fold a background subagent's task card into the `Agent` card that started it.
+///
+/// Claude reports a backgrounded subagent twice: the `Agent` tool call gets a
+/// card — the one the subagent's own commands and messages nest under — and the
+/// task records for the same `tool_use_id` get a second, bare card saying the
+/// same thing. Since `Agent` runs in the background by default, that was every
+/// subagent shown twice.
+///
+/// The task records are still what says whether the subagent is *running*: the
+/// `Agent` call itself returns a launch receipt at once. So the task card's
+/// status and its agent mark move onto the `Agent` card — which keeps the chat
+/// reading as busy while the subagent works — and the duplicate is dropped. A
+/// backgrounded shell command keeps its own card: nothing else reports it.
+fn fold_background_agent_cards(
+    items: &mut Vec<ProviderProjectionItem>,
+    positions: &HashMap<String, usize>,
+    folds: &[(String, String)],
+) {
+    let mut dropped = Vec::<usize>::new();
+    for (card_id, agent_id) in folds {
+        let Some(card_index) = positions.get(card_id).copied() else {
+            continue;
+        };
+        let Some(agent_index) = positions.get(agent_id).copied() else {
+            // No `Agent` card for this task — a trimmed history, or a task the
+            // provider started without one. The task card is all there is.
+            continue;
+        };
+        let (status, stream_state) = (items[card_index].status, items[card_index].stream_state);
+        let agent = &mut items[agent_index];
+        agent.background_agent = true;
+        agent.status = status;
+        agent.stream_state = stream_state;
+        dropped.push(card_index);
+    }
+    if dropped.is_empty() {
+        return;
+    }
+    let mut index = 0;
+    items.retain(|_| {
+        let keep = !dropped.contains(&index);
+        index += 1;
+        keep
+    });
 }
 
 /// Drop user messages the provider echoes back to us.
@@ -487,6 +546,8 @@ fn provider_projection_event_from_record(
     let raw_payload =
         provider_projection_category_uses_raw_payload(category).then(|| record.raw_json.clone());
     let body = provider_projection_record_body(record, turn_duration_ms);
+    let background_agent =
+        record.provider_subtype.as_deref() == Some(BACKGROUND_AGENT_TASK_SUBTYPE);
     ProviderProjectionEvent {
         canonical_id: provider_projection_canonical_id(record),
         images: projection_images(&record.raw_json),
@@ -505,8 +566,23 @@ fn provider_projection_event_from_record(
         parent_id: provider_projection_parent_id(record),
         nested_thread_id: record.parent_provider_thread_id.clone(),
         raw_payload,
-        background_agent: record.provider_subtype.as_deref() == Some(BACKGROUND_AGENT_TASK_SUBTYPE),
+        background_agent,
+        background_agent_card_for: background_agent
+            .then(|| record.raw_json.get("tool_use_id").and_then(Value::as_str))
+            .flatten()
+            .map(|tool_use_id| provider_projection_item_canonical_id(record, tool_use_id)),
     }
+}
+
+/// The canonical id a record with this provider item id would project to.
+/// Two records that name the same item land on the same card.
+fn provider_projection_item_canonical_id(record: &ProviderEventRecord, item_id: &str) -> String {
+    let thread_id = record
+        .provider_thread_id
+        .as_deref()
+        .or(record.parent_provider_thread_id.as_deref())
+        .unwrap_or("-");
+    format!("{}:{thread_id}:{item_id}", record.provider)
 }
 
 pub fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String {
@@ -521,7 +597,7 @@ pub fn provider_projection_canonical_id(record: &ProviderEventRecord) -> String 
         }
     }
     if let Some(item_id) = record.provider_item_id.as_deref() {
-        return format!("{}:{thread_id}:{item_id}", record.provider);
+        return provider_projection_item_canonical_id(record, item_id);
     }
     if let Some(event_id) = record.provider_event_id.as_deref() {
         return format!("{}:{thread_id}:event:{event_id}", record.provider);
@@ -2155,6 +2231,10 @@ mod tests {
             ]
         );
 
+        // Neither task has an `Agent` tool card in this fixture, so the agent
+        // task keeps a card of its own; see
+        // `a_backgrounded_subagent_gets_one_card_not_two` for the fold.
+        //
         // Finishing keeps the mark: the notification record merges into the
         // same card, and the agent card stops running while the command runs on.
         let finished = format!("{BACKGROUND_AGENT_AND_COMMAND}{BACKGROUND_AGENT_DONE}\n");
@@ -2194,6 +2274,63 @@ mod tests {
                 .contains("Output: /tmp/tasks/bg_task.output"),
             "{}",
             background[0].body
+        );
+    }
+
+    const RUNNING_BACKGROUND_SUBAGENT: &str = concat!(
+        r#"{"type":"system","subtype":"init","session_id":"sess_run","uuid":"init_1","cwd":"/w","model":"claude-fixture","tools":["Agent"],"mcp_servers":[],"plugins":[]}"#,
+        "\n",
+        r#"{"type":"assistant","session_id":"sess_run","uuid":"call_1","message":{"id":"msg_1","role":"assistant","type":"message","content":[{"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"Audit the renderer","run_in_background":true,"prompt":"Audit it."}}]}}"#,
+        "\n",
+        r#"{"type":"system","subtype":"task_started","session_id":"sess_run","uuid":"task_1","task_id":"task_agent","tool_use_id":"toolu_agent","description":"Audit the renderer","task_type":"local_agent","is_backgrounded":true}"#,
+        "\n",
+        r#"{"type":"user","session_id":"sess_run","uuid":"receipt_1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_agent","content":"Async agent launched successfully.\nThe agent is working in the background."}]}}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","session_id":"sess_run","uuid":"result_1","is_error":false,"result":"Launched.","duration_ms":10,"num_turns":1}"#,
+        "\n",
+        r#"{"type":"system","subtype":"task_progress","session_id":"sess_run","uuid":"task_2","task_id":"task_agent","tool_use_id":"toolu_agent","description":"Reading files","usage":{"tool_uses":2}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn a_backgrounded_subagent_gets_one_card_not_two() {
+        let chat = chat_items_for_claude_fixture(BACKGROUND_SUBAGENT);
+
+        // The task card for the same `tool_use_id` folded into the Agent card:
+        // one piece of work, one card, and it is the card the subagent's own
+        // commands and messages nest under.
+        let background = chat
+            .iter()
+            .filter(|item| item.render_class == ProjectionRenderClass::BackgroundCard)
+            .collect::<Vec<_>>();
+        assert!(background.is_empty(), "{background:?}");
+
+        let agent = chat
+            .iter()
+            .find(|item| item.title == "Agent two step")
+            .expect("an Agent card");
+        assert!(agent.background_agent);
+        assert_eq!(agent.status, ProviderProjectionStatus::Complete);
+    }
+
+    #[test]
+    fn a_backgrounded_subagents_agent_card_runs_until_the_task_ends() {
+        let chat = chat_items_for_claude_fixture(RUNNING_BACKGROUND_SUBAGENT);
+        let agent = chat
+            .iter()
+            .find(|item| item.title == "Agent Audit the renderer")
+            .expect("an Agent card");
+
+        // The Agent call returns a launch receipt at once, so without the task
+        // records the card would read complete while the subagent still works —
+        // and the chat would ding as finished mid-flight.
+        assert_eq!(agent.status, ProviderProjectionStatus::Running);
+        assert!(agent.background_agent);
+        assert!(
+            !chat
+                .iter()
+                .any(|item| item.render_class == ProjectionRenderClass::BackgroundCard),
+            "{chat:?}"
         );
     }
 
