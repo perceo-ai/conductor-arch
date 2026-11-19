@@ -5300,6 +5300,10 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("visible_input: {visible_input}");
             println!("{prompt}");
         }
+        // The readable `archductor attention` command lands separately.
+        ArchcarResponse::Attention { queue } => {
+            println!("attention count={}", queue.items.len());
+        }
         ArchcarResponse::Tasks { workspace, tasks } => {
             println!("tasks workspace={workspace} count={}", tasks.len());
             for task in tasks {

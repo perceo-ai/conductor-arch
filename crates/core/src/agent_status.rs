@@ -88,6 +88,20 @@ pub struct LiveProbe {
     pub runtime_state: Option<AgentSessionState>,
 }
 
+/// Whether a session the daemon holds has ended, given its status string and
+/// runtime state. Shared by the CLI (which asks the daemon over the socket)
+/// and the daemon (which answers about its own sessions directly).
+pub fn session_is_terminal(status: &str, runtime_state: AgentSessionState) -> bool {
+    status != "running"
+        || matches!(
+            runtime_state,
+            AgentSessionState::Interrupted
+                | AgentSessionState::Failed
+                | AgentSessionState::Exited
+                | AgentSessionState::Archived
+        )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LivenessSource {

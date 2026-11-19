@@ -916,6 +916,8 @@ pub enum ArchcarRequest {
     ListTasks {
         workspace: String,
     },
+    /// The cross-project attention queue: what needs the human, ranked.
+    ListAttention {},
     CreateTask {
         workspace: String,
         title: String,
@@ -1449,6 +1451,9 @@ pub enum ArchcarResponse {
     Tasks {
         workspace: String,
         tasks: Vec<Task>,
+    },
+    Attention {
+        queue: crate::attention::AttentionQueue,
     },
     TaskSaved {
         task: Task,
@@ -2550,6 +2555,7 @@ pub fn archcar_request_summary(request: &ArchcarRequest) -> String {
         }
         ArchcarRequest::TickBackgroundTasks => "tick_background_tasks".to_owned(),
         ArchcarRequest::ListTasks { workspace } => format!("list_tasks workspace={workspace}"),
+        ArchcarRequest::ListAttention {} => "list_attention".to_owned(),
         ArchcarRequest::CreateTask {
             workspace, title, ..
         } => format!(
@@ -3115,6 +3121,9 @@ pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
         }
         ArchcarResponse::Tasks { workspace, tasks } => {
             format!("tasks workspace={workspace} count={}", tasks.len())
+        }
+        ArchcarResponse::Attention { queue } => {
+            format!("attention count={}", queue.items.len())
         }
         ArchcarResponse::TaskSaved { task } => {
             format!("task_saved id={} status={}", task.id, task.status)
@@ -5460,5 +5469,56 @@ mod tests {
             archcar_response_summary(&saved),
             "layout_preset_saved id=custom-one"
         );
+    }
+
+    #[test]
+    fn list_attention_request_and_response_round_trip() {
+        use crate::attention::{AttentionItem, AttentionKind, AttentionQueue};
+
+        // Same tagging as its neighbours: an internally tagged object.
+        let tasks = serde_json::to_string(&ArchcarRequest::ListTasks {
+            workspace: "berlin".to_owned(),
+        })
+        .unwrap();
+        assert!(tasks.contains("\"type\":\"list_tasks\""), "{tasks}");
+        let wire = serde_json::to_string(&ArchcarRequest::ListAttention {}).unwrap();
+        assert_eq!(wire, r#"{"type":"list_attention"}"#);
+        let parsed: ArchcarRequest = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(parsed, ArchcarRequest::ListAttention {}));
+
+        let queue = AttentionQueue {
+            generated_at: "2026-11-19T00:00:00Z".to_owned(),
+            items: vec![
+                AttentionItem {
+                    kind: AttentionKind::AgentAsked,
+                    workspace: "berlin".to_owned(),
+                    repository: "conductor".to_owned(),
+                    thread_id: Some(3),
+                    session_id: Some(11),
+                    headline: "Approve rm -rf target".to_owned(),
+                    detail: None,
+                    rank: 0,
+                },
+                AttentionItem {
+                    kind: AttentionKind::Stalled,
+                    workspace: "oslo".to_owned(),
+                    repository: "conductor".to_owned(),
+                    thread_id: None,
+                    session_id: Some(12),
+                    headline: "No progress".to_owned(),
+                    detail: Some("12m".to_owned()),
+                    rank: 2,
+                },
+            ],
+        };
+        let response = ArchcarResponse::Attention {
+            queue: queue.clone(),
+        };
+        let encoded = serde_json::to_string(&response).unwrap();
+        assert!(encoded.contains("\"type\":\"attention\""), "{encoded}");
+        assert!(encoded.contains("\"kind\":\"agent_asked\""), "{encoded}");
+        let decoded: ArchcarResponse = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(decoded, ArchcarResponse::Attention { queue: q } if q == queue));
+        assert_eq!(archcar_response_summary(&response), "attention count=2");
     }
 }

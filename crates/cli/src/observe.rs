@@ -8,8 +8,8 @@
 
 use anyhow::{Context, Result};
 use archductor_core::agent_status::{
-    collect_status, now_ms, read_session, session_report, AgentActivity, LiveProbe, SessionRead,
-    SessionReport, SessionSignals, StatusReport, WorkspaceReport,
+    collect_status, now_ms, read_session, session_is_terminal, session_report, AgentActivity,
+    LiveProbe, SessionRead, SessionReport, SessionSignals, StatusReport, WorkspaceReport,
 };
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{ArchcarRequest, ArchcarResponse};
@@ -56,17 +56,6 @@ pub fn daemon_probe(
             }
         }
     }
-}
-
-pub fn session_is_terminal(status: &str, runtime_state: AgentSessionState) -> bool {
-    status != "running"
-        || matches!(
-            runtime_state,
-            AgentSessionState::Interrupted
-                | AgentSessionState::Failed
-                | AgentSessionState::Exited
-                | AgentSessionState::Archived
-        )
 }
 
 pub fn status_report(
