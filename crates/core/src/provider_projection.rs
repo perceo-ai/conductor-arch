@@ -177,6 +177,11 @@ impl ProjectionRenderClass {
 /// background card.
 pub const BACKGROUND_AGENT_TASK_SUBTYPE: &str = "background_task:agent";
 
+/// What a backgrounded `Agent` card says in place of claude's launch receipt.
+/// True only while the subagent works; once its task ends, the task's own
+/// report replaces it.
+pub const BACKGROUND_AGENT_LAUNCH_BODY: &str = "Working in the background.";
+
 /// An image a provider event carries, named by what it is rather than by its
 /// bytes.
 ///
@@ -414,6 +419,12 @@ pub fn render_provider_event_projection(
 /// status and its agent mark move onto the `Agent` card — which keeps the chat
 /// reading as busy while the subagent works — and the duplicate is dropped. A
 /// backgrounded shell command keeps its own card: nothing else reports it.
+///
+/// Once the task ends, its report — the subagent's summary and the path its
+/// output went to — moves over too, replacing the launch placeholder that is no
+/// longer true (or following any other text the card had). While it runs the
+/// card keeps its own body: the task's progress line would only repeat the
+/// latest action the card's nested rows already show.
 fn fold_background_agent_cards(
     items: &mut Vec<ProviderProjectionItem>,
     positions: &HashMap<String, usize>,
@@ -429,11 +440,28 @@ fn fold_background_agent_cards(
             // provider started without one. The task card is all there is.
             continue;
         };
-        let (status, stream_state) = (items[card_index].status, items[card_index].stream_state);
+        let task = &items[card_index];
+        let (status, stream_state) = (task.status, task.stream_state);
+        let report = (!matches!(
+            status,
+            ProviderProjectionStatus::Pending | ProviderProjectionStatus::Running
+        ))
+        .then(|| task.body.trim().to_owned())
+        .filter(|report| !report.is_empty());
         let agent = &mut items[agent_index];
         agent.background_agent = true;
         agent.status = status;
         agent.stream_state = stream_state;
+        if let Some(report) = report {
+            let body = agent.body.trim();
+            agent.body = if body.is_empty() || body == BACKGROUND_AGENT_LAUNCH_BODY {
+                report
+            } else if body.contains(&report) {
+                agent.body.clone()
+            } else {
+                format!("{body}\n\n{report}")
+            };
+        }
         dropped.push(card_index);
     }
     if dropped.is_empty() {
@@ -2311,6 +2339,14 @@ mod tests {
             .expect("an Agent card");
         assert!(agent.background_agent);
         assert_eq!(agent.status, ProviderProjectionStatus::Complete);
+
+        // The dropped task card held what the subagent reported and where its
+        // output went; the surviving card keeps both instead of the launch
+        // placeholder, which stopped being true when the task ended.
+        assert_eq!(
+            agent.body,
+            "`one.txt` has 2 lines.\nOutput: /tmp/claude/sess/tasks/aea5a10fd8ec72dec.output"
+        );
     }
 
     #[test]
@@ -2326,6 +2362,9 @@ mod tests {
         // and the chat would ding as finished mid-flight.
         assert_eq!(agent.status, ProviderProjectionStatus::Running);
         assert!(agent.background_agent);
+        // While it runs, the card keeps its own text; the task's progress line
+        // does not replace it (the live latest action comes from nested rows).
+        assert_eq!(agent.body, "Working in the background.");
         assert!(
             !chat
                 .iter()
@@ -2372,8 +2411,20 @@ mod tests {
 
         // The launch receipt is addressed to the model — it carries the
         // internal resume handle and says never to quote it — so the row says
-        // what the reader needs instead.
-        assert_eq!(agent.body, "Working in the background.");
+        // what the reader needs instead: once the task ends, what the subagent
+        // reported and where its output went.
+        assert!(
+            agent
+                .body
+                .contains("Output: /tmp/claude/sess/tasks/aea5a10fd8ec72dec.output"),
+            "{}",
+            agent.body
+        );
+        assert!(
+            !agent.body.contains("Async agent launched"),
+            "{}",
+            agent.body
+        );
 
         let children = chat
             .iter()

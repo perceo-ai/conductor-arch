@@ -1,0 +1,39 @@
+test provider_projection::tests::a_file_tool_calls_arguments_read_as_the_change_they_make ... ok
+test provider_projection::tests::a_skill_invocation_shows_the_call_and_never_the_skill_body ... ok
+test provider_projection::tests::a_backgrounded_subagents_agent_card_runs_until_the_task_ends ... ok
+test provider_projection::tests::a_backgrounded_command_gets_a_card_that_follows_it_to_the_end ... ok
+test provider_projection::tests::a_subagents_conversation_nests_under_its_agent_card ... ok
+test provider_projection::tests::chat_projection_drops_the_provider_echo_of_a_sent_user_message ... ok
+test provider_projection::tests::chat_projection_hides_codex_parser_noise_events ... ok
+test provider_projection::tests::chat_projection_keeps_a_repeated_prompt_sent_after_the_agent_replied ... ok
+test provider_projection::tests::chat_projection_keeps_real_tool_events_visible ... ok
+test provider_projection::tests::chat_projection_skips_unused_raw_payload_materialization ... ok
+test provider_projection::tests::a_backgrounded_subagents_thinking_leaves_the_main_agents_reasoning_alone ... ok
+test provider_projection::tests::a_backgrounded_subagents_work_nests_under_its_agent_card ... FAILED
+test provider_projection::tests::a_backgrounded_subagent_gets_one_card_not_two ... FAILED
+test provider_projection::tests::a_background_agent_card_is_marked_as_an_agent_and_a_background_command_is_not ... ok
+test provider_projection::tests::completed_empty_update_preserves_previous_streaming_body ... ok
+test provider_projection::tests::pending_interaction_events_are_detectable_for_dedicated_cards ... ok
+test provider_projection::tests::projection_canonicalizes_parent_item_ids ... ok
+test provider_projection::tests::projection_classifies_plan_and_usage_before_generic_fallbacks ... ok
+test provider_projection::tests::projection_dedupes_in_sequence_order_before_latest_update_wins ... ok
+test provider_projection::tests::projection_maps_search_outputs_to_search_category ... ok
+test provider_projection::tests::raw_payload_redacts_hyphenated_secret_keys ... ok
+test provider_projection::tests::a_todo_list_card_shows_the_list_not_the_tools_receipt ... ok
+test provider_projection::tests::reasoning_projection_prefers_body_summary_over_generic_title ... ok
+test provider_projection::tests::reasoning_projection_renders_title_only_summary_as_body_text ... ok
+test provider_projection::tests::an_image_tool_result_names_its_image_without_inlining_the_bytes ... ok
+test provider_projection::tests::turn_projection_elapsed_time_uses_projection_order_for_reversed_lifecycle_records ... ok
+test provider_projection::tests::turn_projection_merges_lifecycle_events_and_shows_elapsed_time ... ok
+test provider_projection::tests::claude_projection_authoritative_final_repairs_partial_delta_before_empty_stops ... ok
+test provider_projection::tests::an_agent_card_carries_the_subagents_report ... ok
+test provider_projection::tests::claude_projection_mixed_final_snapshot_keeps_assistant_and_reasoning_rows_distinct ... ok
+test provider_projection::tests::claude_projection_combines_streaming_deltas_and_final_assistant_body ... ok
+test provider_projection::tests::reading_an_image_shows_the_tool_card_and_no_human_turn ... ok
+test provider_projection::tests::claude_projection_full_fixture_keeps_non_message_events_out_of_assistant_identity ... ok
+test provider_projection::tests::stop_hook_feedback_is_its_own_card_and_not_the_humans_turn ... ok
+thread 'provider_projection::tests::a_backgrounded_subagents_work_nests_under_its_agent_card' (1661644) panicked at crates/core/src/provider_projection.rs:2388:9:
+thread 'provider_projection::tests::a_backgrounded_subagent_gets_one_card_not_two' (1661641) panicked at crates/core/src/provider_projection.rs:2318:9:
+  left: "Working in the background."
+ right: "`one.txt` has 2 lines.\nOutput: /tmp/claude/sess/tasks/aea5a10fd8ec72dec.output"
+test result: FAILED. 32 passed; 2 failed; 0 ignored; 0 measured; 1296 filtered out; finished in 12.18s
