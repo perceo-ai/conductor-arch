@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::agent_status::{AgentActivity, StatusReport, WorkspaceReport};
 use crate::background_tasks::{background_task_is_terminal, BackgroundTask};
 
+/// A terminal background task stays in the queue this long after it finished.
+pub const TASK_FINISHED_WINDOW_SECONDS: u64 = 86_400;
+
 /// A session idle this long while still working is treated as stalled.
 pub const STALL_THRESHOLD_SECONDS: u64 = 600;
 
@@ -86,11 +89,30 @@ fn item(
     }
 }
 
+/// `updated_at` is epoch seconds as a string (`workspace::timestamp()`), not
+/// RFC3339. When it does not parse the task is kept: visible beats swallowed.
+fn went_terminal_within_window(task: &BackgroundTask, now_ms: u64) -> bool {
+    match task.updated_at.parse::<u64>() {
+        Ok(updated) => (now_ms / 1000).saturating_sub(updated) <= TASK_FINISHED_WINDOW_SECONDS,
+        Err(_) => true,
+    }
+}
+
+fn in_archived_workspace(task: &BackgroundTask, report: &StatusReport) -> bool {
+    task.workspace_name.as_deref().is_some_and(|name| {
+        report.workspaces.iter().any(|w| {
+            w.status == "archived" && w.workspace == name && w.repository == task.repository_name
+        })
+    })
+}
+
 /// Rank everything that wants the human. `generated_at` is carried over from
-/// the report so the two timestamps agree.
+/// the report so the two timestamps agree. `now_ms` bounds how long terminal
+/// background tasks linger.
 pub fn derive_attention(
     report: &StatusReport,
     background_tasks: &[BackgroundTask],
+    now_ms: u64,
 ) -> AttentionQueue {
     let mut items = Vec::new();
     for workspace in report.workspaces.iter().filter(|w| w.status != "archived") {
@@ -165,6 +187,8 @@ pub fn derive_attention(
     for task in background_tasks
         .iter()
         .filter(|t| background_task_is_terminal(&t.status))
+        .filter(|t| went_terminal_within_window(t, now_ms))
+        .filter(|t| !in_archived_workspace(t, report))
     {
         items.push(AttentionItem {
             kind: AttentionKind::TaskFinished,
@@ -184,7 +208,20 @@ pub fn derive_attention(
         });
     }
     items.sort_by(|a, b| {
-        (a.rank, &a.workspace, a.session_id).cmp(&(b.rank, &b.workspace, b.session_id))
+        (
+            a.rank,
+            &a.workspace,
+            &a.repository,
+            a.session_id,
+            &a.headline,
+        )
+            .cmp(&(
+                b.rank,
+                &b.workspace,
+                &b.repository,
+                b.session_id,
+                &b.headline,
+            ))
     });
     AttentionQueue {
         generated_at: report.generated_at.clone(),
@@ -196,6 +233,9 @@ pub fn derive_attention(
 mod tests {
     use super::*;
     use crate::agent_status::{LivenessSource, PullRequestReport, SessionReport};
+
+    /// 2000 s after the epoch; `task()` finished at 1000 s.
+    const NOW_MS: u64 = 2_000_000;
 
     fn session(id: i64, state: AgentActivity) -> SessionReport {
         SessionReport {
@@ -277,7 +317,7 @@ mod tests {
             detail: String::new(),
             error: None,
             created_at: "0".into(),
-            updated_at: "0".into(),
+            updated_at: "1000".into(),
         }
     }
 
@@ -296,7 +336,11 @@ mod tests {
         finished.pr = Some(pr("open", Some("failure")));
         let asked = workspace("zeta", vec![session(2, AgentActivity::AwaitingInput)]);
         let failed = workspace("beta", vec![session(3, AgentActivity::Failed)]);
-        let queue = derive_attention(&report(vec![finished, failed, asked]), &[task("ready")]);
+        let queue = derive_attention(
+            &report(vec![finished, failed, asked]),
+            &[task("ready")],
+            NOW_MS,
+        );
         assert_eq!(queue.items[0].kind, AttentionKind::AgentAsked);
         assert_eq!(queue.items[0].rank, 0);
         assert!(queue.items.iter().skip(1).all(|i| i.rank > 0));
@@ -306,7 +350,7 @@ mod tests {
 
     #[test]
     fn workspace_without_sessions_contributes_no_items() {
-        let queue = derive_attention(&report(vec![workspace("alpha", vec![])]), &[]);
+        let queue = derive_attention(&report(vec![workspace("alpha", vec![])]), &[], NOW_MS);
         assert!(queue.items.is_empty());
         assert_eq!(queue.generated_at, "2026-11-19T00:00:00Z");
     }
@@ -316,7 +360,7 @@ mod tests {
         let mut ws = workspace("alpha", vec![session(1, AgentActivity::AwaitingInput)]);
         ws.status = "archived".into();
         ws.pr = Some(pr("open", Some("failure")));
-        let queue = derive_attention(&report(vec![ws]), &[]);
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
         assert!(queue.items.is_empty());
     }
 
@@ -325,7 +369,7 @@ mod tests {
         let mut ws = workspace("alpha", vec![session(1, AgentActivity::Finished)]);
         ws.additions = 3;
         ws.deletions = 1;
-        let queue = derive_attention(&report(vec![ws]), &[]);
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
         assert_eq!(pairs(&queue), vec![(AttentionKind::DiffReady, "alpha")]);
     }
 
@@ -336,7 +380,7 @@ mod tests {
         s.queued_inputs = 1;
         let mut ws = workspace("alpha", vec![s]);
         ws.additions = 3;
-        let queue = derive_attention(&report(vec![ws]), &[]);
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
         assert!(queue.items.is_empty());
     }
 
@@ -350,7 +394,7 @@ mod tests {
                 session(4, AgentActivity::AwaitingInput),
             ],
         );
-        let queue = derive_attention(&report(vec![b, a]), &[]);
+        let queue = derive_attention(&report(vec![b, a]), &[], NOW_MS);
         let order: Vec<(&str, Option<i64>)> = queue
             .items
             .iter()
@@ -366,7 +410,7 @@ mod tests {
     fn failed_checks_on_open_pr_produce_both_items() {
         let mut ws = workspace("alpha", vec![]);
         ws.pr = Some(pr("open", Some("FAILURE")));
-        let queue = derive_attention(&report(vec![ws]), &[]);
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
         assert_eq!(
             pairs(&queue),
             vec![
@@ -379,7 +423,7 @@ mod tests {
     #[test]
     fn terminal_background_task_produces_a_task_finished_item() {
         for status in ["ready", "failed", "cancelled"] {
-            let queue = derive_attention(&report(vec![]), &[task(status)]);
+            let queue = derive_attention(&report(vec![]), &[task(status)], NOW_MS);
             assert_eq!(pairs(&queue), vec![(AttentionKind::TaskFinished, "alpha")]);
             assert!(queue.items[0].headline.contains(status));
         }
@@ -387,7 +431,7 @@ mod tests {
 
     #[test]
     fn active_background_task_produces_no_item() {
-        let queue = derive_attention(&report(vec![]), &[task("running")]);
+        let queue = derive_attention(&report(vec![]), &[task("running")], NOW_MS);
         assert!(queue.items.is_empty());
     }
 
@@ -395,8 +439,71 @@ mod tests {
     fn terminal_task_without_a_workspace_falls_back_to_the_repository() {
         let mut t = task("failed");
         t.workspace_name = None;
-        let queue = derive_attention(&report(vec![]), &[t]);
+        let queue = derive_attention(&report(vec![]), &[t], NOW_MS);
         assert_eq!(pairs(&queue), vec![(AttentionKind::TaskFinished, "repo")]);
         assert!(queue.items[0].detail.is_some());
+    }
+
+    #[test]
+    fn terminal_task_outside_the_window_is_dropped_and_inside_is_kept() {
+        let window_ms = TASK_FINISHED_WINDOW_SECONDS * 1000;
+        let mut t = task("ready");
+        t.updated_at = "1000".into();
+        let stale = derive_attention(&report(vec![]), &[t.clone()], NOW_MS + window_ms);
+        assert!(stale.items.is_empty());
+        let fresh = derive_attention(&report(vec![]), &[t.clone()], NOW_MS);
+        assert_eq!(pairs(&fresh), vec![(AttentionKind::TaskFinished, "alpha")]);
+        t.updated_at = "not-a-number".into();
+        let unparsed = derive_attention(&report(vec![]), &[t], NOW_MS + window_ms);
+        assert_eq!(unparsed.items.len(), 1);
+    }
+
+    #[test]
+    fn terminal_task_in_an_archived_workspace_produces_no_item() {
+        let mut ws = workspace("alpha", vec![]);
+        ws.status = "archived".into();
+        let queue = derive_attention(&report(vec![ws]), &[task("failed")], NOW_MS);
+        assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn same_rank_and_workspace_orders_by_repository_then_headline() {
+        let mut one = task("ready");
+        one.repository_name = "zrepo".into();
+        let mut two = task("ready");
+        two.title = "Alpha".into();
+        let mut three = task("ready");
+        three.title = "Zulu".into();
+        let forward = derive_attention(
+            &report(vec![]),
+            &[one.clone(), three.clone(), two.clone()],
+            NOW_MS,
+        );
+        let backward = derive_attention(&report(vec![]), &[two, three, one], NOW_MS);
+        assert_eq!(forward, backward);
+        assert_eq!(forward.items[2].repository, "zrepo");
+    }
+
+    #[test]
+    fn pending_interaction_alone_is_agent_asked() {
+        let mut s = session(1, AgentActivity::Working);
+        s.pending_interactions = 1;
+        let queue = derive_attention(&report(vec![workspace("alpha", vec![s])]), &[], NOW_MS);
+        assert_eq!(pairs(&queue), vec![(AttentionKind::AgentAsked, "alpha")]);
+    }
+
+    #[test]
+    fn failed_session_is_session_failed() {
+        let ws = workspace("alpha", vec![session(1, AgentActivity::Failed)]);
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
+        assert_eq!(pairs(&queue), vec![(AttentionKind::SessionFailed, "alpha")]);
+    }
+
+    #[test]
+    fn alive_finished_session_with_no_queue_is_idle() {
+        let mut s = session(1, AgentActivity::Finished);
+        s.alive = true;
+        let queue = derive_attention(&report(vec![workspace("alpha", vec![s])]), &[], NOW_MS);
+        assert_eq!(pairs(&queue), vec![(AttentionKind::Idle, "alpha")]);
     }
 }
