@@ -92,6 +92,78 @@ describe("hook feedback cards", () => {
   });
 });
 
+describe("commands that change files", () => {
+  // Reading a command as a read hides the command that made the change, so a
+  // write must never chip down to the file it wrote.
+  it("keeps an in-place sed as the command it ran", () => {
+    expect(inlineEventVerbChip("command_card", "Bash sed -i 's/old/new/' src/a.ts")).toEqual({
+      verb: "Ran",
+      chip: "sed -i 's/old/new/' src/a.ts",
+    });
+  });
+
+  it("keeps a find that deletes as the command it ran", () => {
+    expect(inlineEventVerbChip("command_card", "Bash find . -name '*.tmp' -delete")).toEqual({
+      verb: "Ran",
+      chip: "find . -name '*.tmp' -delete",
+    });
+  });
+
+  it("keeps a read redirected into a file as the command it ran", () => {
+    expect(inlineEventVerbChip("command_card", "Bash cat src/a.ts > src/b.ts")).toEqual({
+      verb: "Ran",
+      chip: "cat src/a.ts > src/b.ts",
+    });
+  });
+
+  it("keeps a pipeline into a writer as the command it ran", () => {
+    expect(inlineEventVerbChip("command_card", "Bash cat src/a.ts | tee src/b.ts")).toEqual({
+      verb: "Ran",
+      chip: "cat src/a.ts | tee src/b.ts",
+    });
+  });
+
+  it("treats other writes and anything it cannot see through as commands", () => {
+    const verb = (title: string) => inlineEventVerbChip("command_card", title).verb;
+    expect(verb("Bash sed -n 's/a/b/w out.txt' src/a.ts")).toBe("Ran");
+    expect(verb("Bash sed -i.bak 's/a/b/' src/a.ts")).toBe("Ran");
+    expect(verb("Bash find . -name '*.rs' -exec rm {} ;")).toBe("Ran");
+    expect(verb("Bash cat src/a.ts >> src/b.ts")).toBe("Ran");
+    expect(verb("Bash cat $(git ls-files)")).toBe("Ran");
+    expect(verb("Bash gh api -X DELETE repos/o/r/issues/1")).toBe("Ran");
+    expect(verb("Bash gh api repos/o/r/issues -f title=x")).toBe("Ran");
+    // Discarding stderr writes no file.
+    expect(verb("Bash cat src/a.ts 2>/dev/null")).toBe("Read");
+  });
+
+  it("still reads a pipeline of reads, and quoted operators, as a read", () => {
+    expect(inlineEventVerbChip("command_card", "Bash rg render_class src | head -20")).toEqual({
+      verb: "Read",
+      chip: "rg render_class src | head -20",
+    });
+    expect(inlineEventVerbChip("command_card", `Bash rg "a > b" notes.md`)).toEqual({
+      verb: "Read",
+      chip: "notes.md",
+    });
+  });
+});
+
+describe("codex command titles", () => {
+  // Codex titles a command with the command itself; there is no tool name in
+  // front of it to take off.
+  it("keep a bare program as its chip", () => {
+    expect(inlineEventVerbChip("command_card", "ls")).toEqual({ verb: "Read", chip: "ls" });
+  });
+
+  it("unwrap a shell wrapper before deciding what the command did", () => {
+    expect(inlineEventVerbChip("command_card", `bash -lc "pwd"`)).toEqual({ verb: "Read", chip: "pwd" });
+    expect(inlineEventVerbChip("command_card", `bash -lc "cargo test"`)).toEqual({
+      verb: "Ran",
+      chip: `bash -lc "cargo test"`,
+    });
+  });
+});
+
 describe("background task cards", () => {
   it("label the task by what it is doing", () => {
     expect(inlineEventVerbChip("background_card", "Run the test suite")).toEqual({
