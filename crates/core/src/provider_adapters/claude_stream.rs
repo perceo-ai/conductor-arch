@@ -978,6 +978,9 @@ pub enum ClaudeProviderEventKind {
     Hook,
     /// A skill body claude injected into the conversation on its own behalf.
     SkillInjection,
+    /// Feedback a hook sent back into the conversation, e.g. a Stop hook that
+    /// refused to let the turn end.
+    HookFeedback,
     /// The dimensions note claude appends after an image tool result.
     ImageCompanionNote,
     Subagent,
@@ -1470,6 +1473,9 @@ impl ClaudeStreamParser {
         if top_type.as_deref() == Some("user") && claude_skill_injection_name(value).is_some() {
             return ClaudeProviderEventKind::SkillInjection;
         }
+        if top_type.as_deref() == Some("user") && claude_hook_feedback_event(value).is_some() {
+            return ClaudeProviderEventKind::HookFeedback;
+        }
         if top_type.as_deref() == Some("user") && claude_image_companion_note(value) {
             return ClaudeProviderEventKind::ImageCompanionNote;
         }
@@ -1665,6 +1671,7 @@ impl ClaudeStreamParser {
             ClaudeProviderEventKind::UserMessage => {
                 message_content_text(&draft.raw_json, "text", "text")
             }
+            ClaudeProviderEventKind::HookFeedback => claude_hook_feedback_body(&draft.raw_json),
             ClaudeProviderEventKind::ToolResult | ClaudeProviderEventKind::DeferredResult => draft
                 .provider_tool_use_id
                 .as_ref()
@@ -2148,6 +2155,40 @@ fn claude_skill_injection_name(value: &Value) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// How claude heads feedback a hook sent back into the conversation, verbatim:
+/// "Stop hook feedback:", "PreToolUse:Bash hook feedback:".
+const CLAUDE_HOOK_FEEDBACK_SUFFIX: &str = "hook feedback:";
+
+/// The hook event whose feedback this record carries, if it is one.
+///
+/// A hook that blocks or comments arrives as a `type: "user"` record — flagged
+/// `isSynthetic` over stream-json, `isMeta` in the transcript on disk — so read
+/// literally it claims the human typed the hook's own words. The chat then
+/// shows a user bubble nobody sent, which is exactly the misreading the skill
+/// and image-note cases below already correct.
+fn claude_hook_feedback_event(value: &Value) -> Option<String> {
+    let synthetic = ["isSynthetic", "isMeta"]
+        .into_iter()
+        .any(|key| value.get(key).and_then(Value::as_bool).unwrap_or(false));
+    if !synthetic || message_has_block_type(value, "tool_result") {
+        return None;
+    }
+    let text = claude_message_plain_text(value)?;
+    let first_line = text.trim_start().lines().next()?.trim();
+    let event = first_line.strip_suffix(CLAUDE_HOOK_FEEDBACK_SUFFIX)?.trim();
+    // "Stop", "PreToolUse:Bash" — one token. Anything wordier is prose that
+    // happens to end in the same phrase, not claude's own header.
+    (!event.is_empty() && !event.contains(char::is_whitespace)).then(|| event.to_owned())
+}
+
+/// What the hook actually said, with claude's header line dropped — the card
+/// title already carries the event name.
+fn claude_hook_feedback_body(value: &Value) -> Option<String> {
+    let text = claude_message_plain_text(value)?;
+    let rest = text.trim_start().split_once('\n').map(|(_, rest)| rest);
+    Some(rest.unwrap_or_default().trim().to_owned())
+}
+
 /// The note claude appends to its own turn after an image tool result, verbatim.
 const CLAUDE_IMAGE_NOTE_PREFIX: &str = "[Image:";
 
@@ -2202,6 +2243,12 @@ fn claude_canonical_kind_and_subtype(
 ) -> (ProviderEventKind, Option<String>) {
     if kind == ClaudeProviderEventKind::SkillInjection {
         return (ProviderEventKind::SkillPluginHook, Some("skill".to_owned()));
+    }
+    if kind == ClaudeProviderEventKind::HookFeedback {
+        return (
+            ProviderEventKind::SkillPluginHook,
+            Some("hook_feedback".to_owned()),
+        );
     }
     if kind == ClaudeProviderEventKind::ImageCompanionNote {
         return (
@@ -2271,9 +2318,9 @@ fn claude_kind_to_provider_kind(kind: ClaudeProviderEventKind) -> ProviderEventK
         | ClaudeProviderEventKind::ToolInputDelta
         | ClaudeProviderEventKind::ToolResult => ProviderEventKind::Tool,
         ClaudeProviderEventKind::Permission => ProviderEventKind::ApprovalPermission,
-        ClaudeProviderEventKind::Hook | ClaudeProviderEventKind::SkillInjection => {
-            ProviderEventKind::SkillPluginHook
-        }
+        ClaudeProviderEventKind::Hook
+        | ClaudeProviderEventKind::SkillInjection
+        | ClaudeProviderEventKind::HookFeedback => ProviderEventKind::SkillPluginHook,
         ClaudeProviderEventKind::ImageCompanionNote => ProviderEventKind::WebBrowserMedia,
         ClaudeProviderEventKind::Subagent => ProviderEventKind::SubagentCollaboration,
         ClaudeProviderEventKind::BackgroundTask => ProviderEventKind::GoalTask,
@@ -2350,6 +2397,7 @@ fn claude_phase_for(kind: ClaudeProviderEventKind, raw_json: &Value) -> Provider
         | ClaudeProviderEventKind::ContentBlockStop
         | ClaudeProviderEventKind::ToolResult
         | ClaudeProviderEventKind::SkillInjection
+        | ClaudeProviderEventKind::HookFeedback
         | ClaudeProviderEventKind::ImageCompanionNote
         | ClaudeProviderEventKind::AssistantMessage => ProviderEventPhase::Completed,
         ClaudeProviderEventKind::DeferredResult => ProviderEventPhase::Declined,
@@ -2393,6 +2441,7 @@ fn claude_title_for(
         | ClaudeProviderEventKind::ContentBlockStop => "Assistant output".to_owned(),
         ClaudeProviderEventKind::Permission => "Permission request".to_owned(),
         ClaudeProviderEventKind::Hook => "Hook".to_owned(),
+        ClaudeProviderEventKind::HookFeedback => "Hook feedback".to_owned(),
         ClaudeProviderEventKind::SkillInjection => "Skill".to_owned(),
         ClaudeProviderEventKind::ImageCompanionNote => "Image".to_owned(),
         ClaudeProviderEventKind::Subagent => "Subagent".to_owned(),
@@ -2486,6 +2535,12 @@ fn claude_event_title(
             .or_else(|| string_at(raw_json, &["hook_event"]))
             .or_else(|| string_at(raw_json, &["hook", "name"]))
             .or_else(|| string_at(raw_json, &["event", "hook_event_name"]))
+            .unwrap_or_else(|| claude_title_for(kind, tool_name, tool_target));
+    }
+
+    if kind == ClaudeProviderEventKind::HookFeedback {
+        return claude_hook_feedback_event(raw_json)
+            .map(|event| format!("{event} hook"))
             .unwrap_or_else(|| claude_title_for(kind, tool_name, tool_target));
     }
 
@@ -3423,6 +3478,76 @@ mod tests {
         assert_eq!(
             event.normalized_payload["title"],
             "Skill: caveman:caveman-help"
+        );
+    }
+
+    /// Captured from a live Archductor session (claude 2.1.x): a Stop hook that
+    /// blocks the end of a turn arrives as a `type: "user"` record flagged
+    /// `isSynthetic`, headed by the event's name.
+    const STOP_HOOK_FEEDBACK: &str = concat!(
+        r#"{"type":"user","session_id":"s1","uuid":"u4","isSynthetic":true,"parent_tool_use_id":null,"#,
+        r#""message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:"#,
+        r#"\nBefore finishing: this session changed files, and nothing has been recorded."}]}}"#,
+    );
+
+    #[test]
+    fn stop_hook_feedback_is_a_hook_card_not_a_user_message() {
+        // Read literally the record claims the human typed the hook's words, so
+        // the chat showed a user bubble nobody sent.
+        let drafts = parse_claude_stream_json_lines(STOP_HOOK_FEEDBACK).unwrap();
+        let draft = drafts.first().expect("expected an event");
+        let event = draft
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(draft.kind, ClaudeProviderEventKind::HookFeedback);
+        assert_eq!(event.kind, ProviderEventKind::SkillPluginHook);
+        assert_eq!(event.provider_subtype.as_deref(), Some("hook_feedback"));
+        assert_eq!(event.normalized_payload["title"], "Stop hook");
+        // The card title already names the event, so the header line goes.
+        assert_eq!(
+            event.normalized_payload["body"],
+            "Before finishing: this session changed files, and nothing has been recorded."
+        );
+    }
+
+    #[test]
+    fn a_per_tool_hooks_feedback_keeps_its_event_name() {
+        let native =
+            STOP_HOOK_FEEDBACK.replace("Stop hook feedback:", "PreToolUse:Bash hook feedback:");
+        let drafts = parse_claude_stream_json_lines(&native).unwrap();
+        let draft = drafts.first().expect("expected an event");
+        let event = draft
+            .clone()
+            .into_provider_event_draft(ProviderEventContext::runtime(
+                None,
+                Some(1),
+                Some(2),
+                "claude",
+            ));
+
+        assert_eq!(draft.kind, ClaudeProviderEventKind::HookFeedback);
+        assert_eq!(event.normalized_payload["title"], "PreToolUse:Bash hook");
+    }
+
+    #[test]
+    fn prose_that_ends_in_the_same_phrase_stays_a_user_message() {
+        // A human asking about hook feedback is still a human talking; only
+        // claude's own one-token header marks an injected record.
+        let native = STOP_HOOK_FEEDBACK
+            .replace("\"isSynthetic\":true", "\"isSynthetic\":false")
+            .replace("Stop hook feedback:", "please read the stop hook feedback:");
+
+        let drafts = parse_claude_stream_json_lines(&native).unwrap();
+
+        assert_eq!(
+            drafts.first().map(|draft| draft.kind),
+            Some(ClaudeProviderEventKind::UserMessage)
         );
     }
 

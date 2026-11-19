@@ -1,6 +1,6 @@
 # Progress
 
-Current as of 2026-10-31.
+Current as of 2026-11-19.
 
 The desktop GUI is now an Electron + Solid.js app (`desktop/`) that talks to the
 Rust `archcar` daemon over its socket. The former in-process GTK app
@@ -26,6 +26,38 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
+
+## Chat rows say who spoke and what happened (2026-11-19)
+
+A blocking hook no longer reads as the person talking. Claude delivers hook
+feedback (a Stop hook that refuses to end the turn) as a synthetic `type:
+"user"` record, so the chat credited its demand to the human and the next agent
+read an instruction nobody gave. Core now projects it onto its own
+`hook_feedback_card`, titled by the event ("Stop hook"), rendered on both
+surfaces; the existing hook lifecycle chatter is untouched.
+
+Tool rows name the tool once, with the verb it performed. The desktop prefixed a
+per-class verb onto a provider title that already led with the tool's name, so
+rows read "Ran Bash …", "Read Edit …" and — saying the opposite of what
+happened — "Read Write …". The tool now supplies the verb (Ran/Read/Wrote/
+Edited/Searched), the name drops out of the chip, a file chip is the file name
+rather than an absolute path, and claude's `Bash sed -n …` reaches the
+read-only check that codex's commands already did.
+
+A file call's card shows the change, not its arguments. Streamed tool input
+arrives as JSON fragments, so a finished Write card's body was
+`{"file_path": …, "content": …}` on one escaped line; it is now the written
+text, an Edit is a two-sided `-`/`+` diff, and a read's arguments (the path the
+title already shows) are dropped. A tool result and a mid-stream body are left
+as they come.
+
+`set_workspace_context` renaming the workspace no longer locks the session out
+of it. The MCP session guard compared the caller's workspace argument to the
+workspace's *current* name, so the name the session was handed at spawn stopped
+working the moment an agent renamed it — and the refusal could not teach the new
+name. A supplied name the daemon no longer has is now taken as this session's
+own; a name that still belongs to another live workspace is still refused, and
+with the daemon silent only the exact name passes.
 
 ## Tailscale daemon discovery (2026-11-17)
 
