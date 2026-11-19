@@ -168,12 +168,18 @@ pub fn derive_attention(
     {
         items.push(AttentionItem {
             kind: AttentionKind::TaskFinished,
-            workspace: task.workspace_name.clone().unwrap_or_default(),
+            workspace: task
+                .workspace_name
+                .clone()
+                .unwrap_or_else(|| task.repository_name.clone()),
             repository: task.repository_name.clone(),
             thread_id: None,
             session_id: None,
             headline: format!("Background task {}: {}", task.status, task.title),
-            detail: None,
+            detail: task
+                .workspace_name
+                .is_none()
+                .then(|| "No workspace was created for this task".to_string()),
             rank: AttentionKind::TaskFinished.rank(),
         });
     }
@@ -383,5 +389,14 @@ mod tests {
     fn active_background_task_produces_no_item() {
         let queue = derive_attention(&report(vec![]), &[task("running")]);
         assert!(queue.items.is_empty());
+    }
+
+    #[test]
+    fn terminal_task_without_a_workspace_falls_back_to_the_repository() {
+        let mut t = task("failed");
+        t.workspace_name = None;
+        let queue = derive_attention(&report(vec![]), &[t]);
+        assert_eq!(pairs(&queue), vec![(AttentionKind::TaskFinished, "repo")]);
+        assert!(queue.items[0].detail.is_some());
     }
 }
