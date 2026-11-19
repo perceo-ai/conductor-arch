@@ -104,10 +104,20 @@ export function AttentionPage() {
       <Show
         when={attentionStore.items().length > 0}
         fallback={
-          // Empty is only a fact once an answer is in and none is owed.
+          // Empty is only a fact once an answer is in, none is owed and the last
+          // fetch did not fail (a failure means the answer is unknown).
           <Show
-            when={attentionStore.settled() && !attentionStore.loading() && !attentionStore.owed()}
-            fallback={<div class="empty-state">Checking…</div>}
+            when={
+              attentionStore.settled() &&
+              !attentionStore.loading() &&
+              !attentionStore.owed() &&
+              !attentionStore.error()
+            }
+            fallback={
+              <Show when={!attentionStore.error()}>
+                <div class="empty-state">Checking…</div>
+              </Show>
+            }
           >
             <div class="empty-state">Nothing needs you right now.</div>
           </Show>

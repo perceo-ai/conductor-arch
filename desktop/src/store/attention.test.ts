@@ -166,5 +166,32 @@ describe("attentionStore", () => {
     await vi.advanceTimersByTimeAsync(ATTENTION_DEBOUNCE_MS + 1);
     expect(attentionStore.owed()).toBe(false);
   });
-});
 
+  it("a second watcher opening after a failure retries (the fetch's own stale flag, not unwatch)", async () => {
+    send.mockRejectedValueOnce(new Error("daemon down"));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attentionStore.error()).toBe("daemon down");
+    // First watcher is still mounted, so no unwatch has marked anything stale.
+    send.mockResolvedValue(queueOf([item()]));
+    const second = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(attentionStore.error()).toBeUndefined();
+    second();
+  });
+
+  it("a manual refresh inside the debounce window cancels the pending timer", async () => {
+    send.mockResolvedValue(queueOf([]));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    send.mockClear();
+    attentionStore.invalidate();
+    await vi.advanceTimersByTimeAsync(500);
+    await attentionStore.refresh();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(attentionStore.owed()).toBe(false);
+    await vi.advanceTimersByTimeAsync(ATTENTION_DEBOUNCE_MS * 2);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+});

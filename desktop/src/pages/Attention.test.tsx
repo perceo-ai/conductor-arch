@@ -155,4 +155,22 @@ describe("Attention page", () => {
     await settle();
     expect(send.mock.calls.length).toBe(before + 1);
   });
+
+  it("does not claim the queue is empty while a refetch is owed", async () => {
+    items = [];
+    const host = mount();
+    await settle();
+    expect(host.textContent).toContain("Nothing needs you");
+    attentionStore.invalidate();
+    expect(host.textContent).not.toContain("Nothing needs you");
+    expect(host.textContent).toContain("Checking");
+  });
+
+  it("shows the error and not the empty text when the first fetch fails", async () => {
+    send.mockRejectedValueOnce(new Error("daemon down"));
+    const host = mount();
+    await settle();
+    expect(host.textContent).toContain("daemon down");
+    expect(host.textContent).not.toContain("Nothing needs you");
+  });
 });

@@ -111,6 +111,12 @@ export const attentionStore = {
 
   /** Fetch now, sharing a request already in flight. */
   refresh(): Promise<void> {
+    // This fetch answers whatever the pending window was waiting to ask.
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+      setOwed(false);
+    }
     return run();
   },
 
