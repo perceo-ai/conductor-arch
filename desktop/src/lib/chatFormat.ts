@@ -20,6 +20,10 @@ const DEFAULT_VERB: Record<string, string> = {
   file_card: "Read",
   diff_card: "Edited",
   skill_card: "Used",
+  // A hook that spoke back into the conversation. Claude delivers its words as
+  // a synthetic user record, so without a card of its own the hook's demand
+  // reads as something the human typed.
+  hook_feedback_card: "Hook",
   tool_card: "Used",
   plugin_card: "Used",
   subagent_card: "Used",
@@ -40,6 +44,57 @@ const ACTION_PREFIXES = new Set([
   "Deleted",
   "Searched",
 ]);
+
+// Providers title a tool card with the tool's own name: "Bash <command>",
+// "Edit <path>", "Write <path>". A tool name is not an action label, so putting
+// the per-class fallback in front of it named the tool twice and sometimes said
+// the wrong thing outright — "Ran Bash …", "Read Edit …", "Read Write …", where
+// the last claims a write was a read. The tool is what decides the verb, so it
+// supplies one and drops out of the chip.
+const TOOL_VERBS: Record<string, string> = {
+  bash: "Ran",
+  shell: "Ran",
+  exec: "Ran",
+  exec_command: "Ran",
+  read: "Read",
+  ls: "Read",
+  glob: "Read",
+  grep: "Searched",
+  search: "Searched",
+  write: "Wrote",
+  create: "Wrote",
+  edit: "Edited",
+  multiedit: "Edited",
+  notebookedit: "Edited",
+  apply_patch: "Edited",
+  patch: "Edited",
+};
+
+/** `(head, rest)` of a title: its first word and everything after it. */
+function splitHead(title: string): { head: string; rest: string } {
+  const space = title.indexOf(" ");
+  if (space === -1) return { head: title, rest: "" };
+  return { head: title.slice(0, space), rest: title.slice(space + 1).trim() };
+}
+
+/**
+ * The chip for a card whose content is one file: its name.
+ *
+ * A projected file title carries the absolute path, which is most of a row and
+ * tells the reader nothing they are not already looking at — the workspace is
+ * the same for every row. Commands already chip down to file names, so this
+ * keeps a file card reading like the rest of the timeline. Anything with a
+ * space in it is not a lone path and is left alone.
+ */
+function fileTargetChip(target: string): string {
+  const trimmed = target.trim();
+  if (!trimmed || /\s/.test(trimmed)) return trimmed;
+  return trimmed.split("/").filter(Boolean).at(-1) ?? trimmed;
+}
+
+function isFileCard(renderClass: string): boolean {
+  return renderClass === "file_card" || renderClass === "diff_card";
+}
 
 export function isInlineEventClass(renderClass: string): boolean {
   return renderClass in DEFAULT_VERB;
@@ -74,15 +129,22 @@ export function isRenderableClass(renderClass: string): boolean {
  */
 export function inlineEventVerbChip(renderClass: string, title: string): { verb: string; chip: string } {
   const trimmed = title.trim();
-  const space = trimmed.indexOf(" ");
-  const first = space === -1 ? trimmed : trimmed.slice(0, space);
+  const { head, rest } = splitHead(trimmed);
+  const toolVerb = TOOL_VERBS[head.toLowerCase()];
   if (isCommandCard(renderClass)) {
-    const command = first === "Ran" ? trimmed.slice(space + 1).trim() : trimmed;
+    // "Bash sed -n '1,80p' x" is a read, and the command decides that — so the
+    // tool's name comes off before the command is inspected, or claude's Bash
+    // cards never reach the read-only check that codex's already do.
+    const command = head === "Ran" || toolVerb ? rest : trimmed;
     const readChip = readOnlyCommandChip(command);
     if (readChip) return { verb: "Read", chip: readChip };
+    if (toolVerb) return { verb: toolVerb, chip: command };
   }
-  if (ACTION_PREFIXES.has(first)) {
-    return { verb: first, chip: trimmed.slice(space + 1).trim() };
+  if (toolVerb && !ACTION_PREFIXES.has(head)) {
+    return { verb: toolVerb, chip: isFileCard(renderClass) ? fileTargetChip(rest) : rest };
+  }
+  if (ACTION_PREFIXES.has(head)) {
+    return { verb: head, chip: isFileCard(renderClass) ? fileTargetChip(rest) : rest };
   }
   return { verb: DEFAULT_VERB[renderClass] ?? "Used", chip: trimmed };
 }
@@ -94,7 +156,10 @@ function isCommandCard(renderClass: string): boolean {
 function readOnlyCommandChip(command: string): string | null {
   const inner = unwrapShellCommand(command);
   if (!isReadOnlyCommand(inner)) return null;
-  return readableCommandTargets(inner) || firstCommandWord(inner);
+  // Files if the command names any, and otherwise the command itself: a search
+  // is defined by its pattern (`rg render_class`), and chipping that down to
+  // the program name alone threw away the only part worth reading.
+  return readableCommandTargets(inner) || inner;
 }
 
 function unwrapShellCommand(command: string): string {

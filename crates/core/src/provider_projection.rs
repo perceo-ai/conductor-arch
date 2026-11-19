@@ -26,6 +26,9 @@ pub enum ProviderProjectionCategory {
     Skill,
     Plugin,
     Hook,
+    /// What a hook said back into the conversation, as opposed to the hook
+    /// lifecycle records above.
+    HookFeedback,
     Subagent,
     NestedTranscript,
     BackgroundTerminal,
@@ -95,6 +98,7 @@ pub enum ProjectionRenderClass {
     SkillCard,
     PluginCard,
     HookCard,
+    HookFeedbackCard,
     SubagentCard,
     NestedTranscriptCard,
     BackgroundCard,
@@ -123,6 +127,7 @@ impl ProjectionRenderClass {
             Self::SkillCard => "skill_card",
             Self::PluginCard => "plugin_card",
             Self::HookCard => "hook_card",
+            Self::HookFeedbackCard => "hook_feedback_card",
             Self::SubagentCard => "subagent_card",
             Self::NestedTranscriptCard => "nested_transcript_card",
             Self::BackgroundCard => "background_card",
@@ -151,6 +156,7 @@ impl ProjectionRenderClass {
             Self::SkillCard => "skill",
             Self::PluginCard => "plugin",
             Self::HookCard => "hook",
+            Self::HookFeedbackCard => "hook",
             Self::SubagentCard => "subagent",
             Self::NestedTranscriptCard => "nested",
             Self::BackgroundCard => "background",
@@ -675,6 +681,9 @@ fn provider_projection_category(
         ProviderEventKind::SkillPluginHook if subtype.contains("plugin") => {
             ProviderProjectionCategory::Plugin
         }
+        ProviderEventKind::SkillPluginHook if subtype.contains("hook_feedback") => {
+            ProviderProjectionCategory::HookFeedback
+        }
         ProviderEventKind::SkillPluginHook if subtype.contains("hook") => {
             ProviderProjectionCategory::Hook
         }
@@ -789,6 +798,76 @@ fn canonical_projection_id(event: &ProviderProjectionEvent) -> String {
     }
 }
 
+/// Turn a file tool call's own arguments into something worth reading.
+///
+/// A provider streams a tool call's input as JSON fragments, which the store
+/// concatenates, so a finished Write card's body is
+/// `{"file_path": "…", "content": "…"}` and an Edit card's is the two strings it
+/// swapped — one escaped line, with the interesting part buried in it. The
+/// title already names the file; what the reader wants is the change. So show
+/// the written text, or the replacement as a two-sided diff, and show nothing
+/// at all for a read whose arguments are only the path it already displays.
+///
+/// Only a body that parses as a JSON object of known argument keys is touched:
+/// a tool *result* ("The file … has been updated successfully.") and a body
+/// still mid-stream are left exactly as they came.
+fn readable_file_tool_arguments(
+    category: ProviderProjectionCategory,
+    body: &str,
+) -> Option<String> {
+    if !matches!(
+        category,
+        ProviderProjectionCategory::FileRead
+            | ProviderProjectionCategory::FileWrite
+            | ProviderProjectionCategory::FilePatch
+    ) {
+        return None;
+    }
+    let arguments = serde_json::from_str::<Value>(body.trim()).ok()?;
+    let arguments = arguments.as_object()?;
+    if !arguments.contains_key("file_path") && !arguments.contains_key("notebook_path") {
+        return None;
+    }
+    let text = |key: &str| arguments.get(key).and_then(Value::as_str);
+
+    if let Some(content) = text("content").or_else(|| text("new_source")) {
+        return Some(content.to_owned());
+    }
+    if let Some(replacement) = replacement_diff(arguments) {
+        return Some(replacement);
+    }
+    if let Some(edits) = arguments.get("edits").and_then(Value::as_array) {
+        let blocks = edits
+            .iter()
+            .filter_map(|edit| replacement_diff(edit.as_object()?))
+            .collect::<Vec<_>>();
+        if !blocks.is_empty() {
+            return Some(blocks.join("\n\n"));
+        }
+    }
+    // A read's arguments are the path, an offset and a limit: the title says
+    // the first and the card is about to show the file itself.
+    Some(String::new())
+}
+
+/// `- old` / `+ new`, the way a diff reads, for one string swap.
+fn replacement_diff(arguments: &serde_json::Map<String, Value>) -> Option<String> {
+    let old = arguments.get("old_string").and_then(Value::as_str)?;
+    let new = arguments.get("new_string").and_then(Value::as_str)?;
+    let sided = |sign: char, text: &str| {
+        text.lines()
+            .map(|line| format!("{sign} {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let mut out = sided('-', old);
+    if !out.is_empty() && !new.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(&sided('+', new));
+    Some(out)
+}
+
 fn projection_item_from_event(
     id: String,
     event: ProviderProjectionEvent,
@@ -803,6 +882,9 @@ fn projection_item_from_event(
     {
         body = title_source;
         title_source = String::new();
+    }
+    if let Some(readable) = readable_file_tool_arguments(event.category, &body) {
+        body = readable;
     }
     let title = projection_title(event.category, &title_source);
     let raw_payload = event
@@ -860,6 +942,7 @@ fn render_class_for_category(category: ProviderProjectionCategory) -> Projection
         ProviderProjectionCategory::Skill => ProjectionRenderClass::SkillCard,
         ProviderProjectionCategory::Plugin => ProjectionRenderClass::PluginCard,
         ProviderProjectionCategory::Hook => ProjectionRenderClass::HookCard,
+        ProviderProjectionCategory::HookFeedback => ProjectionRenderClass::HookFeedbackCard,
         ProviderProjectionCategory::Subagent => ProjectionRenderClass::SubagentCard,
         ProviderProjectionCategory::NestedTranscript => ProjectionRenderClass::NestedTranscriptCard,
         ProviderProjectionCategory::BackgroundTerminal
@@ -902,6 +985,7 @@ fn projection_title(category: ProviderProjectionCategory, title: &str) -> String
         ProviderProjectionCategory::Skill => "Skill".to_owned(),
         ProviderProjectionCategory::Plugin => "Plugin".to_owned(),
         ProviderProjectionCategory::Hook => "Hook".to_owned(),
+        ProviderProjectionCategory::HookFeedback => "Hook feedback".to_owned(),
         ProviderProjectionCategory::Subagent => "Subagent".to_owned(),
         ProviderProjectionCategory::NestedTranscript => "Nested transcript".to_owned(),
         ProviderProjectionCategory::BackgroundTerminal => "Background terminal".to_owned(),
@@ -1551,6 +1635,124 @@ mod tests {
             chat.iter()
                 .all(|item| !item.body.contains("# Caveman Help")),
             "the skill body never reaches the transcript"
+        );
+    }
+
+    #[test]
+    fn a_file_tool_calls_arguments_read_as_the_change_they_make() {
+        // Claude streams tool input as JSON fragments, so a finished card's body
+        // was the raw call — `{"file_path": …, "old_string": …}` on one escaped
+        // line — which says nothing about what changed.
+        assert_eq!(
+            readable_file_tool_arguments(
+                ProviderProjectionCategory::FileWrite,
+                r#"{"file_path": "/ws/a.rs", "content": "fn main() {}\n"}"#,
+            )
+            .as_deref(),
+            Some("fn main() {}\n")
+        );
+        assert_eq!(
+            readable_file_tool_arguments(
+                ProviderProjectionCategory::FilePatch,
+                r#"{"file_path": "/ws/a.rs", "old_string": "let a = 1;", "new_string": "let a = 2;\nlet b = 3;"}"#,
+            )
+            .as_deref(),
+            Some("- let a = 1;\n+ let a = 2;\n+ let b = 3;")
+        );
+        // A read's arguments are the path the title already shows.
+        assert_eq!(
+            readable_file_tool_arguments(
+                ProviderProjectionCategory::FileRead,
+                r#"{"file_path": "/ws/a.rs", "offset": 10, "limit": 40}"#,
+            )
+            .as_deref(),
+            Some("")
+        );
+        // The tool's own answer, and a body still mid-stream, are left alone.
+        assert_eq!(
+            readable_file_tool_arguments(
+                ProviderProjectionCategory::FileWrite,
+                "File created successfully at: /ws/a.rs",
+            ),
+            None
+        );
+        assert_eq!(
+            readable_file_tool_arguments(
+                ProviderProjectionCategory::FileWrite,
+                r#"{"file_path": "/ws/a.rs", "content": "fn ma"#,
+            ),
+            None
+        );
+        // Another card's body is none of this function's business.
+        assert_eq!(
+            readable_file_tool_arguments(
+                ProviderProjectionCategory::Command,
+                r#"{"file_path": "/ws/a.rs", "content": "x"}"#,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn stop_hook_feedback_is_its_own_card_and_not_the_humans_turn() {
+        // A Stop hook that blocks arrives as a synthetic `type: "user"` record,
+        // so the chat credited the hook's demand to the person — and the next
+        // agent reading the thread saw an instruction nobody gave.
+        let native = concat!(
+            r#"{"type":"user","session_id":"s1","uuid":"u1","message":{"role":"user","content":[{"type":"text","text":"ship it"}]}}"#,
+            "\n",
+            r#"{"type":"user","session_id":"s1","uuid":"u2","isSynthetic":true,"message":{"role":"user","content":[{"type":"text","text":"Stop hook feedback:\nRecord this work before finishing."}]}}"#,
+            "\n",
+        );
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::provider_events::ProviderEventStore::new(temp.path().join("state.db"));
+        let mut latest = BTreeMap::new();
+
+        for (sequence, event) in parse_claude_stream_json_lines(native)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+        {
+            let mut draft =
+                event.into_provider_event_draft(crate::provider_events::ProviderEventContext {
+                    workspace_id: None,
+                    chat_thread_id: None,
+                    process_id: None,
+                    occurred_at_ms: sequence as u64,
+                    schema_version: 1,
+                    adapter_version: "claude-projection-test".to_owned(),
+                });
+            draft.provider_sequence = Some(sequence as i64);
+            let record = store.upsert_event(&draft).unwrap();
+            latest.insert(record.identity_key.clone(), record);
+        }
+
+        let projection = provider_projection_from_records(
+            &latest.into_values().collect::<Vec<ProviderEventRecord>>(),
+        );
+
+        // Only what the person typed is a user turn.
+        assert_eq!(
+            projection
+                .items
+                .iter()
+                .filter(|item| item.render_class == ProjectionRenderClass::UserChat)
+                .map(|item| item.body.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ship it"]
+        );
+        let hook = projection
+            .items
+            .iter()
+            .find(|item| item.render_class == ProjectionRenderClass::HookFeedbackCard)
+            .expect("the hook's words land on a card of their own");
+        assert_eq!(hook.title, "Stop hook");
+        assert_eq!(hook.body, "Record this work before finishing.");
+        // Every surface labels the row by who spoke; the hook is not the human.
+        assert_eq!(hook.render_class.role_label(), "hook");
+        assert!(
+            provider_projection_item_is_relevant_chat_event(hook),
+            "a hook that blocked the turn is worth showing"
         );
     }
 

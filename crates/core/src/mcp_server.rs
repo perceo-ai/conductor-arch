@@ -887,11 +887,24 @@ pub fn tool_definitions(options: McpOptions) -> Vec<Value> {
         .collect()
 }
 
-/// Which workspace a call belongs to when the caller did not say. Archductor
-/// registers one MCP server for the whole device, so the agent should not have
-/// to know a workspace name it never chose — the session's environment or the
-/// directory it is working in answers for it.
-fn default_workspace(client: &ArchcarClient) -> Option<String> {
+/// Which workspace a call belongs to when the caller did not say, plus every
+/// workspace name the daemon knows. Archductor registers one MCP server for the
+/// whole device, so the agent should not have to know a workspace name it never
+/// chose — the session's environment or the directory it is working in answers
+/// for it.
+///
+/// The names come back with it because the guard below needs them: deciding
+/// whether a caller-supplied name is a *different* workspace takes the list,
+/// and asking for it twice would be a second round trip.
+#[derive(Default)]
+struct SessionWorkspaceScope {
+    session: Option<String>,
+    /// `None` when the daemon did not answer, which is not the same as "no
+    /// workspaces" — the guard refuses rather than guesses.
+    known: Option<Vec<String>>,
+}
+
+fn session_workspace_scope(client: &ArchcarClient) -> SessionWorkspaceScope {
     let env_name = std::env::var(WORKSPACE_ENV)
         .ok()
         .map(|name| name.trim().to_owned())
@@ -900,9 +913,37 @@ fn default_workspace(client: &ArchcarClient) -> Option<String> {
         client.send(ArchcarRequest::ListWorkspaces).ok()
     else {
         // The daemon could not answer, so the environment's word stands.
-        return env_name;
+        return SessionWorkspaceScope {
+            session: env_name,
+            known: None,
+        };
     };
-    resolve_default_workspace(env_name, &workspaces, std::env::current_dir().ok())
+    SessionWorkspaceScope {
+        session: resolve_default_workspace(env_name, &workspaces, std::env::current_dir().ok()),
+        known: Some(
+            workspaces
+                .iter()
+                .map(|workspace| workspace.name.clone())
+                .collect(),
+        ),
+    }
+}
+
+/// Whether a caller-supplied workspace name is this session's own.
+///
+/// The session was told its workspace's name when it spawned, and
+/// `set_workspace_context` can rename the workspace mid-session, so the name
+/// the agent has in hand is routinely one rename out of date. Refusing it
+/// taught nothing — the workspace is the session's either way, and the agent
+/// has no way to learn the new name from the refusal. A supplied name is only
+/// another workspace when the daemon still has a workspace by that name; when
+/// the daemon did not answer we cannot tell, so the exact match is all that
+/// passes.
+fn supplied_is_session_workspace(supplied: &str, session: &str, known: Option<&[String]>) -> bool {
+    if supplied == session {
+        return true;
+    }
+    known.is_some_and(|known| !known.iter().any(|name| name == supplied))
 }
 
 fn resolve_default_workspace(
@@ -974,14 +1015,17 @@ fn bind_session_arguments(
         let supplied = optional_string(&Value::Object(object.clone()), "workspace");
         // Resolving costs a round trip when the environment does not answer, so
         // only ask when the value is actually going to be used.
-        let session = (profile == McpProfile::Session || supplied.is_none())
-            .then(|| default_workspace(client))
-            .flatten();
-        if let Some(session) = session {
+        let scope = if profile == McpProfile::Session || supplied.is_none() {
+            session_workspace_scope(client)
+        } else {
+            SessionWorkspaceScope::default()
+        };
+        let known = scope.known;
+        if let Some(session) = scope.session {
             if profile == McpProfile::Session {
                 if let Some(supplied) = supplied.as_deref() {
                     anyhow::ensure!(
-                        supplied == session,
+                        supplied_is_session_workspace(supplied, &session, known.as_deref()),
                         "this session belongs to workspace `{session}`, so it cannot act on \
                          `{supplied}`"
                     );
@@ -1463,6 +1507,38 @@ mod tests {
         assert!(refused.to_string().contains("lisbon"), "{refused}");
         assert_eq!(bound["workspace"], "berlin");
         assert_eq!(full["workspace"], "lisbon");
+    }
+
+    #[test]
+    fn a_workspaces_former_name_still_reaches_it_after_a_rename() {
+        // `set_workspace_context` renames the workspace out from under the name
+        // the session was given, so the next call carries a name the daemon no
+        // longer has. That is this session's own workspace, not another one.
+        let known = vec!["lisbon".to_owned(), "fix-mcp-server".to_owned()];
+
+        assert!(supplied_is_session_workspace(
+            "gnome",
+            "fix-mcp-server",
+            Some(&known)
+        ));
+        assert!(supplied_is_session_workspace(
+            "fix-mcp-server",
+            "fix-mcp-server",
+            Some(&known)
+        ));
+        // A workspace that still exists is somebody else's, renamed or not.
+        assert!(!supplied_is_session_workspace(
+            "lisbon",
+            "fix-mcp-server",
+            Some(&known)
+        ));
+        // Without the daemon's list a stale name is indistinguishable from
+        // another workspace, so only the exact name passes.
+        assert!(!supplied_is_session_workspace(
+            "gnome",
+            "fix-mcp-server",
+            None
+        ));
     }
 
     #[test]

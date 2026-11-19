@@ -5,6 +5,7 @@ import {
   formatActionCount,
   formatReasoningText,
   inlineEventVerbChip,
+  isRenderableClass,
   isSubagentAction,
   stripArchductorMetadata,
   stripSubagentFraming,
@@ -29,6 +30,40 @@ describe("inlineEventVerbChip", () => {
     });
   });
 
+  it("names a tool once, with the verb the tool actually performed", () => {
+    // Claude titles these with the tool's own name. The per-class fallback used
+    // to be prefixed on top: "Ran Bash …", "Read Edit …", and — saying the
+    // opposite of what happened — "Read Write …".
+    expect(inlineEventVerbChip("command_card", "Bash cargo fmt --all")).toEqual({
+      verb: "Ran",
+      chip: "cargo fmt --all",
+    });
+    expect(inlineEventVerbChip("file_card", "Write src/lib/chatFormat.ts")).toEqual({
+      verb: "Wrote",
+      chip: "chatFormat.ts",
+    });
+    expect(inlineEventVerbChip("file_card", "Edit /ws/gnome/crates/core/src/mcp_server.rs")).toEqual({
+      verb: "Edited",
+      chip: "mcp_server.rs",
+    });
+    expect(inlineEventVerbChip("file_card", "Grep hook_feedback")).toEqual({
+      verb: "Searched",
+      chip: "hook_feedback",
+    });
+    // A card that arrives before its arguments has nothing to chip, and the
+    // verb alone is still true.
+    expect(inlineEventVerbChip("file_card", "Write")).toEqual({ verb: "Wrote", chip: "" });
+  });
+
+  it("sees a read-only command through claude's Bash wrapper", () => {
+    // The command decides whether it is a read; the tool name in front of it
+    // used to hide that, so every claude `sed -n` read showed up as "Ran".
+    expect(inlineEventVerbChip("command_card", "Bash sed -n '1,70p' docs/guides/README.md")).toEqual({
+      verb: "Read",
+      chip: "README.md",
+    });
+  });
+
   it("renders provider file-read titles as Read events", () => {
     expect(inlineEventVerbChip("file_card", "Read README.md")).toEqual({
       verb: "Read",
@@ -42,6 +77,18 @@ describe("inlineEventVerbChip", () => {
         "**Summarizing live DB lock and timeout findings**\n\n**Investigating queue logs**",
       ),
     ).toBe("Summarizing live DB lock and timeout findings\n\nInvestigating queue logs");
+  });
+});
+
+describe("hook feedback cards", () => {
+  it("are shown, and as the hook talking rather than the person", () => {
+    // Core projects a blocking hook's words onto their own card; the timeline
+    // is a strict allowlist, so an unlisted class would silently vanish.
+    expect(isRenderableClass("hook_feedback_card")).toBe(true);
+    expect(inlineEventVerbChip("hook_feedback_card", "Stop hook")).toEqual({
+      verb: "Hook",
+      chip: "Stop hook",
+    });
   });
 });
 

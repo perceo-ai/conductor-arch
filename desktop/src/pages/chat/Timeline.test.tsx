@@ -145,6 +145,24 @@ describe("Timeline", () => {
     expect(mount().querySelector(".chat-timeline-scroll")).toBeTruthy();
   });
 
+  it("shows a blocking hook as its own row, not as the person's message", () => {
+    // Claude delivers hook feedback as a synthetic user record. Before core
+    // gave it a card, this row was a user bubble nobody sent.
+    items = [
+      projectionItem({
+        id: "hook",
+        render_class: "hook_feedback_card",
+        role_label: "hook",
+        title: "Stop hook",
+        body: "Record this work before finishing.",
+      }),
+    ];
+    const el = mount();
+
+    expect(el.querySelector(".chat-user-bubble")).toBeNull();
+    expect(el.textContent).toContain("Stop hook");
+  });
+
   describe("when the content grows without a new message", () => {
     async function mountScroller() {
       const observed = stubResizeObserver();
@@ -406,7 +424,9 @@ describe("Timeline", () => {
     // The delegation opens on its own work, and the launch line is all the
     // card itself has to say.
     const nested = el.querySelector(".chat-inline-event-nested")!;
-    expect(nested.textContent).toContain("Bash ls");
+    // "Read ls", not "Bash ls": the tool names itself once and the verb says
+    // what the command did.
+    expect(nested.textContent).toContain("ls");
     expect(nested.querySelector(".chat-nested-text")?.textContent).toContain(
       "The directory holds two files.",
     );

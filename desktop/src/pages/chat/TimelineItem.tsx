@@ -65,6 +65,7 @@ export function eventIcon(renderClass: string): IconName {
   if (renderClass === "diff_card") return "git-compare";
   if (renderClass === "reasoning_card") return "brain";
   if (renderClass === "skill_card" || renderClass === "tool_card" || renderClass === "plugin_card") return "wrench";
+  if (renderClass === "hook_feedback_card") return "alert";
   if (renderClass === "subagent_card" || renderClass === "nested_transcript_card") return "bolt";
   if (renderClass === DELEGATION_RENDER_CLASS) return "users";
   return "wrench";
