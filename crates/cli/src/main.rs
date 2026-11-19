@@ -188,7 +188,7 @@ enum Command {
     Status {
         /// Only this workspace.
         workspace: Option<String>,
-        /// One JSON document (schema_version 1) for programmatic use.
+        /// One JSON document (schema_version 2) for programmatic use.
         #[arg(long)]
         json: bool,
     },

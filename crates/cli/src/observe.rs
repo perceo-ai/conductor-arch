@@ -148,6 +148,7 @@ fn agent_summary(ws: &WorkspaceReport) -> String {
     let order = [
         AgentActivity::AwaitingInput,
         AgentActivity::Failed,
+        AgentActivity::Stalled,
         AgentActivity::Working,
         AgentActivity::Finished,
         AgentActivity::Stopped,

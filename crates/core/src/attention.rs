@@ -19,6 +19,8 @@ pub const STALL_THRESHOLD_SECONDS: u64 = 600;
 pub enum AttentionKind {
     AgentAsked,
     SessionFailed,
+    /// A live agent mid-turn with no progress past the stall threshold.
+    Stalled,
     TaskFinished,
     ChecksFailed,
     ReviewComments,
@@ -31,6 +33,7 @@ impl AttentionKind {
         match self {
             Self::AgentAsked => "agent_asked",
             Self::SessionFailed => "session_failed",
+            Self::Stalled => "stalled",
             Self::TaskFinished => "task_finished",
             Self::ChecksFailed => "checks_failed",
             Self::ReviewComments => "review_comments",
@@ -43,7 +46,7 @@ impl AttentionKind {
     fn rank(self) -> u8 {
         match self {
             Self::AgentAsked => 0,
-            Self::SessionFailed => 1,
+            Self::SessionFailed | Self::Stalled => 1,
             Self::TaskFinished => 2,
             Self::ChecksFailed => 3,
             Self::ReviewComments => 4,
@@ -133,6 +136,14 @@ pub fn derive_attention(
                     workspace,
                     ids,
                     "Session failed".to_string(),
+                ));
+            }
+            if session.state == AgentActivity::Stalled {
+                items.push(item(
+                    AttentionKind::Stalled,
+                    workspace,
+                    ids,
+                    "Agent looks stuck".to_string(),
                 ));
             }
             if session.alive
@@ -260,7 +271,7 @@ mod tests {
     fn workspace(name: &str, sessions: Vec<SessionReport>) -> WorkspaceReport {
         let state = sessions.iter().map(|s| s.state).max_by_key(|s| match s {
             AgentActivity::AwaitingInput => 4,
-            AgentActivity::Failed => 3,
+            AgentActivity::Failed | AgentActivity::Stalled => 3,
             AgentActivity::Working => 2,
             AgentActivity::Finished => 1,
             AgentActivity::Stopped => 0,
@@ -505,5 +516,27 @@ mod tests {
         s.alive = true;
         let queue = derive_attention(&report(vec![workspace("alpha", vec![s])]), &[], NOW_MS);
         assert_eq!(pairs(&queue), vec![(AttentionKind::Idle, "alpha")]);
+    }
+
+    #[test]
+    fn stalled_session_produces_a_stalled_item_ranked_with_failures() {
+        let stalled = workspace("zeta", vec![session(1, AgentActivity::Stalled)]);
+        let failed = workspace("beta", vec![session(2, AgentActivity::Failed)]);
+        let finished = workspace(
+            "alpha",
+            vec![{
+                let mut s = session(3, AgentActivity::Finished);
+                s.alive = false;
+                s
+            }],
+        );
+        let queue = derive_attention(&report(vec![finished, stalled, failed]), &[], NOW_MS);
+        assert_eq!(
+            pairs(&queue),
+            vec![
+                (AttentionKind::SessionFailed, "beta"),
+                (AttentionKind::Stalled, "zeta"),
+            ]
+        );
     }
 }
