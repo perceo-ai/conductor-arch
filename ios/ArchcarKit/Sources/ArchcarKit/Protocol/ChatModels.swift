@@ -111,6 +111,7 @@ public struct ProjectionItem: Decodable, Sendable, Identifiable, Hashable {
         case "subagent_card", "nested_transcript_card": "person.2"
         case "background_card": "clock.arrow.circlepath"
         case "hook_card": "link"
+        case "hook_feedback_card": "exclamationmark.bubble"
         case "image_card": "photo"
         default: "square.text.square"
         }

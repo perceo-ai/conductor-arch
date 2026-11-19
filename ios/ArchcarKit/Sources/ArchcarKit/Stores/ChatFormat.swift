@@ -25,6 +25,11 @@ public enum ChatFormat {
         "file_card": "Read",
         "diff_card": "Edited",
         "skill_card": "Used",
+        // A hook that spoke back into the conversation, e.g. a Stop hook
+        // blocking the turn. Claude delivers its words as a synthetic user
+        // record; core gives them a card of their own so they do not read as
+        // something the person typed, and an unlisted class is dropped here.
+        "hook_feedback_card": "Hook",
         "tool_card": "Used",
         "plugin_card": "Used",
         "subagent_card": "Used",

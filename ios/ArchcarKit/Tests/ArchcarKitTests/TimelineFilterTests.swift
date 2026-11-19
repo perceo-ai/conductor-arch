@@ -62,3 +62,24 @@ private func item(_ renderClass: String, stream: String = "complete", title: Str
     let kept = items.filter(ChatFormat.isDisplayable)
     #expect(kept.map(\.renderClass) == ["user_chat", "command_card", "assistant_chat"])
 }
+
+@Test func hookFeedbackSurvivesTheFilterAsAHookRow() throws {
+    // A blocking hook's explanation used to arrive as a user row. Core now
+    // projects it onto its own class; dropping that class would lose the
+    // hook's words from the phone entirely. The desktop renders it as an
+    // inline event row (verb "Hook", title as chip, body on expand), so the
+    // phone does the same rather than showing it as prose.
+    let feedback = try item("hook_feedback_card", title: "Stop hook")
+    #expect(ChatFormat.isDisplayable(feedback))
+    #expect(feedback.presentation == .card)
+    let label = ChatFormat.verbChip(renderClass: "hook_feedback_card", title: "Stop hook")
+    #expect(label.verb == "Hook")
+    #expect(label.chip == "Stop hook")
+
+    let kept = [
+        try item("user_chat"),
+        try item("hook_card", title: "SessionStart:startup"),
+        feedback,
+    ].filter(ChatFormat.isDisplayable)
+    #expect(kept.map(\.renderClass) == ["user_chat", "hook_feedback_card"])
+}

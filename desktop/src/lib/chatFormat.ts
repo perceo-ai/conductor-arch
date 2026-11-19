@@ -70,6 +70,19 @@ const TOOL_VERBS: Record<string, string> = {
   patch: "Edited",
 };
 
+/**
+ * True if a title's first word reads as a tool name a provider put in front,
+ * rather than as the start of a command.
+ *
+ * Claude titles a call `<Tool> <target>`, and its tool names are capitalized
+ * (`Bash`, `Read`, `LS`); a tool id like `apply_patch` is snake_case. Codex
+ * titles a command with the command itself, and a program typed at a shell is
+ * neither — so a bare `ls` or `bash -lc "pwd"` keeps its program name.
+ */
+function isProviderToolName(head: string): boolean {
+  return /^[A-Z]/.test(head) || head.includes("_");
+}
+
 /** `(head, rest)` of a title: its first word and everything after it. */
 function splitHead(title: string): { head: string; rest: string } {
   const space = title.indexOf(" ");
@@ -130,7 +143,7 @@ export function isRenderableClass(renderClass: string): boolean {
 export function inlineEventVerbChip(renderClass: string, title: string): { verb: string; chip: string } {
   const trimmed = title.trim();
   const { head, rest } = splitHead(trimmed);
-  const toolVerb = TOOL_VERBS[head.toLowerCase()];
+  const toolVerb = isProviderToolName(head) ? TOOL_VERBS[head.toLowerCase()] : undefined;
   if (isCommandCard(renderClass)) {
     // "Bash sed -n '1,80p' x" is a read, and the command decides that — so the
     // tool's name comes off before the command is inspected, or claude's Bash
@@ -177,17 +190,190 @@ function unquote(value: string): string {
   return trimmed.slice(1, -1).replace(/\\(["'\\])/g, "$1");
 }
 
+/**
+ * True only for a command that cannot have changed anything. A write shown as
+ * "Read a.ts" hides the command that changed a.ts, so anything this cannot see
+ * through is not a read: every command in a pipeline or list must be one, and
+ * a redirection into a file, a substitution, or a write flag rules it out.
+ */
 function isReadOnlyCommand(command: string): boolean {
-  const first = firstCommandWord(command);
-  if (!first) return false;
-  if (["cat", "find", "head", "ls", "nl", "pwd", "rg", "sed", "tail", "wc"].includes(first)) return true;
-  if (first === "git") return /^git\s+(?:diff|grep|log|show|status)(?:\s|$)/.test(command);
-  if (first === "gh") return /^gh\s+(?:api|pr\s+(?:checks|view|diff|status)|run\s+(?:list|view)|issue\s+(?:list|view))(?:\s|$)/.test(command);
-  return false;
+  const commands = simpleCommands(command);
+  return !!commands?.length && commands.every(isReadOnlyWords);
 }
 
-function firstCommandWord(command: string): string {
-  return command.trim().split(/\s+/, 1)[0]?.split("/").pop() ?? "";
+// find's actions that change or run something rather than list.
+const FIND_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf"]);
+
+function isReadOnlyWords(words: string[]): boolean {
+  const program = words[0].split("/").pop() ?? "";
+  const args = words.slice(1);
+  const [sub, action] = args;
+  switch (program) {
+    case "cat":
+    case "head":
+    case "ls":
+    case "nl":
+    case "pwd":
+    case "tail":
+    case "wc":
+      return true;
+    case "rg":
+      // --pre runs a program on every file.
+      return !args.some((arg) => arg === "--pre" || arg.startsWith("--pre="));
+    case "find":
+      return !args.some((arg) => FIND_ACTIONS.has(arg));
+    case "sed":
+      return isReadOnlySed(args);
+    case "git":
+      return /^(?:diff|grep|log|show|status)$/.test(sub ?? "") && !args.some((arg) => /^--output(?:=|$)/.test(arg));
+    case "gh":
+      if (sub === "api") {
+        // A method or a field makes it a request that can change something.
+        return !args.some((arg) => /^-[XfF]/.test(arg) || /^--(?:method|field|raw-field|input)(?:=|$)/.test(arg));
+      }
+      if (sub === "pr") return ["checks", "view", "diff", "status"].includes(action ?? "");
+      return (sub === "run" || sub === "issue") && ["list", "view"].includes(action ?? "");
+    default:
+      return false;
+  }
+}
+
+// sed options that change nothing about what the command can touch.
+const SED_SHORT_FLAGS = new Set(["n", "E", "r", "s", "u", "z"]);
+const SED_LONG_FLAGS = new Set([
+  "--quiet",
+  "--silent",
+  "--regexp-extended",
+  "--separate",
+  "--unbuffered",
+  "--null-data",
+  "--posix",
+  "--sandbox",
+]);
+
+/**
+ * True for a sed that only prints. Its options are read the way sed reads
+ * them — a script may be attached to `-e` or be the first operand — and each
+ * script must have a shape known to print: an addressed `p`/`q`/`d`/`=`/`l`, or
+ * an `s///` whose flags write nothing. Anything else (-i, -f, a `w` or `e`
+ * command however it is spelled) is not a read.
+ */
+function isReadOnlySed(args: string[]): boolean {
+  const scripts: string[] = [];
+  let operands = false;
+  let first: string | null = null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (operands || arg === "-" || !arg.startsWith("-")) {
+      if (first === null) first = arg;
+      continue;
+    }
+    if (arg === "--") {
+      operands = true;
+    } else if (arg.startsWith("--")) {
+      const [name, value] = arg.split(/=(.*)/s, 2);
+      if (name === "--expression") {
+        const script = value ?? args[++i];
+        if (script === undefined) return false;
+        scripts.push(script);
+      } else if (!SED_LONG_FLAGS.has(arg)) {
+        return false;
+      }
+    } else {
+      for (let j = 1; j < arg.length; j++) {
+        if (arg[j] === "e") {
+          const script = arg.slice(j + 1) || args[++i];
+          if (script === undefined) return false;
+          scripts.push(script);
+          break;
+        }
+        if (!SED_SHORT_FLAGS.has(arg[j])) return false;
+      }
+    }
+  }
+  if (!scripts.length && first !== null) scripts.push(first);
+  return scripts.length > 0 && scripts.every((script) => script.split(/[;\n]/).every(isPrintingSedCommand));
+}
+
+const SED_ADDRESS = String.raw`(?:\d+|\$|\/(?:[^\\/]|\\.)*\/)`;
+const SED_PRINT = new RegExp(String.raw`^${SED_ADDRESS}?(?:\s*,\s*(?:${SED_ADDRESS}|[+~]\d+))?\s*!?\s*[pPqd=l]?$`);
+// `s` with any delimiter; flags limited to the ones that write nothing.
+const SED_SUBSTITUTE = /^(?:\d+(?:,\d+)?)?\s*s(.)(?:(?!\1)[^\\]|\\.)*\1(?:(?!\1)[^\\]|\\.)*\1[gpiIm0-9]*$/;
+
+function isPrintingSedCommand(command: string): boolean {
+  const trimmed = command.trim();
+  return SED_PRINT.test(trimmed) || SED_SUBSTITUTE.test(trimmed);
+}
+
+/**
+ * A command line's simple commands, each as its words with quotes removed,
+ * split on unquoted `|`, `;`, `&`, `&&`, `||` and newlines. Null when the line
+ * does something the words do not show: a redirection into a file, a command
+ * or process substitution, a subshell, or a quote left open. `2>&1` and `>/dev/null` write no file and
+ * are let through.
+ */
+function simpleCommands(line: string): string[][] | null {
+  const commands: string[][] = [];
+  let words: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quote: string | null = null;
+  const endWord = () => {
+    if (inWord) words.push(word);
+    word = "";
+    inWord = false;
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length) commands.push(words);
+    words = [];
+  };
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else word += ch;
+      continue;
+    }
+    if (ch === "`" || (ch === "$" && line[i + 1] === "(")) return null;
+    if (ch === "\\") {
+      word += line[i + 1] ?? "";
+      inWord = true;
+      i++;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      inWord = true;
+    } else if (ch === "(") {
+      // `<(…)`, `=(…)` and subshells run a command of their own.
+      return null;
+    } else if (ch === ">") {
+      const harmless = line.slice(i).match(/^>>?\s*(?:&\d+|\/dev\/null)(?=[\s|;&]|$)/);
+      if (!harmless) return null;
+      // The fd number in front (`2>`) is part of the redirection, not a word.
+      if (/^\d+$/.test(word)) {
+        word = "";
+        inWord = false;
+      }
+      i += harmless[0].length - 1;
+    } else if (ch === "|" || ch === ";" || ch === "&" || ch === "\n") {
+      endCommand();
+    } else if (/\s/.test(ch)) {
+      endWord();
+    } else {
+      word += ch;
+      inWord = true;
+    }
+  }
+  if (quote) return null;
+  endCommand();
+  return commands;
 }
 
 function readableCommandTargets(command: string): string {
