@@ -146,6 +146,18 @@ pub fn derive_attention(
                     "Session failed".to_string(),
                 ));
             }
+            // Not running, and the last turn never finished: killed, exited
+            // unexpectedly, or interrupted by a daemon restart. The spec counts
+            // that with a session error, so it shares the kind and the rank;
+            // only the headline says which of the two happened.
+            if session.state == AgentActivity::Stopped {
+                items.push(item(
+                    AttentionKind::SessionFailed,
+                    workspace,
+                    ids,
+                    "Session stopped before finishing".to_string(),
+                ));
+            }
             if session.state == AgentActivity::Stalled {
                 items.push(item(
                     AttentionKind::Stalled,
@@ -544,6 +556,18 @@ mod tests {
         s.alive = true;
         let queue = derive_attention(&report(vec![workspace("alpha", vec![s])]), &[], NOW_MS);
         assert_eq!(pairs(&queue), vec![(AttentionKind::Idle, "alpha")]);
+    }
+
+    #[test]
+    fn stopped_session_is_reported_as_a_stopped_session() {
+        // Killed, exited unexpectedly, or interrupted by a daemon restart.
+        // The spec counts that with a session error, so it must not vanish.
+        let ws = workspace("alpha", vec![session(1, AgentActivity::Stopped)]);
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
+        assert_eq!(pairs(&queue), vec![(AttentionKind::SessionFailed, "alpha")]);
+        assert_eq!(queue.items[0].headline, "Session stopped before finishing");
+        assert_eq!(queue.items[0].rank, 1);
+        assert_eq!(queue.items[0].session_id, Some(1));
     }
 
     #[test]
