@@ -40,7 +40,16 @@ struct AttentionView: View {
                 }
             }
         }
-        .task(id: model.activeDaemon?.id) { await load() }
+        // Keyed on the session itself: it is set only after the connection is
+        // up, so a task keyed on the daemon id alone can run before it exists
+        // and never run again. A new session also means a new daemon or a
+        // reconnect, so whatever was loaded no longer applies.
+        .task(id: model.session.map(ObjectIdentifier.init)) {
+            queue = nil
+            loadError = nil
+            path = NavigationPath()
+            await load()
+        }
     }
 
     @ViewBuilder
@@ -49,7 +58,7 @@ struct AttentionView: View {
             LazyVStack(alignment: .leading, spacing: 6) {
                 if let queue {
                     if let date = queue.generatedDate {
-                        Text("As of \(date.formatted(date: .omitted, time: .shortened))")
+                        Text("As of \(Self.asOf(date))")
                             .font(Typeface.micro)
                             .foregroundStyle(palette.textMuted)
                     }
@@ -85,7 +94,15 @@ struct AttentionView: View {
     }
 
     private func workspace(for item: AttentionItem) -> WorkspaceSummary? {
-        model.workspaces?.workspaces.first { $0.name == item.workspace }
+        item.openableWorkspace(in: model.workspaces?.workspaces ?? [])
+    }
+
+    /// The time alone reads wrong once the queue is from another day.
+    private static func asOf(_ date: Date) -> String {
+        if Calendar.current.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
     }
 
     @ViewBuilder
@@ -143,13 +160,18 @@ struct AttentionView: View {
     private func load() async {
         guard let session = model.session else { return }
         do {
-            guard case .attention(let fetched) = try await session.request(ListAttentionRequest()) else {
+            let response = try await session.request(ListAttentionRequest())
+            // A result for a session that is no longer current (daemon switch
+            // while in flight) must not land on the new daemon's screen.
+            guard !Task.isCancelled, model.session === session else { return }
+            guard case .attention(let fetched) = response else {
                 loadError = UserFacingMessage.unexpectedResponse
                 return
             }
             queue = fetched
             loadError = nil
         } catch {
+            guard !Task.isCancelled, model.session === session else { return }
             loadError = UserFacingMessage.describing(error)
         }
     }

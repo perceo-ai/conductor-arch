@@ -73,8 +73,13 @@ public struct AttentionQueue: Decodable, Equatable, Sendable {
         case items
     }
 
+    /// Accepts fractional seconds too, which a daemon may emit.
     public var generatedDate: Date? {
-        ISO8601DateFormatter().date(from: generatedAt)
+        let plain = ISO8601DateFormatter()
+        if let date = plain.date(from: generatedAt) { return date }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: generatedAt)
     }
 }
 
@@ -114,5 +119,18 @@ public enum AttentionTier: Equatable, Sendable {
             }
         }
         return out
+    }
+}
+
+extension AttentionItem {
+    /// The workspace this row may navigate to, or nil when it names none.
+    ///
+    /// The daemon puts the *repository* name in `workspace` for a background
+    /// task with no workspace, so a name match alone is not enough: the
+    /// workspace must also belong to `repository`. Residual case: a workspace
+    /// named exactly like its own repository is indistinguishable from that
+    /// placeholder without a wire flag, and resolves to the workspace.
+    public func openableWorkspace(in workspaces: [WorkspaceSummary]) -> WorkspaceSummary? {
+        workspaces.first { $0.name == workspace && $0.repositoryName == repository }
     }
 }

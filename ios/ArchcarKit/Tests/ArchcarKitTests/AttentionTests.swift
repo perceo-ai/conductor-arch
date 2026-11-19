@@ -136,3 +136,34 @@ private func line(_ queue: String) -> String {
     #expect(queue.generatedDate == Date(timeIntervalSince1970: 1_795_127_316))
     #expect(AttentionQueue(generatedAt: "garbage", items: []).generatedDate == nil)
 }
+
+private func summary(_ name: String, repository: String) throws -> WorkspaceSummary {
+    let json = """
+    {"id":1,"name":"\(name)","repository_name":"\(repository)","path":"/w","branch":"b",\
+    "base_ref":"main","status":"active","open_todos":0,"open_tasks":0,"blocked_tasks":0,\
+    "active_sessions":0,"awaiting_input":false,"run_running":false,"changed_files":0,\
+    "diff_additions":0,"diff_deletions":0,"pull_request_number":null,"pull_request_state":null,\
+    "pull_request_url":null,"branch_ahead":null,"branch_behind":null,"updated_at":"0"}
+    """
+    return try JSONDecoder().decode(WorkspaceSummary.self, from: Data(json.utf8))
+}
+
+@Test func attentionGuardOpensOnlyAKnownWorkspaceOfTheItemsRepository() throws {
+    let known = [try summary("columbia", repository: "conductor-arch"),
+                 try summary("other", repository: "elsewhere")]
+    func item(_ workspace: String, _ repository: String) -> AttentionItem {
+        AttentionItem(kind: .stalled, workspace: workspace, repository: repository,
+                      threadID: nil, sessionID: nil, headline: "h", detail: nil, rank: 1)
+    }
+    #expect(item("columbia", "conductor-arch").openableWorkspace(in: known)?.name == "columbia")
+    // Repository placeholder for a workspace-less task: not a workspace.
+    #expect(item("smoke-repo", "smoke-repo").openableWorkspace(in: known) == nil)
+    // A real workspace of that name in a different repository must not match.
+    #expect(item("other", "conductor-arch").openableWorkspace(in: known) == nil)
+    #expect(item("columbia", "conductor-arch").openableWorkspace(in: []) == nil)
+}
+
+@Test func attentionGeneratedAtAcceptsFractionalSeconds() {
+    let queue = AttentionQueue(generatedAt: "2026-11-19T22:28:36.123Z", items: [])
+    #expect(queue.generatedDate != nil)
+}
