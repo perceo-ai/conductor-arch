@@ -70,6 +70,19 @@ const TOOL_VERBS: Record<string, string> = {
   patch: "Edited",
 };
 
+/**
+ * True if a title's first word reads as a tool name a provider put in front,
+ * rather than as the start of a command.
+ *
+ * Claude titles a call `<Tool> <target>`, and its tool names are capitalized
+ * (`Bash`, `Read`, `LS`); a tool id like `apply_patch` is snake_case. Codex
+ * titles a command with the command itself, and a program typed at a shell is
+ * neither — so a bare `ls` or `bash -lc "pwd"` keeps its program name.
+ */
+function isProviderToolName(head: string): boolean {
+  return /^[A-Z]/.test(head) || head.includes("_");
+}
+
 /** `(head, rest)` of a title: its first word and everything after it. */
 function splitHead(title: string): { head: string; rest: string } {
   const space = title.indexOf(" ");
@@ -130,7 +143,7 @@ export function isRenderableClass(renderClass: string): boolean {
 export function inlineEventVerbChip(renderClass: string, title: string): { verb: string; chip: string } {
   const trimmed = title.trim();
   const { head, rest } = splitHead(trimmed);
-  const toolVerb = TOOL_VERBS[head.toLowerCase()];
+  const toolVerb = isProviderToolName(head) ? TOOL_VERBS[head.toLowerCase()] : undefined;
   if (isCommandCard(renderClass)) {
     // "Bash sed -n '1,80p' x" is a read, and the command decides that — so the
     // tool's name comes off before the command is inspected, or claude's Bash
@@ -177,17 +190,127 @@ function unquote(value: string): string {
   return trimmed.slice(1, -1).replace(/\\(["'\\])/g, "$1");
 }
 
+/**
+ * True only for a command that cannot have changed anything. A write shown as
+ * "Read a.ts" hides the command that changed a.ts, so anything this cannot see
+ * through is not a read: every command in a pipeline or list must be one, and
+ * a redirection into a file, a substitution, or a write flag rules it out.
+ */
 function isReadOnlyCommand(command: string): boolean {
-  const first = firstCommandWord(command);
-  if (!first) return false;
-  if (["cat", "find", "head", "ls", "nl", "pwd", "rg", "sed", "tail", "wc"].includes(first)) return true;
-  if (first === "git") return /^git\s+(?:diff|grep|log|show|status)(?:\s|$)/.test(command);
-  if (first === "gh") return /^gh\s+(?:api|pr\s+(?:checks|view|diff|status)|run\s+(?:list|view)|issue\s+(?:list|view))(?:\s|$)/.test(command);
-  return false;
+  const commands = simpleCommands(command);
+  return !!commands?.length && commands.every(isReadOnlyWords);
 }
 
-function firstCommandWord(command: string): string {
-  return command.trim().split(/\s+/, 1)[0]?.split("/").pop() ?? "";
+// find's actions that change or run something rather than list.
+const FIND_ACTIONS = new Set(["-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf"]);
+
+function isReadOnlyWords(words: string[]): boolean {
+  const program = words[0].split("/").pop() ?? "";
+  const args = words.slice(1);
+  const [sub, action] = args;
+  switch (program) {
+    case "cat":
+    case "head":
+    case "ls":
+    case "nl":
+    case "pwd":
+    case "tail":
+    case "wc":
+      return true;
+    case "rg":
+      // --pre runs a program on every file.
+      return !args.some((arg) => arg === "--pre" || arg.startsWith("--pre="));
+    case "find":
+      return !args.some((arg) => FIND_ACTIONS.has(arg));
+    case "sed":
+      // -i edits in place; a script's w/e commands write a file or run one;
+      // a -f script cannot be inspected.
+      return !args.some(
+        (arg) =>
+          /^-[^-]*[if]/.test(arg) ||
+          /^--(?:in-place|file)(?:=|$)/.test(arg) ||
+          (!arg.startsWith("-") && /(?:^|[\s;{}/0-9$])[wWe](?:[\s;}]|$)/.test(arg)),
+      );
+    case "git":
+      return /^(?:diff|grep|log|show|status)$/.test(sub ?? "") && !args.some((arg) => /^--output(?:=|$)/.test(arg));
+    case "gh":
+      if (sub === "api") {
+        // A method or a field makes it a request that can change something.
+        return !args.some((arg) => /^-[XfF]/.test(arg) || /^--(?:method|field|raw-field|input)(?:=|$)/.test(arg));
+      }
+      if (sub === "pr") return ["checks", "view", "diff", "status"].includes(action ?? "");
+      return (sub === "run" || sub === "issue") && ["list", "view"].includes(action ?? "");
+    default:
+      return false;
+  }
+}
+
+/**
+ * A command line's simple commands, each as its words with quotes removed,
+ * split on unquoted `|`, `;`, `&`, `&&`, `||` and newlines. Null when the line
+ * does something the words do not show: a redirection into a file, a command
+ * substitution, or a quote left open. `2>&1` and `>/dev/null` write no file and
+ * are let through.
+ */
+function simpleCommands(line: string): string[][] | null {
+  const commands: string[][] = [];
+  let words: string[] = [];
+  let word = "";
+  let inWord = false;
+  let quote: string | null = null;
+  const endWord = () => {
+    if (inWord) words.push(word);
+    word = "";
+    inWord = false;
+  };
+  const endCommand = () => {
+    endWord();
+    if (words.length) commands.push(words);
+    words = [];
+  };
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else word += ch;
+      continue;
+    }
+    if (ch === "`" || (ch === "$" && line[i + 1] === "(")) return null;
+    if (ch === "\\") {
+      word += line[i + 1] ?? "";
+      inWord = true;
+      i++;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      inWord = true;
+    } else if (ch === ">") {
+      const harmless = line.slice(i).match(/^>>?\s*(?:&\d+|\/dev\/null)(?=[\s|;&]|$)/);
+      if (!harmless) return null;
+      // The fd number in front (`2>`) is part of the redirection, not a word.
+      if (/^\d+$/.test(word)) {
+        word = "";
+        inWord = false;
+      }
+      i += harmless[0].length - 1;
+    } else if (ch === "|" || ch === ";" || ch === "&" || ch === "\n") {
+      endCommand();
+    } else if (/\s/.test(ch)) {
+      endWord();
+    } else {
+      word += ch;
+      inWord = true;
+    }
+  }
+  if (quote) return null;
+  endCommand();
+  return commands;
 }
 
 function readableCommandTargets(command: string): string {
