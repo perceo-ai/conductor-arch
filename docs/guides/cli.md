@@ -74,15 +74,16 @@ An agent's `state` is one of:
 | state | meaning |
 | --- | --- |
 | `working` | alive and mid-turn: thinking, streaming, or running a tool |
+| `stalled` | alive and mid-turn, but nothing has moved for 10 minutes. Suspected stuck, not proven: a long silent tool such as a 15-minute build reads the same. Only reported when the daemon probed the agent itself, never on the recorded-PID fallback |
 | `awaiting_input` | alive and blocked on a person: a permission prompt, a question, a plan to approve, or a fresh chat with no task yet |
 | `finished` | the last turn completed successfully (idle, or exited) |
 | `failed` | the last turn ended in an error, or the daemon marked the session failed (even if its last turn succeeded) |
 | `stopped` | not running, and the last turn did not finish |
 
-`status --json` (`schema_version` 1):
+`status --json` (`schema_version` 2; version 1 had no `stalled` state, so a consumer that matched on the state list must handle it):
 
 ```json
-{"schema_version":1,"generated_at":"2026-09-30T09:09:58Z","workspaces":[
+{"schema_version":2,"generated_at":"2026-09-30T09:09:58Z","workspaces":[
   {"workspace":"fix-auth","repository":"my-app","status":"active","branch":"fix/auth",
    "has_upstream":true,"ahead":2,"behind":0,"additions":140,"deletions":8,"open_todos":0,
    "run_script":"stopped","state":"working",
@@ -102,6 +103,13 @@ archived workspace). `pr_url` is the workspace PR, else the newest PR an agent
 opened in its chat (`gh pr create` output), so "is it done, and where is the PR"
 needs no log search. `turn_outcome` is `running`, `success`, `failed`,
 `interrupted`, or `unknown` (an older turn with no recorded end).
+
+`archductor archcar attention` lists what needs you across every project and
+workspace, most urgent first, one line per item with a glyph for its kind
+(`?` agent asked, `!` session failed, `~` stalled, `+` task finished, `x`
+checks failed, `@` review comments, `*` diff ready, `.` idle). `--json` prints
+the whole queue document. An empty queue prints `Nothing needs you`. See
+[Running work in parallel](parallel-workspaces.md#knowing-which-workspace-needs-you).
 
 `chat` prints one line per step: `user:` requests, `assistant:` prose, a tool
 call as `Bash: cargo test --all` with its result clipped on the next line

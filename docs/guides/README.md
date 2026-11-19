@@ -7,7 +7,7 @@ are actually trying to get something done.
 | Guide | Read it when |
 | --- | --- |
 | [Your first workspace](first-workspace.md) | You installed it and want a merged PR by the end of the hour. |
-| [Running work in parallel](parallel-workspaces.md) | One workspace works and you want five. |
+| [Running work in parallel](parallel-workspaces.md) | One workspace works and you want five, and need to know which one wants you (the Attention queue). |
 | [Configuring a repository](repository-settings.md) | New workspaces need setup, ports, secrets, checks, or house rules. |
 | [Agent sessions](agent-sessions.md) | You want to drive agents well: queueing, steering, plan mode, background tasks, MCP. |
 | [Running the daemon on a server](remote-daemon.md) | The machine that should run the agents is not the machine in front of you. |

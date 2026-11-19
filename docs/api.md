@@ -169,6 +169,9 @@ Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
   staged concatenated under headings), whose sections overlapped. `scope`
   defaults to `"all"`, so clients that omit it keep the old default view.
   `get_commit_diff` takes an optional `path` to narrow a commit to one file.
+- Attention: `list_attention` returns `attention { queue }`, one ranked list of
+  what needs a human across every workspace on this daemon (read-only; cost
+  grows with active workspaces). CLI: `archductor archcar attention [--json]`.
 - Checks and review: configured check list/run/logs, review comments, PR
   draft/create/refresh/merge, readiness detail.
 - Background tasks: `start_background_task` (one or more managed agents via
