@@ -5507,7 +5507,10 @@ mod tests {
                     session_id: Some(12),
                     headline: "No progress".to_owned(),
                     detail: Some("12m".to_owned()),
-                    rank: 2,
+                    // Stalled is rank 1, tied with a failed session. A reader
+                    // takes this fixture as the contract, so it must agree
+                    // with `AttentionKind::rank`.
+                    rank: 1,
                 },
             ],
         };
@@ -5525,7 +5528,7 @@ mod tests {
                 r#""detail":null,"rank":0},"#,
                 r#"{"kind":"stalled","workspace":"oslo","repository":"conductor","#,
                 r#""thread_id":null,"session_id":12,"headline":"No progress","#,
-                r#""detail":"12m","rank":2}]}}"#
+                r#""detail":"12m","rank":1}]}}"#
             )
         );
         let decoded: ArchcarResponse = serde_json::from_str(&encoded).unwrap();

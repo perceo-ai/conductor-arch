@@ -109,6 +109,23 @@ fn in_archived_workspace(task: &BackgroundTask, report: &StatusReport) -> bool {
     })
 }
 
+/// Why a task's row goes nowhere, or `None` when it opens its workspace.
+///
+/// Both GUIs disable a row whose workspace they cannot find, so a row with no
+/// explanation reads as broken. Two cases have no workspace to open: a task
+/// that never got one (its `workspace_name` is unset and the repository name
+/// stands in), and one whose workspace has since been deleted.
+fn no_workspace_detail(task: &BackgroundTask, report: &StatusReport) -> Option<String> {
+    let Some(name) = task.workspace_name.as_deref() else {
+        return Some("No workspace was created for this task".to_string());
+    };
+    let known = report
+        .workspaces
+        .iter()
+        .any(|w| w.workspace == name && w.repository == task.repository_name);
+    (!known).then(|| format!("Workspace {name} no longer exists"))
+}
+
 /// Rank everything that wants the human. `generated_at` is carried over from
 /// the report so the two timestamps agree. `now_ms` bounds how long terminal
 /// background tasks linger.
@@ -231,10 +248,7 @@ pub fn derive_attention(
             thread_id: None,
             session_id: None,
             headline: format!("Background task {}: {}", task.status, task.title),
-            detail: task
-                .workspace_name
-                .is_none()
-                .then(|| "No workspace was created for this task".to_string()),
+            detail: no_workspace_detail(task, report),
             rank: AttentionKind::TaskFinished.rank(),
         });
     }
@@ -487,6 +501,25 @@ mod tests {
         t.updated_at = "not-a-number".into();
         let unparsed = derive_attention(&report(vec![]), &[t], NOW_MS + window_ms);
         assert_eq!(unparsed.items.len(), 1);
+    }
+
+    #[test]
+    fn terminal_task_whose_workspace_was_deleted_says_so() {
+        // The workspace is gone, so `workspace_name` names nothing the GUIs
+        // can open. The row is still shown, but it has to explain itself.
+        let queue = derive_attention(&report(vec![]), &[task("ready")], NOW_MS);
+        assert_eq!(pairs(&queue), vec![(AttentionKind::TaskFinished, "alpha")]);
+        assert_eq!(
+            queue.items[0].detail.as_deref(),
+            Some("Workspace alpha no longer exists")
+        );
+        // A live workspace needs no explanation: the row opens it.
+        let live = derive_attention(
+            &report(vec![workspace("alpha", vec![])]),
+            &[task("ready")],
+            NOW_MS,
+        );
+        assert_eq!(live.items[0].detail, None);
     }
 
     #[test]
