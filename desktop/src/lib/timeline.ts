@@ -1,5 +1,6 @@
 import type { ArchcarProjectionItem } from "@/bridge/protocol";
 import { isRenderableClass } from "./chatFormat";
+import { isLiveBackgroundAgent } from "./chatBusy";
 
 // Assistant answer text only renders once finalized to avoid partial markdown
 // churn. Reasoning/thinking and command/tool cards render live so the user can
@@ -139,13 +140,16 @@ export const NESTED_WINDOW_STEP = 50;
  * An interrupted turn leaves its tool cards marked running, so once the agent
  * is idle they stop spinning. A background task is the exception: it outlives
  * the turn that started it, and keeps running for as long as the session does.
+ * That includes a backgrounded subagent's `Agent` tool card, which the daemon
+ * folds the task card into: it is the row the user watches while the subagent
+ * works, and the same rows `activeSubagentCount` keeps the chat busy for.
  */
 export function showsRunning(
   item: ArchcarProjectionItem,
   agent: { idle: boolean; sessionAlive: boolean },
 ): boolean {
   if (item.status !== "running") return false;
-  if (item.render_class === "background_card") return agent.sessionAlive;
+  if (item.render_class === "background_card" || isLiveBackgroundAgent(item)) return agent.sessionAlive;
   return !agent.idle;
 }
 

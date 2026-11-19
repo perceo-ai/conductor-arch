@@ -1,0 +1,59 @@
+
+ RUN  v2.1.9 ~/archductor/workspaces/conductor-arch/fix-270-greptile-followup/desktop
+
+ ❯ src/lib/timeline.test.ts (32 tests | 2 failed) 14ms
+   × showsRunning > keeps a folded background subagent's Agent card running after the turn ends 5ms
+     → expected false to be true // Object.is equality
+   × showsRunning > agrees with the busy count on which rows are live background agents 1ms
+     → expected 1 to be 2 // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/timeline.test.ts > showsRunning > keeps a folded background subagent's Agent card running after the turn ends
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ src/lib/timeline.test.ts:217:69
+    215|     const agent = item({ render_class: "tool_card", status: "running",…
+    216|     expect(showsRunning(agent, { idle: false, sessionAlive: true })).t…
+    217|     expect(showsRunning(agent, { idle: true, sessionAlive: true })).to…
+       |                                                                     ^
+    218|     expect(showsRunning(agent, { idle: true, sessionAlive: false })).t…
+    219|     const done = { ...agent, status: "completed" };
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  src/lib/timeline.test.ts > showsRunning > agrees with the busy count on which rows are live background agents
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ src/lib/timeline.test.ts:230:66
+    228|     ];
+    229|     const idle = { idle: true, sessionAlive: true };
+    230|     expect(rows.filter((row) => showsRunning(row, idle)).length).toBe(…
+       |                                                                  ^
+    231|   });
+    232| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+ Test Files  1 failed (1)
+      Tests  2 failed | 30 passed (32)
+   Start at  13:53:08
+   Duration  273ms (transform 56ms, setup 0ms, collect 66ms, tests 14ms, environment 0ms, prepare 57ms)
+
+npm notice
+npm notice New major version of npm available! 11.17.0 -> 12.2.3
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.3
+npm notice To update run: npm install -g npm@12.2.3
+npm notice

@@ -567,6 +567,52 @@ describe("Timeline", () => {
     expect(card.querySelector(".chat-inline-event-spinner")).not.toBeNull();
   });
 
+  // The card #270 folds a backgrounded subagent into: the Agent tool card, not
+  // a background card. The main turn has ended, so only the agent mark keeps
+  // it live; then the task ends and its report lands on the same card.
+  it("keeps a folded background subagent's Agent card live after the turn, then shows its output", () => {
+    const agent = projectionItem({
+      id: "agent",
+      render_class: "tool_card",
+      title: "Agent two step",
+      body: "Working in the background.",
+      status: "running",
+      stream_state: "streaming",
+      background_agent: true,
+    });
+    const call = projectionItem({
+      id: "call",
+      render_class: "command_card",
+      title: "Bash rg render_class",
+      body: "",
+      parent_id: "agent",
+    });
+    setLiveItems([agent, call]);
+    const el = mount();
+    const toggle = () => el.querySelector<HTMLButtonElement>(".chat-inline-event-expander")!.click();
+    // Collapsed is where the header carries the latest action.
+    if (el.querySelector(".chat-inline-event-nested")) toggle();
+    const card = el.querySelector(".chat-inline-event")!;
+    expect(card.classList.contains("chat-inline-event-running")).toBe(true);
+    expect(card.querySelector(".chat-inline-event-spinner")).not.toBeNull();
+    expect(card.querySelector(".chat-inline-event-latest")?.textContent).toContain("rg render_class");
+
+    setLiveItems([
+      {
+        ...agent,
+        status: "complete",
+        stream_state: "complete",
+        body: "`one.txt` has 2 lines.\nOutput: /tmp/claude/sess/tasks/aea5a10fd8ec72dec.output",
+      },
+      call,
+    ]);
+    const done = el.querySelector(".chat-inline-event")!;
+    expect(done.classList.contains("chat-inline-event-running")).toBe(false);
+    expect(done.querySelector(".chat-inline-event-spinner")).toBeNull();
+    if (!el.querySelector(".chat-inline-event-nested")) toggle();
+    expect(el.textContent).toContain("Output: /tmp/claude/sess/tasks/aea5a10fd8ec72dec.output");
+  });
+
   it("marks a running command without attaching the looping loader", () => {
     setSession({ runtime_state: "running", ready: false });
     items = [

@@ -10,6 +10,7 @@ import {
   withoutPlanSource,
 } from "./timeline";
 import type { ArchcarProjectionItem } from "@/bridge/protocol";
+import { activeSubagentCount } from "./chatBusy";
 
 // Assistant text renders only when finalized; reasoning, command, and other
 // activity cards render live so the agent's current state is visible.
@@ -206,6 +207,27 @@ describe("showsRunning", () => {
   it("keeps a background task running after the turn ends, while the session lives", () => {
     expect(showsRunning(background, { idle: true, sessionAlive: true })).toBe(true);
     expect(showsRunning(background, { idle: true, sessionAlive: false })).toBe(false);
+  });
+
+  it("keeps a folded background subagent's Agent card running after the turn ends", () => {
+    // #270 folds the task card into the Agent tool card, so the row the user
+    // watches is a `tool_card` carrying the agent mark, not a background card.
+    const agent = item({ render_class: "tool_card", status: "running", background_agent: true });
+    expect(showsRunning(agent, { idle: false, sessionAlive: true })).toBe(true);
+    expect(showsRunning(agent, { idle: true, sessionAlive: true })).toBe(true);
+    expect(showsRunning(agent, { idle: true, sessionAlive: false })).toBe(false);
+    const done = { ...agent, status: "completed" };
+    expect(showsRunning(done, { idle: true, sessionAlive: true })).toBe(false);
+  });
+
+  it("agrees with the busy count on which rows are live background agents", () => {
+    const rows = [
+      item({ render_class: "tool_card", status: "running", background_agent: true }),
+      item({ render_class: "background_card", status: "running", background_agent: true }),
+      item({ render_class: "tool_card", status: "running" }),
+    ];
+    const idle = { idle: true, sessionAlive: true };
+    expect(rows.filter((row) => showsRunning(row, idle)).length).toBe(activeSubagentCount(rows));
   });
 
   it("never spins a finished card", () => {
