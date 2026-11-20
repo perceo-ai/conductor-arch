@@ -11,6 +11,19 @@
 export interface RefreshCoalescerOptions {
   /** Minimum gap between two runs for the same key. */
   intervalMs: number;
+  /**
+   * Whether the first request of a burst runs at once (default) or waits out a
+   * quiet window first.
+   *
+   * Leading is right when a refresh is cheap and latency is what matters — the
+   * chat path, where an isolated queued input is not something to sit on.
+   * Trailing-only is right when the refresh itself is expensive: one
+   * `list_workspaces` costs six git subprocesses per active workspace, and a
+   * turn start emits a spawn, a start and a ready in quick succession, so
+   * running the first and then a trailing one pays for the storm twice. iOS
+   * made the same call in `WorkspacesStore.drainCoalescedRefreshes`.
+   */
+  leading?: boolean;
   now?: () => number;
   schedule?: (fn: () => void, delayMs: number) => void;
 }
@@ -28,7 +41,7 @@ export function createRefreshCoalescer<K>(
   run: (key: K) => void,
   options: RefreshCoalescerOptions,
 ): RefreshCoalescer<K> {
-  const { intervalMs } = options;
+  const { intervalMs, leading = true } = options;
   const now = options.now ?? (() => Date.now());
   const schedule = options.schedule ?? ((fn, delayMs) => void setTimeout(fn, delayMs));
   const lastRunAt = new Map<K, number>();
@@ -50,16 +63,21 @@ export function createRefreshCoalescer<K>(
       if (scheduledFor.has(key)) return;
       const last = lastRunAt.get(key);
       const elapsed = last == null ? Infinity : now() - last;
-      if (elapsed >= intervalMs) {
+      if (leading && elapsed >= intervalMs) {
         runNow(key);
         return;
       }
       const scheduledGeneration = generation.get(key) ?? 0;
       scheduledFor.set(key, scheduledGeneration);
-      schedule(() => {
-        if (scheduledFor.get(key) !== scheduledGeneration) return;
-        runNow(key);
-      }, intervalMs - elapsed);
+      schedule(
+        () => {
+          if (scheduledFor.get(key) !== scheduledGeneration) return;
+          runNow(key);
+        },
+        // Without a leading run there is no previous run to measure from, so
+        // the wait is the whole window rather than what is left of it.
+        leading ? intervalMs - elapsed : intervalMs,
+      );
     },
 
     flush(key: K) {

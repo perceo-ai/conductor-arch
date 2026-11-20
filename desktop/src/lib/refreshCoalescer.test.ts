@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import { createRefreshCoalescer } from "./refreshCoalescer";
 
 /** Manual clock + scheduler so the tests assert behaviour, not wall time. */
-function harness(intervalMs = 100) {
+function harness(intervalMs = 100, leading = true) {
   let clock = 1_000;
   const timers: { at: number; fn: () => void }[] = [];
   const runs: number[] = [];
   const coalescer = createRefreshCoalescer<number>((key) => runs.push(key), {
     intervalMs,
+    leading,
     now: () => clock,
     schedule: (fn, delayMs) => void timers.push({ at: clock + delayMs, fn }),
   });
@@ -81,5 +82,33 @@ describe("createRefreshCoalescer", () => {
 
     advance(100); // the trailing timer fires into a superseded generation
     expect(runs).toEqual([7, 7]);
+  });
+});
+
+describe("createRefreshCoalescer with leading disabled", () => {
+  it("waits out a quiet window instead of running an isolated request at once", () => {
+    const { coalescer, runs, advance } = harness(250, false);
+    coalescer.request(7);
+    // Nothing yet: an inventory refresh costs six git subprocesses per active
+    // workspace, so it is worth 250ms of latency to find out whether more of
+    // the burst is coming.
+    expect(runs).toEqual([]);
+
+    advance(250);
+    expect(runs).toEqual([7]);
+  });
+
+  it("collapses a whole burst into a single run", () => {
+    const { coalescer, runs, advance } = harness(250, false);
+    for (let i = 0; i < 10; i += 1) coalescer.request(7);
+
+    advance(250);
+    expect(runs).toEqual([7]);
+  });
+
+  it("still runs a flush immediately", () => {
+    const { coalescer, runs } = harness(250, false);
+    coalescer.flush(7);
+    expect(runs).toEqual([7]);
   });
 });

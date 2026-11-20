@@ -1,0 +1,130 @@
+// @vitest-environment node
+//
+// Its own file on purpose. These assertions count RPCs, and the shared
+// reducer.test.ts leaks work across tests — an inventory refresh started by one
+// test's `turn_completed` lands a microtask later, on the next test's mock. A
+// separate module keeps the counts attributable to the event under test.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+interface MockApi {
+  request: ReturnType<typeof vi.fn>;
+  notify: ReturnType<typeof vi.fn>;
+  log: ReturnType<typeof vi.fn>;
+}
+
+let api: MockApi;
+
+beforeEach(() => {
+  vi.resetModules();
+  api = {
+    request: vi.fn(async (req: { type: string; thread_id?: number }) => {
+      if (req.type === "get_chat_snapshot") {
+        return {
+          type: "chat_snapshot",
+          snapshot: {
+            thread_id: req.thread_id,
+            messages: [],
+            events: [],
+            provider_events: [],
+            queued_inputs: [],
+            live_session: undefined,
+          },
+        };
+      }
+      if (req.type === "get_chat_projection") {
+        return { type: "chat_projection", thread_id: req.thread_id, items: [] };
+      }
+      if (req.type === "list_workspaces") return { type: "workspaces", workspaces: [] };
+      if (req.type === "list_chat_threads") return { type: "chat_threads", threads: [] };
+      return { type: "ack" };
+    }),
+    notify: vi.fn(async () => ({ ok: true })),
+    log: vi.fn(),
+  };
+  (globalThis as unknown as { window: { archductor: MockApi } }).window = { archductor: api };
+});
+
+afterEach(() => {
+  delete (globalThis as { window?: unknown }).window;
+});
+
+describe("applyEvent inventory refresh cost", () => {
+  // Fake timers throughout: the inventory coalescer is trailing-only, so these
+  // tests are about what happens at the end of a quiet window. Real timers also
+  // leak a pending refresh from one test into the next, which made the
+  // assertions depend on test order.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  function inventoryCalls() {
+    return api.request.mock.calls
+      .map(([req]) => (req as { type: string }).type)
+      .filter((type) => type === "list_workspaces");
+  }
+
+  it("collapses a burst of session_started events into one inventory refresh", async () => {
+    const { applyEvent } = await import("./reducer");
+
+    for (let i = 1; i <= 10; i += 1) {
+      applyEvent({
+        type: "session_started",
+        session_id: 100 + i,
+        thread_id: i,
+        workspace: `ws-${i}`,
+        kind: "claude",
+        pid: 1000 + i,
+      });
+    }
+    expect(inventoryCalls()).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(250);
+
+    // One trailing refresh for the whole burst, not one per event. Each
+    // list_workspaces costs the daemon six git subprocesses per active
+    // workspace, so ten of them is the difference between 450ms and 4.5s.
+    expect(inventoryCalls()).toHaveLength(1);
+  });
+
+  it("does not refresh the inventory for a streamed token", async () => {
+    const { applyEvent } = await import("./reducer");
+
+    applyEvent({ type: "session_messages_updated", thread_id: 3 });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(inventoryCalls()).toHaveLength(0);
+  });
+
+  it("does not refresh the inventory for a queued input", async () => {
+    const { applyEvent } = await import("./reducer");
+
+    applyEvent({ type: "chat_queue_updated", thread_id: 3 });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(inventoryCalls()).toHaveLength(0);
+  });
+
+  it("refreshes the inventory immediately when a turn completes", async () => {
+    const { applyEvent } = await import("./reducer");
+
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "success" });
+
+    // The end of a turn is the state the user reads; it must not wait out an
+    // interval.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(inventoryCalls()).toHaveLength(1);
+  });
+});
+
+describe("chat refresh interval", () => {
+  it("is 250ms", async () => {
+    const { CHAT_REFRESH_INTERVAL_MS } = await import("./reducer");
+
+    expect(CHAT_REFRESH_INTERVAL_MS).toBe(250);
+  });
+});
