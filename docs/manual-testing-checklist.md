@@ -215,6 +215,10 @@ Linear checks.
 - [ ] During active Codex generation, press Ctrl+Enter and confirm the user
   message appears immediately and steers the active turn; if the turn finishes
   concurrently, confirm a new turn starts without an error.
+- [ ] During a Claude turn that is running a tool, press stop; confirm the turn
+  ends marked interrupted rather than failed, the session stays ready, and the
+  next message starts a new turn in the same chat. Repeat with
+  `archductor archcar interrupt <session-id>` for the CLI surface.
 - [ ] Confirm contract version 1 capability snapshots list the full required
   baseline for both Codex and Claude Code through
   `archductor archcar status <session-id>`.

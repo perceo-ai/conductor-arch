@@ -97,7 +97,9 @@ wrong way; use the normal queue for everything else. Interrupting a good turn
 to add a nice-to-have wastes the turn.
 
 `archductor archcar interrupt <session-id>` stops the turn without sending
-anything.
+anything. It stops the turn, not the session: the agent stays up, the turn ends
+marked interrupted, and the next message you send goes into a new turn. (In the
+app that is the stop button the composer shows while a turn runs.)
 
 Steering needs an agent that can take input mid-turn, and Codex and Claude can.
 ACP agents such as Devin and Gemini take one prompt at a time, so for them
