@@ -11398,6 +11398,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -11475,6 +11476,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         // A loop that takes the command and then dies — the daemon restart
@@ -11547,6 +11549,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let loop_stand_in = pump_one_input_write(
@@ -11631,6 +11634,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let loop_stand_in = pump_one_input_write(
