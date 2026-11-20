@@ -165,6 +165,14 @@ Items, most urgent first (session failed and stalled share a rank, so they inter
 | diff ready | a workspace has changes and its agent has finished with nothing queued |
 | idle | a live agent finished its turn and has nothing queued: a free lane (an exited session does not count) |
 
+The queue is derived on demand, never stored. The sweep behind it is not cheap
+(several git calls per active workspace), so the daemon serves one derivation to
+every surface for a few seconds, and drops it the moment anything could have
+changed the answer: a request that changes something, or an event — a turn
+ending, a session dying, a question asked or answered, a background task or
+chat queue moving. So a surface that has just acted always reads a fresh
+queue.
+
 Within a rank the order is total and stable (workspace, repository, session, then headline), so the list does
 not shuffle between refreshes. Archived workspaces never appear.
 

@@ -171,7 +171,10 @@ Near-parity across RPC, CLI (`archductor archcar <cmd>`), and MCP tools:
   `get_commit_diff` takes an optional `path` to narrow a commit to one file.
 - Attention: `list_attention` returns `attention { queue }`, one ranked list of
   what needs a human across every workspace on this daemon (read-only; cost
-  grows with active workspaces). CLI: `archductor archcar attention [--json]`.
+  grows with active workspaces, so the daemon serves one derivation to every
+  client for a few seconds, and drops it as soon as a client changes anything
+  or an event changes what the queue would say). It is an RPC with a CLI command
+  (`archductor archcar attention [--json]`); there is no MCP tool for it.
 - Checks and review: configured check list/run/logs, review comments, PR
   draft/create/refresh/merge, readiness detail.
 - Background tasks: `start_background_task` (one or more managed agents via
