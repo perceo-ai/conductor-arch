@@ -4377,6 +4377,17 @@ fn attention_with_cache(
         let sweep_fn = sweep
             .take()
             .expect("only one pass through this loop ever becomes the lead");
+        // Release the slot and wake its waiters even if `sweep_fn` unwinds.
+        // The sweep calls `.lock().unwrap()` on both the server state and a
+        // session snapshot, so a mutex poisoned anywhere else in the daemon
+        // makes it panic — and a slot left registered with no result parks
+        // every later reader on `cond` for the rest of the process's life.
+        // Before sharing was added, such a panic cost exactly one request.
+        let mut registered = SweepSlotGuard {
+            state,
+            slot: slot.clone(),
+            finished: false,
+        };
         let result = sweep_fn();
         // The sweep takes seconds, and anything that landed while it ran — the
         // human answering the very question this queue still lists — invalidated
@@ -4408,7 +4419,35 @@ fn attention_with_cache(
                 .map(Clone::clone)
                 .map_err(|err| err.to_string()),
         );
+        registered.finished = true;
         return result;
+    }
+}
+
+/// Releases the in-flight sweep slot and wakes its waiters even when the
+/// sweep unwinds, so one panicking sweep cannot wedge every later reader.
+struct SweepSlotGuard<'a> {
+    state: &'a Arc<Mutex<ServerState>>,
+    slot: Arc<SweepInFlight>,
+    finished: bool,
+}
+
+impl Drop for SweepSlotGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if let Ok(mut guard) = self.state.lock() {
+            if guard
+                .attention_sweep
+                .as_ref()
+                .is_some_and(|slot| Arc::ptr_eq(slot, &self.slot))
+            {
+                guard.attention_sweep = None;
+            }
+        }
+        self.slot
+            .finish(Err("the attention sweep did not complete".to_owned()));
     }
 }
 
@@ -13169,6 +13208,100 @@ default = true
                 || cached.unwrap().queue.items[0].headline == "fresh sweep after the mutation",
             "the pre-mutation queue was memoized instead of the fresh one"
         );
+    }
+
+    #[test]
+    fn qa_a_waiter_is_not_served_a_sweep_a_mutation_invalidated_before_it_arrived() {
+        // qa's independently-written probe for the same hazard as the test
+        // above, with a different interleaving: here the mutation completes
+        // *before* the waiter even calls `attention_with_cache`, not while
+        // it is blocked in `wait()`. Kept verbatim (qa's naming) because it
+        // exercises the barrier ordering from the other side: on base, every
+        // miss ran its own sweep, so this reader would have swept the
+        // post-change world itself; the sharing this PR adds is what makes
+        // the pre-change answer reachable here at all.
+        let temp = tempfile::tempdir().unwrap();
+        let state = bare_state(temp.path());
+        let registered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let lead_registered = Arc::clone(&registered);
+        let lead_release = Arc::clone(&release);
+        let lead_state = Arc::clone(&state);
+
+        let lead = thread::spawn(move || {
+            attention_with_cache(&lead_state, ATTENTION_CACHE_TTL, move || {
+                // The slot is registered before `sweep()` runs; the world is
+                // read here, i.e. before the mutation below.
+                lead_registered.wait();
+                lead_release.wait();
+                Ok(marked_queue("the world before the change"))
+            })
+        });
+        registered.wait();
+
+        // The mutation completes now: after the lead read the world, before
+        // the reader below asks. This is the very post-dispatch invalidation
+        // this PR adds.
+        invalidate_attention_cache(&mut state.lock().unwrap());
+
+        // Let the lead finish only once the reader has parked on its slot.
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            release.wait();
+        });
+
+        let served = attention_with_cache(&state, ATTENTION_CACHE_TTL, || {
+            Ok(marked_queue("the world after the change"))
+        })
+        .unwrap();
+        lead.join().unwrap().unwrap();
+        releaser.join().unwrap();
+
+        assert_eq!(
+            served.items[0].headline, "the world after the change",
+            "a reader that arrived after the mutation completed was handed the \
+             invalidated sweep's queue instead of a fresh one"
+        );
+    }
+
+    #[test]
+    fn qa_a_panicking_sweep_does_not_wedge_every_later_reader() {
+        // The in-flight slot was cleared on the success path only. A sweep
+        // that unwinds left it registered with no result, so every later
+        // reader blocked on its condvar for the daemon's remaining lifetime
+        // — a permanent hang of ListAttention, where base would have failed
+        // exactly one request. `SweepSlotGuard` closes this.
+        let temp = tempfile::tempdir().unwrap();
+        let state = bare_state(temp.path());
+        let panicking_state = Arc::clone(&state);
+        let outcome = thread::spawn(move || {
+            attention_with_cache(&panicking_state, ATTENTION_CACHE_TTL, || {
+                panic!("a sweep blew up");
+            })
+        })
+        .join();
+        assert!(outcome.is_err(), "the sweep was supposed to panic");
+
+        let (tx, rx) = mpsc::channel();
+        let later_state = Arc::clone(&state);
+        thread::spawn(move || {
+            let _ = tx.send(
+                attention_with_cache(&later_state, ATTENTION_CACHE_TTL, || {
+                    Ok(marked_queue("served after the panic"))
+                })
+                .map(|queue| queue.items[0].headline.clone())
+                .map_err(|err| err.to_string()),
+            );
+        });
+        match rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(Ok(headline)) => assert_eq!(headline, "served after the panic"),
+            Ok(Err(message)) => panic!("the later reader failed: {message}"),
+            Err(_) => panic!(
+                "a later reader never returned: the panicked sweep left its \
+                 in-flight slot registered, so every subsequent ListAttention \
+                 blocks forever"
+            ),
+        }
     }
 
     #[test]
