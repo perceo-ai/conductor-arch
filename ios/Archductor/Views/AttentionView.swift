@@ -150,7 +150,7 @@ struct AttentionView: View {
         case .sessionFailed, .checksFailed: "xmark.circle"
         case .stalled: "exclamationmark.circle"
         case .taskFinished: "checkmark.circle"
-        case .reviewComments: "text.bubble"
+        case .prOpen: "arrow.triangle.pull"
         case .diffReady: "plusminus.circle"
         case .idle: "circle.dotted"
         case .unknown: "circle"

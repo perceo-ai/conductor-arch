@@ -107,7 +107,7 @@ needs no log search. `turn_outcome` is `running`, `success`, `failed`,
 `archductor archcar attention` lists what needs you across every project and
 workspace, most urgent first, one line per item with a glyph for its kind
 (`?` agent asked, `!` session failed, `~` stalled, `+` task finished, `x`
-checks failed, `@` review comments, `*` diff ready, `.` idle). `--json` prints
+checks failed, `o` open pull request, `*` diff ready, `.` idle). `--json` prints
 the whole queue document. An empty queue prints `Nothing needs you`. See
 [Running work in parallel](parallel-workspaces.md#knowing-which-workspace-needs-you).
 

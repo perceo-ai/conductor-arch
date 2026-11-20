@@ -5,7 +5,7 @@ import Foundation
 /// whole queue.
 public enum AttentionKind: Equatable, Sendable, Decodable {
     case agentAsked, sessionFailed, stalled, taskFinished
-    case checksFailed, reviewComments, diffReady, idle
+    case checksFailed, prOpen, diffReady, idle
     case unknown(String)
 
     public init(from decoder: Decoder) throws {
@@ -16,7 +16,7 @@ public enum AttentionKind: Equatable, Sendable, Decodable {
         case "stalled": self = .stalled
         case "task_finished": self = .taskFinished
         case "checks_failed": self = .checksFailed
-        case "review_comments": self = .reviewComments
+        case "pr_open": self = .prOpen
         case "diff_ready": self = .diffReady
         case "idle": self = .idle
         default: self = .unknown(raw)

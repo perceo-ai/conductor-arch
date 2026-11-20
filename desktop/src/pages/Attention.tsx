@@ -30,7 +30,7 @@ const KIND_ICON: Record<AttentionKind, "circle-help" | "circle-x" | "alert-circl
   stalled: "alert-circle",
   task_finished: "circle-check",
   checks_failed: "circle-x",
-  review_comments: "git-pull-request",
+  pr_open: "git-pull-request",
   diff_ready: "git-compare",
   idle: "circle-dot",
 };
@@ -43,7 +43,7 @@ const KIND_LABEL: Record<AttentionKind, string> = {
   stalled: "Might be stuck",
   task_finished: "Background task finished",
   checks_failed: "Checks failed",
-  review_comments: "Review comments",
+  pr_open: "Open pull request",
   diff_ready: "Diff ready",
   idle: "Idle",
 };

@@ -137,6 +137,15 @@ describe("Attention page", () => {
     expect(selectWorkspace).not.toHaveBeenCalled();
   });
 
+  it("labels an open pull request as what it detects, not as comments", async () => {
+    items = [item({ kind: "pr_open", rank: 4, headline: "PR #7 is waiting on review" })];
+    const host = mount();
+    await settle();
+    const row = host.querySelector("[data-attention-row]")!;
+    expect(row.getAttribute("title")).toBe("Open pull request");
+    expect(host.textContent).not.toContain("Review comments");
+  });
+
   it("shows a placeholder, not blank space, until the first answer lands", async () => {
     items = [];
     const host = mount();

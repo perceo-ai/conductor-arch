@@ -304,7 +304,7 @@ export type AttentionKind =
   | "stalled"
   | "task_finished"
   | "checks_failed"
-  | "review_comments"
+  | "pr_open"
   | "diff_ready"
   | "idle";
 

@@ -161,7 +161,7 @@ Items, most urgent first (session failed and stalled share a rank, so they inter
 | stalled | an agent is alive and mid-turn but has shown no progress for 10 minutes |
 | task finished | a background task reached a terminal state in the last 24 hours (a task whose timestamp cannot be parsed is kept, not dropped) |
 | checks failed | a PR's checks are reported as failing |
-| review comments | an open PR is waiting on review |
+| open pull request | a PR for the workspace is open and waiting on review (this does not read review comments or merge blockers) |
 | diff ready | a workspace has changes and its agent has finished with nothing queued |
 | idle | a live agent finished its turn and has nothing queued: a free lane (an exited session does not count) |
 

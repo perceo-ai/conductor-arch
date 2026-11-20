@@ -71,7 +71,7 @@ private func line(_ queue: String) -> String {
 
 @Test func attentionDecodesEveryKnownKind() throws {
     let kinds = ["agent_asked", "session_failed", "stalled", "task_finished",
-                 "checks_failed", "review_comments", "diff_ready", "idle"]
+                 "checks_failed", "pr_open", "diff_ready", "idle"]
     let items = kinds.map {
         #"{"kind":"\#($0)","workspace":"w","repository":"r","thread_id":null,"session_id":null,"headline":"h","detail":null,"rank":0}"#
     }.joined(separator: ",")
@@ -82,7 +82,7 @@ private func line(_ queue: String) -> String {
     }
     #expect(queue.items.map(\.kind) == [
         .agentAsked, .sessionFailed, .stalled, .taskFinished,
-        .checksFailed, .reviewComments, .diffReady, .idle,
+        .checksFailed, .prOpen, .diffReady, .idle,
     ])
 }
 

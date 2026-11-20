@@ -4539,7 +4539,7 @@ fn attention_glyph(kind: AttentionKind) -> char {
         AttentionKind::Stalled => '~',
         AttentionKind::TaskFinished => '+',
         AttentionKind::ChecksFailed => 'x',
-        AttentionKind::ReviewComments => '@',
+        AttentionKind::PrOpen => 'o',
         AttentionKind::DiffReady => '*',
         AttentionKind::Idle => '.',
     }

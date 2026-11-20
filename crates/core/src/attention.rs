@@ -23,7 +23,9 @@ pub enum AttentionKind {
     Stalled,
     TaskFinished,
     ChecksFailed,
-    ReviewComments,
+    /// An open pull request, waiting on review. This detects "a PR is open",
+    /// not "there are new review comments": nothing here reads comments.
+    PrOpen,
     DiffReady,
     Idle,
 }
@@ -36,7 +38,7 @@ impl AttentionKind {
             Self::Stalled => "stalled",
             Self::TaskFinished => "task_finished",
             Self::ChecksFailed => "checks_failed",
-            Self::ReviewComments => "review_comments",
+            Self::PrOpen => "pr_open",
             Self::DiffReady => "diff_ready",
             Self::Idle => "idle",
         }
@@ -49,7 +51,7 @@ impl AttentionKind {
             Self::SessionFailed | Self::Stalled => 1,
             Self::TaskFinished => 2,
             Self::ChecksFailed => 3,
-            Self::ReviewComments => 4,
+            Self::PrOpen => 4,
             Self::DiffReady => 5,
             Self::Idle => 6,
         }
@@ -210,7 +212,7 @@ pub fn derive_attention(
             }
             if pr.state == "open" {
                 items.push(item(
-                    AttentionKind::ReviewComments,
+                    AttentionKind::PrOpen,
                     workspace,
                     None,
                     format!("PR #{} is waiting on review", pr.number),
@@ -460,9 +462,25 @@ mod tests {
             pairs(&queue),
             vec![
                 (AttentionKind::ChecksFailed, "alpha"),
-                (AttentionKind::ReviewComments, "alpha"),
+                (AttentionKind::PrOpen, "alpha"),
             ]
         );
+    }
+
+    #[test]
+    fn an_open_pr_is_named_for_what_it_detects_not_for_comments() {
+        // Nothing here reads review comments or merge blockers, so the kind
+        // must not claim them: every surface labels itself from this name.
+        let mut ws = workspace("alpha", vec![]);
+        ws.pr = Some(pr("open", None));
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
+        assert_eq!(pairs(&queue), vec![(AttentionKind::PrOpen, "alpha")]);
+        assert_eq!(AttentionKind::PrOpen.as_str(), "pr_open");
+        assert_eq!(
+            serde_json::to_value(AttentionKind::PrOpen).unwrap(),
+            serde_json::json!("pr_open")
+        );
+        assert_eq!(queue.items[0].rank, 4);
     }
 
     #[test]
