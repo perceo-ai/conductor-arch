@@ -1,0 +1,10 @@
+
+ RUN  v2.1.9 ~/archductor/workspaces/conductor-arch/fix-270-greptile-followup/desktop
+
+ ✓ src/pages/chat/Timeline.test.tsx (27 tests | 26 skipped) 45ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 26 skipped (27)
+   Start at  14:01:25
+   Duration  2.62s (transform 995ms, setup 0ms, collect 1.79s, tests 45ms, environment 529ms, prepare 64ms)
+

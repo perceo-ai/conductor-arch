@@ -19,19 +19,29 @@ type BusyItem = Pick<
   "render_class" | "status" | "parent_id" | "background_agent"
 >;
 
+/**
+ * Whether a row is a running backgrounded agent: work that outlives the turn
+ * that started it. The daemon marks the card the agent runs on, whichever
+ * class it is — a Claude subagent's work lands on its `Agent` tool card, while
+ * a task with no tool card of its own gets a plain background card. A
+ * backgrounded shell command gets that same class unmarked.
+ */
+export function isLiveBackgroundAgent(item: Pick<BusyItem, "status" | "background_agent">): boolean {
+  return item.status === "running" && item.background_agent === true;
+}
+
 /** Subagent cards the daemon still reports as running. */
 export function activeSubagentCount(projection: readonly BusyItem[]): number {
   let n = 0;
   for (const item of projection) {
     if (item.status !== "running") continue;
-    // A backgrounded Claude agent shows up only as a background card: its
-    // Agent tool call returns at once, and the main turn ends while it works.
-    // A backgrounded shell command gets the same card; the daemon marks which
-    // is which, and a dev server left running is not the chat still working.
-    if (item.render_class === "background_card") {
-      if (item.background_agent) n += 1;
+    if (isLiveBackgroundAgent(item)) {
+      n += 1;
       continue;
     }
+    // An unmarked background card is a shell command — a dev server left
+    // running is not the chat still working.
+    if (item.render_class === "background_card") continue;
     if (!SUBAGENT_RENDER_CLASSES.has(item.render_class)) continue;
     // A `subagent_card` nested under an Agent card is the prompt the subagent
     // was given. The daemon projects it from a user record that has no

@@ -1,0 +1,33 @@
+
+ RUN  v2.1.9 ~/archductor/workspaces/conductor-arch/fix-270-greptile-followup/desktop
+
+ ❯ src/pages/chat/Timeline.test.tsx (27 tests | 1 failed | 26 skipped) 35ms
+   × Timeline > keeps a folded background subagent's Agent card live after the turn, then shows its output 34ms
+     → expected false to be true // Object.is equality
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/pages/chat/Timeline.test.tsx > Timeline > keeps a folded background subagent's Agent card live after the turn, then shows its output
+AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ src/pages/chat/Timeline.test.tsx:596:66
+    594|     if (el.querySelector(".chat-inline-event-nested")) toggle();
+    595|     const card = el.querySelector(".chat-inline-event")!;
+    596|     expect(card.classList.contains("chat-inline-event-running")).toBe(…
+       |                                                                  ^
+    597|     expect(card.querySelector(".chat-inline-event-spinner")).not.toBeN…
+    598|     expect(card.querySelector(".chat-inline-event-latest")?.textConten…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 26 skipped (27)
+   Start at  14:01:21
+   Duration  2.64s (transform 1.04s, setup 0ms, collect 1.84s, tests 35ms, environment 515ms, prepare 61ms)
+

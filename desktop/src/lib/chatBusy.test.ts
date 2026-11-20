@@ -56,6 +56,21 @@ describe("activeSubagentCount", () => {
     expect(activeSubagentCount([card("running", false), card("running")])).toBe(0);
   });
 
+  it("counts a running backgrounded subagent on its Agent tool card", () => {
+    // The daemon folds a backgrounded subagent's task card into the `Agent`
+    // tool card that started it (one piece of work, one card), so the busy
+    // mark now arrives on a `tool_card`.
+    expect(
+      activeSubagentCount([{ render_class: "tool_card", status: "running", background_agent: true }]),
+    ).toBe(1);
+    expect(
+      activeSubagentCount([
+        { render_class: "tool_card", status: "complete", background_agent: true },
+        { render_class: "tool_card", status: "running" },
+      ]),
+    ).toBe(0);
+  });
+
   it("counts only running subagent and nested-transcript cards", () => {
     expect(
       activeSubagentCount([

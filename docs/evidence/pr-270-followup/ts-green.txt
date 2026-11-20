@@ -1,0 +1,11 @@
+
+ RUN  v2.1.9 ~/archductor/workspaces/conductor-arch/fix-270-greptile-followup/desktop
+
+ ✓ src/lib/chatBusy.test.ts (19 tests) 6ms
+ ✓ src/lib/timeline.test.ts (32 tests) 11ms
+
+ Test Files  2 passed (2)
+      Tests  51 passed (51)
+   Start at  13:54:07
+   Duration  272ms (transform 76ms, setup 0ms, collect 92ms, tests 17ms, environment 0ms, prepare 102ms)
+

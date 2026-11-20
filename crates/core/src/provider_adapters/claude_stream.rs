@@ -13,7 +13,7 @@ use crate::archcar::harness_contract::{
 use crate::provider_events::{
     ProviderEventContext, ProviderEventDraft, ProviderEventKind, ProviderEventPhase,
 };
-use crate::provider_projection::BACKGROUND_AGENT_TASK_SUBTYPE;
+use crate::provider_projection::{BACKGROUND_AGENT_LAUNCH_BODY, BACKGROUND_AGENT_TASK_SUBTYPE};
 use crate::workspace::SessionKind;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1848,7 +1848,7 @@ fn message_content_text(value: &Value, block_type: &str, field: &str) -> Option<
 fn claude_async_agent_launch_body(text: &str) -> Option<String> {
     text.trim_start()
         .starts_with("Async agent launched successfully")
-        .then(|| "Working in the background.".to_owned())
+        .then(|| BACKGROUND_AGENT_LAUNCH_BODY.to_owned())
 }
 
 /// The text of every tool result in a user record. `content` is a plain
