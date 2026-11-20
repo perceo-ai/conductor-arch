@@ -8413,6 +8413,21 @@ mutation($threadId: ID!) {{
         Ok(queued)
     }
 
+    /// Runs `body` in one transaction on this store's connection: everything
+    /// it writes lands together, or (on `Err`) none of it does.
+    pub(crate) fn in_transaction<T>(&self, body: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let value = body(self)?;
+        transaction.commit()?;
+        Ok(value)
+    }
+
+    /// Settles a provider input as failed on this store's connection, so it
+    /// can share a transaction with the queue row that recovers the message.
+    pub(crate) fn mark_provider_input_failed(&self, id: &str, error: &str) -> Result<()> {
+        crate::provider_inputs::mark_failed_on(&self.conn, id, error)
+    }
+
     pub fn requeue_claimed_chat_input_front(&self, input: &QueuedChatInputRecord) -> Result<()> {
         let now = timestamp();
         before_front_queue_insert();

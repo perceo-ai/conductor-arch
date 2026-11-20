@@ -3331,7 +3331,6 @@ fn run_codex_app_server_session_loop(
                     {
                         let _ = connection.child.kill();
                         let outcome = recover_unrecorded_input_write(
-                            &runtime_store,
                             &db_path,
                             &event_tx,
                             &started,
@@ -3673,7 +3672,6 @@ fn run_claude_stream_session_loop(
                         adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
                         let outcome = recover_unrecorded_input_write(
-                            &runtime_store,
                             &db_path,
                             &event_tx,
                             &started,
@@ -4215,7 +4213,6 @@ fn run_acp_session_loop(
                     {
                         let _ = connection.child.kill();
                         let outcome = recover_unrecorded_input_write(
-                            &runtime_store,
                             &db_path,
                             &event_tx,
                             &started,
@@ -5062,14 +5059,14 @@ fn reclaim_unsettled_session_inputs(
 /// not be saved. The session is killed for it, so the message goes back on the
 /// queue -- exactly once.
 ///
-/// Its durable row is settled as failed here, before anything is requeued:
-/// left `queued`, the exit sweep that follows the kill would find it unsettled
-/// and put the same message back a second time. If even that cannot be saved,
-/// the row stays unsettled and the exit sweep is the one owner of putting it
-/// back; nothing is requeued here, so it is still only once.
+/// The queue row that recovers it and the `failed` mark that settles its
+/// durable row are written in one transaction. Settled without the queue row,
+/// the message would be lost: the exit sweep skips a failed row. Queued
+/// without the settle, the exit sweep that follows the kill would find the row
+/// unsettled and put it back a second time. If the transaction fails, neither
+/// landed, and the exit sweep is the one owner of putting it back.
 #[allow(clippy::too_many_arguments)]
 fn recover_unrecorded_input_write(
-    runtime_store: &RuntimeSessionStore,
     db_path: &std::path::Path,
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
@@ -5079,34 +5076,59 @@ fn recover_unrecorded_input_write(
     persisted_input: &str,
     error: String,
 ) -> Result<InputWriteOutcome, String> {
-    if let Err(err) = runtime_store.mark_provider_input_failed(local_input_id, &error) {
-        warn!(
-            session_id = started.session_id,
-            local_input_id,
-            error = %format!("{err:#}"),
-            "archcar left an unrecorded input to the exit sweep"
-        );
-        // The sweep replays the user's own words, a direct send or a claimed
-        // one alike; anything else it drops, as a failed write would.
-        return if *kind == ArchcarInputKind::User {
-            Ok(InputWriteOutcome::QueuedForNextSession)
-        } else {
-            Err(error)
-        };
-    }
-    let requeued = requeue_failed_direct_input(
-        db_path,
-        event_tx,
-        started,
-        queued_handoff.as_ref(),
-        kind,
-        persisted_input,
-    );
-    requeue_failed_queued_handoff(db_path, event_tx, queued_handoff);
-    if requeued {
-        Ok(InputWriteOutcome::QueuedForNextSession)
-    } else {
-        Err(error)
+    let recovered = WorkspaceStore::open_app(db_path).and_then(|store| {
+        store.in_transaction(|store| {
+            let requeued = if let Some(claimed) = queued_handoff.as_ref() {
+                store.requeue_claimed_chat_input_front(claimed)?;
+                true
+            } else if *kind == ArchcarInputKind::User {
+                store.enqueue_chat_input_front(
+                    started.thread_id,
+                    persisted_input,
+                    Some(persisted_input),
+                    ArchcarInputKind::User,
+                    started.kind,
+                )?;
+                true
+            } else {
+                false
+            };
+            store.mark_provider_input_failed(local_input_id, &error)?;
+            Ok(requeued)
+        })
+    });
+    match recovered {
+        Ok(requeued) => {
+            if requeued {
+                let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
+                    thread_id: started.thread_id,
+                });
+            }
+            // A direct send is answered by what became of it; a claimed one
+            // has nobody waiting.
+            if requeued && queued_handoff.is_none() {
+                Ok(InputWriteOutcome::QueuedForNextSession)
+            } else {
+                Err(error)
+            }
+        }
+        Err(err) => {
+            warn!(
+                session_id = started.session_id,
+                local_input_id,
+                error = %format!("{err:#}"),
+                "archcar left an unrecorded input to the exit sweep"
+            );
+            // The sweep replays the user's own words, a direct send or a
+            // claimed one alike. Anything else it only settles, so a claim on
+            // one is restored here: the sweep will not put it back.
+            if *kind == ArchcarInputKind::User {
+                Ok(InputWriteOutcome::QueuedForNextSession)
+            } else {
+                requeue_failed_queued_handoff(db_path, event_tx, queued_handoff);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -6754,7 +6776,6 @@ mod tests {
         .unwrap();
 
         let outcome = recover_unrecorded_input_write(
-            &runtime_store,
             runtime_store.db_path(),
             &event_tx,
             &started,
@@ -6811,7 +6832,6 @@ mod tests {
         .unwrap();
 
         recover_unrecorded_input_write(
-            &runtime_store,
             runtime_store.db_path(),
             &event_tx,
             &started,
@@ -6832,6 +6852,172 @@ mod tests {
         );
 
         assert_eq!(queued_texts(&store, thread.id), ["write the changelog"]);
+    }
+
+    /// The queue row that recovers an unrecorded write cannot be saved. Its
+    /// durable row must not be settled without it either, or the exit sweep
+    /// skips it and the message is gone from everywhere.
+    #[test]
+    fn a_failed_recovery_requeue_leaves_the_input_to_the_exit_sweep() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, thread, runtime_store, started) = claude_recovery_fixture(temp.path(), 43990);
+        let (event_tx, _event_rx) = mpsc::channel();
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "steer-1",
+            "<composed preamble> wrong file",
+            Some("wrong file"),
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Immediate,
+            None,
+        )
+        .unwrap();
+        // Another connection's lock or a full disk, as far as this insert can
+        // tell: the queue refuses the row.
+        let blocker = rusqlite::Connection::open(runtime_store.db_path()).unwrap();
+        blocker
+            .execute_batch(
+                "CREATE TRIGGER refuse_queue BEFORE INSERT ON chat_queued_inputs
+                 BEGIN SELECT RAISE(ABORT, 'queue unavailable'); END;",
+            )
+            .unwrap();
+
+        let outcome = recover_unrecorded_input_write(
+            runtime_store.db_path(),
+            &event_tx,
+            &started,
+            "steer-1",
+            None,
+            &ArchcarInputKind::User,
+            "wrong file",
+            "Claude input written-state persistence failed: database is locked".to_owned(),
+        );
+        blocker.execute_batch("DROP TRIGGER refuse_queue;").unwrap();
+        reclaim_unsettled_session_inputs(
+            &runtime_store,
+            &event_tx,
+            &started,
+            "the agent's transport exited (signalled) before this input was answered",
+            &[],
+            None,
+        );
+
+        assert_eq!(
+            queued_texts(&store, thread.id),
+            ["wrong file"],
+            "the exit sweep puts the message back, once"
+        );
+        assert_eq!(outcome, Ok(InputWriteOutcome::QueuedForNextSession));
+    }
+
+    /// Codex refuses a steer in the read that follows its exit. There is no
+    /// agent to start the fallback turn on: the loop must still reach its
+    /// exit, put the refused message back and announce the exit.
+    #[test]
+    fn codex_steer_refused_after_exit_still_reaches_exit_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        // `cat` itself, not under a shell: killing it must close the pipe,
+        // with no forked child left holding it open.
+        let mut child = ProcessCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let process = record_thread_session_with_port_and_pid(&store, &thread, 43989, pid);
+        let (native_tx, native_rx) = mpsc::channel();
+        let connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: native_rx,
+            next_read_line: 0,
+            native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: None,
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            pid,
+            false,
+        )));
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let loop_thread = thread::spawn(move || {
+            run_codex_app_server_session_loop(
+                db_path,
+                snapshot_for_loop,
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        native_tx
+            .send(r#"{"id":1,"result":{}}"#.to_owned())
+            .unwrap();
+        native_tx
+            .send(r#"{"id":2,"result":{"thread":{"id":"thr-fixture"}}}"#.to_owned())
+            .unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
+        );
+        native_tx
+            .send(r#"{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}"#.to_owned())
+            .unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionMessagesUpdated { thread_id } if *thread_id == thread.id),
+        );
+        let (ack_tx, ack_rx) = mpsc::channel();
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "use the other file".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+                ack: Some(ack_tx),
+            })
+            .unwrap();
+        assert_eq!(
+            ack_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Ok(InputWriteOutcome::Written)
+        );
+
+        // The agent goes; the loop sees it gone and starts its final read.
+        // Only then does the refusal of the steer come through.
+        command_tx.send(SessionCommand::Kill).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        native_tx
+            .send(r#"{"id":11,"error":{"message":"no active turn to steer"}}"#.to_owned())
+            .unwrap();
+        drop(native_tx);
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionExited { session_id, .. } if *session_id == process.id),
+        );
+        loop_thread.join().unwrap();
+        assert_eq!(queued_texts(&store, thread.id), ["use the other file"]);
     }
 
     /// A stop's answer settles only what was written before the stop. A
