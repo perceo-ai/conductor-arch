@@ -1198,12 +1198,10 @@ fn apply_harness_effect(
                 "managed harness rate limited"
             );
         }
-        // TODO(steer-drops): the input-durability work consumes this — what
-        // claude says it is still holding after a stop decides which written
-        // inputs may be put back on the chat queue. Recorded for the log in
-        // the meantime so the signal is visible before it is acted on.
         HarnessEffect::InterruptSettled {
             retained_local_input_ids,
+            dropped_local_input_ids,
+            covered_local_input_ids,
         } => {
             info!(
                 session_id = started.session_id,
@@ -1222,9 +1220,16 @@ fn apply_harness_effect(
             // that, stopping a turn in the window before the provider echoes
             // its prompt back would replay that prompt as a fresh turn — the
             // work the user just stopped, started again.
+            //
+            // A dropped input will never be taken into a turn, so no
+            // completion will finish the generation it started; it ends here,
+            // or the session never reads ready again.
             let mut retained = retained_local_input_ids;
-            if let Ok(state) = snapshot.lock() {
+            if let Ok(mut state) = snapshot.lock() {
                 retained.extend(state.turns.taken_input_ids());
+                for local_input_id in &dropped_local_input_ids {
+                    state.turns.retire_input(local_input_id);
+                }
             }
             reclaim_unsettled_session_inputs(
                 runtime_store,
@@ -1232,6 +1237,7 @@ fn apply_harness_effect(
                 started,
                 "the turn was stopped before the agent read this input",
                 &retained,
+                Some(&covered_local_input_ids),
             );
         }
         HarnessEffect::InteractionResolved { .. } | HarnessEffect::ResumeRequired => {}
@@ -3392,6 +3398,7 @@ fn run_codex_app_server_session_loop(
                             .unwrap_or_else(|| "signalled".to_owned())
                     ),
                     &[],
+                    None,
                 );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
@@ -3809,6 +3816,7 @@ fn run_claude_stream_session_loop(
                             .unwrap_or_else(|| "signalled".to_owned())
                     ),
                     &[],
+                    None,
                 );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
@@ -4280,6 +4288,7 @@ fn run_acp_session_loop(
                             .unwrap_or_else(|| "signalled".to_owned())
                     ),
                     &[],
+                    None,
                 );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
@@ -4905,12 +4914,18 @@ fn mark_snapshot_exited(snapshot: &Arc<Mutex<SessionSnapshot>>, exit_code: Optio
 /// `retained` names inputs the provider says it is still holding; those are
 /// left exactly as they are, because the provider still intends to deliver
 /// them and replaying one would send the user's words twice.
+///
+/// `scope`, when given, limits the sweep to those inputs. A stop's answer
+/// speaks only for what was written before the stop; an input written after
+/// it is still on its way, and the provider may well answer it. An exited
+/// session passes `None`: everything it held is gone.
 fn reclaim_unsettled_session_inputs(
     runtime_store: &RuntimeSessionStore,
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
     reason: &str,
     retained: &[String],
+    scope: Option<&[String]>,
 ) {
     let unsettled = match runtime_store.unsettled_provider_inputs(started.session_id) {
         Ok(unsettled) => unsettled,
@@ -4927,6 +4942,7 @@ fn reclaim_unsettled_session_inputs(
     let lost = unsettled
         .into_iter()
         .filter(|input| !retained.contains(&input.id))
+        .filter(|input| scope.is_none_or(|scope| scope.contains(&input.id)))
         .collect::<Vec<_>>();
     for input in &lost {
         if let Err(err) = runtime_store.mark_provider_input_failed(&input.id, reason) {
@@ -6444,6 +6460,7 @@ mod tests {
             &started,
             "the agent's transport exited (code 0) before this input was answered",
             &[],
+            None,
         );
 
         let queued = store
@@ -6505,6 +6522,7 @@ mod tests {
             &started,
             "the turn was stopped before the agent read this input",
             &["kept-1".to_owned()],
+            None,
         );
 
         let queued = store
@@ -6574,6 +6592,8 @@ mod tests {
             &mut None,
             HarnessEffect::InterruptSettled {
                 retained_local_input_ids: Vec::new(),
+                dropped_local_input_ids: Vec::new(),
+                covered_local_input_ids: vec!["running-1".to_owned()],
             },
         );
 
