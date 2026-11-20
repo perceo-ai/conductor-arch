@@ -899,6 +899,28 @@ fn spawn_stdout_line_reader(stdout: std::process::ChildStdout) -> Receiver<Strin
     rx
 }
 
+/// How long an exited agent's stdout reader gets to forward what the agent
+/// wrote last. The pipe closes when the agent exits, so the reader ends almost
+/// at once; the bound only matters if something the agent spawned still holds
+/// the pipe open.
+const EXITED_STDOUT_GRACE: Duration = Duration::from_secs(2);
+
+/// The next line the stdout reader has forwarded.
+///
+/// A live session takes what is there (`until_closed` is `None`). An exited
+/// one waits, up to the deadline, for the reader to finish: the child having
+/// exited does not mean the reader thread has forwarded its last lines, and a
+/// channel that is only empty *for now* would have the exit sweep requeue an
+/// input whose echo and answer were still on their way.
+fn next_stdout_line(rx: &Receiver<String>, until_closed: Option<Instant>) -> Option<String> {
+    match until_closed {
+        None => rx.try_recv().ok(),
+        Some(deadline) => rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .ok(),
+    }
+}
+
 fn process_lifecycle_ready(kind: SessionKind) -> bool {
     matches!(kind, SessionKind::CODEX | SessionKind::SHELL)
 }
@@ -1198,12 +1220,10 @@ fn apply_harness_effect(
                 "managed harness rate limited"
             );
         }
-        // TODO(steer-drops): the input-durability work consumes this — what
-        // claude says it is still holding after a stop decides which written
-        // inputs may be put back on the chat queue. Recorded for the log in
-        // the meantime so the signal is visible before it is acted on.
         HarnessEffect::InterruptSettled {
             retained_local_input_ids,
+            dropped_local_input_ids,
+            covered_local_input_ids,
         } => {
             info!(
                 session_id = started.session_id,
@@ -1222,9 +1242,16 @@ fn apply_harness_effect(
             // that, stopping a turn in the window before the provider echoes
             // its prompt back would replay that prompt as a fresh turn — the
             // work the user just stopped, started again.
+            //
+            // A dropped input will never be taken into a turn, so no
+            // completion will finish the generation it started; it ends here,
+            // or the session never reads ready again.
             let mut retained = retained_local_input_ids;
-            if let Ok(state) = snapshot.lock() {
+            if let Ok(mut state) = snapshot.lock() {
                 retained.extend(state.turns.taken_input_ids());
+                for local_input_id in &dropped_local_input_ids {
+                    state.turns.retire_input(local_input_id);
+                }
             }
             reclaim_unsettled_session_inputs(
                 runtime_store,
@@ -1232,6 +1259,7 @@ fn apply_harness_effect(
                 started,
                 "the turn was stopped before the agent read this input",
                 &retained,
+                Some(&covered_local_input_ids),
             );
         }
         HarnessEffect::InteractionResolved { .. } | HarnessEffect::ResumeRequired => {}
@@ -2800,8 +2828,11 @@ fn run_codex_app_server_session_loop(
         },
     });
 
+    // Set once the agent is seen to have exited: one more pass then reads
+    // everything it wrote before the sweep decides what it left unanswered.
+    let mut exited_stdout_deadline: Option<Instant> = None;
     loop {
-        while let Ok(line) = connection.stdout_rx.try_recv() {
+        while let Some(line) = next_stdout_line(&connection.stdout_rx, exited_stdout_deadline) {
             connection.next_read_line += 1;
             let _ = runtime_store.append_provider_native_output(
                 started.session_id,
@@ -2928,6 +2959,15 @@ fn run_codex_app_server_session_loop(
                                             .push((joined_turn_id, pending.local_input_id));
                                     }
                                 }
+                                // The agent has exited: there is nothing to
+                                // start the refused input's turn on, and the
+                                // write would only fail. It stays unsettled,
+                                // so the exit sweep puts it back.
+                                CodexInputResponseAction::RetryStart
+                                    if exited_stdout_deadline.is_some() =>
+                                {
+                                    continue;
+                                }
                                 CodexInputResponseAction::RetryStart => {
                                     let Some(thread_id) = provider_thread_id.as_deref() else {
                                         let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -2981,7 +3021,10 @@ fn run_codex_app_server_session_loop(
                                                 "Codex immediate turn fallback failed: {err:#}"
                                             ),
                                         );
-                                        return;
+                                        // Not `return`: the loop goes on to its
+                                        // exit, whose sweep puts the refused
+                                        // input back and announces the exit.
+                                        continue;
                                     }
                                     pending_input_requests.insert(
                                         fallback_request_id,
@@ -3115,7 +3158,14 @@ fn run_codex_app_server_session_loop(
             }
         }
 
-        while let Ok(command) = command_rx.try_recv() {
+        // The agent is gone: a command now would only fail against it, and is
+        // left for whatever the exit hands over to, as it was before the final
+        // read.
+        while let Some(command) = exited_stdout_deadline
+            .is_none()
+            .then(|| command_rx.try_recv().ok())
+            .flatten()
+        {
             let (command, queued_handoff) = command.split_queued_claim();
             match command {
                 SessionCommand::SendInput {
@@ -3280,25 +3330,17 @@ fn run_codex_app_server_session_loop(
                         runtime_store.mark_provider_input_written(&local_input_id)
                     {
                         let _ = connection.child.kill();
-                        let requeued = requeue_failed_direct_input(
+                        let outcome = recover_unrecorded_input_write(
                             &db_path,
                             &event_tx,
                             &started,
-                            queued_handoff.as_ref(),
+                            &local_input_id,
+                            queued_handoff,
                             &kind,
                             &persisted_input,
+                            format!("Codex input written-state persistence failed: {err:#}"),
                         );
-                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
-                        answer_input_write(
-                            &ack,
-                            if requeued {
-                                Ok(InputWriteOutcome::QueuedForNextSession)
-                            } else {
-                                Err(format!(
-                                    "Codex input written-state persistence failed: {err:#}"
-                                ))
-                            },
-                        );
+                        answer_input_write(&ack, outcome);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3374,6 +3416,10 @@ fn run_codex_app_server_session_loop(
         }
 
         match connection.child.try_wait() {
+            Ok(Some(_)) if exited_stdout_deadline.is_none() => {
+                exited_stdout_deadline = Some(Instant::now() + EXITED_STDOUT_GRACE);
+                continue;
+            }
             Ok(Some(status)) => {
                 let code = status.code();
                 let _ = runtime_store.mark_session_process_exited(started.session_id, code);
@@ -3392,6 +3438,7 @@ fn run_codex_app_server_session_loop(
                             .unwrap_or_else(|| "signalled".to_owned())
                     ),
                     &[],
+                    None,
                 );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
@@ -3495,6 +3542,7 @@ fn run_claude_stream_session_loop(
             &started,
             &mut connection,
             &mut adapter,
+            None,
         );
 
         while let Ok(command) = command_rx.try_recv() {
@@ -3623,25 +3671,17 @@ fn run_claude_stream_session_loop(
                     {
                         adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
-                        let requeued = requeue_failed_direct_input(
+                        let outcome = recover_unrecorded_input_write(
                             &db_path,
                             &event_tx,
                             &started,
-                            queued_handoff.as_ref(),
+                            &local_input_id,
+                            queued_handoff,
                             &kind,
                             &persisted_input,
+                            format!("Claude input written-state persistence failed: {err:#}"),
                         );
-                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
-                        answer_input_write(
-                            &ack,
-                            if requeued {
-                                Ok(InputWriteOutcome::QueuedForNextSession)
-                            } else {
-                                Err(format!(
-                                    "Claude input written-state persistence failed: {err:#}"
-                                ))
-                            },
-                        );
+                        answer_input_write(&ack, outcome);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3784,6 +3824,8 @@ fn run_claude_stream_session_loop(
 
         match connection.child.try_wait() {
             Ok(Some(status)) => {
+                // Everything the agent wrote before it exited is read before
+                // the sweep decides what it left unanswered.
                 drain_claude_stdout(
                     &runtime_store,
                     &snapshot,
@@ -3791,6 +3833,7 @@ fn run_claude_stream_session_loop(
                     &started,
                     &mut connection,
                     &mut adapter,
+                    Some(Instant::now() + EXITED_STDOUT_GRACE),
                 );
                 let code = status.code();
                 let _ = runtime_store.mark_session_process_exited(started.session_id, code);
@@ -3809,6 +3852,7 @@ fn run_claude_stream_session_loop(
                             .unwrap_or_else(|| "signalled".to_owned())
                     ),
                     &[],
+                    None,
                 );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
@@ -3834,8 +3878,9 @@ fn drain_claude_stdout(
     started: &SessionSnapshot,
     connection: &mut ProviderProcessConnection,
     adapter: &mut ClaudeManagedAdapter,
+    until_closed: Option<Instant>,
 ) {
-    while let Ok(line) = connection.stdout_rx.try_recv() {
+    while let Some(line) = next_stdout_line(&connection.stdout_rx, until_closed) {
         let _ = runtime_store.append_provider_native_output(
             started.session_id,
             "claude-stream-json",
@@ -3988,6 +4033,7 @@ fn run_acp_session_loop(
             &harness_name,
             &mut connection,
             &mut adapter,
+            None,
         ) {
             end_failed_acp_session(
                 &runtime_store,
@@ -4166,25 +4212,17 @@ fn run_acp_session_loop(
                         runtime_store.mark_provider_input_written(&local_input_id)
                     {
                         let _ = connection.child.kill();
-                        let requeued = requeue_failed_direct_input(
+                        let outcome = recover_unrecorded_input_write(
                             &db_path,
                             &event_tx,
                             &started,
-                            queued_handoff.as_ref(),
+                            &local_input_id,
+                            queued_handoff,
                             &kind,
                             &persisted_input,
+                            format!("ACP input written-state persistence failed: {err:#}"),
                         );
-                        requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
-                        answer_input_write(
-                            &ack,
-                            if requeued {
-                                Ok(InputWriteOutcome::QueuedForNextSession)
-                            } else {
-                                Err(format!(
-                                    "ACP input written-state persistence failed: {err:#}"
-                                ))
-                            },
-                        );
+                        answer_input_write(&ack, outcome);
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -4254,6 +4292,8 @@ fn run_acp_session_loop(
 
         match connection.child.try_wait() {
             Ok(Some(status)) => {
+                // Everything the agent wrote before it exited is read before
+                // the sweep decides what it left unanswered.
                 drain_acp_stdout(
                     &runtime_store,
                     &snapshot,
@@ -4262,6 +4302,7 @@ fn run_acp_session_loop(
                     &harness_name,
                     &mut connection,
                     &mut adapter,
+                    Some(Instant::now() + EXITED_STDOUT_GRACE),
                 );
                 let code = status.code();
                 let _ = runtime_store.mark_session_process_exited(started.session_id, code);
@@ -4280,6 +4321,7 @@ fn run_acp_session_loop(
                             .unwrap_or_else(|| "signalled".to_owned())
                     ),
                     &[],
+                    None,
                 );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
@@ -4339,8 +4381,10 @@ fn release_held_acp_inputs(
             )
         });
         match queued {
+            // Saved for the next session, not delivered: the agent never saw
+            // it, and `Written` would have the CLI report it sent.
             Ok(_) => {
-                answer_input_write(&ack, Ok(InputWriteOutcome::Written));
+                answer_input_write(&ack, Ok(InputWriteOutcome::QueuedForNextSession));
                 let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
                     thread_id: started.thread_id,
                 });
@@ -4409,6 +4453,7 @@ fn write_acp_request(connection: &mut ProviderProcessConnection, payload: &[u8])
 /// Applies everything the agent has written. Returns true when a fatal error
 /// arrived before an ACP session existed: there is then no session to keep,
 /// and the caller ends it.
+#[allow(clippy::too_many_arguments)]
 fn drain_acp_stdout(
     runtime_store: &RuntimeSessionStore,
     snapshot: &Arc<Mutex<SessionSnapshot>>,
@@ -4417,9 +4462,10 @@ fn drain_acp_stdout(
     harness_name: &str,
     connection: &mut ProviderProcessConnection,
     adapter: &mut AcpAdapter,
+    until_closed: Option<Instant>,
 ) -> bool {
     let mut failed_before_session = false;
-    while let Ok(line) = connection.stdout_rx.try_recv() {
+    while let Some(line) = next_stdout_line(&connection.stdout_rx, until_closed) {
         let _ =
             runtime_store.append_provider_native_output(started.session_id, harness_name, &line);
         match adapter.observe_native(NativeRecord {
@@ -4905,12 +4951,18 @@ fn mark_snapshot_exited(snapshot: &Arc<Mutex<SessionSnapshot>>, exit_code: Optio
 /// `retained` names inputs the provider says it is still holding; those are
 /// left exactly as they are, because the provider still intends to deliver
 /// them and replaying one would send the user's words twice.
+///
+/// `scope`, when given, limits the sweep to those inputs. A stop's answer
+/// speaks only for what was written before the stop; an input written after
+/// it is still on its way, and the provider may well answer it. An exited
+/// session passes `None`: everything it held is gone.
 fn reclaim_unsettled_session_inputs(
     runtime_store: &RuntimeSessionStore,
     event_tx: &Sender<ArchcarEvent>,
     started: &SessionSnapshot,
     reason: &str,
     retained: &[String],
+    scope: Option<&[String]>,
 ) {
     let unsettled = match runtime_store.unsettled_provider_inputs(started.session_id) {
         Ok(unsettled) => unsettled,
@@ -4927,6 +4979,7 @@ fn reclaim_unsettled_session_inputs(
     let lost = unsettled
         .into_iter()
         .filter(|input| !retained.contains(&input.id))
+        .filter(|input| scope.is_none_or(|scope| scope.contains(&input.id)))
         .collect::<Vec<_>>();
     for input in &lost {
         if let Err(err) = runtime_store.mark_provider_input_failed(&input.id, reason) {
@@ -4999,6 +5052,83 @@ fn reclaim_unsettled_session_inputs(
         let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
             thread_id: started.thread_id,
         });
+    }
+}
+
+/// An input whose write reached the provider but whose `written` mark could
+/// not be saved. The session is killed for it, so the message goes back on the
+/// queue -- exactly once.
+///
+/// The queue row that recovers it and the `failed` mark that settles its
+/// durable row are written in one transaction. Settled without the queue row,
+/// the message would be lost: the exit sweep skips a failed row. Queued
+/// without the settle, the exit sweep that follows the kill would find the row
+/// unsettled and put it back a second time. If the transaction fails, neither
+/// landed, and the exit sweep is the one owner of putting it back.
+#[allow(clippy::too_many_arguments)]
+fn recover_unrecorded_input_write(
+    db_path: &std::path::Path,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    local_input_id: &str,
+    queued_handoff: Option<QueuedChatInputRecord>,
+    kind: &ArchcarInputKind,
+    persisted_input: &str,
+    error: String,
+) -> Result<InputWriteOutcome, String> {
+    let recovered = WorkspaceStore::open_app(db_path).and_then(|store| {
+        store.in_transaction(|store| {
+            let requeued = if let Some(claimed) = queued_handoff.as_ref() {
+                store.requeue_claimed_chat_input_front(claimed)?;
+                true
+            } else if *kind == ArchcarInputKind::User {
+                store.enqueue_chat_input_front(
+                    started.thread_id,
+                    persisted_input,
+                    Some(persisted_input),
+                    ArchcarInputKind::User,
+                    started.kind,
+                )?;
+                true
+            } else {
+                false
+            };
+            store.mark_provider_input_failed(local_input_id, &error)?;
+            Ok(requeued)
+        })
+    });
+    match recovered {
+        Ok(requeued) => {
+            if requeued {
+                let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
+                    thread_id: started.thread_id,
+                });
+            }
+            // A direct send is answered by what became of it; a claimed one
+            // has nobody waiting.
+            if requeued && queued_handoff.is_none() {
+                Ok(InputWriteOutcome::QueuedForNextSession)
+            } else {
+                Err(error)
+            }
+        }
+        Err(err) => {
+            warn!(
+                session_id = started.session_id,
+                local_input_id,
+                error = %format!("{err:#}"),
+                "archcar left an unrecorded input to the exit sweep"
+            );
+            // The sweep replays the user's own words, a direct send or a
+            // claimed one alike. Anything else it only settles, so a claim on
+            // one is restored here: the sweep will not put it back.
+            if *kind == ArchcarInputKind::User {
+                Ok(InputWriteOutcome::QueuedForNextSession)
+            } else {
+                requeue_failed_queued_handoff(db_path, event_tx, queued_handoff);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -6444,6 +6574,7 @@ mod tests {
             &started,
             "the agent's transport exited (code 0) before this input was answered",
             &[],
+            None,
         );
 
         let queued = store
@@ -6505,6 +6636,7 @@ mod tests {
             &started,
             "the turn was stopped before the agent read this input",
             &["kept-1".to_owned()],
+            None,
         );
 
         let queued = store
@@ -6574,6 +6706,8 @@ mod tests {
             &mut None,
             HarnessEffect::InterruptSettled {
                 retained_local_input_ids: Vec::new(),
+                dropped_local_input_ids: Vec::new(),
+                covered_local_input_ids: vec!["running-1".to_owned()],
             },
         );
 
@@ -6581,6 +6715,528 @@ mod tests {
             store.list_queued_chat_inputs(thread.id).unwrap().is_empty(),
             "the stopped turn's own prompt must not come back as a fresh turn"
         );
+    }
+
+    /// A Claude session row, its runtime store and the snapshot a loop would
+    /// start from, for the recovery tests below.
+    fn claude_recovery_fixture(
+        root: &Path,
+        port: u16,
+    ) -> (
+        WorkspaceStore,
+        ChatThreadRecord,
+        RuntimeSessionStore,
+        SessionSnapshot,
+    ) {
+        let store = seeded_workspace_store(root);
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, port);
+        let runtime_store = RuntimeSessionStore::new(root.join("state.db"));
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            process.pid,
+            false,
+        );
+        (store, thread, runtime_store, started)
+    }
+
+    fn queued_texts(store: &WorkspaceStore, thread_id: i64) -> Vec<String> {
+        store
+            .list_queued_chat_inputs(thread_id)
+            .unwrap()
+            .into_iter()
+            .map(|input| input.input)
+            .collect()
+    }
+
+    /// The write reached the provider but its `written` mark did not save, so
+    /// the session is killed and the message put back. The exit sweep that
+    /// follows the kill must not find the same row unsettled and put it back
+    /// again.
+    #[test]
+    fn mark_provider_input_written_failure_settles_input_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, thread, runtime_store, started) = claude_recovery_fixture(temp.path(), 43995);
+        let (event_tx, _event_rx) = mpsc::channel();
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "steer-1",
+            "<composed preamble> wrong file",
+            Some("wrong file"),
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Immediate,
+            None,
+        )
+        .unwrap();
+
+        let outcome = recover_unrecorded_input_write(
+            runtime_store.db_path(),
+            &event_tx,
+            &started,
+            "steer-1",
+            None,
+            &ArchcarInputKind::User,
+            "wrong file",
+            "Claude input written-state persistence failed: database is locked".to_owned(),
+        );
+        reclaim_unsettled_session_inputs(
+            &runtime_store,
+            &event_tx,
+            &started,
+            "the agent's transport exited (signalled) before this input was answered",
+            &[],
+            None,
+        );
+
+        assert_eq!(outcome, Ok(InputWriteOutcome::QueuedForNextSession));
+        assert_eq!(queued_texts(&store, thread.id), ["wrong file"]);
+        assert_eq!(
+            runtime_store_input_state(runtime_store.db_path(), "steer-1"),
+            "failed"
+        );
+    }
+
+    /// A claimed queue row is restored by its claim; the sweep must not add a
+    /// second copy of it either.
+    #[test]
+    fn a_failed_written_mark_restores_a_claimed_input_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, thread, runtime_store, started) = claude_recovery_fixture(temp.path(), 43996);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let claim = store
+            .enqueue_chat_input(
+                thread.id,
+                "write the changelog",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+        store.delete_queued_chat_input(claim.id).unwrap();
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "queued-1",
+            "write the changelog",
+            Some("write the changelog"),
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Auto,
+            None,
+        )
+        .unwrap();
+
+        recover_unrecorded_input_write(
+            runtime_store.db_path(),
+            &event_tx,
+            &started,
+            "queued-1",
+            Some(claim),
+            &ArchcarInputKind::User,
+            "write the changelog",
+            "Claude input written-state persistence failed: database is locked".to_owned(),
+        )
+        .ok();
+        reclaim_unsettled_session_inputs(
+            &runtime_store,
+            &event_tx,
+            &started,
+            "the agent's transport exited (signalled) before this input was answered",
+            &[],
+            None,
+        );
+
+        assert_eq!(queued_texts(&store, thread.id), ["write the changelog"]);
+    }
+
+    /// The queue row that recovers an unrecorded write cannot be saved. Its
+    /// durable row must not be settled without it either, or the exit sweep
+    /// skips it and the message is gone from everywhere.
+    #[test]
+    fn a_failed_recovery_requeue_leaves_the_input_to_the_exit_sweep() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, thread, runtime_store, started) = claude_recovery_fixture(temp.path(), 43990);
+        let (event_tx, _event_rx) = mpsc::channel();
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "steer-1",
+            "<composed preamble> wrong file",
+            Some("wrong file"),
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Immediate,
+            None,
+        )
+        .unwrap();
+        // Another connection's lock or a full disk, as far as this insert can
+        // tell: the queue refuses the row.
+        let blocker = rusqlite::Connection::open(runtime_store.db_path()).unwrap();
+        blocker
+            .execute_batch(
+                "CREATE TRIGGER refuse_queue BEFORE INSERT ON chat_queued_inputs
+                 BEGIN SELECT RAISE(ABORT, 'queue unavailable'); END;",
+            )
+            .unwrap();
+
+        let outcome = recover_unrecorded_input_write(
+            runtime_store.db_path(),
+            &event_tx,
+            &started,
+            "steer-1",
+            None,
+            &ArchcarInputKind::User,
+            "wrong file",
+            "Claude input written-state persistence failed: database is locked".to_owned(),
+        );
+        blocker.execute_batch("DROP TRIGGER refuse_queue;").unwrap();
+        reclaim_unsettled_session_inputs(
+            &runtime_store,
+            &event_tx,
+            &started,
+            "the agent's transport exited (signalled) before this input was answered",
+            &[],
+            None,
+        );
+
+        assert_eq!(
+            queued_texts(&store, thread.id),
+            ["wrong file"],
+            "the exit sweep puts the message back, once"
+        );
+        assert_eq!(outcome, Ok(InputWriteOutcome::QueuedForNextSession));
+    }
+
+    /// Codex refuses a steer in the read that follows its exit. There is no
+    /// agent to start the fallback turn on: the loop must still reach its
+    /// exit, put the refused message back and announce the exit.
+    #[test]
+    fn codex_steer_refused_after_exit_still_reaches_exit_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "codex", "Codex", None)
+            .unwrap();
+        // `cat` itself, not under a shell: killing it must close the pipe,
+        // with no forked child left holding it open.
+        let mut child = ProcessCommand::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let stdin = child.stdin.take().unwrap();
+        let process = record_thread_session_with_port_and_pid(&store, &thread, 43989, pid);
+        let (native_tx, native_rx) = mpsc::channel();
+        let connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: native_rx,
+            next_read_line: 0,
+            native_thread_id: None,
+            program: PathBuf::from("bash"),
+            env: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: None,
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+        let snapshot = Arc::new(Mutex::new(running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CODEX,
+            pid,
+            false,
+        )));
+        let snapshot_for_loop = Arc::clone(&snapshot);
+        let (command_tx, command_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let db_path = temp.path().join("state.db");
+        let loop_thread = thread::spawn(move || {
+            run_codex_app_server_session_loop(
+                db_path,
+                snapshot_for_loop,
+                connection,
+                command_rx,
+                event_tx,
+            )
+        });
+
+        native_tx
+            .send(r#"{"id":1,"result":{}}"#.to_owned())
+            .unwrap();
+        native_tx
+            .send(r#"{"id":2,"result":{"thread":{"id":"thr-fixture"}}}"#.to_owned())
+            .unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionReady { session_id, .. } if *session_id == process.id),
+        );
+        native_tx
+            .send(r#"{"method":"turn/started","params":{"turn":{"id":"turn-1"}}}"#.to_owned())
+            .unwrap();
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionMessagesUpdated { thread_id } if *thread_id == thread.id),
+        );
+        let (ack_tx, ack_rx) = mpsc::channel();
+        command_tx
+            .send(SessionCommand::SendInput {
+                input: "use the other file".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+                ack: Some(ack_tx),
+            })
+            .unwrap();
+        assert_eq!(
+            ack_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Ok(InputWriteOutcome::Written)
+        );
+
+        // The agent goes; the loop sees it gone and starts its final read.
+        // Only then does the refusal of the steer come through.
+        command_tx.send(SessionCommand::Kill).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        native_tx
+            .send(r#"{"id":11,"error":{"message":"no active turn to steer"}}"#.to_owned())
+            .unwrap();
+        drop(native_tx);
+
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::SessionExited { session_id, .. } if *session_id == process.id),
+        );
+        loop_thread.join().unwrap();
+        assert_eq!(queued_texts(&store, thread.id), ["use the other file"]);
+    }
+
+    /// A stop's answer settles only what was written before the stop. A
+    /// message written after it is left to claude; the steers it dropped end
+    /// their generations so the session can read ready again.
+    #[test]
+    fn interrupt_settled_does_not_replay_input_written_after_the_interrupt() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, thread, runtime_store, started) = claude_recovery_fixture(temp.path(), 43997);
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        for (id, visible) in [
+            ("running-1", "refactor the parser"),
+            ("before-stop", "never mind"),
+            ("after-stop", "do this instead"),
+        ] {
+            enqueue_provider_input(
+                &runtime_store,
+                &started,
+                id,
+                visible,
+                Some(visible),
+                &ArchcarInputKind::User,
+                ArchcarInputDelivery::Immediate,
+                None,
+            )
+            .unwrap();
+            runtime_store.mark_provider_input_written(id).unwrap();
+            let mut state = snapshot.lock().unwrap();
+            mark_session_busy_for_input(&mut state);
+            state.turns.note_input(id.to_owned());
+        }
+        {
+            let mut state = snapshot.lock().unwrap();
+            state.turns.note_input_taken("running-1");
+            // The stopped turn's own completion has already landed.
+            state.turns.finish(FinishedTurn::Input("running-1"));
+        }
+        runtime_store
+            .mark_provider_input_terminal("running-1")
+            .unwrap();
+        let (event_tx, _event_rx) = mpsc::channel();
+
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut None,
+            &mut None,
+            HarnessEffect::InterruptSettled {
+                retained_local_input_ids: Vec::new(),
+                dropped_local_input_ids: vec!["before-stop".to_owned()],
+                covered_local_input_ids: vec!["running-1".to_owned(), "before-stop".to_owned()],
+            },
+        );
+
+        assert_eq!(queued_texts(&store, thread.id), ["never mind"]);
+        assert_eq!(
+            runtime_store_input_state(runtime_store.db_path(), "after-stop"),
+            "written",
+            "a message written after the stop is still claude's to read"
+        );
+        let state = snapshot.lock().unwrap();
+        assert!(
+            !state.turns.latest_turn_completed(),
+            "the later message's own turn is still to come"
+        );
+        assert_eq!(
+            state.turns.completed + 1,
+            state.turns.started,
+            "the dropped steer's generation ended with the stop"
+        );
+    }
+
+    /// The child exiting does not mean its last lines have come through the
+    /// reader. The exit sweep runs only once they have, or it requeues a
+    /// message claude had already taken in and answered.
+    #[test]
+    fn exit_sweep_waits_for_stdout_reader_before_reclaiming() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, thread, runtime_store, started) = claude_recovery_fixture(temp.path(), 43998);
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        let mut child = ProcessCommand::new("true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        child.wait().unwrap();
+        let (native_tx, native_rx) = mpsc::channel();
+        let mut connection = ProviderProcessConnection {
+            child,
+            stdin,
+            stdout_rx: native_rx,
+            next_read_line: 0,
+            native_thread_id: None,
+            program: PathBuf::from("true"),
+            env: Vec::new(),
+            cwd: PathBuf::from("/tmp/workspace"),
+            model: None,
+            approval_policy: None,
+            reasoning_mode: None,
+            effort_mode: None,
+            personality: None,
+            fast_mode: false,
+            pending_recovery_context: None,
+        };
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: started.session_id,
+            thread_id: started.thread_id,
+            workspace: started.workspace.clone(),
+            native_session_id: None,
+            controls: DesiredHarnessControls::default(),
+        });
+        adapter.note_transport_started();
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "last-input",
+            "ship it",
+            Some("ship it"),
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Auto,
+            None,
+        )
+        .unwrap();
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "last-input".to_owned(),
+                content: "ship it".to_owned(),
+                visible_content: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        runtime_store
+            .mark_provider_input_written("last-input")
+            .unwrap();
+        {
+            let mut state = snapshot.lock().unwrap();
+            mark_session_busy_for_input(&mut state);
+            state.turns.note_input("last-input".to_owned());
+        }
+        let (event_tx, _event_rx) = mpsc::channel();
+        // The reader forwards the echo and the answer only after the loop has
+        // seen the child gone, then reaches the end of the pipe.
+        let late_reader = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            for line in [
+                r#"{"type":"user","session_id":"fake-session","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"ship it"}]}}"#,
+                r#"{"type":"result","subtype":"success","is_error":false,"session_id":"fake-session","uuid":"result-last","duration_ms":10,"result":"shipped"}"#,
+            ] {
+                native_tx.send(line.to_owned()).unwrap();
+            }
+        });
+        assert!(connection.child.try_wait().unwrap().is_some());
+
+        drain_claude_stdout(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut connection,
+            &mut adapter,
+            Some(Instant::now() + EXITED_STDOUT_GRACE),
+        );
+        reclaim_unsettled_session_inputs(
+            &runtime_store,
+            &event_tx,
+            &started,
+            "the agent's transport exited (code 0) before this input was answered",
+            &[],
+            None,
+        );
+        late_reader.join().unwrap();
+
+        assert!(
+            queued_texts(&store, thread.id).is_empty(),
+            "an answered message must not come back as a fresh turn"
+        );
+        assert_ne!(
+            runtime_store_input_state(runtime_store.db_path(), "last-input"),
+            "failed"
+        );
+    }
+
+    /// Held ACP inputs never reached the agent. Saved to the queue, they are
+    /// queued for the next session, not sent.
+    #[test]
+    fn release_held_acp_inputs_reports_queued_not_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, thread, runtime_store, started) = claude_recovery_fixture(temp.path(), 43999);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (ack_tx, ack_rx) = mpsc::channel();
+        let held = VecDeque::from([(
+            SessionCommand::SendInput {
+                input: "and the docs".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+                ack: Some(ack_tx),
+            },
+            None,
+        )]);
+        let (_command_tx, command_rx) = mpsc::channel();
+
+        release_held_acp_inputs(
+            runtime_store.db_path(),
+            &event_tx,
+            &started,
+            held,
+            &command_rx,
+        );
+
+        assert_eq!(
+            ack_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Ok(InputWriteOutcome::QueuedForNextSession)
+        );
+        assert_eq!(queued_texts(&store, thread.id), ["and the docs"]);
     }
 
     fn runtime_store_input_state(db_path: &Path, local_input_id: &str) -> String {

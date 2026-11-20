@@ -164,46 +164,7 @@ impl ProviderInputStore {
         acknowledgement: Option<&str>,
         error: Option<&str>,
     ) -> Result<()> {
-        let now = timestamp();
-        let valid_prior_states = match state {
-            ProviderInputState::Queued => &[][..],
-            ProviderInputState::Written => &["queued"][..],
-            ProviderInputState::Acknowledged => &["written"][..],
-            ProviderInputState::Terminal => &["written", "acknowledged"][..],
-            ProviderInputState::Failed => &["queued", "written", "acknowledged"][..],
-        };
-        if valid_prior_states.is_empty() {
-            bail!(
-                "provider input {} cannot transition to {}",
-                id,
-                state.as_str()
-            );
-        }
-        let prior_predicate = valid_prior_states
-            .iter()
-            .map(|state| format!("'{state}'"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sql = format!(
-            "UPDATE provider_inputs
-             SET state = ?2,
-                 acknowledgement = COALESCE(?3, acknowledgement),
-                 error = COALESCE(?4, error),
-                 updated_at = ?5
-             WHERE id = ?1 AND state IN ({prior_predicate})"
-        );
-        let updated = self.open()?.execute(
-            &sql,
-            params![id, state.as_str(), acknowledgement, error, now],
-        )?;
-        if updated != 1 {
-            bail!(
-                "provider input {} missing or not in a valid prior state for {}",
-                id,
-                state.as_str()
-            );
-        }
-        Ok(())
+        update_state_on(&self.open()?, id, state, acknowledgement, error)
     }
 
     fn open(&self) -> Result<Connection> {
@@ -211,6 +172,61 @@ impl ProviderInputStore {
         crate::storage::configure_workspace_db(&conn)?;
         Ok(conn)
     }
+}
+
+/// Settles an input as failed on `conn`, so a caller can do it in the same
+/// transaction as the write that recovers the message.
+pub(crate) fn mark_failed_on(conn: &Connection, id: &str, error: &str) -> Result<()> {
+    update_state_on(conn, id, ProviderInputState::Failed, None, Some(error))
+}
+
+fn update_state_on(
+    conn: &Connection,
+    id: &str,
+    state: ProviderInputState,
+    acknowledgement: Option<&str>,
+    error: Option<&str>,
+) -> Result<()> {
+    let now = timestamp();
+    let valid_prior_states = match state {
+        ProviderInputState::Queued => &[][..],
+        ProviderInputState::Written => &["queued"][..],
+        ProviderInputState::Acknowledged => &["written"][..],
+        ProviderInputState::Terminal => &["written", "acknowledged"][..],
+        ProviderInputState::Failed => &["queued", "written", "acknowledged"][..],
+    };
+    if valid_prior_states.is_empty() {
+        bail!(
+            "provider input {} cannot transition to {}",
+            id,
+            state.as_str()
+        );
+    }
+    let prior_predicate = valid_prior_states
+        .iter()
+        .map(|state| format!("'{state}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE provider_inputs
+         SET state = ?2,
+             acknowledgement = COALESCE(?3, acknowledgement),
+             error = COALESCE(?4, error),
+             updated_at = ?5
+         WHERE id = ?1 AND state IN ({prior_predicate})"
+    );
+    let updated = conn.execute(
+        &sql,
+        params![id, state.as_str(), acknowledgement, error, now],
+    )?;
+    if updated != 1 {
+        bail!(
+            "provider input {} missing or not in a valid prior state for {}",
+            id,
+            state.as_str()
+        );
+    }
+    Ok(())
 }
 
 fn row_to_provider_input(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderInputRecord> {

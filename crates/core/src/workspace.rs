@@ -8386,18 +8386,19 @@ mutation($threadId: ID!) {{
         let input = input.trim();
         anyhow::ensure!(!input.is_empty(), "queued chat input cannot be empty");
         let now = timestamp();
-        let front_id = self.conn.query_row(
-            "SELECT COALESCE((SELECT MIN(id) FROM chat_queued_inputs), 1) - 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )?;
+        before_front_queue_insert();
+        // The id is chosen inside the insert. As a separate read it could be
+        // chosen by two connections at once -- recovery runs on each session's
+        // own -- and the second insert would fail on it, losing a message its
+        // caller had already settled as failed.
         let queued = self.conn.query_row(
             "INSERT INTO chat_queued_inputs (
                 id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             )
+             SELECT COALESCE((SELECT MIN(id) FROM chat_queued_inputs), 1) - 1,
+                    ?1, ?2, ?3, ?4, ?5, ?6, ?6
              RETURNING id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at",
             params![
-                front_id,
                 thread_id,
                 input,
                 visible_input,
@@ -8412,22 +8413,38 @@ mutation($threadId: ID!) {{
         Ok(queued)
     }
 
+    /// Runs `body` in one transaction on this store's connection: everything
+    /// it writes lands together, or (on `Err`) none of it does.
+    pub(crate) fn in_transaction<T>(&self, body: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let value = body(self)?;
+        transaction.commit()?;
+        Ok(value)
+    }
+
+    /// Settles a provider input as failed on this store's connection, so it
+    /// can share a transaction with the queue row that recovers the message.
+    pub(crate) fn mark_provider_input_failed(&self, id: &str, error: &str) -> Result<()> {
+        crate::provider_inputs::mark_failed_on(&self.conn, id, error)
+    }
+
     pub fn requeue_claimed_chat_input_front(&self, input: &QueuedChatInputRecord) -> Result<()> {
-        let restore_id = self.conn.query_row(
-            "SELECT CASE
-                   WHEN NOT EXISTS (SELECT 1 FROM chat_queued_inputs WHERE id = ?1) THEN ?1
-                   ELSE COALESCE((SELECT MIN(id) FROM chat_queued_inputs), ?1) - 1
-                 END",
-            params![input.id],
-            |row| row.get::<_, i64>(0),
-        )?;
         let now = timestamp();
+        before_front_queue_insert();
+        // Chosen inside the insert for the same reason as
+        // `enqueue_chat_input_front`: a front id read separately can be taken
+        // by another connection before this one writes it.
         self.conn.execute(
             "INSERT INTO chat_queued_inputs (
                 id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             )
+             SELECT CASE
+                        WHEN NOT EXISTS (SELECT 1 FROM chat_queued_inputs WHERE id = ?1) THEN ?1
+                        ELSE COALESCE((SELECT MIN(id) FROM chat_queued_inputs), ?1) - 1
+                    END,
+                    ?2, ?3, ?4, ?5, ?6, ?7, ?8",
             params![
-                restore_id,
+                input.id,
                 input.thread_id,
                 &input.input,
                 input.visible_input.as_deref(),
@@ -11256,6 +11273,35 @@ fn after_queued_chat_input_insert(id: i64) {
 #[cfg(not(test))]
 #[inline(always)]
 fn after_queued_chat_input_insert(_id: i64) {}
+
+#[cfg(test)]
+type FrontQueueInsertHook = Box<dyn FnOnce()>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_FRONT_QUEUE_INSERT: std::cell::RefCell<Option<FrontQueueInsertHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test seam: runs `hook` once, on this thread, as the next front insert
+/// (`enqueue_chat_input_front`, `requeue_claimed_chat_input_front`) starts
+/// writing. A test inserts a front row from another connection here, as a
+/// second session's recovery can in the daemon.
+#[cfg(test)]
+pub(crate) fn set_before_front_queue_insert_hook(hook: impl FnOnce() + 'static) {
+    BEFORE_FRONT_QUEUE_INSERT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn before_front_queue_insert() {
+    if let Some(hook) = BEFORE_FRONT_QUEUE_INSERT.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn before_front_queue_insert() {}
 
 fn row_to_queued_chat_input(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueuedChatInputRecord> {
     let input_kind: String = row.get(4)?;
@@ -16472,6 +16518,120 @@ branch_prefix = "team"
             .unwrap();
         assert_eq!(front.input, "actually, wrong branch");
         assert_eq!(front.session_kind, SessionKind::CLAUDE);
+    }
+
+    /// Two sessions recovering at once, each on its own connection, must not
+    /// pick the same front id: the loser's insert failed, and the message it
+    /// had already settled as failed was gone from everywhere.
+    #[test]
+    fn enqueue_chat_input_front_is_atomic_under_concurrent_front_inserts() {
+        let (temp, store) = test_workspace_store();
+        let first = store
+            .create_chat_thread("berlin", "claude", "First", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "claude", "Second", None)
+            .unwrap();
+        let db_path = temp.path().join("state.db");
+        let other_thread = second.id;
+        set_before_front_queue_insert_hook(move || {
+            WorkspaceStore::open_app(&db_path)
+                .unwrap()
+                .enqueue_chat_input_front(
+                    other_thread,
+                    "recovered elsewhere",
+                    None,
+                    ArchcarInputKind::User,
+                    SessionKind::CLAUDE,
+                )
+                .unwrap();
+        });
+
+        let recovered = store
+            .enqueue_chat_input_front(
+                first.id,
+                "recovered here",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .expect("a concurrent front insert must not take this one's id");
+
+        let elsewhere = store.list_queued_chat_inputs(second.id).unwrap();
+        assert_eq!(elsewhere.len(), 1);
+        assert_ne!(recovered.id, elsewhere[0].id);
+        assert_eq!(
+            store
+                .list_queued_chat_inputs(first.id)
+                .unwrap()
+                .into_iter()
+                .map(|queued| queued.input)
+                .collect::<Vec<_>>(),
+            ["recovered here"]
+        );
+    }
+
+    /// A claim restored while another connection front-inserts must land too.
+    #[test]
+    fn requeue_claimed_chat_input_front_is_atomic_under_concurrent_front_inserts() {
+        let (temp, store) = test_workspace_store();
+        let first = store
+            .create_chat_thread("berlin", "claude", "First", None)
+            .unwrap();
+        let second = store
+            .create_chat_thread("berlin", "claude", "Second", None)
+            .unwrap();
+        // Two rows, the front one claimed: its id is taken again by the
+        // restore unless someone else has it, so the race is over the next
+        // id below the queue's head.
+        store
+            .enqueue_chat_input(
+                first.id,
+                "queued behind",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+        let claimed = store
+            .enqueue_chat_input_front(
+                first.id,
+                "claimed",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+        store.delete_queued_chat_input(claimed.id).unwrap();
+        let db_path = temp.path().join("state.db");
+        let other_thread = second.id;
+        set_before_front_queue_insert_hook(move || {
+            WorkspaceStore::open_app(&db_path)
+                .unwrap()
+                .enqueue_chat_input_front(
+                    other_thread,
+                    "recovered elsewhere",
+                    None,
+                    ArchcarInputKind::User,
+                    SessionKind::CLAUDE,
+                )
+                .unwrap();
+        });
+
+        store
+            .requeue_claimed_chat_input_front(&claimed)
+            .expect("a concurrent front insert must not take the restored id");
+
+        assert_eq!(
+            store
+                .list_queued_chat_inputs(first.id)
+                .unwrap()
+                .into_iter()
+                .map(|queued| queued.input)
+                .collect::<Vec<_>>(),
+            ["claimed", "queued behind"]
+        );
+        assert_eq!(store.list_queued_chat_inputs(second.id).unwrap().len(), 1);
     }
 
     #[test]

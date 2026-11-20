@@ -102,10 +102,20 @@ pub(crate) struct ClaudeManagedAdapter {
     /// so without this the stop button marked the chat failed and showed
     /// "Claude Code returned a failed result."
     interrupt_pending: bool,
-    /// `request_id`s of interrupts we have sent and not yet seen answered. The
-    /// answer carries `still_queued`, the provider's own account of what it is
-    /// holding, which decides what may be put back.
-    pending_interrupt_ids: HashSet<String>,
+    /// Interrupts we have sent and not yet seen answered, by `request_id`,
+    /// each with the inputs that were outstanding when it was sent. The answer
+    /// carries `still_queued`, the provider's own account of what it is
+    /// holding, which decides what of those inputs may be put back. An input
+    /// written after the stop is not the stop's to settle.
+    pending_interrupts: HashMap<String, Vec<String>>,
+}
+
+/// What the provider's answer to one stop means, in our own ids.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InterruptSettlement {
+    retained: Vec<String>,
+    dropped: Vec<String>,
+    covered: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +183,32 @@ impl ClaudeTurnTracker {
         {
             self.active_turn = None;
         }
+    }
+
+    /// The provider let these go on a stop: no turn will take them in, so
+    /// nothing would ever settle them here, and the session would read busy
+    /// for good. Only inputs still waiting are pruned; the active turn ends by
+    /// its own `result`. Returns the ids pruned.
+    fn drop_unretained(&mut self, covered: &[String], retained: &[String]) -> Vec<String> {
+        let mut dropped = Vec::new();
+        self.written_inputs.retain(|written| {
+            let lost = covered.contains(&written.local_input_id)
+                && !retained.contains(&written.local_input_id);
+            if lost {
+                dropped.push(written.local_input_id.clone());
+            }
+            !lost
+        });
+        dropped
+    }
+
+    /// Every input this tracker still expects a turn for, oldest first.
+    fn outstanding_input_ids(&self) -> Vec<String> {
+        self.active_turn
+            .iter()
+            .chain(self.written_inputs.iter())
+            .map(|input| input.local_input_id.clone())
+            .collect()
     }
 
     fn note_replayed_user(&mut self, text: &str, effects: &mut Vec<HarnessEffect>) {
@@ -304,7 +340,7 @@ impl ClaudeManagedAdapter {
             control_request_seq: 0,
             plan_mode: false,
             interrupt_pending: false,
-            pending_interrupt_ids: HashSet::new(),
+            pending_interrupts: HashMap::new(),
         }
     }
 
@@ -499,7 +535,8 @@ impl ClaudeManagedAdapter {
             "archcar-interrupt-{}-{}",
             self.context.session_id, self.control_request_seq
         );
-        self.pending_interrupt_ids.insert(request_id.clone());
+        self.pending_interrupts
+            .insert(request_id.clone(), self.tracker.outstanding_input_ids());
         let payload = json!({
             "type": "control_request",
             "request_id": request_id,
@@ -517,7 +554,12 @@ impl ClaudeManagedAdapter {
     /// and claude has not taken into a turn. That errs towards the provider
     /// keeping the message, because the cost of being wrong the other way is
     /// delivering the user's words twice.
-    fn interrupt_settlement(&mut self, line: &str) -> Result<Option<Vec<String>>> {
+    ///
+    /// Each entry claims a distinct written input: two steers with the same
+    /// text are two messages, and claude holding both must keep both ours.
+    /// Only inputs the stop covered are candidates, and only they can be
+    /// dropped: one written after the stop is still on its way.
+    fn interrupt_settlement(&mut self, line: &str) -> Result<Option<InterruptSettlement>> {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return Ok(None);
         };
@@ -527,35 +569,44 @@ impl ClaudeManagedAdapter {
         let Some(request_id) = string_at(&value, &["response", "request_id"]) else {
             return Ok(None);
         };
-        if !self.pending_interrupt_ids.remove(&request_id) {
+        let Some(covered) = self.pending_interrupts.remove(&request_id) else {
             return Ok(None);
-        }
+        };
         let entries = value
             .pointer("/response/response/still_queued")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if entries.is_empty() {
-            return Ok(Some(Vec::new()));
-        }
         let mut retained = Vec::new();
         for entry in &entries {
-            match self.written_input_id_for_retained(entry) {
+            let placed = claude_user_message_text(entry).and_then(|text| {
+                self.tracker
+                    .written_inputs
+                    .iter()
+                    .find(|written| {
+                        written.content == text
+                            && covered.contains(&written.local_input_id)
+                            && !retained.contains(&written.local_input_id)
+                    })
+                    .map(|written| written.local_input_id.clone())
+            });
+            match placed {
                 Some(local_input_id) => retained.push(local_input_id),
-                None => return Ok(Some(self.written_input_ids())),
+                None => {
+                    return Ok(Some(InterruptSettlement {
+                        retained: self.written_input_ids(),
+                        dropped: Vec::new(),
+                        covered,
+                    }))
+                }
             }
         }
-        Ok(Some(retained))
-    }
-
-    /// The local id of the written input a `still_queued` entry describes.
-    fn written_input_id_for_retained(&self, entry: &Value) -> Option<String> {
-        let text = claude_user_message_text(entry)?;
-        self.tracker
-            .written_inputs
-            .iter()
-            .find(|written| written.content == text)
-            .map(|written| written.local_input_id.clone())
+        let dropped = self.tracker.drop_unretained(&covered, &retained);
+        Ok(Some(InterruptSettlement {
+            retained,
+            dropped,
+            covered,
+        }))
     }
 
     fn written_input_ids(&self) -> Vec<String> {
@@ -625,10 +676,19 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             // The answer to a stop we asked for: it says what claude is still
             // holding, which is what decides whether a written input may be
             // put back or must be left to the provider.
-            if let Some(retained_local_input_ids) = self.interrupt_settlement(line)? {
+            if let Some(settlement) = self.interrupt_settlement(line)? {
+                let pruned = !settlement.dropped.is_empty();
                 effects.push(HarnessEffect::InterruptSettled {
-                    retained_local_input_ids,
+                    retained_local_input_ids: settlement.retained,
+                    dropped_local_input_ids: settlement.dropped,
+                    covered_local_input_ids: settlement.covered,
                 });
+                // The stopped turn's `result` may have come first and found
+                // the dropped inputs still waiting; nothing else would say
+                // the session is free again.
+                if pruned && self.tracker.ready() {
+                    effects.push(HarnessEffect::Ready);
+                }
                 continue;
             }
             let Some(event) = self.parser.parse_line(line)? else {
@@ -3987,6 +4047,7 @@ mod tests {
             .find_map(|effect| match effect {
                 HarnessEffect::InterruptSettled {
                     retained_local_input_ids,
+                    ..
                 } => Some(retained_local_input_ids),
                 _ => None,
             })
@@ -4037,6 +4098,158 @@ mod tests {
                 "steer-one".to_owned(),
                 "steer-two".to_owned()
             ]
+        );
+    }
+
+    fn write_user_input(adapter: &mut ClaudeManagedAdapter, local_input_id: &str, content: &str) {
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: local_input_id.to_owned(),
+                content: content.to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Immediate,
+            })
+            .unwrap();
+    }
+
+    /// Sends a stop and returns the line claude answers it with, given what it
+    /// says it still holds.
+    fn stop_answered_with(adapter: &mut ClaudeManagedAdapter, still_queued: &str) -> String {
+        let HarnessControlPlan::NativeWrite(write) =
+            adapter.plan_control(HarnessControl::Interrupt)
+        else {
+            panic!("the stop should be written");
+        };
+        let request_id = serde_json::from_slice::<Value>(&write.payload).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        format!(
+            r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"{request_id}","response":{{"still_queued":{still_queued}}}}}}}"#
+        )
+    }
+
+    fn observe_line(adapter: &mut ClaudeManagedAdapter, line: &str) -> Vec<HarnessEffect> {
+        adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: format!("{line}\n").into_bytes(),
+            })
+            .unwrap()
+    }
+
+    fn settled(effects: &[HarnessEffect]) -> (Vec<String>, Vec<String>, Vec<String>) {
+        effects
+            .iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::InterruptSettled {
+                    retained_local_input_ids,
+                    dropped_local_input_ids,
+                    covered_local_input_ids,
+                } => Some((
+                    retained_local_input_ids.clone(),
+                    dropped_local_input_ids.clone(),
+                    covered_local_input_ids.clone(),
+                )),
+                _ => None,
+            })
+            .expect("the stop's answer should settle it")
+    }
+
+    /// A steer claude let go on a stop is put back on the queue by the
+    /// session; left in the tracker, it waited for a turn that never comes and
+    /// the chat read busy for good.
+    #[test]
+    fn claude_adapter_ready_after_dropped_steer_is_pruned_from_tracker() {
+        let mut adapter = adapter_mid_turn();
+        observe_line(
+            &mut adapter,
+            r#"{"type":"user","session_id":"fixture-session","isReplay":true,"message":{"role":"user","content":[{"type":"text","text":"work on it"}]}}"#,
+        );
+        write_user_input(&mut adapter, "steer-one", "use the other file");
+        let answer = stop_answered_with(&mut adapter, "[]");
+
+        // The stopped turn's own `result` first, then the stop's answer.
+        let result_effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: INTERRUPTED_RESULT.to_vec(),
+            })
+            .unwrap();
+        assert!(
+            !adapter.tracker.ready(),
+            "the steer is still outstanding until the stop says otherwise: {result_effects:?}"
+        );
+        let effects = observe_line(&mut adapter, &answer);
+
+        let (retained, dropped, _) = settled(&effects);
+        assert!(retained.is_empty());
+        assert_eq!(dropped, ["steer-one"]);
+        assert!(adapter.tracker.written_inputs.is_empty());
+        assert!(adapter.tracker.ready());
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, HarnessEffect::Ready)),
+            "nothing else would say the session is free again: {effects:?}"
+        );
+    }
+
+    /// Two steers with the same words are two messages. Claude holding both
+    /// must keep both ours to leave alone, or one of them is delivered twice.
+    #[test]
+    fn interrupt_settlement_matches_each_duplicate_steer_to_a_distinct_input() {
+        let held = r#"{"message":{"role":"user","content":[{"type":"text","text":"continue"}]}}"#;
+        let retained = settlement_for(
+            &format!(
+                r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"REQUEST_ID","response":{{"still_queued":[{held},{held}]}}}}}}"#
+            ),
+            &[("continue-one", "continue"), ("continue-two", "continue")],
+        );
+
+        assert_eq!(retained, ["continue-one", "continue-two"]);
+    }
+
+    /// More held entries than inputs with those words: one cannot be placed,
+    /// so nothing is put back rather than risk sending a held message twice.
+    #[test]
+    fn an_extra_duplicate_held_entry_keeps_every_written_input() {
+        let held = r#"{"message":{"role":"user","content":[{"type":"text","text":"continue"}]}}"#;
+        let retained = settlement_for(
+            &format!(
+                r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"REQUEST_ID","response":{{"still_queued":[{held},{held}]}}}}}}"#
+            ),
+            &[("continue-one", "continue")],
+        );
+
+        assert_eq!(retained, ["active-input", "continue-one"]);
+    }
+
+    /// The stop's answer describes claude's queue at the stop. A message
+    /// written after it is not in that answer, and is not the stop's to put
+    /// back: claude may well still read it.
+    #[test]
+    fn interrupt_settled_does_not_replay_input_written_after_the_interrupt() {
+        let mut adapter = adapter_mid_turn();
+        write_user_input(&mut adapter, "before-stop", "never mind");
+        let answer = stop_answered_with(&mut adapter, "[]");
+        write_user_input(&mut adapter, "after-stop", "do this instead");
+
+        let (retained, dropped, covered) = settled(&observe_line(&mut adapter, &answer));
+
+        assert!(retained.is_empty());
+        assert_eq!(covered, ["active-input", "before-stop"]);
+        assert_eq!(dropped, ["active-input", "before-stop"]);
+        assert_eq!(
+            adapter
+                .tracker
+                .written_inputs
+                .iter()
+                .map(|written| written.local_input_id.as_str())
+                .collect::<Vec<_>>(),
+            ["after-stop"],
+            "the later message is still on its way to claude"
         );
     }
 

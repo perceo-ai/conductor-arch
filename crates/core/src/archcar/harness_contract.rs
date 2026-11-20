@@ -401,8 +401,16 @@ pub enum HarnessEffect {
     /// it is ours to put back. Anything named here it still intends to deliver,
     /// so putting that back would send the user's words twice. An empty list
     /// means it kept nothing.
+    ///
+    /// Only the inputs written before the stop are its business: `covered`
+    /// names them. Anything written after it is still on its way to the
+    /// provider, and the stop's answer says nothing about it. `dropped` names
+    /// the covered inputs the adapter has stopped tracking because the
+    /// provider let them go; no turn will ever complete them.
     InterruptSettled {
         retained_local_input_ids: Vec<String>,
+        dropped_local_input_ids: Vec<String>,
+        covered_local_input_ids: Vec<String>,
     },
 }
 
