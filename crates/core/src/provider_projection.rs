@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use serde_json::Value;
@@ -362,13 +362,19 @@ pub fn render_provider_event_projection(
 
     let mut items = Vec::<ProviderProjectionItem>::new();
     let mut positions = HashMap::<String, usize>::new();
-    // background card id → the `Agent` card it duplicates.
+    // background card id → the `Agent` card it duplicates. Insertion order is
+    // preserved because folds are applied in order and a later fold can append
+    // to a card an earlier one already wrote.
     let mut background_agent_folds = Vec::<(String, String)>::new();
+    // Which card ids are already in `background_agent_folds`. A linear scan of
+    // the vec per event made this quadratic in the number of background cards,
+    // which is the bulk of the projection cost on a long multi-agent chat.
+    let mut background_agent_folded = HashSet::<String>::new();
 
     for event in events {
         let id = canonical_projection_id(&event);
         if let Some(agent_id) = event.background_agent_card_for.clone() {
-            if !background_agent_folds.iter().any(|(card, _)| card == &id) {
+            if background_agent_folded.insert(id.clone()) {
                 background_agent_folds.push((id.clone(), agent_id));
             }
         }

@@ -52,17 +52,33 @@ function tickRequests(threadId) {
   ];
 }
 
+/**
+ * Cold and warm cost for one request, reported separately.
+ *
+ * The daemon caches a thread's projection, and folds in rows as it writes them
+ * — so a bench that multiplies rows directly in SQLite, as this one does,
+ * leaves the cache holding the pre-multiplication records. Ignoring that
+ * reported a 56x speed-up that was really a stale answer: 64kB where the
+ * uncached path returns 716kB.
+ *
+ * Each size therefore gets its own thread, never pulled before. Its first pull
+ * is a genuine cache miss over the real row count; the samples after it are
+ * warm hits on the same data.
+ */
 async function measure(request) {
-  await scratch.rpc(request); // warm lazily-opened handles
+  const coldStarted = performance.now();
+  const cold = await scratch.rpc(request);
+  const coldMs = performance.now() - coldStarted;
+
   const times = [];
-  let bytes = 0;
+  let bytes = cold.bytes;
   for (let i = 0; i < SAMPLES; i += 1) {
     const started = performance.now();
     const res = await scratch.rpc(request);
     times.push(performance.now() - started);
     bytes = res.bytes;
   }
-  return { times: stats(times), bytes };
+  return { cold: { ms: coldMs, bytes: cold.bytes }, times: stats(times), bytes };
 }
 
 /**
@@ -125,6 +141,43 @@ function growTo(threadId, target) {
     `);
   }
   return rowCount(threadId);
+}
+
+/**
+ * Copy a thread's rows onto a brand-new chat thread, and return its id.
+ *
+ * Gives each size a thread the daemon has never projected, which is what makes
+ * the first pull a genuine cache miss.
+ */
+function cloneThreadForSize(threadId, size) {
+  const workspaceId = Number(
+    scratch.sql(`SELECT workspace_id FROM chat_threads WHERE id = ${threadId}`),
+  );
+  scratch.sql(`
+    INSERT INTO chat_threads (workspace_id, provider, title, status, created_at, updated_at)
+    VALUES (${workspaceId}, 'claude', 'size-${size}', 'active', '1', '1')
+  `);
+  const clone = Number(scratch.sql("SELECT MAX(id) FROM chat_threads"));
+  scratch.sql(`
+    INSERT INTO provider_events (
+      identity_key, provider, provider_event_id, provider_item_id,
+      provider_thread_id, provider_turn_id, parent_provider_item_id,
+      parent_provider_thread_id, workspace_id, chat_thread_id, process_id,
+      phase, kind, provider_subtype, provider_sequence, received_sequence,
+      timeline_seq, occurred_at_ms, normalized_payload_json, raw_json,
+      schema_version, adapter_version, created_at, updated_at
+    )
+    SELECT
+      identity_key || '-t${clone}', provider,
+      provider_event_id || '-t${clone}', provider_item_id || '-t${clone}',
+      provider_thread_id, provider_turn_id, parent_provider_item_id,
+      parent_provider_thread_id, workspace_id, ${clone}, process_id,
+      phase, kind, provider_subtype, provider_sequence, received_sequence,
+      timeline_seq, occurred_at_ms, normalized_payload_json, raw_json,
+      schema_version, adapter_version, created_at, updated_at
+    FROM provider_events WHERE chat_thread_id = ${threadId}
+  `);
+  return clone;
 }
 
 /** Stream a recorded capture through the daemon's real ingest path. */
@@ -209,21 +262,26 @@ async function main() {
 
     for (const size of SIZES) {
       const rows = growTo(threadId, size);
+      // A thread of its own, carrying a copy of the grown row set, so its first
+      // pull is a real cache miss rather than a hit on stale records.
+      const sizedThread = cloneThreadForSize(threadId, size);
       const cells = [];
-      let tickMs = 0;
+      let warmTickMs = 0;
+      let coldTickMs = 0;
       let tickBytes = 0;
-      for (const [, request] of tickRequests(threadId)) {
+      for (const [, request] of tickRequests(sizedThread)) {
         const result = await measure(request);
-        tickMs += result.times.min;
+        warmTickMs += result.times.min;
+        coldTickMs += result.cold.ms;
         tickBytes += result.bytes;
         cells.push(
-          `${fmtMs(result.times.min)}/${(result.bytes / 1024).toFixed(0)}kB/n${result.times.noise.toFixed(1)}`.padStart(26),
+          `${fmtMs(result.cold.ms)}→${fmtMs(result.times.min)}/${(result.bytes / 1024).toFixed(0)}kB`.padStart(26),
         );
       }
       console.log(`${String(rows).padStart(6)}  ${cells.join("")}`);
       console.log(
-        `${"".padStart(6)}  → one refresh tick: ${fmtMs(tickMs)}, ${(tickBytes / 1024).toFixed(0)}kB` +
-          `   (10 ticks/s/thread → ${(tickMs / 100).toFixed(1)}x one core, ${((tickBytes * 10) / 1024 / 1024).toFixed(1)}MB/s)`,
+        `${"".padStart(6)}  → one tick: cold ${fmtMs(coldTickMs)}, warm ${fmtMs(warmTickMs)}, ${(tickBytes / 1024).toFixed(0)}kB` +
+          `   (4 ticks/s/thread → ${((tickBytes * 4) / 1024 / 1024).toFixed(1)}MB/s)`,
       );
     }
   } finally {

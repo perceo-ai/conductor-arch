@@ -26,6 +26,7 @@ pub mod model_registry;
 pub mod notifications;
 pub mod paths;
 pub mod platform;
+pub mod projection_cache;
 pub mod provider_adapters;
 pub mod provider_capabilities;
 pub mod provider_events;

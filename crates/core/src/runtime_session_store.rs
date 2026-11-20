@@ -100,7 +100,13 @@ impl RuntimeSessionStore {
     }
 
     pub fn append_provider_event(&self, draft: &ProviderEventDraft) -> Result<ProviderEventRecord> {
-        self.provider_event_store.upsert_event(draft)
+        let record = self.provider_event_store.upsert_event(draft)?;
+        // Fold the row into the thread's cached projection rather than leaving
+        // the next pull to re-read the whole thread. This is the single funnel
+        // for session-written events; the other writer
+        // (interrupt_active_turns_for_process) invalidates instead.
+        crate::projection_cache::cache_for(&self.db_path).note_record(&record);
+        Ok(record)
     }
 
     pub fn enqueue_provider_input(&self, input: ProviderInputInput) -> Result<ProviderInputRecord> {

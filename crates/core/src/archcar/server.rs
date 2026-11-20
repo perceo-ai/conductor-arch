@@ -1561,9 +1561,14 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetChatProjection { thread_id } => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id) {
-                Ok(records) => {
-                    let projection = provider_projection_from_records(&records);
+            let projections = crate::projection_cache::cache_for(&db_path);
+            // Served from the cache when the thread is held; `load` only runs
+            // on a miss, so the common case touches neither SQLite nor the JSON
+            // parser.
+            match projections.projection(thread_id, || {
+                ProviderEventStore::new(&db_path).list_for_chat_thread(thread_id)
+            }) {
+                Ok(projection) => {
                     ArchcarResponse::ChatProjection {
                         thread_id,
                         items: crate::provider_projection::drop_echoed_user_messages(

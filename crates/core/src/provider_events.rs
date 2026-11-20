@@ -599,6 +599,16 @@ impl ProviderEventStore {
         }
 
         tx.commit()?;
+        // These rows bypass RuntimeSessionStore::append_provider_event, so
+        // nothing folded them into the cached projection. A cache that missed
+        // them would leave the interrupted turn rendering as still streaming.
+        for thread_id in active_turns
+            .iter()
+            .filter_map(|event| event.chat_thread_id)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            crate::projection_cache::cache_for(&self.db_path).invalidate(thread_id);
+        }
         Ok(active_turns.len())
     }
 
