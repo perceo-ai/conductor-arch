@@ -35,8 +35,9 @@ const { AttentionPage } = await import("./Attention");
 const { attentionStore } = await import("@/store/attention");
 const { workspacesStore } = await import("@/store/workspaces");
 
+/** Known workspaces, in the repository the fixture items name. */
 function knowWorkspaces(...names: string[]) {
-  workspacesStore.setAll(names.map((name) => ({ name }) as never));
+  workspacesStore.setAll(names.map((name) => ({ name, repository: "repo" }) as never));
 }
 
 let dispose: (() => void) | undefined;
@@ -94,7 +95,8 @@ describe("Attention page", () => {
     const host = mount();
     await settle();
     expect(host.querySelectorAll("[data-attention-row]")).toHaveLength(0);
-    expect(host.textContent).toContain("Nothing needs you");
+    // The CLI and iOS use this exact line; surface parity is a project rule.
+    expect(host.querySelector(".empty-state")?.textContent).toBe("Nothing needs you");
   });
 
   it("navigates to the item's workspace and thread when a row is activated", async () => {
@@ -144,6 +146,31 @@ describe("Attention page", () => {
     const row = host.querySelector("[data-attention-row]")!;
     expect(row.getAttribute("title")).toBe("Open pull request");
     expect(host.textContent).not.toContain("Review comments");
+  });
+
+  it("still renders a row whose kind comes from a newer daemon", async () => {
+    items = [item({ kind: "quota_low" as never, rank: 3, headline: "Quota nearly spent" })];
+    const host = mount();
+    await settle();
+    const row = host.querySelector("[data-attention-row]")!;
+    expect(row.textContent).toContain("Quota nearly spent");
+    expect(row.getAttribute("title")).toBe("Needs attention");
+    // An unknown kind must not leave the icon name undefined.
+    expect(row.querySelector(".attention-row-icon")).not.toBeNull();
+    expect(host.textContent).not.toContain("undefined");
+  });
+
+  it("does not open a workspace of another repository that shares the name", async () => {
+    // A workspace-less background task carries the repository name in
+    // `workspace`, so a name match alone can land on an unrelated workspace.
+    knowWorkspaces("alpha");
+    items = [item({ workspace: "alpha", repository: "elsewhere", thread_id: 42 })];
+    const host = mount();
+    await settle();
+    const row = host.querySelector("[data-attention-row]") as HTMLButtonElement;
+    expect(row.disabled).toBe(true);
+    row.click();
+    expect(selectWorkspace).not.toHaveBeenCalled();
   });
 
   it("shows a placeholder, not blank space, until the first answer lands", async () => {

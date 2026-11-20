@@ -153,10 +153,17 @@ export const attentionStore = {
 
   /**
    * A background task started without a workspace is reported against its
-   * repository's name; there is no workspace to open for it.
+   * repository's name, and a task whose workspace was deleted still names it,
+   * so there is no workspace to open in either case.
+   *
+   * The name alone is not enough: the repository has to match too, or a
+   * workspace that happens to share a name with another repository would be
+   * opened for that repository's workspace-less task. (Residual case, shared
+   * with iOS: a workspace named exactly like its own repository is
+   * indistinguishable from the placeholder, and resolves to the workspace.)
    */
   canOpen(item: AttentionItem): boolean {
-    return workspacesStore.row(item.workspace) !== undefined;
+    return workspacesStore.row(item.workspace)?.repository === item.repository;
   },
 
   /** Land on the thing itself: its workspace, and its chat when it names one. */

@@ -24,7 +24,16 @@ function toneOf(item: AttentionItem): Tone {
   return "quiet";
 }
 
-const KIND_ICON: Record<AttentionKind, "circle-help" | "circle-x" | "alert-circle" | "circle-check" | "git-pull-request" | "git-compare" | "circle-dot"> = {
+type KindIcon =
+  | "circle-help"
+  | "circle-x"
+  | "alert-circle"
+  | "circle-check"
+  | "git-pull-request"
+  | "git-compare"
+  | "circle-dot";
+
+const KIND_ICON: Record<AttentionKind, KindIcon> = {
   agent_asked: "circle-help",
   session_failed: "circle-x",
   stalled: "alert-circle",
@@ -47,6 +56,22 @@ const KIND_LABEL: Record<AttentionKind, string> = {
   diff_ready: "Diff ready",
   idle: "Idle",
 };
+
+// A daemon newer than this app can send a kind this build has never heard of.
+// The maps are exhaustive over the kinds this build knows, so they are read
+// through a lookup that tolerates anything else: iOS decodes such a kind to
+// `.unknown` and still renders the row, and this page must not render an
+// `undefined` icon name and an empty title instead.
+const UNKNOWN_ICON: KindIcon = "circle-dot";
+const UNKNOWN_LABEL = "Needs attention";
+
+function iconOf(kind: AttentionKind): KindIcon {
+  return (KIND_ICON as Partial<Record<string, KindIcon>>)[kind] ?? UNKNOWN_ICON;
+}
+
+function labelOf(kind: AttentionKind): string {
+  return (KIND_LABEL as Partial<Record<string, string>>)[kind] ?? UNKNOWN_LABEL;
+}
 
 const TONE_LABEL: Record<Tone, string> = {
   urgent: "Needs you now",
@@ -119,7 +144,7 @@ export function AttentionPage() {
               </Show>
             }
           >
-            <div class="empty-state">Nothing needs you right now.</div>
+            <div class="empty-state">Nothing needs you</div>
           </Show>
         }
       >
@@ -136,11 +161,11 @@ export function AttentionPage() {
                       data-attention-row
                       data-kind={item.kind}
                       data-tone={toneOf(item)}
-                      title={KIND_LABEL[item.kind]}
+                      title={labelOf(item.kind)}
                       disabled={!attentionStore.canOpen(item)}
                       onClick={() => attentionStore.selectItem(item)}
                     >
-                      <Icon name={KIND_ICON[item.kind]} class="attention-row-icon" />
+                      <Icon name={iconOf(item.kind)} class="attention-row-icon" />
                       <span class="attention-row-workspace">{item.workspace}</span>
                       <span class="attention-row-headline">{item.headline}</span>
                       <Show when={item.detail}>
