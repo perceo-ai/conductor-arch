@@ -12,6 +12,9 @@ import type { ArchcarChecksSummary, ArchcarConfiguredCheck, ArchcarTimelineEvent
 
 export type ArchcarResponse =
   | { type: "ack" }
+  // What became of an input: written means the agent has it, queued_for_next_session
+  // means the write failed and the message went back on the chat's queue.
+  | { type: "input_accepted"; written: boolean; queued_for_next_session: boolean }
   | { type: "session_spawn_queued"; workspace: string; kind: SessionKind }
   | { type: "session_spawned"; session_id: number; thread_id: number; workspace: string; kind: SessionKind; pid: number }
   | { type: "session_messages"; thread_id: number; messages: ArchcarMessage[] }

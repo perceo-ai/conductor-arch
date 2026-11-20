@@ -3588,6 +3588,33 @@ fn run_cli() -> Result<()> {
                         kind: input_kind,
                         delivery: cli_input_delivery(immediate),
                     })? {
+                        // "sent" is only said when the agent really took the
+                        // message. Saying it for a write that had not happened
+                        // yet is half of why steering looked broken: the
+                        // command reported success and the agent carried on
+                        // with the turn the message was meant to redirect.
+                        ArchcarResponse::InputAccepted {
+                            written,
+                            queued_for_next_session,
+                        } => {
+                            let label = session_kind_label(kind);
+                            let immediate_label = if immediate { " immediate" } else { "" };
+                            if written {
+                                println!(
+                                    "sent {label}{immediate_label} message to session {session_id} thread {resolved_thread_id}"
+                                );
+                            } else if queued_for_next_session {
+                                println!(
+                                    "{label} session {session_id} could not take this message, so it is queued \
+                                     at the head of thread {resolved_thread_id}; the next session delivers it"
+                                );
+                            } else {
+                                println!(
+                                    "accepted {label}{immediate_label} message for session {session_id} thread \
+                                     {resolved_thread_id}; it has not been written to the agent yet"
+                                );
+                            }
+                        }
                         ArchcarResponse::Ack => {
                             println!(
                                 "sent {}{} message to session {} thread {}",
@@ -4548,6 +4575,18 @@ fn attention_glyph(kind: AttentionKind) -> char {
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
+        ArchcarResponse::InputAccepted {
+            written,
+            queued_for_next_session,
+        } => {
+            if written {
+                println!("ok: the agent took the message");
+            } else if queued_for_next_session {
+                println!("queued: the session could not take it; the next one delivers it");
+            } else {
+                println!("accepted: not written to the agent yet");
+            }
+        }
         // Base64 image bytes are not something to spill into a terminal; the
         // line says what arrived so a caller can confirm the fetch worked.
         ArchcarResponse::ChatImage {

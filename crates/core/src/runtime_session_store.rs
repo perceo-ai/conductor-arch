@@ -31,6 +31,13 @@ impl RuntimeSessionStore {
         }
     }
 
+    /// The database every store here points at. Callers that must reach for a
+    /// `WorkspaceStore` (the chat queue lives there, not in the runtime stores)
+    /// take it from here rather than threading a second path alongside.
+    pub fn db_path(&self) -> &std::path::Path {
+        &self.db_path
+    }
+
     pub fn append_input_and_audit_log(
         &self,
         thread_id: i64,
@@ -119,6 +126,16 @@ impl RuntimeSessionStore {
 
     pub fn mark_provider_input_failed(&self, id: &str, error: &str) -> Result<()> {
         self.provider_input_store.mark_failed(id, error)
+    }
+
+    /// Every input this process was handed and the provider has not answered,
+    /// so a caller can settle them and put the user's own messages back on the
+    /// chat's queue.
+    pub fn unsettled_provider_inputs(
+        &self,
+        process_id: i64,
+    ) -> Result<Vec<crate::provider_inputs::ProviderInputRecord>> {
+        self.provider_input_store.unsettled_for_process(process_id)
     }
 
     /// Whether this chat is planning rather than building.

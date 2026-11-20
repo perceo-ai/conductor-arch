@@ -1044,6 +1044,15 @@ pub enum ArchcarRequest {
 #[allow(clippy::large_enum_variant)]
 pub enum ArchcarResponse {
     Ack,
+    /// What became of an input a client sent. `Ack` says only that the daemon
+    /// took the request; this says whether the agent actually got the message,
+    /// which is the difference between a steer that landed and one that did
+    /// not. `written` false with `queued_for_next_session` false means the
+    /// session has the message but has not written it yet.
+    InputAccepted {
+        written: bool,
+        queued_for_next_session: bool,
+    },
     SessionSpawnQueued {
         workspace: String,
         kind: SessionKind,
@@ -2716,6 +2725,12 @@ fn provider_interaction_resolution_summary(resolution: &ProviderInteractionResol
 pub fn archcar_response_summary(response: &ArchcarResponse) -> String {
     match response {
         ArchcarResponse::Ack => "ack".to_owned(),
+        ArchcarResponse::InputAccepted {
+            written,
+            queued_for_next_session,
+        } => format!(
+            "input_accepted written={written} queued_for_next_session={queued_for_next_session}"
+        ),
         ArchcarResponse::SessionSpawnQueued { workspace, kind } => format!(
             "session_spawn_queued workspace={workspace} kind={}",
             session_kind_label(*kind)

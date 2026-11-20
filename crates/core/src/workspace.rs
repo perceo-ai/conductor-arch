@@ -8367,6 +8367,51 @@ mutation($threadId: ID!) {{
             .map_err(Into::into)
     }
 
+    /// Put a message that was already handed to a provider back at the head of
+    /// the queue.
+    ///
+    /// A direct send — steering, above all — never had a queue row to restore:
+    /// when its write failed, or the transport died holding it, the message was
+    /// simply gone while the transcript still showed it as sent. This is the
+    /// row it gets instead, ahead of anything queued behind it so the user's
+    /// correction still arrives before the work it was correcting.
+    pub fn enqueue_chat_input_front(
+        &self,
+        thread_id: i64,
+        input: &str,
+        visible_input: Option<&str>,
+        input_kind: ArchcarInputKind,
+        session_kind: SessionKind,
+    ) -> Result<QueuedChatInputRecord> {
+        let input = input.trim();
+        anyhow::ensure!(!input.is_empty(), "queued chat input cannot be empty");
+        let now = timestamp();
+        let front_id = self.conn.query_row(
+            "SELECT COALESCE((SELECT MIN(id) FROM chat_queued_inputs), 1) - 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let queued = self.conn.query_row(
+            "INSERT INTO chat_queued_inputs (
+                id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+             RETURNING id, thread_id, input, visible_input, input_kind, session_kind, created_at, updated_at",
+            params![
+                front_id,
+                thread_id,
+                input,
+                visible_input,
+                archcar_input_kind_as_str(input_kind),
+                session_kind_as_str(session_kind),
+                now
+            ],
+            row_to_queued_chat_input,
+        )?;
+        after_queued_chat_input_insert(queued.id);
+        self.touch_chat_thread(thread_id, &now)?;
+        Ok(queued)
+    }
+
     pub fn requeue_claimed_chat_input_front(&self, input: &QueuedChatInputRecord) -> Result<()> {
         let restore_id = self.conn.query_row(
             "SELECT CASE
@@ -16368,6 +16413,65 @@ branch_prefix = "team"
             .unwrap()
             .is_none());
         assert!(store.list_queued_chat_thread_ids().unwrap().is_empty());
+    }
+
+    /// A lost steer is put back ahead of the queue, and ahead of an earlier
+    /// loss too: the order the user said things in is the order they arrive in.
+    #[test]
+    fn enqueue_chat_input_front_lands_ahead_of_everything_queued() {
+        let (_temp, store) = test_workspace_store();
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "then write the changelog",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+
+        store
+            .enqueue_chat_input_front(
+                thread.id,
+                "stop, wrong file",
+                Some("stop, wrong file"),
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+        store
+            .enqueue_chat_input_front(
+                thread.id,
+                "actually, wrong branch",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+
+        let order = store
+            .list_queued_chat_inputs(thread.id)
+            .unwrap()
+            .into_iter()
+            .map(|queued| queued.input)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            order,
+            [
+                "actually, wrong branch",
+                "stop, wrong file",
+                "then write the changelog"
+            ]
+        );
+        let front = store
+            .peek_next_queued_chat_input(thread.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(front.input, "actually, wrong branch");
+        assert_eq!(front.session_kind, SessionKind::CLAUDE);
     }
 
     #[test]

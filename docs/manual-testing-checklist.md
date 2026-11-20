@@ -219,6 +219,17 @@ Linear checks.
   ends marked interrupted rather than failed, the session stays ready, and the
   next message starts a new turn in the same chat. Repeat with
   `archductor archcar interrupt <session-id>` for the CLI surface.
+- [ ] Steer a Claude turn, then kill the claude process from outside Archductor
+  (`kill <pid>` on the session's pid) before the agent answers; confirm the
+  steer reappears at the top of that chat's queue and is delivered to the
+  replacement session rather than disappearing.
+- [ ] With a message already queued for an idle chat, run
+  `archductor session send <ws> --kind claude "second"` with no `--immediate`;
+  confirm the queued message runs first and `second` waits behind it.
+- [ ] Run `archductor session send <ws> --kind claude --immediate "..."` into a
+  busy turn and confirm the command reports it as sent only when the agent
+  really took it; stop the daemon mid-send and confirm the command reports the
+  message as undelivered instead of success.
 - [ ] Confirm contract version 1 capability snapshots list the full required
   baseline for both Codex and Claude Code through
   `archductor archcar status <session-id>`.

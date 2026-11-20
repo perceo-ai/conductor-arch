@@ -91,6 +91,29 @@ fn durable_thread_is_first_user_turn(db_path: &std::path::Path, thread_id: i64) 
         .any(|message| message.role == "user"))
 }
 
+/// How a session loop reports what became of an input it was handed: `Ok` once
+/// the bytes are in the provider's stdin and the row says so, `Err` with the
+/// reason otherwise.
+///
+/// A send used to be acknowledged the moment it reached the loop's channel,
+/// which is not the same thing at all: a command still queued there when the
+/// daemon restarted was reported as sent and then died with the loop, leaving
+/// no row, no delivery and nothing to tell the user. The answer now comes from
+/// the write itself.
+pub type InputWriteAck = Sender<Result<InputWriteOutcome, String>>;
+
+/// What became of an input the loop accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputWriteOutcome {
+    /// The bytes are in the provider's input.
+    Written,
+    /// The write failed, but the message was not lost: it is back at the head
+    /// of the chat's queue and the next session delivers it. Callers report
+    /// this as accepted rather than failed, so a client does not also restore
+    /// the text to its composer and send it a second time.
+    QueuedForNextSession,
+}
+
 #[derive(Debug)]
 pub enum SessionCommand {
     SendInput {
@@ -98,6 +121,9 @@ pub enum SessionCommand {
         visible_input: Option<String>,
         kind: ArchcarInputKind,
         delivery: ArchcarInputDelivery,
+        /// Answered by the loop that writes this input. `None` for a handover
+        /// nobody is waiting on, such as a queue drain.
+        ack: Option<InputWriteAck>,
     },
     /// A queued chat input the server's drain took off the thread's queue.
     /// The claimed row travels with the command, so only this command can
@@ -126,6 +152,7 @@ impl SessionCommand {
                     visible_input: claim.visible_input.clone(),
                     kind: claim.input_kind.clone(),
                     delivery: ArchcarInputDelivery::Auto,
+                    ack: None,
                 },
                 Some(claim),
             ),
@@ -239,6 +266,19 @@ impl TurnGenerations {
         if let Some((_, generation)) = self.inputs.iter().find(|(id, _)| id == local_input_id) {
             self.taken = self.taken.max(*generation);
         }
+    }
+
+    /// The inputs a turn has already taken in.
+    ///
+    /// A stop cancels the turn answering them, and the provider will not
+    /// deliver them again — but it did read them, so putting one back would
+    /// re-run as a fresh turn exactly the work the user just stopped.
+    pub(crate) fn taken_input_ids(&self) -> Vec<String> {
+        self.inputs
+            .iter()
+            .filter(|(_, generation)| *generation <= self.taken)
+            .map(|(local_input_id, _)| local_input_id.clone())
+            .collect()
     }
 
     /// Records the busy mark's time for the generation it just opened.
@@ -1156,6 +1196,42 @@ fn apply_harness_effect(
                 retry_after_ms = ?retry_after_ms,
                 provider_message = %message,
                 "managed harness rate limited"
+            );
+        }
+        // TODO(steer-drops): the input-durability work consumes this — what
+        // claude says it is still holding after a stop decides which written
+        // inputs may be put back on the chat queue. Recorded for the log in
+        // the meantime so the signal is visible before it is acted on.
+        HarnessEffect::InterruptSettled {
+            retained_local_input_ids,
+        } => {
+            info!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                retained = retained_local_input_ids.len(),
+                "provider accepted the stop and reported what it still holds"
+            );
+            // A stop cancels the turn, not the things the user said after it.
+            // Anything written that the provider is no longer holding is a
+            // message it will never read, so it goes back on the queue and is
+            // delivered to the turn that follows the stop.
+            //
+            // The prompt of the turn being stopped is not one of those: the
+            // provider took it in and answered it, however briefly, so the
+            // keep-list is widened with everything a turn has taken. Without
+            // that, stopping a turn in the window before the provider echoes
+            // its prompt back would replay that prompt as a fresh turn — the
+            // work the user just stopped, started again.
+            let mut retained = retained_local_input_ids;
+            if let Ok(state) = snapshot.lock() {
+                retained.extend(state.turns.taken_input_ids());
+            }
+            reclaim_unsettled_session_inputs(
+                runtime_store,
+                event_tx,
+                started,
+                "the turn was stopped before the agent read this input",
+                &retained,
             );
         }
         HarnessEffect::InteractionResolved { .. } | HarnessEffect::ResumeRequired => {}
@@ -2283,6 +2359,7 @@ fn run_session_loop(
                     visible_input,
                     kind,
                     delivery: _,
+                    ack,
                 } => {
                     let current = snapshot.lock().unwrap().clone();
                     if kind == ArchcarInputKind::RawTerminal {
@@ -2292,9 +2369,11 @@ fn run_session_loop(
                                     state.ready = true;
                                     state.runtime_state = AgentSessionState::WaitingForInput;
                                 }
+                                answer_input_write(&ack, Ok(InputWriteOutcome::Written));
                             }
                             Err(err) => {
                                 let message = format!("Raw terminal input failed: {err:#}");
+                                answer_input_write(&ack, Err(message.clone()));
                                 warn!(
                                     session_id = current.session_id,
                                     thread_id = current.thread_id,
@@ -2437,6 +2516,7 @@ fn run_session_loop(
                                 chars = input.chars().count(),
                                 "archcar session send_input wrote to pty"
                             );
+                            answer_input_write(&ack, Ok(InputWriteOutcome::Written));
                         }
                         Err(err) => {
                             warn!(
@@ -2452,6 +2532,7 @@ fn run_session_loop(
                             // instead of leaving it Running. The process may
                             // still be alive, so do not stop it.
                             requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                            answer_input_write(&ack, Err(format!("{err:#}")));
                             mark_provider_session_failed(
                                 &runtime_store,
                                 &snapshot,
@@ -3042,6 +3123,7 @@ fn run_codex_app_server_session_loop(
                     visible_input,
                     kind,
                     delivery,
+                    ack,
                 } => {
                     crate::archcar::test_hooks::pause_before_session_takes_input();
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
@@ -3051,6 +3133,10 @@ fn run_codex_app_server_session_loop(
                             Ok(first_turn) => first_turn,
                             Err(err) => {
                                 requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                                answer_input_write(
+                                    &ack,
+                                    Err(format!("Could not prepare Codex input history: {err:#}")),
+                                );
                                 mark_provider_session_failed(
                                     &runtime_store,
                                     &snapshot,
@@ -3107,6 +3193,10 @@ fn run_codex_app_server_session_loop(
                         connection.native_thread_id.clone(),
                     ) {
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            Err(format!("Codex input persistence failed: {err:#}")),
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3162,7 +3252,23 @@ fn run_codex_app_server_session_loop(
                         let _ = runtime_store
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
                         let _ = connection.child.kill();
+                        let requeued = requeue_failed_direct_input(
+                            &db_path,
+                            &event_tx,
+                            &started,
+                            queued_handoff.as_ref(),
+                            &kind,
+                            &persisted_input,
+                        );
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            if requeued {
+                                Ok(InputWriteOutcome::QueuedForNextSession)
+                            } else {
+                                Err(format!("Codex turn input failed: {err:#}"))
+                            },
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3174,7 +3280,21 @@ fn run_codex_app_server_session_loop(
                         runtime_store.mark_provider_input_written(&local_input_id)
                     {
                         let _ = connection.child.kill();
+                        let requeued = requeue_failed_direct_input(
+                            &db_path,
+                            &event_tx,
+                            &started,
+                            queued_handoff.as_ref(),
+                            &kind,
+                            &persisted_input,
+                        );
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            Err(format!(
+                                "Codex input written-state persistence failed: {err:#}"
+                            )),
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3207,6 +3327,7 @@ fn run_codex_app_server_session_loop(
                         let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
                             thread_id: started.thread_id,
                         });
+                        answer_input_write(&ack, Ok(InputWriteOutcome::Written));
                     }
                 }
                 SessionCommand::SendQueuedInput { .. } => {
@@ -3253,6 +3374,21 @@ fn run_codex_app_server_session_loop(
                 let code = status.code();
                 let _ = runtime_store.mark_session_process_exited(started.session_id, code);
                 mark_snapshot_exited(&snapshot, code);
+                // An agent exits on its own as well as on command, and
+                // anything it was still holding went with it. Put it back
+                // before the exit is announced, so a client reacting to the
+                // exit already sees the queue it will be delivered from.
+                reclaim_unsettled_session_inputs(
+                    &runtime_store,
+                    &event_tx,
+                    &started,
+                    &format!(
+                        "the agent's transport exited ({}) before this input was answered",
+                        code.map(|code| format!("code {code}"))
+                            .unwrap_or_else(|| "signalled".to_owned())
+                    ),
+                    &[],
+                );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
                     exit_code: code,
@@ -3365,6 +3501,7 @@ fn run_claude_stream_session_loop(
                     visible_input,
                     kind,
                     delivery,
+                    ack,
                 } => {
                     crate::archcar::test_hooks::pause_before_session_takes_input();
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
@@ -3374,6 +3511,10 @@ fn run_claude_stream_session_loop(
                             Ok(first_turn) => first_turn,
                             Err(err) => {
                                 requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                                answer_input_write(
+                                    &ack,
+                                    Err(format!("Could not prepare Claude input history: {err:#}")),
+                                );
                                 mark_provider_session_failed(
                                     &runtime_store,
                                     &snapshot,
@@ -3402,6 +3543,10 @@ fn run_claude_stream_session_loop(
                         connection.native_thread_id.clone(),
                     ) {
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            Err(format!("Claude input persistence failed: {err:#}")),
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3445,7 +3590,23 @@ fn run_claude_stream_session_loop(
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
                         adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
+                        let requeued = requeue_failed_direct_input(
+                            &db_path,
+                            &event_tx,
+                            &started,
+                            queued_handoff.as_ref(),
+                            &kind,
+                            &persisted_input,
+                        );
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            if requeued {
+                                Ok(InputWriteOutcome::QueuedForNextSession)
+                            } else {
+                                Err(format!("Claude stream input failed: {err:#}"))
+                            },
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3458,7 +3619,23 @@ fn run_claude_stream_session_loop(
                     {
                         adapter.settle_failed_input_write(&local_input_id);
                         let _ = connection.child.kill();
+                        let requeued = requeue_failed_direct_input(
+                            &db_path,
+                            &event_tx,
+                            &started,
+                            queued_handoff.as_ref(),
+                            &kind,
+                            &persisted_input,
+                        );
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            if requeued {
+                                Ok(InputWriteOutcome::QueuedForNextSession)
+                            } else {
+                                Err(format!("Claude input written-state persistence failed: {err:#}"))
+                            },
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3476,6 +3653,7 @@ fn run_claude_stream_session_loop(
                             &kind,
                             user_input_sequence,
                         );
+                        answer_input_write(&ack, Ok(InputWriteOutcome::Written));
                     }
                 }
                 SessionCommand::SendQueuedInput { .. } => {
@@ -3611,6 +3789,21 @@ fn run_claude_stream_session_loop(
                 let code = status.code();
                 let _ = runtime_store.mark_session_process_exited(started.session_id, code);
                 mark_snapshot_exited(&snapshot, code);
+                // An agent exits on its own as well as on command, and
+                // anything it was still holding went with it. Put it back
+                // before the exit is announced, so a client reacting to the
+                // exit already sees the queue it will be delivered from.
+                reclaim_unsettled_session_inputs(
+                    &runtime_store,
+                    &event_tx,
+                    &started,
+                    &format!(
+                        "the agent's transport exited ({}) before this input was answered",
+                        code.map(|code| format!("code {code}"))
+                            .unwrap_or_else(|| "signalled".to_owned())
+                    ),
+                    &[],
+                );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
                     exit_code: code,
@@ -3849,6 +4042,7 @@ fn run_acp_session_loop(
                     visible_input,
                     kind,
                     delivery,
+                    ack,
                 } => {
                     crate::archcar::test_hooks::pause_before_session_takes_input();
                     let first_turn = if kind == ArchcarInputKind::ControlCommand {
@@ -3858,6 +4052,10 @@ fn run_acp_session_loop(
                             Ok(first_turn) => first_turn,
                             Err(err) => {
                                 requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                                answer_input_write(
+                                    &ack,
+                                    Err(format!("Could not prepare ACP input history: {err:#}")),
+                                );
                                 mark_provider_session_failed(
                                     &runtime_store,
                                     &snapshot,
@@ -3886,6 +4084,10 @@ fn run_acp_session_loop(
                         connection.native_thread_id.clone(),
                     ) {
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            Err(format!("ACP input persistence failed: {err:#}")),
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3930,7 +4132,23 @@ fn run_acp_session_loop(
                         let _ = runtime_store
                             .mark_provider_input_failed(&local_input_id, &err.to_string());
                         let _ = connection.child.kill();
+                        let requeued = requeue_failed_direct_input(
+                            &db_path,
+                            &event_tx,
+                            &started,
+                            queued_handoff.as_ref(),
+                            &kind,
+                            &persisted_input,
+                        );
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            if requeued {
+                                Ok(InputWriteOutcome::QueuedForNextSession)
+                            } else {
+                                Err(format!("ACP prompt write failed: {err:#}"))
+                            },
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3942,7 +4160,23 @@ fn run_acp_session_loop(
                         runtime_store.mark_provider_input_written(&local_input_id)
                     {
                         let _ = connection.child.kill();
+                        let requeued = requeue_failed_direct_input(
+                            &db_path,
+                            &event_tx,
+                            &started,
+                            queued_handoff.as_ref(),
+                            &kind,
+                            &persisted_input,
+                        );
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
+                        answer_input_write(
+                            &ack,
+                            if requeued {
+                                Ok(InputWriteOutcome::QueuedForNextSession)
+                            } else {
+                                Err(format!("ACP input written-state persistence failed: {err:#}"))
+                            },
+                        );
                         mark_provider_session_failed(
                             &runtime_store,
                             &snapshot,
@@ -3973,6 +4207,7 @@ fn run_acp_session_loop(
                                 effect,
                             );
                         }
+                        answer_input_write(&ack, Ok(InputWriteOutcome::Written));
                     }
                 }
                 SessionCommand::SendQueuedInput { .. } => {
@@ -4023,6 +4258,21 @@ fn run_acp_session_loop(
                 let code = status.code();
                 let _ = runtime_store.mark_session_process_exited(started.session_id, code);
                 mark_snapshot_exited(&snapshot, code);
+                // An agent exits on its own as well as on command, and
+                // anything it was still holding went with it. Put it back
+                // before the exit is announced, so a client reacting to the
+                // exit already sees the queue it will be delivered from.
+                reclaim_unsettled_session_inputs(
+                    &runtime_store,
+                    &event_tx,
+                    &started,
+                    &format!(
+                        "the agent's transport exited ({}) before this input was answered",
+                        code.map(|code| format!("code {code}"))
+                            .unwrap_or_else(|| "signalled".to_owned())
+                    ),
+                    &[],
+                );
                 let _ = event_tx.send(ArchcarEvent::SessionExited {
                     session_id: started.session_id,
                     exit_code: code,
@@ -4065,6 +4315,7 @@ fn release_held_acp_inputs(
             input,
             visible_input,
             kind,
+            ack,
             ..
         } = command
         else {
@@ -4081,6 +4332,7 @@ fn release_held_acp_inputs(
         });
         match queued {
             Ok(_) => {
+                answer_input_write(&ack, Ok(InputWriteOutcome::Written));
                 let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
                     thread_id: started.thread_id,
                 });
@@ -4091,6 +4343,12 @@ fn release_held_acp_inputs(
                     thread_id = started.thread_id,
                     error = %format!("{err:#}"),
                     "archcar lost an ACP input it could not deliver or queue"
+                );
+                answer_input_write(
+                    &ack,
+                    Err(format!(
+                        "the session ended and this input could not be queued: {err:#}"
+                    )),
                 );
                 let _ = event_tx.send(ArchcarEvent::SessionError {
                     session_id: Some(started.session_id),
@@ -4584,6 +4842,16 @@ fn enqueue_provider_input(
     Ok(())
 }
 
+/// Tell whoever is waiting what became of the input they sent.
+///
+/// Dropping the receiver is normal — a queue drain waits on nothing — so a
+/// failed send here is not an error.
+fn answer_input_write(ack: &Option<InputWriteAck>, outcome: Result<InputWriteOutcome, String>) {
+    if let Some(ack) = ack {
+        let _ = ack.send(outcome);
+    }
+}
+
 fn session_kind_provider_key(kind: SessionKind) -> &'static str {
     kind.as_str()
 }
@@ -4611,6 +4879,166 @@ fn mark_snapshot_exited(snapshot: &Arc<Mutex<SessionSnapshot>>, exit_code: Optio
         let mut machine = SessionStateMachine::from_state(state.runtime_state);
         machine.mark_exited(exit_code);
         state.runtime_state = machine.state();
+    }
+}
+
+/// Settle every input this session never finished with, and put the user's own
+/// messages back on the chat's queue.
+///
+/// `written` only means the bytes went into the provider's stdin. When the
+/// transport dies — claude exits on its own, or a write fails mid-turn — the
+/// inputs it was holding stayed `written` for ever and the messages themselves
+/// were gone, which is what made a steer look like it had been ignored: the
+/// transcript showed it, the agent never saw it, and nothing ever said so.
+///
+/// Queued-origin inputs are not replayed here: their own claim is restored by
+/// [`requeue_failed_queued_handoff`], which runs on the handoff that failed.
+/// Replaying both would deliver that message twice.
+/// `retained` names inputs the provider says it is still holding; those are
+/// left exactly as they are, because the provider still intends to deliver
+/// them and replaying one would send the user's words twice.
+fn reclaim_unsettled_session_inputs(
+    runtime_store: &RuntimeSessionStore,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    reason: &str,
+    retained: &[String],
+) {
+    let unsettled = match runtime_store.unsettled_provider_inputs(started.session_id) {
+        Ok(unsettled) => unsettled,
+        Err(err) => {
+            warn!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                error = %format!("{err:#}"),
+                "archcar could not read the inputs a session was holding"
+            );
+            return;
+        }
+    };
+    let lost = unsettled
+        .into_iter()
+        .filter(|input| !retained.iter().any(|kept| *kept == input.id))
+        .collect::<Vec<_>>();
+    for input in &lost {
+        if let Err(err) = runtime_store.mark_provider_input_failed(&input.id, reason) {
+            warn!(
+                session_id = started.session_id,
+                local_input_id = %input.id,
+                error = %format!("{err:#}"),
+                "archcar could not settle an input a session was holding"
+            );
+        }
+    }
+    // Only the human's own words are replayable. A control command answers a
+    // question this session asked, and it means nothing to its replacement.
+    let replayable = lost
+        .into_iter()
+        .filter(|input| input.input_kind == input_kind_storage_label(&ArchcarInputKind::User))
+        .collect::<Vec<_>>();
+    if replayable.is_empty() {
+        return;
+    }
+    let store = match WorkspaceStore::open_app(runtime_store.db_path()) {
+        Ok(store) => store,
+        Err(err) => {
+            warn!(
+                thread_id = started.thread_id,
+                error = %format!("{err:#}"),
+                "archcar could not open the store to requeue a lost input"
+            );
+            return;
+        }
+    };
+    // Front-insert reverses order, so walk backwards: the first thing the user
+    // said ends up first in the queue again.
+    let mut requeued = 0usize;
+    for input in replayable.iter().rev() {
+        // The provider-bound text carries a first-turn preamble and hidden
+        // context the next session composes for itself. `visible_input` is what
+        // the user actually typed, so that is what goes back.
+        let text = input
+            .visible_input
+            .as_deref()
+            .unwrap_or(input.provider_input.as_str());
+        match store.enqueue_chat_input_front(
+            started.thread_id,
+            text,
+            input.visible_input.as_deref(),
+            ArchcarInputKind::User,
+            started.kind,
+        ) {
+            Ok(_) => requeued += 1,
+            Err(err) => warn!(
+                thread_id = started.thread_id,
+                local_input_id = %input.id,
+                error = %format!("{err:#}"),
+                "archcar could not requeue an input a dead session was holding"
+            ),
+        }
+    }
+    if requeued > 0 {
+        info!(
+            session_id = started.session_id,
+            thread_id = started.thread_id,
+            requeued,
+            reason,
+            "archcar requeued input a dead session was holding"
+        );
+        let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
+            thread_id: started.thread_id,
+        });
+        let _ = event_tx.send(ArchcarEvent::SessionMessagesUpdated {
+            thread_id: started.thread_id,
+        });
+    }
+}
+
+/// A direct send whose write failed goes back on the queue too.
+///
+/// Steering is a direct send, so it had no queue row to restore: a steer into a
+/// transport that had already exited died as `Broken pipe (os error 32)` and
+/// was never seen again, while the chat carried on with the turn the user was
+/// trying to redirect. Here it is parked at the head of the queue instead, and
+/// the replacement session delivers it.
+fn requeue_failed_direct_input(
+    db_path: &std::path::Path,
+    event_tx: &Sender<ArchcarEvent>,
+    started: &SessionSnapshot,
+    claimed: Option<&QueuedChatInputRecord>,
+    kind: &ArchcarInputKind,
+    text: &str,
+) -> bool {
+    // A claimed input is restored by its own claim; replaying both would
+    // deliver the message twice.
+    if claimed.is_some() || *kind != ArchcarInputKind::User {
+        return false;
+    }
+    let requeued = WorkspaceStore::open_app(db_path).and_then(|store| {
+        store.enqueue_chat_input_front(
+            started.thread_id,
+            text,
+            Some(text),
+            ArchcarInputKind::User,
+            started.kind,
+        )
+    });
+    match requeued {
+        Ok(_) => {
+            let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
+                thread_id: started.thread_id,
+            });
+            true
+        }
+        Err(err) => {
+            warn!(
+                session_id = started.session_id,
+                thread_id = started.thread_id,
+                error = %format!("{err:#}"),
+                "archcar could not requeue a direct input after a failed write"
+            );
+            false
+        }
     }
 }
 
@@ -5377,6 +5805,7 @@ mod tests {
                 visible_input: None,
                 kind: ArchcarInputKind::RawTerminal,
                 delivery: ArchcarInputDelivery::Immediate,
+                ack: None,
             })
             .unwrap();
 
@@ -5458,6 +5887,7 @@ mod tests {
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Auto,
+                ack: None,
             })
             .unwrap();
 
@@ -5681,6 +6111,7 @@ mod tests {
                 visible_input: claimed.visible_input.clone(),
                 kind: claimed.input_kind.clone(),
                 delivery: ArchcarInputDelivery::Immediate,
+                ack: None,
             })
             .unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -5943,6 +6374,217 @@ mod tests {
         assert!(recorded.contains("second line"), "{recorded}");
     }
 
+    /// The steer-drop case, end to end at this layer: two messages written to a
+    /// transport that then died. Both must come back on the queue, in the order
+    /// the user said them, carrying the user's own words.
+    #[test]
+    fn inputs_a_dead_session_was_holding_come_back_on_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43992);
+        let db_path = temp.path().join("state.db");
+        let runtime_store = RuntimeSessionStore::new(db_path.clone());
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            process.pid,
+            false,
+        );
+        let (event_tx, event_rx) = mpsc::channel();
+        for (suffix, visible) in [
+            ("input-1", "stop, wrong file"),
+            ("input-2", "wrong branch too"),
+        ] {
+            let local_input_id = provider_input_local_id(process.id, 0);
+            let local_input_id = format!("{local_input_id}-{suffix}");
+            enqueue_provider_input(
+                &runtime_store,
+                &started,
+                &local_input_id,
+                &format!("<composed preamble> {visible}"),
+                Some(visible),
+                &ArchcarInputKind::User,
+                ArchcarInputDelivery::Immediate,
+                None,
+            )
+            .unwrap();
+            runtime_store
+                .mark_provider_input_written(&local_input_id)
+                .unwrap();
+        }
+        // A control command is not the user's words and must not be replayed.
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "control-1",
+            "/model opus",
+            None,
+            &ArchcarInputKind::ControlCommand,
+            ArchcarInputDelivery::Immediate,
+            None,
+        )
+        .unwrap();
+
+        reclaim_unsettled_session_inputs(
+            &runtime_store,
+            &event_tx,
+            &started,
+            "the agent's transport exited (code 0) before this input was answered",
+            &[],
+        );
+
+        let queued = store
+            .list_queued_chat_inputs(thread.id)
+            .unwrap()
+            .into_iter()
+            .map(|input| input.input)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            queued,
+            ["stop, wrong file", "wrong branch too"],
+            "the user's own words come back, in order, without the composed preamble"
+        );
+        recv_archcar_event_until(
+            &event_rx,
+            |event| matches!(event, ArchcarEvent::ChatQueueUpdated { thread_id } if *thread_id == thread.id),
+        );
+    }
+
+    /// A stop is not a licence to replay what the provider is still holding:
+    /// the keep-list it answers with is honoured, or the user is answered twice.
+    #[test]
+    fn a_stop_leaves_the_inputs_the_provider_still_holds_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43993);
+        let db_path = temp.path().join("state.db");
+        let runtime_store = RuntimeSessionStore::new(db_path.clone());
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            process.pid,
+            false,
+        );
+        let (event_tx, _event_rx) = mpsc::channel();
+        for (id, visible) in [("kept-1", "still mine"), ("dropped-1", "never read")] {
+            enqueue_provider_input(
+                &runtime_store,
+                &started,
+                id,
+                visible,
+                Some(visible),
+                &ArchcarInputKind::User,
+                ArchcarInputDelivery::Immediate,
+                None,
+            )
+            .unwrap();
+            runtime_store.mark_provider_input_written(id).unwrap();
+        }
+
+        reclaim_unsettled_session_inputs(
+            &runtime_store,
+            &event_tx,
+            &started,
+            "the turn was stopped before the agent read this input",
+            &["kept-1".to_owned()],
+        );
+
+        let queued = store
+            .list_queued_chat_inputs(thread.id)
+            .unwrap()
+            .into_iter()
+            .map(|input| input.input)
+            .collect::<Vec<_>>();
+        assert_eq!(queued, ["never read"]);
+        assert_eq!(
+            runtime_store_input_state(&db_path, "kept-1"),
+            "written",
+            "an input the provider still holds is left exactly as it was"
+        );
+        assert_eq!(runtime_store_input_state(&db_path, "dropped-1"), "failed");
+    }
+
+    /// Stopping a turn must not re-ask the question that turn was answering,
+    /// even in the window before the provider has echoed the prompt back.
+    #[test]
+    fn a_stop_does_not_replay_the_prompt_of_the_turn_it_cancelled() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = seeded_workspace_store(temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let process = record_running_thread_session_with_port(&store, &thread, 43994);
+        let db_path = temp.path().join("state.db");
+        let runtime_store = RuntimeSessionStore::new(db_path.clone());
+        let started = running_session_snapshot(
+            process.id,
+            thread.id,
+            "berlin".to_owned(),
+            SessionKind::CLAUDE,
+            process.pid,
+            false,
+        );
+        let snapshot = Arc::new(Mutex::new(started.clone()));
+        enqueue_provider_input(
+            &runtime_store,
+            &started,
+            "running-1",
+            "refactor the parser",
+            Some("refactor the parser"),
+            &ArchcarInputKind::User,
+            ArchcarInputDelivery::Auto,
+            None,
+        )
+        .unwrap();
+        runtime_store
+            .mark_provider_input_written("running-1")
+            .unwrap();
+        {
+            let mut state = snapshot.lock().unwrap();
+            mark_session_busy_for_input(&mut state);
+            state.turns.note_input("running-1".to_owned());
+            state.turns.note_input_taken("running-1");
+        }
+        let (event_tx, _event_rx) = mpsc::channel();
+
+        apply_harness_effect(
+            &runtime_store,
+            &snapshot,
+            &event_tx,
+            &started,
+            &mut None,
+            &mut None,
+            HarnessEffect::InterruptSettled {
+                retained_local_input_ids: Vec::new(),
+            },
+        );
+
+        assert!(
+            store.list_queued_chat_inputs(thread.id).unwrap().is_empty(),
+            "the stopped turn's own prompt must not come back as a fresh turn"
+        );
+    }
+
+    fn runtime_store_input_state(db_path: &Path, local_input_id: &str) -> String {
+        crate::provider_inputs::ProviderInputStore::new(db_path.to_path_buf())
+            .get(local_input_id)
+            .unwrap()
+            .expect("provider input row")
+            .state
+            .as_str()
+            .to_owned()
+    }
+
     #[test]
     fn fatal_harness_effect_persists_chat_visible_session_error() {
         let temp = tempfile::tempdir().unwrap();
@@ -6116,6 +6758,7 @@ mod tests {
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Auto,
+                ack: None,
             })
             .unwrap();
         wait_for_snapshot_readiness(&snapshot, false);
@@ -6256,6 +6899,7 @@ printf '%s\n' '{"type":"result","subtype":"success","session_id":"fake-session",
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Auto,
+                ack: None,
             })
             .unwrap();
         wait_for_snapshot_readiness(&snapshot, false);
@@ -7874,6 +8518,7 @@ while True:
                 visible_input: None,
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Auto,
+                ack: None,
             })
             .unwrap();
     }
@@ -8100,6 +8745,7 @@ while True:
                 visible_input: Some(format!("visible {input}")),
                 kind: ArchcarInputKind::User,
                 delivery: ArchcarInputDelivery::Immediate,
+                ack: None,
             })
             .unwrap();
     }
