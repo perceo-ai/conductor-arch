@@ -104,13 +104,19 @@ struct ServerState {
 /// alone — never on the main `ServerState` lock, which the lead sweeper still
 /// needs in order to finish and clear the slot.
 struct SweepInFlight {
+    /// The generation in effect when the lead sweeper started. A waiter that
+    /// asked after a later mutation moved the generation on must not be
+    /// handed this sweep's answer — it describes a world from before the
+    /// mutation it should already reflect. See `attention_with_cache`.
+    generation: u64,
     done: Mutex<Option<Result<crate::attention::AttentionQueue, String>>>,
     cond: Condvar,
 }
 
 impl SweepInFlight {
-    fn new() -> Self {
+    fn new(generation: u64) -> Self {
         Self {
+            generation,
             done: Mutex::new(None),
             cond: Condvar::new(),
         }
@@ -4315,63 +4321,95 @@ fn attention_with_cache(
     ttl: Duration,
     sweep: impl FnOnce() -> Result<crate::attention::AttentionQueue>,
 ) -> Result<crate::attention::AttentionQueue> {
-    let entered_at = crate::agent_status::now_ms();
     enum Lookup {
         Lead(Arc<SweepInFlight>, u64),
         Await(Arc<SweepInFlight>),
     }
-    let lookup = {
-        let mut guard = state.lock().unwrap();
-        if let Some(cached) = guard.attention_cache.as_ref() {
-            if cached_attention_is_fresh(cached.derived_at_ms, entered_at, ttl) {
-                return Ok(cached.queue.clone());
+    // `sweep` is `FnOnce`: across every loop iteration below it is called at
+    // most once, by whichever single pass becomes the lead. A waiter that
+    // discovers its answer is stale (see the `Await` arm) re-enters the loop
+    // instead of calling `sweep` itself — on that later pass it either finds
+    // a freshly-cached answer or becomes the lead and takes `sweep` then,
+    // which is still only one call in total.
+    let mut sweep = Some(sweep);
+    loop {
+        let entered_at = crate::agent_status::now_ms();
+        let lookup = {
+            let mut guard = state.lock().unwrap();
+            if let Some(cached) = guard.attention_cache.as_ref() {
+                if cached_attention_is_fresh(cached.derived_at_ms, entered_at, ttl) {
+                    return Ok(cached.queue.clone());
+                }
+            }
+            if let Some(in_progress) = guard.attention_sweep.clone() {
+                Lookup::Await(in_progress)
+            } else {
+                let slot = Arc::new(SweepInFlight::new(guard.attention_generation));
+                guard.attention_sweep = Some(slot.clone());
+                Lookup::Lead(slot, guard.attention_generation)
+            }
+        };
+        let (slot, generation) = match lookup {
+            // Someone else is already sweeping for this miss; share their
+            // answer — unless a mutation landed between the lead starting and
+            // this waiter asking, which means the lead's queue describes a
+            // world from before something this waiter's request should
+            // already reflect. The lead's own generation check below only
+            // gates the *cache write-back*; a waiter must run its own check
+            // before accepting the slot's result, or it would be served the
+            // exact stale answer that check exists to keep out of the cache.
+            // Re-entering the loop is safe: by the time a waiter gets here the
+            // lead's slot is already cleared, so this either finds a fresh
+            // cache entry or makes the waiter the new lead.
+            Lookup::Await(slot) => {
+                let result = slot.wait()?;
+                let moved_on = {
+                    let guard = state.lock().unwrap();
+                    guard.attention_generation != slot.generation
+                };
+                if moved_on {
+                    continue;
+                }
+                return Ok(result);
+            }
+            Lookup::Lead(slot, generation) => (slot, generation),
+        };
+        let sweep_fn = sweep
+            .take()
+            .expect("only one pass through this loop ever becomes the lead");
+        let result = sweep_fn();
+        // The sweep takes seconds, and anything that landed while it ran — the
+        // human answering the very question this queue still lists — invalidated
+        // the cache and moved the generation on. Such a queue describes the world
+        // from before that, so it answers only the caller who led this sweep (and
+        // any waiter whose own generation check above still agrees) and is never
+        // installed in the cache for anyone else. An emptied cache is not the
+        // test: emptied is also what a plain expiry looks like.
+        //
+        // The entry is stamped now, when the sweep finished, not when this
+        // function was entered: a sweep slower than the window would otherwise
+        // produce an entry that is born expired and never served, which is exactly
+        // the fleet the memoization exists for.
+        {
+            let mut guard = state.lock().unwrap();
+            guard.attention_sweep = None;
+            if let Ok(queue) = &result {
+                if guard.attention_generation == generation {
+                    guard.attention_cache = Some(CachedAttention {
+                        derived_at_ms: crate::agent_status::now_ms(),
+                        queue: queue.clone(),
+                    });
+                }
             }
         }
-        if let Some(in_progress) = guard.attention_sweep.clone() {
-            Lookup::Await(in_progress)
-        } else {
-            let slot = Arc::new(SweepInFlight::new());
-            guard.attention_sweep = Some(slot.clone());
-            Lookup::Lead(slot, guard.attention_generation)
-        }
-    };
-    let (slot, generation) = match lookup {
-        // Someone else is already sweeping for this miss; share their answer
-        // rather than running `sweep()` again.
-        Lookup::Await(slot) => return slot.wait(),
-        Lookup::Lead(slot, generation) => (slot, generation),
-    };
-    let result = sweep();
-    // The sweep takes seconds, and anything that landed while it ran — the
-    // human answering the very question this queue still lists — invalidated
-    // the cache and moved the generation on. Such a queue describes the world
-    // from before that, so it answers the caller who asked for it and is never
-    // installed for anyone else. An emptied cache is not the test: emptied is
-    // also what a plain expiry looks like.
-    //
-    // The entry is stamped now, when the sweep finished, not when this
-    // function was entered: a sweep slower than the window would otherwise
-    // produce an entry that is born expired and never served, which is exactly
-    // the fleet the memoization exists for.
-    {
-        let mut guard = state.lock().unwrap();
-        guard.attention_sweep = None;
-        if let Ok(queue) = &result {
-            if guard.attention_generation == generation {
-                guard.attention_cache = Some(CachedAttention {
-                    derived_at_ms: crate::agent_status::now_ms(),
-                    queue: queue.clone(),
-                });
-            }
-        }
+        slot.finish(
+            result
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(|err| err.to_string()),
+        );
+        return result;
     }
-    slot.finish(
-        result
-            .as_ref()
-            .map(Clone::clone)
-            .map_err(|err| err.to_string()),
-    );
-    result
 }
 
 /// Open the app store and map any failure to a protocol error response. Keeps
@@ -13070,6 +13108,66 @@ default = true
         assert!(
             state.lock().unwrap().attention_sweep.is_none(),
             "the in-flight sweep slot was not cleared once it finished"
+        );
+    }
+
+    #[test]
+    fn a_waiter_whose_generation_moved_while_awaiting_does_not_get_the_stale_sweep() {
+        // `SweepInFlight` carries no generation of its own without this fix:
+        // a reader that asks *after* a mutation completed, but joins a sweep
+        // that *started before* the mutation, must not be handed that
+        // sweep's pre-mutation answer by `Lookup::Await` — straight past the
+        // generation check that only gates installing it into the cache.
+        // This is the hole the finding-8 dedup accidentally reopened in
+        // finding 7's fix: finding 7 stops the stale queue from being
+        // *installed*; this is the stale queue being *served* directly to a
+        // later-arriving caller instead.
+        let temp = tempfile::tempdir().unwrap();
+        let state = bare_state(temp.path());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let lead_barrier = Arc::clone(&barrier);
+        let lead_state = Arc::clone(&state);
+
+        let lead = thread::spawn(move || {
+            attention_with_cache(&lead_state, ATTENTION_CACHE_TTL, move || {
+                // `attention_sweep` is registered before this runs, so the
+                // main thread crossing the barrier below is guaranteed to
+                // see it and await rather than lead itself.
+                lead_barrier.wait();
+                thread::sleep(Duration::from_millis(50));
+                Ok(marked_queue("led the sweep, before the mutation"))
+            })
+        });
+        barrier.wait();
+        // A mutation lands while the lead sweep is still running: this
+        // reader's request is newer than the mutation even though the sweep
+        // it is about to join started before it.
+        invalidate_attention_cache(&mut state.lock().unwrap());
+
+        let waiter_calls = Arc::new(AtomicUsize::new(0));
+        let waiter_sweep_calls = Arc::clone(&waiter_calls);
+        let waiter = attention_with_cache(&state, ATTENTION_CACHE_TTL, move || {
+            waiter_sweep_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(marked_queue("fresh sweep after the mutation"))
+        })
+        .unwrap();
+        let led = lead.join().unwrap().unwrap();
+
+        assert_eq!(led.items[0].headline, "led the sweep, before the mutation");
+        assert_eq!(
+            waiter.items[0].headline, "fresh sweep after the mutation",
+            "a reader that asked after a mutation was served the lead's pre-mutation queue"
+        );
+        assert_eq!(
+            waiter_calls.load(Ordering::SeqCst),
+            1,
+            "the waiter's own sweep ran zero or more than once"
+        );
+        let cached = state.lock().unwrap().attention_cache.take();
+        assert!(
+            cached.is_none()
+                || cached.unwrap().queue.items[0].headline == "fresh sweep after the mutation",
+            "the pre-mutation queue was memoized instead of the fresh one"
         );
     }
 
