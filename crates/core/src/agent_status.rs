@@ -27,7 +27,7 @@ use crate::workspace::{
 };
 
 /// Version of the `status --json` document. Bump on any breaking change.
-pub const STATUS_SCHEMA_VERSION: u32 = 1;
+pub const STATUS_SCHEMA_VERSION: u32 = 2;
 
 /// Stopped sessions listed per workspace beyond the live ones, newest first.
 const STOPPED_SESSIONS_PER_WORKSPACE: usize = 3;
@@ -35,8 +35,15 @@ const STOPPED_SESSIONS_PER_WORKSPACE: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentActivity {
-    /// Alive and mid-turn: thinking, streaming, or running a tool.
+    /// Alive and mid-turn: thinking, streaming, or running a tool. Excludes
+    /// sessions reported as `Stalled`; a client counting working agents must
+    /// add those back if it wants every mid-turn agent.
     Working,
+    /// Alive and mid-turn, but nothing observable has happened for longer than
+    /// the stall threshold: suspected stuck, not proven. A long silent tool
+    /// (a 15-minute build) trips it, so clients should present it as "might
+    /// be stuck", not "stuck".
+    Stalled,
     /// Alive and blocked on a human: a permission prompt, a question, a plan to
     /// approve, or a fresh session that has not been given a task.
     AwaitingInput,
@@ -53,6 +60,7 @@ impl AgentActivity {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Working => "working",
+            Self::Stalled => "stalled",
             Self::AwaitingInput => "awaiting_input",
             Self::Finished => "finished",
             Self::Failed => "failed",
@@ -65,7 +73,7 @@ impl AgentActivity {
     fn urgency(self) -> u8 {
         match self {
             Self::AwaitingInput => 4,
-            Self::Failed => 3,
+            Self::Failed | Self::Stalled => 3,
             Self::Working => 2,
             Self::Finished => 1,
             Self::Stopped => 0,
@@ -78,6 +86,20 @@ impl AgentActivity {
 pub struct LiveProbe {
     pub alive: bool,
     pub runtime_state: Option<AgentSessionState>,
+}
+
+/// Whether a session the daemon holds has ended, given its status string and
+/// runtime state. Shared by the CLI (which asks the daemon over the socket)
+/// and the daemon (which answers about its own sessions directly).
+pub fn session_is_terminal(status: &str, runtime_state: AgentSessionState) -> bool {
+    status != "running"
+        || matches!(
+            runtime_state,
+            AgentSessionState::Interrupted
+                | AgentSessionState::Failed
+                | AgentSessionState::Exited
+                | AgentSessionState::Archived
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -122,6 +144,24 @@ pub fn derive_activity(
         // Only the PID was checked: an open turn means work in progress.
         None if last_turn == Some(TurnOutcome::Running) => AgentActivity::Working,
         _ => by_outcome(AgentActivity::AwaitingInput),
+    }
+}
+
+/// Promote a working session to `Stalled` once it has shown no progress for
+/// `stall_threshold_seconds`. Only a daemon probe counts: the PID fallback
+/// (daemon unreachable, e.g. mid-restart) gives no basis to call anything
+/// stuck, and an absent idle time is "unknown", not "long".
+pub fn stall_if_idle(
+    activity: AgentActivity,
+    source: LivenessSource,
+    idle_seconds: Option<u64>,
+    stall_threshold_seconds: u64,
+) -> AgentActivity {
+    let past_threshold = idle_seconds.is_some_and(|idle| idle >= stall_threshold_seconds);
+    if activity == AgentActivity::Working && source == LivenessSource::Daemon && past_threshold {
+        AgentActivity::Stalled
+    } else {
+        activity
     }
 }
 
@@ -447,7 +487,13 @@ pub fn session_report(
         .and_then(|id| store.list_queued_chat_inputs(id).ok())
         .map_or(0, |queued| queued.len());
     let outcome = last_outcome(turns);
-    let state = derive_activity(alive, runtime_state, pending_interactions, outcome);
+    let idle = last_activity_ms.map(|ms| idle_seconds(ms, now_ms));
+    let state = stall_if_idle(
+        derive_activity(alive, runtime_state, pending_interactions, outcome),
+        source,
+        idle,
+        crate::attention::STALL_THRESHOLD_SECONDS,
+    );
     SessionReport {
         session_id: process.id,
         thread_id,
@@ -459,8 +505,8 @@ pub fn session_report(
         liveness_source: source,
         state,
         last_activity: last_activity_ms.map(rfc3339_from_ms),
-        idle_seconds: last_activity_ms.map(|ms| idle_seconds(ms, now_ms)),
-        current_tool: (state == AgentActivity::Working)
+        idle_seconds: idle,
+        current_tool: matches!(state, AgentActivity::Working | AgentActivity::Stalled)
             .then(|| current_tool(turns))
             .flatten(),
         turn_outcome: outcome,
@@ -609,7 +655,7 @@ mod tests {
         assert_eq!(session.turns, 2);
 
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["workspaces"][0]["sessions"][0]["state"], "working");
     }
 
@@ -896,6 +942,30 @@ mod tests {
     }
 
     #[test]
+    fn a_daemon_probed_session_idle_past_the_threshold_is_reported_stalled() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, db_path, process, last_ms) = board_with_a_stale_pid(temp.path());
+        let now_ms = last_ms + (THRESHOLD + 5) * 1000;
+        let probe = LiveProbe {
+            alive: true,
+            runtime_state: Some(AgentSessionState::ToolRunning),
+        };
+
+        let report = collect_status(&store, &db_path, None, now_ms, &mut |_| Some(probe)).unwrap();
+        let session = &report.workspaces[0].sessions[0];
+        assert_eq!(session.session_id, process.id);
+        assert_eq!(session.state, AgentActivity::Stalled);
+        assert_eq!(report.workspaces[0].state, Some(AgentActivity::Stalled));
+
+        // The same silence with no daemon answer (PID fallback) is not a stall.
+        let report = collect_status(&store, &db_path, None, now_ms, &mut |_| None).unwrap();
+        assert_ne!(
+            report.workspaces[0].sessions[0].state,
+            AgentActivity::Stalled
+        );
+    }
+
+    #[test]
     fn idle_seconds_count_from_the_last_stream_event() {
         assert_eq!(idle_seconds(1_000, 62_999), 61);
         // Clock skew never goes negative.
@@ -912,5 +982,65 @@ mod tests {
         ];
         states.sort_by_key(|s| std::cmp::Reverse(s.urgency()));
         assert_eq!(states[0], AgentActivity::AwaitingInput);
+    }
+
+    const THRESHOLD: u64 = crate::attention::STALL_THRESHOLD_SECONDS;
+
+    #[test]
+    fn working_session_past_the_threshold_is_stalled() {
+        let stalled = |idle| {
+            stall_if_idle(
+                AgentActivity::Working,
+                LivenessSource::Daemon,
+                idle,
+                THRESHOLD,
+            )
+        };
+        assert_eq!(stalled(Some(THRESHOLD)), AgentActivity::Stalled);
+        assert_eq!(stalled(Some(THRESHOLD + 1)), AgentActivity::Stalled);
+        assert_eq!(stalled(Some(THRESHOLD - 1)), AgentActivity::Working);
+    }
+
+    #[test]
+    fn working_session_without_idle_seconds_is_never_stalled() {
+        assert_eq!(
+            stall_if_idle(
+                AgentActivity::Working,
+                LivenessSource::Daemon,
+                None,
+                THRESHOLD
+            ),
+            AgentActivity::Working
+        );
+    }
+
+    #[test]
+    fn pid_fallback_liveness_is_never_stalled() {
+        assert_eq!(
+            stall_if_idle(
+                AgentActivity::Working,
+                LivenessSource::Pid,
+                Some(THRESHOLD * 10),
+                THRESHOLD
+            ),
+            AgentActivity::Working
+        );
+    }
+
+    #[test]
+    fn stalled_outranks_working_for_the_workspace_state() {
+        assert!(AgentActivity::Stalled.urgency() > AgentActivity::Working.urgency());
+        assert_eq!(
+            AgentActivity::Stalled.urgency(),
+            AgentActivity::Failed.urgency()
+        );
+        assert!(AgentActivity::Stalled.urgency() < AgentActivity::AwaitingInput.urgency());
+        // Only a working session can stall.
+        for other in [AgentActivity::Finished, AgentActivity::AwaitingInput] {
+            assert_eq!(
+                stall_if_idle(other, LivenessSource::Daemon, Some(THRESHOLD), THRESHOLD),
+                other
+            );
+        }
     }
 }

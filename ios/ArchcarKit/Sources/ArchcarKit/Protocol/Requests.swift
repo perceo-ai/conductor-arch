@@ -47,3 +47,9 @@ public struct RegisterNotificationDeviceRequest: ArchcarRequestBody {
         case appBundle = "app_bundle"
     }
 }
+
+/// The cross-project attention queue: what needs the human, ranked.
+public struct ListAttentionRequest: ArchcarRequestBody {
+    public static let typeName = "list_attention"
+    public init() {}
+}

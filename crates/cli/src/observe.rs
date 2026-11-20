@@ -8,8 +8,8 @@
 
 use anyhow::{Context, Result};
 use archductor_core::agent_status::{
-    collect_status, now_ms, read_session, session_report, AgentActivity, LiveProbe, SessionRead,
-    SessionReport, SessionSignals, StatusReport, WorkspaceReport,
+    collect_status, now_ms, read_session, session_is_terminal, session_report, AgentActivity,
+    LiveProbe, SessionRead, SessionReport, SessionSignals, StatusReport, WorkspaceReport,
 };
 use archductor_core::archcar::client::ArchcarClient;
 use archductor_core::archcar::protocol::{ArchcarRequest, ArchcarResponse};
@@ -19,7 +19,6 @@ use archductor_core::chat_transcript::{
 use archductor_core::paths::AppPaths;
 use archductor_core::provider_events::ProviderEventStore;
 use archductor_core::provider_interactions::ProviderInteractionStore;
-use archductor_core::session_state::AgentSessionState;
 use archductor_core::workspace::{ProcessRecord, WorkspaceStore};
 use std::fmt::Write as _;
 
@@ -56,17 +55,6 @@ pub fn daemon_probe(
             }
         }
     }
-}
-
-pub fn session_is_terminal(status: &str, runtime_state: AgentSessionState) -> bool {
-    status != "running"
-        || matches!(
-            runtime_state,
-            AgentSessionState::Interrupted
-                | AgentSessionState::Failed
-                | AgentSessionState::Exited
-                | AgentSessionState::Archived
-        )
 }
 
 pub fn status_report(
@@ -148,6 +136,7 @@ fn agent_summary(ws: &WorkspaceReport) -> String {
     let order = [
         AgentActivity::AwaitingInput,
         AgentActivity::Failed,
+        AgentActivity::Stalled,
         AgentActivity::Working,
         AgentActivity::Finished,
         AgentActivity::Stopped,

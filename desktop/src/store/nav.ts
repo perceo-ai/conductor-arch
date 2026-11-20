@@ -28,6 +28,7 @@ export type AppPage =
   | "history"
   | "settings"
   | "achievements"
+  | "attention"
   | "review";
 
 const [selectedWorkspace, setSelectedWorkspaceRaw] = createSignal<string | null>(null);
@@ -268,6 +269,10 @@ export const nav = {
     pushHistory();
     selectRaw(null);
     setActivePage("dashboard");
+  },
+
+  goToAttention() {
+    nav.goToPage("attention");
   },
 
   selectChatThread(threadId: number | null) {

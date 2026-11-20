@@ -27,6 +27,36 @@ Archductor has a usable but rough GUI-first loop for one local repository:
 The app is not MVP-complete. Treat it as a working prototype with real product
 paths and known rough edges.
 
+## One ranked list of what needs you, across every project (2026-11-19)
+
+You can now see which workspace wants you without opening each one. The
+**Attention** page (a top-level desktop page, an iOS tab, and `archductor
+archcar attention [--json]`) is a single queue across every project and
+workspace on the daemon, ranked: agent asked, session failed or stalled, task
+finished (24h window), checks failed, review comments, diff ready, idle. The
+order is total and stable, archived workspaces contribute nothing, and an empty
+queue prints `Nothing needs you`. The new `ListAttention` RPC is read-only and
+derived in core (`attention.rs`) from the status report and background tasks.
+
+A new agent state, `stalled`, means alive and mid-turn with no progress for 600
+seconds. It is suspected stuck, not proven: a long silent tool such as a
+15-minute build trips it. It is only reported when the daemon probed the agent,
+never on the recorded-PID fallback. `STATUS_SCHEMA_VERSION` went from 1 to 2
+because of the new variant, so `archductor status --json` consumers must handle
+`stalled`.
+
+Desktop fetches only while the page is open, with a 2 second trailing debounce
+over seven daemon event types, a Refresh button, a ticking "as of" line, and
+rows that do not navigate when their workspace is unknown.
+
+Known limits: the queue is daemon-local (not every host). iOS loads on
+appearance, daemon change and pull-to-refresh but does not refresh on daemon
+events, a deliberate parity gap because the RPC is expensive. Cost grows with
+active workspaces (git subprocesses per workspace); 30 workspaces on a heavily
+loaded machine took 10-14s per call. Nothing orchestrates yet: this is the
+watching half of `docs/superpowers/specs/2026-11-19-orchestrator-first-class-design.md`,
+and the orchestrator agent is a later plan.
+
 ## Chat rows say who spoke and what happened (2026-11-19)
 
 A blocking hook no longer reads as the person talking. Claude delivers hook

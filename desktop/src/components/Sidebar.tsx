@@ -573,6 +573,14 @@ export default function Sidebar(props: { collapsed: boolean; onToggle: () => voi
         </button>
         <button
           class="sidebar-nav-button"
+          classList={{ active: nav.activePage() === "attention" }}
+          onClick={() => nav.goToAttention()}
+        >
+          <Icon name="alert-circle" class="sidebar-nav-icon" />
+          <span class="sidebar-nav-label">Attention</span>
+        </button>
+        <button
+          class="sidebar-nav-button"
           classList={{ active: nav.activePage() === "history" }}
           data-shortcut={keyHint("goto-history")}
           onClick={() => nav.goToPage("history")}

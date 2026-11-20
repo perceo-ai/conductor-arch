@@ -13,6 +13,7 @@ import { nav } from "./nav";
 import { workspacesStore } from "./workspaces";
 import { threadsStore } from "./threads";
 import { intelStore } from "./intel";
+import { attentionStore } from "./attention";
 import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
 import { noteTurnCompleted, observeChatGeneration } from "./turnSound";
 
@@ -185,11 +186,25 @@ function notificationIsRedundant(event: ArchcarEvent): boolean {
   return nav.activePage() === "workspace" && nav.chatThreadInView(threadId);
 }
 
+const ATTENTION_EVENTS: ReadonlySet<string> = new Set([
+  "turn_completed",
+  "session_error",
+  "session_exited",
+  "provider_interaction_requested",
+  "provider_interaction_resolved",
+  "background_task_updated",
+  "chat_queue_updated",
+]);
+
 export function applyEvent(event: ArchcarEvent) {
   const notification = notificationIsRedundant(event)
     ? null
     : notificationForArchcarEvent(event, notificationContextForEvent(event));
   if (notification) void notify(notification);
+
+  // Each of these can change what needs the human's attention. The store
+  // debounces, so a burst of them costs one `list_attention`.
+  if (ATTENTION_EVENTS.has(event.type)) attentionStore.invalidate();
 
   switch (event.type) {
     case "session_messages_updated":

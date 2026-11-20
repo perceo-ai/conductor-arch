@@ -83,6 +83,75 @@ struct ServerState {
     /// this machine wants the truth about the process answering it, not what
     /// some unit file asked for.
     remote_listen: Option<std::net::SocketAddr>,
+    /// The last derived attention queue, served to every client for
+    /// [`ATTENTION_CACHE_TTL`]. In memory only, and part of this daemon's own
+    /// state, so a restart starts with no queue rather than serving the
+    /// previous process's answer.
+    attention_cache: Option<CachedAttention>,
+    /// Bumped by every invalidation of `attention_cache`. A sweep captures it
+    /// before it starts and writes its result back only if it has not moved:
+    /// clearing the entry cannot stop an in-flight sweep, and the queue that
+    /// sweep derived is from *before* whatever invalidated it.
+    attention_generation: u64,
+}
+
+/// A derived attention queue, when it was derived, and nothing else: it is
+/// dropped rather than updated.
+struct CachedAttention {
+    /// Stamped when the sweep *finished*. Stamping its start would spend the
+    /// whole window on the sweep itself — on a fleet where the sweep takes
+    /// longer than the window, the entry would be born expired.
+    derived_at_ms: u64,
+    queue: crate::attention::AttentionQueue,
+}
+
+/// How long one derived attention queue is served to every client.
+///
+/// `list_attention` runs the whole `archductor status` sweep inside request
+/// dispatch — `WorkspaceStore::list_status` shells out to git twice per active
+/// workspace — measured at 10-14s with 30 workspaces on a loaded machine. The
+/// desktop, iOS and every CLI invocation each paid it separately, so one event
+/// fanned out into three identical sweeps.
+///
+/// Three seconds is just over the desktop's own 2s refetch debounce
+/// (`ATTENTION_DEBOUNCE_MS`), which is what makes a fan-out collapse into a
+/// single sweep: every surface reacting to the same burst of events reads one
+/// answer. It is kept that short because the queue is partly clock-derived
+/// (idle, stalled, a finished task expiring), so a cached answer must never be
+/// old enough to read as wrong. Staleness after something *happened* is not
+/// left to the clock at all: every event that can change the queue clears the
+/// cache, so a client that just acted sees the new queue on its next read.
+const ATTENTION_CACHE_TTL: Duration = Duration::from_secs(3);
+
+/// Drop the memoized queue, and record that it happened: a sweep already
+/// running must not install the answer it derived before this moment.
+fn invalidate_attention_cache(state: &mut ServerState) {
+    state.attention_cache = None;
+    state.attention_generation = state.attention_generation.wrapping_add(1);
+}
+
+/// Whether a queue derived at `derived_at_ms` may still be served at `now_ms`.
+/// A clock that moved backwards gives no basis to call it fresh.
+fn cached_attention_is_fresh(derived_at_ms: u64, now_ms: u64, ttl: Duration) -> bool {
+    now_ms >= derived_at_ms && now_ms - derived_at_ms < ttl.as_millis() as u64
+}
+
+/// Whether an event can change what needs the human, and so must drop the
+/// cached queue. Mirrors `ATTENTION_EVENTS` in the desktop's reducer, which is
+/// the set of events the clients refetch on. Deliberately not every event:
+/// provider message updates arrive per streamed token and change nothing the
+/// queue reports.
+fn event_changes_attention(event: &ArchcarEvent) -> bool {
+    matches!(
+        event,
+        ArchcarEvent::TurnCompleted { .. }
+            | ArchcarEvent::SessionError { .. }
+            | ArchcarEvent::SessionExited { .. }
+            | ArchcarEvent::ProviderInteractionRequested { .. }
+            | ArchcarEvent::ProviderInteractionResolved { .. }
+            | ArchcarEvent::BackgroundTaskUpdated { .. }
+            | ArchcarEvent::ChatQueueUpdated { .. }
+    )
 }
 
 /// How often the daemon advances background development tasks.
@@ -136,6 +205,7 @@ impl Drop for QueueDrainGuard {
 pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
     let store = WorkspaceStore::open_app_with_logs(&paths.database_path, &paths.logs_dir)?;
     let provider_events = ProviderEventStore::new(&paths.database_path);
+    let mut reconciled: Vec<i64> = Vec::new();
     for workspace in store.list()? {
         let records = store.list_sessions(&workspace.name)?;
         for kind in [SessionKind::CODEX, SessionKind::CLAUDE] {
@@ -155,10 +225,41 @@ pub fn reconcile_managed_sessions_on_startup(paths: &AppPaths) -> Result<()> {
                 } else {
                     let _ = store.mark_session_process_exited(record.id, None)?;
                 }
+                reconciled.push(record.id);
             }
         }
     }
+    expire_pending_interactions_of_reconciled_sessions(paths, &reconciled);
     Ok(())
+}
+
+/// A pending ask can only be answered on the connection it arrived on, so the
+/// asks of a session that died with the previous daemon are unanswerable. The
+/// running daemon expires them when it sees `SessionExited`, but across a
+/// restart nobody was listening — and a pending ask the queue still believes
+/// in puts an unanswerable question at the top of the attention queue forever.
+/// Only sessions this reconcile just declared dead are swept: a session whose
+/// process is still alive is left alone.
+fn expire_pending_interactions_of_reconciled_sessions(paths: &AppPaths, reconciled: &[i64]) {
+    if reconciled.is_empty() {
+        return;
+    }
+    let store = ProviderInteractionStore::new(paths.database_path.clone());
+    let Ok(pending) = store.list(None, true) else {
+        return;
+    };
+    for interaction in pending
+        .into_iter()
+        .filter(|interaction| reconciled.contains(&interaction.session_id))
+    {
+        if let Err(err) = store.expire(&interaction.id) {
+            warn!(
+                interaction = %interaction.id,
+                error = %format!("{err:#}"),
+                "archcar could not expire a pending interaction at startup"
+            );
+        }
+    }
 }
 
 fn archcar_process_alive(pid: u32) -> bool {
@@ -231,6 +332,8 @@ impl ArchcarServer {
             drain_reruns: HashSet::new(),
             sessions: HashMap::new(),
             subscribers: Vec::new(),
+            attention_cache: None,
+            attention_generation: 0,
         }));
         Ok(Self {
             listener,
@@ -862,10 +965,19 @@ impl Drop for InFlight {
 
 fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
     let _in_flight = InFlight::enter();
-    if archcar_request_is_mutating(&request) && state.lock().unwrap().shutting_down {
+    let mutating = archcar_request_is_mutating(&request);
+    if mutating && state.lock().unwrap().shutting_down {
         return ArchcarResponse::Error {
             message: "archcar is shutting down".to_owned(),
         };
+    }
+    // Anything a client changed can change what needs the human, and not every
+    // such change ends in an event (archiving a workspace, say). A client that
+    // just acted must not be handed the queue from before it acted, so the
+    // memoized queue is dropped before the request is served: its own read
+    // then sweeps afresh.
+    if mutating {
+        invalidate_attention_cache(&mut state.lock().unwrap());
     }
     let response = match request {
         ArchcarRequest::EnsureWorkspaceDefaultSession {
@@ -3245,6 +3357,7 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             })
         }),
         // ---- Workspace intelligence -------------------------------------
+        ArchcarRequest::ListAttention {} => list_attention(state),
         ArchcarRequest::ListTasks { workspace } => with_store(state, |store| {
             let tasks = store.list_tasks(&workspace)?;
             Ok(ArchcarResponse::Tasks { workspace, tasks })
@@ -4100,6 +4213,85 @@ fn chat_transcript_from_projection(
             })
         })
         .collect()
+}
+
+/// The attention queue. The report is built exactly as `archductor status`
+/// builds it (`collect_status`, no workspace filter); only the probe differs:
+/// the CLI asks the daemon over the socket, the daemon reads its own session
+/// table. A session it does not hold answers `None`, so `read_session` falls
+/// back to the recorded PID. This must stay read-only: it runs for every
+/// thread on the board, unattended, so it never restores or terminates.
+fn list_attention(state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
+    with_store(state, |store| {
+        let db_path = state.lock().unwrap().db_path.clone();
+        let queue = attention_with_cache(state, ATTENTION_CACHE_TTL, || {
+            let mut probe = |process: &crate::workspace::ProcessRecord| {
+                let handle = state.lock().unwrap().sessions.get(&process.id).cloned()?;
+                let snapshot = handle.snapshot.lock().unwrap().clone();
+                Some(crate::agent_status::LiveProbe {
+                    alive: !crate::agent_status::session_is_terminal(
+                        snapshot.status.as_str(),
+                        snapshot.runtime_state,
+                    ),
+                    runtime_state: Some(snapshot.runtime_state),
+                })
+            };
+            let swept_at = crate::agent_status::now_ms();
+            let report =
+                crate::agent_status::collect_status(store, &db_path, None, swept_at, &mut probe)?;
+            let tasks = store.list_background_tasks(false)?;
+            Ok(crate::attention::derive_attention(
+                &report, &tasks, swept_at,
+            ))
+        })?;
+        Ok(ArchcarResponse::Attention { queue })
+    })
+}
+
+/// Serve the memoized queue, or run `sweep` and memoize what it derived.
+///
+/// `sweep` is injected so this is testable without a fleet: it is the
+/// expensive part, and both rules here are about what happens *while* it runs.
+/// `ttl` is a parameter for the same reason — production always passes
+/// [`ATTENTION_CACHE_TTL`].
+fn attention_with_cache(
+    state: &Arc<Mutex<ServerState>>,
+    ttl: Duration,
+    sweep: impl FnOnce() -> Result<crate::attention::AttentionQueue>,
+) -> Result<crate::attention::AttentionQueue> {
+    let entered_at = crate::agent_status::now_ms();
+    let (served, generation) = {
+        let guard = state.lock().unwrap();
+        let served = guard
+            .attention_cache
+            .as_ref()
+            .filter(|cached| cached_attention_is_fresh(cached.derived_at_ms, entered_at, ttl))
+            .map(|cached| cached.queue.clone());
+        (served, guard.attention_generation)
+    };
+    if let Some(queue) = served {
+        return Ok(queue);
+    }
+    let queue = sweep()?;
+    // The sweep takes seconds, and anything that landed while it ran — the
+    // human answering the very question this queue still lists — invalidated
+    // the cache and moved the generation on. Such a queue describes the world
+    // from before that, so it answers the caller who asked for it and is never
+    // installed for anyone else. An emptied cache is not the test: emptied is
+    // also what a plain expiry looks like.
+    //
+    // The entry is stamped now, when the sweep finished, not when this
+    // function was entered: a sweep slower than the window would otherwise
+    // produce an entry that is born expired and never served, which is exactly
+    // the fleet the memoization exists for.
+    let mut guard = state.lock().unwrap();
+    if guard.attention_generation == generation {
+        guard.attention_cache = Some(CachedAttention {
+            derived_at_ms: crate::agent_status::now_ms(),
+            queue: queue.clone(),
+        });
+    }
+    Ok(queue)
 }
 
 /// Open the app store and map any failure to a protocol error response. Keeps
@@ -5531,6 +5723,7 @@ fn archcar_request_is_mutating(request: &ArchcarRequest) -> bool {
             | ArchcarRequest::ListBackgroundTasks { .. }
             | ArchcarRequest::GetBackgroundTask { .. }
             | ArchcarRequest::ListTasks { .. }
+            | ArchcarRequest::ListAttention {}
             | ArchcarRequest::ListSummaries { .. }
             | ArchcarRequest::DraftSummary { .. }
             | ArchcarRequest::GetContextBriefing { .. }
@@ -6888,6 +7081,11 @@ fn load_or_restore_session_handle(
 }
 
 fn broadcast(state: &mut ServerState, event: ArchcarEvent) {
+    // Something the queue reports has changed, so the cached answer is wrong
+    // now rather than in `ATTENTION_CACHE_TTL`.
+    if event_changes_attention(&event) {
+        invalidate_attention_cache(state);
+    }
     if crate::notifications::event_notification(&event).is_some() {
         let db_path = state.db_path.clone();
         let notification_event = event.clone();
@@ -7201,6 +7399,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let ArchcarResponse::UpdateStatus { status } =
@@ -7291,6 +7491,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let import = || {
             dispatch_request(
@@ -7506,6 +7708,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let on = dispatch_request(
@@ -7600,6 +7804,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let added = dispatch_request(
             ArchcarRequest::AddRepository {
@@ -7689,6 +7895,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -7779,6 +7987,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -7880,6 +8090,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         // Claim the row from a separate connection the moment it is inserted,
@@ -7987,6 +8199,8 @@ mod tests {
             sessions: HashMap::from([(process.id, handle.clone())]),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let queued = store
             .enqueue_chat_input(
@@ -8085,6 +8299,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let closed = dispatch_request(
@@ -8201,6 +8417,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -8290,6 +8508,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let context = crate::workspace::DeterministicNamingContext {
@@ -8375,6 +8595,8 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         // Agent metadata is applied while a thread renders, so a read can rename
@@ -8465,6 +8687,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -8517,6 +8741,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         // What the `set_workspace_context` MCP tool sends.
@@ -8582,6 +8808,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -8742,6 +8970,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -8855,6 +9085,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         drain_queued_input_for_thread(&state, thread.id);
@@ -8950,6 +9182,8 @@ exit 1
             sessions,
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         handle_session_event(
@@ -9037,6 +9271,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         handle_session_event(
@@ -9117,6 +9353,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         BusySession {
             state,
@@ -9361,6 +9599,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let interaction = ProviderInteractionStore::new(db_path.clone())
             .register(interaction_draft_for(
@@ -9487,6 +9727,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let mut adapter = crate::provider_adapters::acp::AcpAdapter::new(
             SessionKind::new("gemini"),
@@ -9594,6 +9836,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         let interaction = interactions
@@ -9647,6 +9891,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         interactions
@@ -9719,6 +9965,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         drain_every_queued_chat_thread(&state);
@@ -9774,6 +10022,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         // Two sends back to back, the way a user types a follow-up right after
@@ -9837,6 +10087,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         // A brand-new chat thread has no session, so nothing would ever deliver
@@ -9891,6 +10143,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         assert_eq!(
@@ -9920,6 +10174,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let guard = QueueDrainGuard::begin(&state, thread.id).expect("first drain runs");
@@ -10009,6 +10265,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -10057,6 +10315,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let first = ensure_default_session(
             &state,
@@ -10101,6 +10361,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![event_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let claude = ensure_default_session(
@@ -10143,6 +10405,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = spawn_session(
@@ -10365,6 +10629,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = ensure_default_session(
@@ -10444,6 +10710,8 @@ exit 1
             ]),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         };
         let (subscriber_tx, subscriber_rx) = mpsc::channel();
 
@@ -10496,6 +10764,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         begin_shutdown(&state);
@@ -10567,6 +10837,8 @@ exit 1
             )]),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
@@ -10649,6 +10921,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = ensure_chat_thread_session(
@@ -10704,6 +10978,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -10761,6 +11037,8 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = dispatch_request(
@@ -10833,6 +11111,8 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let response = ensure_chat_thread_session(
@@ -11246,6 +11526,8 @@ icon = "cloud"
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let added = dispatch_request(
@@ -11334,6 +11616,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let added = dispatch_request(
@@ -11429,6 +11713,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         dispatch_request(
             ArchcarRequest::AddRepository {
@@ -11533,6 +11819,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         dispatch_request(
@@ -11600,6 +11888,49 @@ default = true
             matches!(listed, ArchcarResponse::Tasks { ref tasks, .. } if tasks.len() == 1),
             "list_tasks got {listed:?}"
         );
+
+        let attention = dispatch_request(ArchcarRequest::ListAttention {}, &state);
+        let ArchcarResponse::Attention { queue } = attention else {
+            panic!("list_attention got {attention:?}");
+        };
+        assert!(
+            queue.items.is_empty(),
+            "nothing needs attention yet: {queue:?}"
+        );
+        {
+            let store = WorkspaceStore::open_app(&db_path).unwrap();
+            let background = store
+                .start_background_task(crate::background_tasks::StartBackgroundTask {
+                    repository: "demo".to_owned(),
+                    prompt: "do the thing".to_owned(),
+                    title: Some("Wire attention".to_owned()),
+                    workspace_name: Some("oslo".to_owned()),
+                    branch: None,
+                    base_ref: None,
+                    provider: "claude".to_owned(),
+                    run_checks: false,
+                    open_pr: false,
+                    draft_pr: true,
+                    extra_agents: Vec::new(),
+                })
+                .unwrap();
+            store.cancel_background_task(background.id).unwrap();
+        }
+        // This test moved the task in the store directly, so the daemon saw
+        // neither a request nor an event: nothing dropped its memoized queue.
+        state.lock().unwrap().attention_cache = None;
+        let attention = dispatch_request(ArchcarRequest::ListAttention {}, &state);
+        let ArchcarResponse::Attention { queue } = attention else {
+            panic!("list_attention got {attention:?}");
+        };
+        let finished: Vec<_> = queue
+            .items
+            .iter()
+            .filter(|item| item.kind == crate::attention::AttentionKind::TaskFinished)
+            .collect();
+        assert_eq!(finished.len(), 1, "{queue:?}");
+        assert_eq!(finished[0].repository, "demo");
+        assert!(finished[0].headline.contains("cancelled"), "{queue:?}");
 
         let drafted = dispatch_request(
             ArchcarRequest::DraftSummary {
@@ -11743,6 +12074,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let added = dispatch_request(
@@ -11875,6 +12208,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         // Read it off the wire, the way the iOS client's connect handshake does.
@@ -11912,6 +12247,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         dispatch_request(
@@ -11985,6 +12322,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         dispatch_request(
@@ -12109,6 +12448,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -12155,6 +12496,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -12192,6 +12535,8 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
         }));
         let (inside_tx, inside_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -12465,6 +12810,258 @@ default = true
             .unwrap()
             .iter()
             .any(|event| event.phase == ProviderEventPhase::Interrupted));
+    }
+
+    /// A queue with one recognisable item, for cache tests.
+    fn marked_queue(headline: &str) -> crate::attention::AttentionQueue {
+        crate::attention::AttentionQueue {
+            generated_at: "2026-11-19T00:00:00Z".to_owned(),
+            items: vec![crate::attention::AttentionItem {
+                kind: crate::attention::AttentionKind::Idle,
+                workspace: "w".to_owned(),
+                repository: "demo".to_owned(),
+                thread_id: None,
+                session_id: None,
+                headline: headline.to_owned(),
+                detail: None,
+                rank: 6,
+            }],
+        }
+    }
+
+    fn bare_state(temp: &Path) -> Arc<Mutex<ServerState>> {
+        Arc::new(Mutex::new(ServerState {
+            db_path: temp.join("state.db"),
+            logs_dir: temp.join("logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
+        }))
+    }
+
+    #[test]
+    fn a_sweep_invalidated_while_it_ran_is_not_memoized() {
+        // The human answers the question this sweep is still deriving. Its
+        // queue answers the caller who asked, but installing it would show
+        // everyone else, for a whole window, a question already answered.
+        let temp = tempfile::tempdir().unwrap();
+        let state = bare_state(temp.path());
+        let queue = attention_with_cache(&state, ATTENTION_CACHE_TTL, || {
+            // Twice, as a real answer does: the mutating request, then the
+            // `ProviderInteractionResolved` event.
+            invalidate_attention_cache(&mut state.lock().unwrap());
+            invalidate_attention_cache(&mut state.lock().unwrap());
+            Ok(marked_queue("derived before the answer"))
+        })
+        .unwrap();
+        assert_eq!(queue.items[0].headline, "derived before the answer");
+        assert!(
+            state.lock().unwrap().attention_cache.is_none(),
+            "a queue derived before an invalidation was memoized"
+        );
+        // And the next read genuinely sweeps again rather than being served.
+        let after = attention_with_cache(&state, ATTENTION_CACHE_TTL, || {
+            Ok(marked_queue("derived after the answer"))
+        })
+        .unwrap();
+        assert_eq!(after.items[0].headline, "derived after the answer");
+    }
+
+    #[test]
+    fn a_sweep_slower_than_the_window_still_leaves_a_servable_entry() {
+        // The whole point of memoizing: the heavy fleets are the ones where
+        // the sweep takes longer than the window is long. Stamping the entry
+        // when the sweep started would make it born expired there.
+        let temp = tempfile::tempdir().unwrap();
+        let state = bare_state(temp.path());
+        let ttl = Duration::from_millis(40);
+        let first = attention_with_cache(&state, ttl, || {
+            std::thread::sleep(ttl * 2);
+            Ok(marked_queue("swept slowly"))
+        })
+        .unwrap();
+        assert_eq!(first.items[0].headline, "swept slowly");
+        let second = attention_with_cache(&state, ttl, || {
+            panic!("the slow sweep's entry was not served")
+        })
+        .unwrap();
+        assert_eq!(second.items[0].headline, "swept slowly");
+    }
+
+    #[test]
+    fn cached_attention_freshness_has_a_window_and_distrusts_a_backwards_clock() {
+        // Pins the shipped constant, not a number copied next to it.
+        let ttl = ATTENTION_CACHE_TTL;
+        let window = ttl.as_millis() as u64;
+        assert!(cached_attention_is_fresh(1_000, 1_000, ttl));
+        assert!(cached_attention_is_fresh(1_000, 1_000 + window - 1, ttl));
+        assert!(!cached_attention_is_fresh(1_000, 1_000 + window, ttl));
+        assert!(!cached_attention_is_fresh(1_000, 1_000 + window + 1, ttl));
+        // The clock moved backwards: no basis to call the entry fresh.
+        assert!(!cached_attention_is_fresh(1_000, 999, ttl));
+    }
+
+    #[test]
+    fn attention_is_served_from_the_daemon_cache_until_an_event_changes_it() {
+        // The sweep behind `list_attention` costs seconds per call and every
+        // surface pays it, so one derivation is shared — but never across an
+        // event that changes what needs the human.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
+        }));
+
+        let first = dispatch_request(ArchcarRequest::ListAttention {}, &state);
+        assert!(
+            matches!(first, ArchcarResponse::Attention { .. }),
+            "list_attention got {first:?}"
+        );
+        assert!(
+            state.lock().unwrap().attention_cache.is_some(),
+            "the sweep did not populate the cache"
+        );
+
+        // A sentinel no sweep could produce: getting it back proves the answer
+        // came from the cache rather than from another sweep.
+        let sentinel = crate::attention::AttentionQueue {
+            generated_at: "2026-11-19T00:00:00Z".to_owned(),
+            items: vec![crate::attention::AttentionItem {
+                kind: crate::attention::AttentionKind::Idle,
+                workspace: "cached".to_owned(),
+                repository: "demo".to_owned(),
+                thread_id: None,
+                session_id: None,
+                headline: "from the cache".to_owned(),
+                detail: None,
+                rank: 6,
+            }],
+        };
+        let now = crate::agent_status::now_ms();
+        state.lock().unwrap().attention_cache = Some(CachedAttention {
+            derived_at_ms: now,
+            queue: sentinel.clone(),
+        });
+        let cached = dispatch_request(ArchcarRequest::ListAttention {}, &state);
+        assert!(
+            matches!(cached, ArchcarResponse::Attention { ref queue } if *queue == sentinel),
+            "a fresh cached queue was not served: {cached:?}"
+        );
+
+        // An event that can change the queue drops it.
+        broadcast(
+            &mut state.lock().unwrap(),
+            ArchcarEvent::TurnCompleted {
+                session_id: 1,
+                thread_id: 1,
+                status: Some("success".to_owned()),
+                duration_ms: None,
+            },
+        );
+        assert!(state.lock().unwrap().attention_cache.is_none());
+        let after_event = dispatch_request(ArchcarRequest::ListAttention {}, &state);
+        assert!(
+            matches!(after_event, ArchcarResponse::Attention { ref queue } if *queue != sentinel),
+            "a stale queue was served after an event: {after_event:?}"
+        );
+
+        // A client that just changed something must not read the queue from
+        // before it acted, even when its action raises no event.
+        state.lock().unwrap().attention_cache = Some(CachedAttention {
+            derived_at_ms: now,
+            queue: sentinel.clone(),
+        });
+        dispatch_request(
+            ArchcarRequest::CreateChatThread {
+                workspace: "berlin".to_owned(),
+                provider: "claude".to_owned(),
+                title: "New Chat".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            state.lock().unwrap().attention_cache.is_none(),
+            "a mutating request left the memoized queue in place"
+        );
+
+        // And an entry older than the window is not served either.
+        state.lock().unwrap().attention_cache = Some(CachedAttention {
+            derived_at_ms: now - ATTENTION_CACHE_TTL.as_millis() as u64,
+            queue: sentinel.clone(),
+        });
+        let expired = dispatch_request(ArchcarRequest::ListAttention {}, &state);
+        assert!(
+            matches!(expired, ArchcarResponse::Attention { ref queue } if *queue != sentinel),
+            "an expired cached queue was served: {expired:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_startup_expires_pending_asks_of_sessions_it_declared_dead() {
+        // An agent parked on a permission prompt when the daemon went down.
+        // Its request id died with the process, so the ask is unanswerable —
+        // and a pending ask would otherwise lead the attention queue forever.
+        let temp = tempfile::tempdir().unwrap();
+        let paths = app_paths(temp.path());
+        let store = seeded_workspace_store(&paths.database_path, &paths.logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "Claude", None)
+            .unwrap();
+        let launch = store.session_launch("berlin", SessionKind::CLAUDE).unwrap();
+        let process = store
+            .record_session_process_for_thread("berlin", thread.id, &launch, exited_child_pid())
+            .unwrap();
+        let interactions = ProviderInteractionStore::new(paths.database_path.clone());
+        let pending = interactions
+            .register(interaction_draft_for(
+                thread.id,
+                process.id,
+                ProviderInteractionKind::Permission,
+                "req-1",
+            ))
+            .unwrap();
+        assert_eq!(
+            pending.status,
+            crate::provider_interactions::ProviderInteractionStatus::Pending
+        );
+
+        reconcile_managed_sessions_on_startup(&paths).unwrap();
+
+        assert_ne!(
+            store.get_process_record(process.id).unwrap().status,
+            ProcessStatus::Running,
+            "the session was not reconciled at all"
+        );
+        assert!(
+            interactions.list(None, true).unwrap().is_empty(),
+            "a dead session's ask stayed pending"
+        );
+        assert_eq!(
+            interactions.get(&pending.id).unwrap().unwrap().status,
+            crate::provider_interactions::ProviderInteractionStatus::Expired
+        );
     }
 
     #[test]

@@ -117,6 +117,7 @@ export type ArchcarResponse =
   | { type: "checks_summary"; workspace: string; summary: ArchcarChecksSummary }
   | { type: "settings"; scope: string; toml: string }
   | { type: "achievements"; summary: AchievementsSummary }
+  | { type: "attention"; queue: AttentionQueue }
   | { type: "layout_presets"; presets: LayoutPresetRecord[] }
   | { type: "layout_preset_saved"; preset: LayoutPresetRecord }
   | { type: "repository_branches"; repository: string; branches: string[] }
@@ -290,6 +291,39 @@ export interface ProviderUsageReport {
   meters: UsageMeter[];
   manage_url?: string | null;
   checked_at: number;
+}
+
+/**
+ * Mirrors `archductor_core::attention`. `stalled` means "might be stuck": the
+ * session is alive and mid-turn but silent past a threshold, and a long quiet
+ * tool trips it too.
+ */
+export type AttentionKind =
+  | "agent_asked"
+  | "session_failed"
+  | "stalled"
+  | "task_finished"
+  | "checks_failed"
+  | "pr_open"
+  | "diff_ready"
+  | "idle";
+
+export interface AttentionItem {
+  kind: AttentionKind;
+  workspace: string;
+  repository: string;
+  thread_id: number | null;
+  session_id: number | null;
+  headline: string;
+  detail: string | null;
+  /** 0 is most urgent. Already the order the daemon sorted by. */
+  rank: number;
+}
+
+export interface AttentionQueue {
+  /** RFC3339 (unlike most archcar timestamps, which are epoch seconds). */
+  generated_at: string;
+  items: AttentionItem[];
 }
 
 /** Mirrors `archductor_core::achievements`. Derived on demand by the daemon. */

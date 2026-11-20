@@ -3,6 +3,7 @@ pub mod agent_naming;
 pub mod agent_status;
 pub mod agent_tools;
 pub mod archcar;
+pub mod attention;
 pub mod background_tasks;
 pub mod chat_attachments;
 pub mod chat_store;

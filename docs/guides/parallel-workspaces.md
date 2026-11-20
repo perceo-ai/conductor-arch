@@ -143,6 +143,61 @@ already holds clears the old binding rather than leaving the keymap ambiguous.
 it as a repository view default, but the Electron app does not read it yet;
 Settings is the working path today.
 
+## Knowing which workspace needs you
+
+With several workspaces running, the question is not "what is each one doing"
+but "which one should I look at next". The **Attention** page answers it: one
+ranked list across every project and workspace, most urgent first. It is a top
+level page in the desktop app (not inside a project), an **Attention** tab in the
+iOS app, and `archductor archcar attention` in the CLI (`--json` for the whole
+document; an empty queue prints `Nothing needs you`).
+
+Items, most urgent first (session failed and stalled share a rank, so they interleave by workspace name):
+
+| Kind | Means |
+| --- | --- |
+| agent asked | an agent is blocked on a permission prompt, question, or plan |
+| session failed | an agent's last turn ended in an error, or the session died with a turn still open — killed, an unexpected exit, or a daemon restart (the headline says which). A chat that was never prompted, and a turn you interrupted yourself, raise nothing |
+| stalled | an agent is alive and mid-turn but has shown no progress for 10 minutes |
+| task finished | a background task reached a terminal state in the last 24 hours (a task whose timestamp cannot be parsed is kept, not dropped) |
+| checks failed | a PR's checks are reported as failing |
+| open pull request | a PR for the workspace is open and waiting on review (this does not read review comments or merge blockers) |
+| diff ready | a workspace has changes and its agent has finished with nothing queued |
+| idle | a live agent finished its turn and has nothing queued: a free lane (an exited session does not count) |
+
+The queue is derived on demand, never stored. The sweep behind it is not cheap
+(several git calls per active workspace), so the daemon serves one derivation to
+every surface for a few seconds, and drops it the moment anything could have
+changed the answer: a request that changes something, or an event — a turn
+ending, a session dying, a question asked or answered, a background task or
+chat queue moving. So a surface that has just acted always reads a fresh
+queue.
+
+Within a rank the order is total and stable (workspace, repository, session, then headline), so the list does
+not shuffle between refreshes. Archived workspaces never appear.
+
+**Stalled means suspected stuck, not proven.** The threshold is a fixed 10
+minutes of silence. A long quiet tool, such as a 15-minute build, trips it
+although nothing is wrong. Stalled is only reported when the daemon probed the
+agent directly, so a daemon restart does not mark every agent stalled.
+
+Things to know:
+
+- The queue is **daemon-local**: it covers the daemon your client is pointed at,
+  not every host you have paired.
+- It works whether or not anything is orchestrating. It is derived from
+  workspace state and needs no AI; nothing acts on it for you yet.
+- Reopening the page always refetches, because three kinds are decided by the clock.
+- The desktop fetches only while the page is open, refetches (after a 2 second
+  settle) on daemon events, and has a Refresh button and an "as of" line. A row
+  whose workspace is not known does not navigate.
+- The iOS tab loads when it appears, when you switch daemon, and on
+  pull-to-refresh. It does **not** refresh on daemon events; the desktop does.
+  That gap is deliberate, because building the queue is expensive.
+- Cost grows with the number of active workspaces, since each one runs git
+  commands. On a heavily loaded machine with 30 workspaces one call took 10 to
+  14 seconds.
+
 ## Workspace panes and splits
 
 The workspace view is one or two panes, and a pane shows exactly one

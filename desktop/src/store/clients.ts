@@ -10,6 +10,7 @@ import {
 import { dialogs } from "./dialogs";
 import { logAction, logState } from "@/lib/log";
 import { achievementsStore } from "./achievements";
+import { attentionStore } from "./attention";
 import { actions } from "./actions";
 import { bumpDaemonEpoch } from "./daemonEpoch";
 import { providersStore } from "./providers";
@@ -123,6 +124,7 @@ async function resync(): Promise<void> {
   // navigates, so an open Achievements page stays mounted and never reloads.
   achievementsStore.daemonChanged();
   if (nav.activePage() === "achievements") void achievementsStore.load();
+  attentionStore.daemonChanged();
   let inventoryOk = true;
   await actions.refreshInventory().catch(() => {
     inventoryOk = false;

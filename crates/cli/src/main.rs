@@ -11,6 +11,7 @@ use archductor_core::archcar::protocol::{
 };
 use archductor_core::archcar::remote;
 use archductor_core::archcar::server::{reconcile_managed_sessions_on_startup, ArchcarServer};
+use archductor_core::attention::AttentionKind;
 use archductor_core::background_tasks::{BackgroundAgentSpec, StartBackgroundTask};
 use archductor_core::chat_attachments::MAX_CHAT_ATTACHMENT_BYTES;
 use archductor_core::doctor;
@@ -188,7 +189,7 @@ enum Command {
     Status {
         /// Only this workspace.
         workspace: Option<String>,
-        /// One JSON document (schema_version 1) for programmatic use.
+        /// One JSON document (schema_version 2) for programmatic use.
         #[arg(long)]
         json: bool,
     },
@@ -464,6 +465,12 @@ enum ArchcarCommand {
     Interactions {
         #[command(subcommand)]
         command: ArchcarInteractionsCommand,
+    },
+    /// Everything that needs you across every workspace, most urgent first.
+    Attention {
+        /// Print the queue as JSON instead of one line per item.
+        #[arg(long)]
+        json: bool,
     },
     Send {
         session_id: i64,
@@ -2545,6 +2552,17 @@ fn run_cli() -> Result<()> {
                         client.send(ArchcarRequest::GetPullRequestDraft { workspace })?,
                     );
                 }
+                ArchcarCommand::Attention { json } => {
+                    let response = client.send(ArchcarRequest::ListAttention {})?;
+                    match response {
+                        // The shared printer is line-oriented text; the JSON
+                        // form is the queue itself, in the daemon's order.
+                        ArchcarResponse::Attention { queue } if json => {
+                            println!("{}", serde_json::to_string_pretty(&queue)?);
+                        }
+                        other => print_archcar_response(other),
+                    }
+                }
                 ArchcarCommand::Tasks { workspace } => {
                     print_archcar_response(client.send(ArchcarRequest::ListTasks { workspace })?);
                 }
@@ -4513,6 +4531,20 @@ fn render_achievements(
     out
 }
 
+/// One ASCII mark per attention kind, so a column of items scans at a glance.
+fn attention_glyph(kind: AttentionKind) -> char {
+    match kind {
+        AttentionKind::AgentAsked => '?',
+        AttentionKind::SessionFailed => '!',
+        AttentionKind::Stalled => '~',
+        AttentionKind::TaskFinished => '+',
+        AttentionKind::ChecksFailed => 'x',
+        AttentionKind::PrOpen => 'o',
+        AttentionKind::DiffReady => '*',
+        AttentionKind::Idle => '.',
+    }
+}
+
 fn print_archcar_response(response: ArchcarResponse) {
     match response {
         ArchcarResponse::Ack => println!("ok"),
@@ -5299,6 +5331,20 @@ fn print_archcar_response(response: ArchcarResponse) {
             println!("workspace_git_action_prompt workspace={workspace} action={action:?}");
             println!("visible_input: {visible_input}");
             println!("{prompt}");
+        }
+        // Already ranked by the daemon; print in the order received.
+        ArchcarResponse::Attention { queue } => {
+            if queue.items.is_empty() {
+                println!("Nothing needs you");
+            }
+            for item in queue.items {
+                println!(
+                    "{} {}  {}",
+                    attention_glyph(item.kind),
+                    item.workspace,
+                    item.headline
+                );
+            }
         }
         ArchcarResponse::Tasks { workspace, tasks } => {
             println!("tasks workspace={workspace} count={}", tasks.len());
@@ -9315,6 +9361,22 @@ mod tests {
             other => panic!("parsed as {other:?}"),
         }
         assert!(try_parse(["archductor", "remote", "update", "build", "--all"]).is_err());
+    }
+
+    #[test]
+    fn attention_subcommand_parses() {
+        assert!(matches!(
+            command_of(&["archductor", "archcar", "attention"]),
+            Command::Archcar {
+                command: ArchcarCommand::Attention { json: false }
+            }
+        ));
+        assert!(matches!(
+            command_of(&["archductor", "archcar", "attention", "--json"]),
+            Command::Archcar {
+                command: ArchcarCommand::Attention { json: true }
+            }
+        ));
     }
 
     #[test]
