@@ -4348,8 +4348,10 @@ fn release_held_acp_inputs(
             )
         });
         match queued {
+            // Saved for the next session, not delivered: the agent never saw
+            // it, and `Written` would have the CLI report it sent.
             Ok(_) => {
-                answer_input_write(&ack, Ok(InputWriteOutcome::Written));
+                answer_input_write(&ack, Ok(InputWriteOutcome::QueuedForNextSession));
                 let _ = event_tx.send(ArchcarEvent::ChatQueueUpdated {
                     thread_id: started.thread_id,
                 });
