@@ -560,6 +560,48 @@ pub(crate) fn migrate_workspace_db(conn: &Connection) -> Result<()> {
     )?;
     ensure_column(
         conn,
+        "workspaces",
+        "git_changed_files",
+        "ALTER TABLE workspaces ADD COLUMN git_changed_files INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "git_diff_additions",
+        "ALTER TABLE workspaces ADD COLUMN git_diff_additions INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "git_diff_deletions",
+        "ALTER TABLE workspaces ADD COLUMN git_diff_deletions INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "git_branch_ahead",
+        "ALTER TABLE workspaces ADD COLUMN git_branch_ahead INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "git_branch_behind",
+        "ALTER TABLE workspaces ADD COLUMN git_branch_behind INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "git_has_upstream",
+        "ALTER TABLE workspaces ADD COLUMN git_has_upstream INTEGER",
+    )?;
+    ensure_column(
+        conn,
+        "workspaces",
+        "git_facts_computed_at_ms",
+        "ALTER TABLE workspaces ADD COLUMN git_facts_computed_at_ms INTEGER",
+    )?;
+    ensure_column(
+        conn,
         "provider_events",
         "timeline_seq",
         "ALTER TABLE provider_events ADD COLUMN timeline_seq INTEGER",
