@@ -1946,7 +1946,24 @@ impl WorkspaceStore {
         Ok(count as usize)
     }
 
+    /// Workspace status lines, deriving each active workspace's git facts.
+    ///
+    /// That derivation is six git subprocesses per workspace, so the daemon
+    /// uses [`Self::list_status_without_git`] and fills the git fields from its
+    /// cache instead. This variant remains for one-shot callers (the CLI), for
+    /// which paying once is fine.
     pub fn list_status(&self) -> Result<Vec<WorkspaceStatusLine>> {
+        self.list_status_inner(true)
+    }
+
+    /// Workspace status lines with the git-derived fields left empty.
+    ///
+    /// Everything here is a database read. The caller supplies the git facts.
+    pub fn list_status_without_git(&self) -> Result<Vec<WorkspaceStatusLine>> {
+        self.list_status_inner(false)
+    }
+
+    fn list_status_inner(&self, derive_git: bool) -> Result<Vec<WorkspaceStatusLine>> {
         let workspaces = self.list()?;
         let mut lines = Vec::with_capacity(workspaces.len());
         for workspace in workspaces {
@@ -1963,12 +1980,12 @@ impl WorkspaceStore {
             )?;
             let active_sessions =
                 self.count_running_processes(workspace.id, ProcessKind::Session)?;
-            let branch_push_state = if workspace.status == "active" {
+            let branch_push_state = if derive_git && workspace.status == "active" {
                 self.branch_push_state(&workspace.name).ok()
             } else {
                 None
             };
-            let (diff_additions, diff_deletions) = if workspace.status == "active" {
+            let (diff_additions, diff_deletions) = if derive_git && workspace.status == "active" {
                 self.diff_stats_against_base(&workspace.name)
                     .unwrap_or_default()
             } else {
@@ -4086,6 +4103,41 @@ impl WorkspaceStore {
         let path = Self::resolve_in_workspace(&workspace.path, relative)?;
         fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
         Ok(())
+    }
+
+    /// Derive a workspace's git facts, paying the six subprocesses once.
+    ///
+    /// An archived workspace has no live worktree to inspect, so it reports
+    /// zeros rather than failing.
+    pub fn derive_git_facts(&self, name: &str, now_ms: u64) -> Result<WorkspaceGitFacts> {
+        let workspace = self.get_by_name(name)?;
+        if workspace.status != "active" {
+            return Ok(WorkspaceGitFacts {
+                changed_files: 0,
+                diff_additions: 0,
+                diff_deletions: 0,
+                branch_ahead: 0,
+                branch_behind: 0,
+                has_upstream: false,
+                computed_at_ms: now_ms,
+            });
+        }
+        let push = self.branch_push_state(name).ok();
+        let (diff_additions, diff_deletions) =
+            self.diff_stats_against_base(name).unwrap_or_default();
+        let changed_files = self
+            .changed_files(name)
+            .map(|files| files.len())
+            .unwrap_or(0);
+        Ok(WorkspaceGitFacts {
+            changed_files,
+            diff_additions,
+            diff_deletions,
+            branch_ahead: push.as_ref().map(|p| p.ahead).unwrap_or(0),
+            branch_behind: push.as_ref().map(|p| p.behind).unwrap_or(0),
+            has_upstream: push.as_ref().map(|p| p.has_upstream).unwrap_or(false),
+            computed_at_ms: now_ms,
+        })
     }
 
     /// Persist a workspace's git-derived summary fields.

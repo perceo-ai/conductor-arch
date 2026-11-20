@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -197,6 +197,10 @@ fn event_changes_attention(event: &ArchcarEvent) -> bool {
             | ArchcarEvent::BackgroundTaskUpdated { .. }
             | ArchcarEvent::ChatQueueUpdated { .. }
     )
+    /// Workspace git facts, so `list_workspaces` never shells out to git.
+    /// Behind its own lock inside the Arc: deriving is slow and must not make
+    /// requests queue on this mutex.
+    git_facts: Arc<GitFactCache>,
 }
 
 /// How often the daemon advances background development tasks.
@@ -367,6 +371,7 @@ impl ArchcarServer {
         };
         let state = Arc::new(Mutex::new(ServerState {
             remote_listen: remote.as_ref().map(|listener| listener.addr),
+            git_facts: Arc::new(GitFactCache::default()),
             db_path: paths.database_path,
             logs_dir: paths.logs_dir,
             shutting_down: false,
@@ -393,6 +398,7 @@ impl ArchcarServer {
         let shutdown = Arc::new(AtomicBool::new(false));
         spawn_queued_input_startup_sweep(&self.state);
         spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
+        spawn_git_fact_refresher(&self.state, Arc::clone(&shutdown));
         spawn_update_check_refresher(&self.state, Arc::clone(&shutdown));
         // Kept for an in-place restart: the listener thread drops its own
         // handle on shutdown, which would close the socket before the handoff.
@@ -662,6 +668,38 @@ fn tick_background_tasks(
         }
     }
     Ok(advanced)
+}
+
+/// Keep the workspace git facts warm.
+///
+/// Recomputes whatever an event marked dirty, plus anything older than
+/// `GIT_FACT_MAX_AGE_MS`, so an agent writing files with no event per write
+/// still moves the sidebar's diff badge. Runs on its own thread and holds no
+/// request-path lock while git is running.
+fn spawn_git_fact_refresher(state: &Arc<Mutex<ServerState>>, shutdown: Arc<AtomicBool>) {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        while !shutdown.load(Ordering::SeqCst) {
+            if shutdown.load(Ordering::SeqCst) || state.lock().unwrap().shutting_down {
+                break;
+            }
+            let (db_path, git_facts) = {
+                let guard = state.lock().unwrap();
+                (guard.db_path.clone(), guard.git_facts.clone())
+            };
+            let _in_flight = InFlight::enter();
+            if let Err(err) = refresh_git_facts_once(
+                &db_path,
+                &git_facts,
+                crate::agent_status::now_ms(),
+                GIT_FACT_MAX_AGE_MS,
+            ) {
+                debug!(error = %err, "git fact refresh failed");
+            }
+            drop(_in_flight);
+            std::thread::sleep(GIT_FACT_TICK);
+        }
+    });
 }
 
 /// Periodically advance background development tasks: once an agent goes idle,
@@ -1408,7 +1446,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::GetInventorySnapshot => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match inventory_snapshot(&db_path) {
+            let git_facts = state.lock().unwrap().git_facts.clone();
+            match inventory_snapshot(&db_path, &git_facts) {
                 Ok((repositories, workspaces, chat_threads)) => {
                     ArchcarResponse::InventorySnapshot {
                         repositories,
@@ -1423,7 +1462,8 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
         }
         ArchcarRequest::ListWorkspaces => {
             let db_path = state.lock().unwrap().db_path.clone();
-            match workspace_summaries(&db_path) {
+            let git_facts = state.lock().unwrap().git_facts.clone();
+            match workspace_summaries(&db_path, &git_facts) {
                 Ok(workspaces) => ArchcarResponse::Workspaces { workspaces },
                 Err(err) => ArchcarResponse::Error {
                     message: err.to_string(),
@@ -4004,6 +4044,13 @@ fn broadcast_naming_changes(
 }
 
 fn broadcast_workspace_renamed(state: &Arc<Mutex<ServerState>>, old_name: &str, new_name: &str) {
+    {
+        // The cache is keyed by name, so the old entry is now unreachable and
+        // the new name has nothing yet.
+        let guard = state.lock().unwrap();
+        guard.git_facts.forget(old_name);
+        guard.git_facts.mark_dirty(new_name);
+    }
     if old_name == new_name {
         return;
     }
@@ -4044,7 +4091,14 @@ fn refresh_workspace_context_after_change(
     thread_id: Option<i64>,
 ) {
     use crate::workspace_intel::SummaryRefreshScope;
-    let db_path = state.lock().unwrap().db_path.clone();
+    let db_path = {
+        let guard = state.lock().unwrap();
+        // Whatever just happened here may have moved the worktree: a commit, a
+        // checkout, or an agent writing files. The refresher re-derives on its
+        // next tick; nothing on the request path waits for it.
+        guard.git_facts.mark_dirty(workspace);
+        guard.db_path.clone()
+    };
     let store = match WorkspaceStore::open_app(&db_path) {
         Ok(store) => store,
         Err(err) => {
@@ -6300,33 +6354,176 @@ fn workspace_summary_from_status_line(
     }
 }
 
-fn workspace_summaries(db_path: &Path) -> Result<Vec<ArchcarWorkspaceSummary>> {
+/// The daemon's cache of workspace git facts.
+///
+/// Deriving them costs six git subprocesses per workspace, and answering
+/// `list_workspaces` from scratch measured 450ms per workspace — 5s across ten
+/// (`docs/evidence/2026-11-19-concurrent-chat-perf-baseline.md`). This holds
+/// the last derived set so a request never waits on git.
+///
+/// It has its own lock rather than living inside `ServerState`: deriving is
+/// slow, and nothing else should queue behind it.
+#[derive(Debug, Default)]
+pub struct GitFactCache {
+    inner: Mutex<GitFactCacheInner>,
+}
+
+#[derive(Debug, Default)]
+struct GitFactCacheInner {
+    facts: HashMap<String, crate::workspace::WorkspaceGitFacts>,
+    dirty: BTreeSet<String>,
+}
+
+impl GitFactCache {
+    pub fn get(&self, workspace: &str) -> Option<crate::workspace::WorkspaceGitFacts> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.facts.get(workspace).cloned())
+    }
+
+    pub fn publish(&self, workspace: &str, facts: crate::workspace::WorkspaceGitFacts) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.facts.insert(workspace.to_owned(), facts);
+        }
+    }
+
+    /// Note that a workspace's git state may have moved.
+    pub fn mark_dirty(&self, workspace: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.dirty.insert(workspace.to_owned());
+        }
+    }
+
+    /// Take the set of workspaces owed a recompute, clearing it.
+    ///
+    /// Taking rather than peeking means a workspace marked again while its
+    /// recompute is running is picked up by the next pass instead of being
+    /// silently dropped.
+    pub fn dirty_workspaces(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .map(|mut inner| std::mem::take(&mut inner.dirty).into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn forget(&self, workspace: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.facts.remove(workspace);
+            inner.dirty.remove(workspace);
+        }
+    }
+}
+
+fn workspace_summaries(
+    db_path: &Path,
+    git_facts: &GitFactCache,
+) -> Result<Vec<ArchcarWorkspaceSummary>> {
     WorkspaceStore::open_app(db_path).and_then(|store| {
-        let lines = store.list_status()?;
+        // The git-free read: everything below is a database query.
+        let lines = store.list_status_without_git()?;
         let task_counts = store.task_counts_by_workspace().unwrap_or_default();
         let awaiting = workspaces_awaiting_input(db_path, &store);
         Ok(lines
             .into_iter()
-            .map(|line| {
-                // Match the GTK dashboard card: changed-file count for the diff
-                // badge, only meaningful for active checkouts.
-                let changed_files = if line.workspace.status == "active" {
-                    store
-                        .changed_files(&line.workspace.name)
-                        .map(|files| files.len())
-                        .unwrap_or(0)
-                } else {
-                    0
+            .map(|mut line| {
+                let name = line.workspace.name.clone();
+                // Cache, then the last persisted set, then nothing. Serving
+                // zeros for a workspace whose state was never measured would
+                // tell the sidebar it is clean, so that case is also queued for
+                // the refresher.
+                let facts = git_facts.get(&name).or_else(|| {
+                    let stored = store.stored_git_facts(&name).ok().flatten();
+                    if let Some(facts) = stored.clone() {
+                        git_facts.publish(&name, facts);
+                    }
+                    stored
+                });
+                let facts = match facts {
+                    Some(facts) => facts,
+                    None => {
+                        git_facts.mark_dirty(&name);
+                        crate::workspace::WorkspaceGitFacts {
+                            changed_files: 0,
+                            diff_additions: 0,
+                            diff_deletions: 0,
+                            branch_ahead: 0,
+                            branch_behind: 0,
+                            has_upstream: false,
+                            computed_at_ms: 0,
+                        }
+                    }
                 };
+                line.diff_additions = facts.diff_additions;
+                line.diff_deletions = facts.diff_deletions;
+                // Shape must match what deriving inline produced: `Some` for
+                // every active workspace — with `has_upstream: false` and zero
+                // counts when there is no upstream — and `None` only for
+                // archived ones. Collapsing the no-upstream case to `None`
+                // turned `branch_ahead: 0` into an absent field on the wire.
+                line.branch_push_state = (line.workspace.status == "active").then_some(
+                    crate::workspace::BranchPushState {
+                        ahead: facts.branch_ahead,
+                        behind: facts.branch_behind,
+                        has_upstream: facts.has_upstream,
+                    },
+                );
                 let tasks = task_counts
                     .get(&line.workspace.id)
                     .copied()
                     .unwrap_or_default();
                 let awaiting_input = awaiting.contains(&line.workspace.name);
-                workspace_summary_from_status_line(line, changed_files, tasks, awaiting_input)
+                workspace_summary_from_status_line(line, facts.changed_files, tasks, awaiting_input)
             })
             .collect())
     })
+}
+
+/// How often a workspace's git facts are re-derived even with no event to
+/// suggest they moved. An agent editing files emits nothing per write, so this
+/// is what makes the diff badge move during a turn.
+const GIT_FACT_MAX_AGE_MS: u64 = 15_000;
+
+/// How often the git-fact refresher wakes.
+const GIT_FACT_TICK: Duration = Duration::from_secs(2);
+
+/// Recompute the git facts that are owed, and return the workspaces touched.
+///
+/// Owed means either marked dirty by an event, or older than `max_age_ms`.
+/// Runs off every lock a request might want, so a slow `git status` delays
+/// nothing but itself.
+fn refresh_git_facts_once(
+    db_path: &Path,
+    git_facts: &GitFactCache,
+    now_ms: u64,
+    max_age_ms: u64,
+) -> Result<Vec<String>> {
+    let store = WorkspaceStore::open_app(db_path)?;
+    let mut owed: BTreeSet<String> = git_facts.dirty_workspaces().into_iter().collect();
+    for workspace in store.list().unwrap_or_default() {
+        if workspace.status != "active" {
+            continue;
+        }
+        let stale = match git_facts.get(&workspace.name) {
+            Some(facts) => now_ms.saturating_sub(facts.computed_at_ms) > max_age_ms,
+            None => true,
+        };
+        if stale {
+            owed.insert(workspace.name);
+        }
+    }
+
+    let mut refreshed = Vec::new();
+    for name in owed {
+        let Ok(facts) = store.derive_git_facts(&name, now_ms) else {
+            // The workspace went away between listing and deriving.
+            continue;
+        };
+        git_facts.publish(&name, facts.clone());
+        let _ = store.store_git_facts(&name, &facts);
+        refreshed.push(name);
+    }
+    Ok(refreshed)
 }
 
 fn repository_summaries(db_path: &Path) -> Result<Vec<ArchcarRepositorySummary>> {
@@ -6403,9 +6600,9 @@ type InventorySnapshot = (
     BTreeMap<String, Vec<ArchcarChatThread>>,
 );
 
-fn inventory_snapshot(db_path: &Path) -> Result<InventorySnapshot> {
+fn inventory_snapshot(db_path: &Path, git_facts: &GitFactCache) -> Result<InventorySnapshot> {
     let repositories = repository_summaries(db_path)?;
-    let workspaces = workspace_summaries(db_path)?;
+    let workspaces = workspace_summaries(db_path, git_facts)?;
     let mut chat_threads = BTreeMap::new();
     for workspace in workspaces.iter().filter(|ws| ws.status != "archived") {
         chat_threads.insert(
@@ -7681,6 +7878,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let ArchcarResponse::UpdateStatus { status } =
@@ -7774,6 +7972,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let import = || {
             dispatch_request(
@@ -7992,6 +8191,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let on = dispatch_request(
@@ -8089,6 +8289,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let added = dispatch_request(
             ArchcarRequest::AddRepository {
@@ -8181,6 +8382,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -8274,6 +8476,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -8378,6 +8581,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Claim the row from a separate connection the moment it is inserted,
@@ -8488,6 +8692,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let queued = store
             .enqueue_chat_input(
@@ -8589,6 +8794,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let closed = dispatch_request(
@@ -8708,6 +8914,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -8800,6 +9007,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let context = crate::workspace::DeterministicNamingContext {
@@ -8888,6 +9096,7 @@ mod tests {
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Agent metadata is applied while a thread renders, so a read can rename
@@ -8981,6 +9190,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -9036,6 +9246,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // What the `set_workspace_context` MCP tool sends.
@@ -9104,6 +9315,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -9267,6 +9479,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -9383,6 +9596,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         drain_queued_input_for_thread(&state, thread.id);
@@ -9481,6 +9695,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         handle_session_event(
@@ -9571,6 +9786,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         handle_session_event(
@@ -9654,6 +9870,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         BusySession {
             state,
@@ -9901,6 +10118,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let interaction = ProviderInteractionStore::new(db_path.clone())
             .register(interaction_draft_for(
@@ -10030,6 +10248,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let mut adapter = crate::provider_adapters::acp::AcpAdapter::new(
             SessionKind::new("gemini"),
@@ -10140,6 +10359,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         let interaction = interactions
@@ -10196,6 +10416,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         interactions
@@ -10271,6 +10492,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         drain_every_queued_chat_thread(&state);
@@ -10329,6 +10551,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Two sends back to back, the way a user types a follow-up right after
@@ -10395,6 +10618,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // A brand-new chat thread has no session, so nothing would ever deliver
@@ -10452,6 +10676,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         assert_eq!(
@@ -10484,6 +10709,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let guard = QueueDrainGuard::begin(&state, thread.id).expect("first drain runs");
@@ -10576,6 +10802,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -10627,6 +10854,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let first = ensure_default_session(
             &state,
@@ -10674,6 +10902,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let claude = ensure_default_session(
@@ -10719,6 +10948,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = spawn_session(
@@ -10944,6 +11174,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = ensure_default_session(
@@ -11026,6 +11257,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         };
         let (subscriber_tx, subscriber_rx) = mpsc::channel();
 
@@ -11081,6 +11313,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         begin_shutdown(&state);
@@ -11155,6 +11388,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
@@ -11240,6 +11474,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = ensure_chat_thread_session(
@@ -11298,6 +11533,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -11714,6 +11950,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let loop_stand_in = pump_one_input_write(
@@ -11799,6 +12036,7 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = ensure_chat_thread_session(
@@ -12215,6 +12453,7 @@ icon = "cloud"
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let added = dispatch_request(
@@ -12306,6 +12545,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let added = dispatch_request(
@@ -12404,6 +12644,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         dispatch_request(
             ArchcarRequest::AddRepository {
@@ -12511,6 +12752,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         dispatch_request(
@@ -12767,6 +13009,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let added = dispatch_request(
@@ -12902,6 +13145,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Read it off the wire, the way the iOS client's connect handshake does.
@@ -12942,6 +13186,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         dispatch_request(
@@ -13018,6 +13263,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         dispatch_request(
@@ -13145,6 +13391,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -13194,6 +13441,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -13234,6 +13482,7 @@ default = true
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
+            git_facts: Arc::new(GitFactCache::default()),
         }));
         let (inside_tx, inside_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -14155,6 +14404,192 @@ default = true
             vec![first.id, second.id, third.id],
             "tabs must keep creation order however recently a chat was touched"
         );
+    }
+
+    fn git_facts(changed_files: usize, computed_at_ms: u64) -> crate::workspace::WorkspaceGitFacts {
+        crate::workspace::WorkspaceGitFacts {
+            changed_files,
+            diff_additions: 0,
+            diff_deletions: 0,
+            branch_ahead: 0,
+            branch_behind: 0,
+            has_upstream: false,
+            computed_at_ms,
+        }
+    }
+
+    #[test]
+    fn git_fact_cache_serves_published_facts() {
+        let cache = GitFactCache::default();
+        assert_eq!(cache.get("berlin"), None);
+
+        cache.publish("berlin", git_facts(4, 100));
+
+        assert_eq!(cache.get("berlin").map(|f| f.changed_files), Some(4));
+    }
+
+    #[test]
+    fn git_fact_cache_reports_a_marked_workspace_dirty() {
+        let cache = GitFactCache::default();
+        cache.mark_dirty("berlin");
+
+        assert_eq!(cache.dirty_workspaces(), vec!["berlin".to_owned()]);
+
+        // Taking the dirty set clears it: the refresher has accepted the work.
+        assert!(cache.dirty_workspaces().is_empty());
+    }
+
+    #[test]
+    fn workspace_summaries_use_cached_facts_without_deriving_from_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let _store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let cache = GitFactCache::default();
+        // The worktree is clean, so anything that actually shelled out to git
+        // would report zero. Seven can only come from the cache.
+        cache.publish("berlin", git_facts(7, 100));
+
+        let summaries = workspace_summaries(&db_path, &cache).unwrap();
+
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|s| s.name == "berlin")
+                .map(|s| s.changed_files),
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn workspace_summaries_fall_back_to_the_persisted_facts() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        store.store_git_facts("berlin", &git_facts(5, 100)).unwrap();
+
+        // Cold cache, as after a daemon restart. The sidebar must show the last
+        // known truth rather than claiming the workspace is clean.
+        let summaries = workspace_summaries(&db_path, &GitFactCache::default()).unwrap();
+
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|s| s.name == "berlin")
+                .map(|s| s.changed_files),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn workspace_summaries_report_zero_and_queue_work_when_nothing_is_known() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let _store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let cache = GitFactCache::default();
+
+        let summaries = workspace_summaries(&db_path, &cache).unwrap();
+
+        // A brand-new workspace has no changes, so zero is the right answer
+        // here rather than merely a convenient one -- but it must still be
+        // queued, because nothing has been measured yet.
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|s| s.name == "berlin")
+                .map(|s| s.changed_files),
+            Some(0)
+        );
+        assert_eq!(cache.dirty_workspaces(), vec!["berlin".to_owned()]);
+    }
+
+    #[test]
+    fn derive_git_facts_reads_the_real_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let workspace = store.get_by_name("berlin").unwrap();
+        // Relative to a baseline: a freshly created workspace already carries
+        // its own untracked scaffolding, so the absolute count is not the point
+        // — that writing a file moves it is.
+        let before = store.derive_git_facts("berlin", 1).unwrap().changed_files;
+        std::fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+
+        let facts = store.derive_git_facts("berlin", 1_234).unwrap();
+
+        assert_eq!(facts.changed_files, before + 1);
+        assert_eq!(facts.computed_at_ms, 1_234);
+    }
+
+    #[test]
+    fn the_refresher_recomputes_a_dirty_workspace_and_persists_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let workspace = store.get_by_name("berlin").unwrap();
+        let expected = {
+            std::fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+            store.derive_git_facts("berlin", 1).unwrap().changed_files
+        };
+        let cache = GitFactCache::default();
+        cache.mark_dirty("berlin");
+
+        let refreshed = refresh_git_facts_once(&db_path, &cache, 2_000, 60_000).unwrap();
+
+        assert_eq!(refreshed, vec!["berlin".to_owned()]);
+        assert_eq!(cache.get("berlin").map(|f| f.changed_files), Some(expected));
+        // Persisted too, so a restart does not go back to reporting nothing.
+        assert_eq!(
+            store
+                .stored_git_facts("berlin")
+                .unwrap()
+                .map(|f| f.changed_files),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn the_refresher_re_derives_stale_facts_nothing_marked_dirty() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let workspace = store.get_by_name("berlin").unwrap();
+        let expected = {
+            std::fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+            store.derive_git_facts("berlin", 1).unwrap().changed_files
+        };
+        let cache = GitFactCache::default();
+        // Known, not dirty, but older than the interval. An agent editing files
+        // emits no event per write, so the interval is what moves the diff
+        // badge mid-turn.
+        cache.publish("berlin", git_facts(0, 1_000));
+
+        let refreshed = refresh_git_facts_once(&db_path, &cache, 1_000 + 60_001, 60_000).unwrap();
+
+        assert_eq!(refreshed, vec!["berlin".to_owned()]);
+        assert_eq!(cache.get("berlin").map(|f| f.changed_files), Some(expected));
+    }
+
+    #[test]
+    fn the_refresher_leaves_fresh_facts_alone() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let workspace = store.get_by_name("berlin").unwrap();
+        std::fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+        let cache = GitFactCache::default();
+        cache.publish("berlin", git_facts(0, 1_000));
+
+        let refreshed = refresh_git_facts_once(&db_path, &cache, 1_500, 60_000).unwrap();
+
+        assert!(refreshed.is_empty());
+        assert_eq!(cache.get("berlin").map(|f| f.changed_files), Some(0));
     }
 
     fn seeded_workspace_store(db_path: &Path, logs_dir: &Path, root: &Path) -> WorkspaceStore {
