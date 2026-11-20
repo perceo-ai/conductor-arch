@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_status::{AgentActivity, StatusReport, WorkspaceReport};
 use crate::background_tasks::{background_task_is_terminal, BackgroundTask};
+use crate::chat_transcript::TurnOutcome;
 
 /// A terminal background task stays in the queue this long after it finished.
 pub const TASK_FINISHED_WINDOW_SECONDS: u64 = 86_400;
@@ -165,11 +166,22 @@ pub fn derive_attention(
                     "Session failed".to_string(),
                 ));
             }
-            // Not running, and the last turn never finished: killed, exited
-            // unexpectedly, or interrupted by a daemon restart. The spec counts
-            // that with a session error, so it shares the kind and the rank;
-            // only the headline says which of the two happened.
-            if session.state == AgentActivity::Stopped {
+            // Died with a turn still open: killed, an unexpected exit, or a
+            // daemon restart mid-turn. The spec counts that with a session
+            // error, so it shares the kind and the rank; only the headline
+            // says which of the two happened.
+            //
+            // `Stopped` alone is much broader and must not raise anything. It
+            // also covers a thread that was opened and never prompted
+            // (`turn_outcome` is `None`), a turn the human deliberately
+            // interrupted (`Interrupted`), and an old turn whose outcome was
+            // never recorded (`Unknown` — "no idea", not "died mid-turn").
+            // Those are not news, and `session_reports` keeps several dead
+            // sessions per workspace, so each one would stack a permanent
+            // rank-1 row in the most urgent tier.
+            if session.state == AgentActivity::Stopped
+                && session.turn_outcome == Some(TurnOutcome::Running)
+            {
                 items.push(item(
                     AttentionKind::SessionFailed,
                     workspace,
@@ -610,15 +622,41 @@ mod tests {
     }
 
     #[test]
-    fn stopped_session_is_reported_as_a_stopped_session() {
-        // Killed, exited unexpectedly, or interrupted by a daemon restart.
-        // The spec counts that with a session error, so it must not vanish.
-        let ws = workspace("alpha", vec![session(1, AgentActivity::Stopped)]);
+    fn a_session_that_died_mid_turn_is_reported_as_stopped() {
+        // Killed, exited unexpectedly, or interrupted by a daemon restart:
+        // the turn was still open when the session went away. The spec counts
+        // that with a session error, so it must not vanish.
+        let mut s = session(1, AgentActivity::Stopped);
+        s.turn_outcome = Some(TurnOutcome::Running);
+        let ws = workspace("alpha", vec![s]);
         let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
         assert_eq!(pairs(&queue), vec![(AttentionKind::SessionFailed, "alpha")]);
         assert_eq!(queue.items[0].headline, "Session stopped before finishing");
         assert_eq!(queue.items[0].rank, 1);
         assert_eq!(queue.items[0].session_id, Some(1));
+    }
+
+    #[test]
+    fn a_stopped_session_that_did_not_die_mid_turn_produces_no_item() {
+        // A thread opened and never prompted, a turn the human interrupted
+        // with ESC before closing the session, a turn that finished, and an
+        // old turn with no recorded outcome. None of these is news, and
+        // several dead sessions are kept per workspace, so each would stack a
+        // permanent row in the most urgent tier.
+        for outcome in [
+            None,
+            Some(TurnOutcome::Interrupted),
+            Some(TurnOutcome::Unknown),
+        ] {
+            let mut s = session(1, AgentActivity::Stopped);
+            s.turn_outcome = outcome;
+            let ws = workspace("alpha", vec![s]);
+            let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
+            assert!(
+                queue.items.is_empty(),
+                "a stopped session with outcome {outcome:?} raised {queue:?}"
+            );
+        }
     }
 
     #[test]

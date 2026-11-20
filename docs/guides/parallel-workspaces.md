@@ -157,7 +157,7 @@ Items, most urgent first (session failed and stalled share a rank, so they inter
 | Kind | Means |
 | --- | --- |
 | agent asked | an agent is blocked on a permission prompt, question, or plan |
-| session failed | an agent's last turn ended in an error, or the session stopped before its turn finished — killed, an unexpected exit, or a daemon restart (the headline says which) |
+| session failed | an agent's last turn ended in an error, or the session died with a turn still open — killed, an unexpected exit, or a daemon restart (the headline says which). A chat that was never prompted, and a turn you interrupted yourself, raise nothing |
 | stalled | an agent is alive and mid-turn but has shown no progress for 10 minutes |
 | task finished | a background task reached a terminal state in the last 24 hours (a task whose timestamp cannot be parsed is kept, not dropped) |
 | checks failed | a PR's checks are reported as failing |
