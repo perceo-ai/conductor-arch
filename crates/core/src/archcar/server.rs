@@ -6484,6 +6484,12 @@ fn workspace_summaries(
     })
 }
 
+/// The least time between two recomputes of the same workspace, however often
+/// events say its git state moved. An agent mid-turn marks its workspace dirty
+/// continuously, and six subprocesses per workspace per tick is how a cache
+/// that made requests free could still keep the machine busy.
+const GIT_FACT_MIN_AGE_MS: u64 = 5_000;
+
 /// How often a workspace's git facts are re-derived even with no event to
 /// suggest they moved. An agent editing files emits nothing per write, so this
 /// is what makes the diff badge move during a turn.
@@ -6503,6 +6509,18 @@ fn refresh_git_facts_once(
     now_ms: u64,
     max_age_ms: u64,
 ) -> Result<Vec<String>> {
+    refresh_git_facts_once_with_floor(db_path, git_facts, now_ms, max_age_ms, GIT_FACT_MIN_AGE_MS)
+}
+
+/// As [`refresh_git_facts_once`], with the per-workspace floor given explicitly
+/// so tests can exercise it without waiting.
+fn refresh_git_facts_once_with_floor(
+    db_path: &Path,
+    git_facts: &GitFactCache,
+    now_ms: u64,
+    max_age_ms: u64,
+    min_age_ms: u64,
+) -> Result<Vec<String>> {
     let store = WorkspaceStore::open_app(db_path)?;
     let mut owed: BTreeSet<String> = git_facts.dirty_workspaces().into_iter().collect();
     for workspace in store.list().unwrap_or_default() {
@@ -6520,6 +6538,15 @@ fn refresh_git_facts_once(
 
     let mut refreshed = Vec::new();
     for name in owed {
+        // The floor is what stops a streaming agent's constant dirty marks
+        // turning into six git subprocesses per workspace on every tick. The
+        // mark is kept, so the work is deferred rather than dropped.
+        if let Some(facts) = git_facts.get(&name) {
+            if now_ms.saturating_sub(facts.computed_at_ms) < min_age_ms {
+                git_facts.mark_dirty(&name);
+                continue;
+            }
+        }
         let Ok(facts) = store.derive_git_facts(&name, now_ms) else {
             // The workspace went away between listing and deriving.
             continue;
@@ -14578,6 +14605,43 @@ default = true
 
         assert_eq!(refreshed, vec!["berlin".to_owned()]);
         assert_eq!(cache.get("berlin").map(|f| f.changed_files), Some(expected));
+    }
+
+    #[test]
+    fn the_refresher_rate_limits_a_workspace_that_is_always_dirty() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let _store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let cache = GitFactCache::default();
+        cache.publish("berlin", git_facts(0, 10_000));
+        cache.mark_dirty("berlin");
+
+        // A streaming agent marks its workspace dirty constantly. Honouring
+        // every mark means six git subprocesses per workspace per tick, which
+        // is how a cache that made requests free still kept the machine busy.
+        let refreshed =
+            refresh_git_facts_once_with_floor(&db_path, &cache, 11_000, 60_000, 5_000).unwrap();
+
+        assert!(refreshed.is_empty());
+        // Still owed, so it is not lost — just deferred.
+        assert_eq!(cache.dirty_workspaces(), vec!["berlin".to_owned()]);
+    }
+
+    #[test]
+    fn the_refresher_recomputes_a_dirty_workspace_once_the_floor_has_passed() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let _store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let cache = GitFactCache::default();
+        cache.publish("berlin", git_facts(0, 10_000));
+        cache.mark_dirty("berlin");
+
+        let refreshed =
+            refresh_git_facts_once_with_floor(&db_path, &cache, 16_000, 60_000, 5_000).unwrap();
+
+        assert_eq!(refreshed, vec!["berlin".to_owned()]);
     }
 
     #[test]
