@@ -82,11 +82,23 @@ const TONE_LABEL: Record<Tone, string> = {
 /** How often the "as of" age is recomputed; it must not freeze at "just now". */
 const ASOF_TICK_MS = 30_000;
 
+/**
+ * How often the page refetches while it is open. An agent crossing the 600s
+ * stall threshold, say, emits no event of its own — nothing tells the store
+ * to invalidate — so a page left open would otherwise show that agent as
+ * fine until something else happened to trigger a refresh. This interval is
+ * well above the 2s debounce `attentionStore` already applies to events, so
+ * it never doubles up with one; `refresh()` shares whatever is in flight.
+ */
+export const VISIBLE_REFRESH_MS = 20_000;
+
 export function AttentionPage() {
   const [now, setNow] = createSignal(Date.now());
   onMount(() => {
     const tick = setInterval(() => setNow(Date.now()), ASOF_TICK_MS);
     onCleanup(() => clearInterval(tick));
+    const refreshTick = setInterval(() => void attentionStore.refresh(), VISIBLE_REFRESH_MS);
+    onCleanup(() => clearInterval(refreshTick));
     const unwatch = attentionStore.watch();
     onCleanup(unwatch);
   });

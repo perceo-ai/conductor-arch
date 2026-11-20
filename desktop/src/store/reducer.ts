@@ -194,6 +194,11 @@ const ATTENTION_EVENTS: ReadonlySet<string> = new Set([
   "provider_interaction_resolved",
   "background_task_updated",
   "chat_queue_updated",
+  // PR refreshes and workspace updates both publish this, and either can
+  // change `pr_open`/`diff_ready`/`checks_failed` rows (a merged PR, say).
+  // Without it, Attention keeps showing a merged PR as waiting-for-review
+  // until something else happens to invalidate it.
+  "inventory_changed",
 ]);
 
 export function applyEvent(event: ArchcarEvent) {

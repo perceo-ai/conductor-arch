@@ -236,3 +236,45 @@ describe("applyEvent workspace renames", () => {
     expect(nav.selectedWorkspace()).toBe("berlin");
   });
 });
+
+describe("applyEvent attention invalidation", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refreshes the attention queue on inventory_changed (a merged PR, say)", async () => {
+    // `inventory_changed` fires for both PR refreshes and workspace updates,
+    // either of which can flip `pr_open`/`diff_ready`/`checks_failed`. It was
+    // missing from the invalidation set, so Attention kept a merged PR's
+    // workspace reading as waiting-for-review until something unrelated
+    // happened to invalidate the cache.
+    vi.useFakeTimers();
+    const { applyEvent } = await import("./reducer");
+    const { attentionStore, ATTENTION_DEBOUNCE_MS } = await import("./attention");
+
+    api.request.mockImplementation(async (req: { type: string }) => {
+      if (req.type === "list_attention") {
+        return { type: "attention", queue: { generated_at: "now", items: [] } };
+      }
+      return { type: "ack" };
+    });
+
+    const unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    const attentionCallsAfterOpen = api.request.mock.calls.filter(
+      (call) => (call[0] as { type: string }).type === "list_attention",
+    ).length;
+    expect(attentionCallsAfterOpen).toBeGreaterThan(0);
+
+    applyEvent({ type: "inventory_changed", scope: "workspaces", workspace: "antix" });
+    await vi.advanceTimersByTimeAsync(ATTENTION_DEBOUNCE_MS + 1);
+
+    const attentionCallsAfterEvent = api.request.mock.calls.filter(
+      (call) => (call[0] as { type: string }).type === "list_attention",
+    ).length;
+    expect(attentionCallsAfterEvent).toBeGreaterThan(attentionCallsAfterOpen);
+
+    unwatch();
+    attentionStore.reset();
+  });
+});

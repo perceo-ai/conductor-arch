@@ -42,13 +42,43 @@ struct AttentionView: View {
         }
         // Keyed on the session itself: it is set only after the connection is
         // up, so a task keyed on the daemon id alone can run before it exists
-        // and never run again. A new session also means a new daemon or a
-        // reconnect, so whatever was loaded no longer applies.
+        // and never run again. A new session also means a new daemon switch,
+        // which resets everything below; a reconnect of the *same* session
+        // (`handleForeground()` reconnects in place rather than replacing
+        // it) is handled by `observeConnections()`, since nothing here would
+        // otherwise notice a drop-and-reconnect.
         .task(id: model.session.map(ObjectIdentifier.init)) {
             queue = nil
             loadError = nil
             path = NavigationPath()
+            await observeConnections()
+        }
+    }
+
+    /// Reloads once per connection of this session — the very first one and
+    /// every reconnect after it — never per daemon event, which is
+    /// deliberately deferred (see the PR body). `connectedEvents()` only
+    /// returns once the session is connected, so each pass through this loop
+    /// represents exactly one connection; the events themselves are drained
+    /// and discarded, which is what makes a reconnect the only thing that
+    /// triggers another reload.
+    ///
+    /// The first load used to run separately, before this loop started, with
+    /// the loop's own first iteration skipped on the assumption that the
+    /// separate load had already answered for it. That assumption broke if
+    /// the connection dropped *during* that first load: the load failed, but
+    /// the skip still fired, so the reconnect which should have retried it
+    /// was swallowed and the error sat on screen with nothing watching for
+    /// it. Calling `load()` from inside this same loop for every connection,
+    /// including the first, needs no such assumption and so cannot swallow
+    /// that case: a drop mid-load simply means the loop's `connectedEvents()`
+    /// waits, then this reloads once the reconnect completes.
+    private func observeConnections() async {
+        guard let session = model.session else { return }
+        while !Task.isCancelled {
+            guard let subscription = await session.connectedEvents() else { return }
             await load()
+            for await _ in subscription.events {}
         }
     }
 

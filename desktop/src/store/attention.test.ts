@@ -194,4 +194,44 @@ describe("attentionStore", () => {
     await vi.advanceTimersByTimeAsync(ATTENTION_DEBOUNCE_MS * 2);
     expect(send).toHaveBeenCalledTimes(1);
   });
+
+  it("runs no hidden fetch after close, and always refetches on reopen", async () => {
+    // An event's follow-up timer can fire while the original read (from
+    // opening the page) is still in flight: `run()` then only sets `rerun`,
+    // since a fetch is already running. If the page closes before that
+    // original read finishes, its `finally` must not schedule a follow-up
+    // anyway — nobody is watching, so such a read would be hidden, and
+    // `fetchQueue` marks `stale = false` as soon as it starts, which would
+    // wrongly tell a later `watch()` the list is already fresh.
+    let resolveFirst: (v: unknown) => void = () => {};
+    send.mockImplementationOnce(() => new Promise((resolve) => (resolveFirst = resolve)));
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(1); // the on-open read, still in flight
+
+    // An event lands while that read is in flight and a watcher is present.
+    attentionStore.invalidate();
+    // The follow-up timer fires before the original read resolves: `run()`
+    // sees `inFlight` and only sets `rerun`, costing no extra fetch yet.
+    await vi.advanceTimersByTimeAsync(ATTENTION_DEBOUNCE_MS + 1);
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // The page closes before the original read resolves.
+    unwatch();
+    unwatch = undefined;
+
+    // The original read now resolves, with nobody watching.
+    send.mockResolvedValue(queueOf([item()]));
+    resolveFirst(queueOf([]));
+    await vi.advanceTimersByTimeAsync(ATTENTION_DEBOUNCE_MS + 1);
+
+    // No hidden fetch must have run while the page was closed.
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // Reopening always refetches (the queue is partly clock-derived) --
+    // which also proves `stale` was not wrongly cleared by a hidden read.
+    unwatch = attentionStore.watch();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
 });

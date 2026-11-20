@@ -31,7 +31,7 @@ vi.mock("@/store/nav", async (orig) => {
   return { ...mod, nav: { ...mod.nav, selectWorkspace, selectChatThread } };
 });
 
-const { AttentionPage } = await import("./Attention");
+const { AttentionPage, VISIBLE_REFRESH_MS } = await import("./Attention");
 const { attentionStore } = await import("@/store/attention");
 const { workspacesStore } = await import("@/store/workspaces");
 
@@ -208,5 +208,26 @@ describe("Attention page", () => {
     await settle();
     expect(host.textContent).toContain("daemon down");
     expect(host.textContent).not.toContain("Nothing needs you");
+  });
+
+  it("refetches on a bounded interval while open, with no manual refresh", async () => {
+    // A newly stalled agent emits no event of its own, so a page left open
+    // must still pick it up on its own cadence rather than only on the next
+    // unrelated invalidation or a click on Refresh.
+    vi.useFakeTimers();
+    try {
+      items = [];
+      mount();
+      await vi.advanceTimersByTimeAsync(0);
+      const before = send.mock.calls.length;
+
+      items = [item({ workspace: "stalled-ws", kind: "stalled", rank: 1 })];
+      await vi.advanceTimersByTimeAsync(VISIBLE_REFRESH_MS + 1);
+
+      expect(send.mock.calls.length).toBeGreaterThan(before);
+      expect(attentionStore.items().map((i) => i.workspace)).toContain("stalled-ws");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
