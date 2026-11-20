@@ -14,7 +14,7 @@ pub enum ProviderInputState {
 }
 
 impl ProviderInputState {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
             Self::Written => "written",
@@ -116,6 +116,30 @@ impl ProviderInputStore {
 
     pub fn mark_failed(&self, id: &str, error: &str) -> Result<()> {
         self.update_state(id, ProviderInputState::Failed, None, Some(error))
+    }
+
+    /// Every input of a process that the provider has not answered yet, oldest
+    /// first.
+    ///
+    /// `written` means "handed to the provider's stdin", not "the provider read
+    /// it". When the process dies the difference matters: those rows sat at
+    /// `written` for ever, so a steer the user watched disappear had no record
+    /// saying it never arrived and nothing to replay it from. These are the
+    /// rows a caller settles and can put back on the chat's queue.
+    pub fn unsettled_for_process(&self, process_id: i64) -> Result<Vec<ProviderInputRecord>> {
+        let conn = self.open()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, provider, thread_id, process_id, native_session_id, input_kind,
+                    delivery, provider_input, visible_input, state, acknowledgement, error,
+                    created_at, updated_at
+               FROM provider_inputs
+              WHERE process_id = ?1 AND state IN ('queued', 'written')
+              ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![process_id], row_to_provider_input)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<ProviderInputRecord>> {
@@ -332,6 +356,50 @@ mod tests {
         assert_eq!(
             store.get(&queued.id).unwrap().unwrap().state,
             ProviderInputState::Queued
+        );
+    }
+
+    /// What a steer written into a process that then died used to look like:
+    /// `written` for ever, with nothing saying it never landed. Listing those
+    /// rows is what lets the caller settle and replay them.
+    #[test]
+    fn unsettled_inputs_of_a_dead_process_are_listed_for_replay() {
+        let (store, _temp) = seeded_store();
+        let queued = store.enqueue(fixture_input("dead-input-1")).unwrap();
+        let written = store.enqueue(fixture_input("dead-input-2")).unwrap();
+        store.mark_written(&written.id).unwrap();
+        let settled = store.enqueue(fixture_input("dead-input-3")).unwrap();
+        store.mark_written(&settled.id).unwrap();
+        store.mark_acknowledged(&settled.id, None).unwrap();
+        store.mark_terminal(&settled.id).unwrap();
+
+        let lost = store.unsettled_for_process(11).unwrap();
+
+        let lost_ids = lost.iter().map(|row| row.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            lost_ids,
+            ["dead-input-1", "dead-input-2"],
+            "an input the provider finished with is not a loss"
+        );
+        assert_eq!(
+            lost[0].visible_input.as_deref(),
+            Some("run tests"),
+            "the user's own words must come back so the input can be replayed"
+        );
+
+        for id in [&queued.id, &written.id] {
+            store.mark_failed(id, "transport exited").unwrap();
+            let row = store.get(id).unwrap().unwrap();
+            assert_eq!(row.state, ProviderInputState::Failed);
+            assert_eq!(row.error.as_deref(), Some("transport exited"));
+        }
+        assert_eq!(
+            store.get(&settled.id).unwrap().unwrap().state,
+            ProviderInputState::Terminal
+        );
+        assert!(
+            store.unsettled_for_process(11).unwrap().is_empty(),
+            "a second sweep has nothing left to settle"
         );
     }
 

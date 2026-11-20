@@ -96,6 +96,16 @@ pub(crate) struct ClaudeManagedAdapter {
     /// plan mode, but we answer its permission asks, so we must not hand back
     /// an `allow` that would undo that.
     plan_mode: bool,
+    /// An interrupt we asked for and whose `result` has not arrived yet. The
+    /// CLI ends an interrupted turn with `subtype: "error_during_execution"`,
+    /// which is indistinguishable from a crashed turn in the payload itself —
+    /// so without this the stop button marked the chat failed and showed
+    /// "Claude Code returned a failed result."
+    interrupt_pending: bool,
+    /// `request_id`s of interrupts we have sent and not yet seen answered. The
+    /// answer carries `still_queued`, the provider's own account of what it is
+    /// holding, which decides what may be put back.
+    pending_interrupt_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -293,6 +303,8 @@ impl ClaudeManagedAdapter {
             pending_interactions: HashMap::new(),
             control_request_seq: 0,
             plan_mode: false,
+            interrupt_pending: false,
+            pending_interrupt_ids: HashSet::new(),
         }
     }
 
@@ -472,6 +484,88 @@ impl ClaudeManagedAdapter {
         claude_native_write(payload)
     }
 
+    /// Cancel the running turn without taking the session down with it.
+    ///
+    /// Verified against claude 2.1.329: SIGINT to the process group ends the
+    /// whole CLI (exit 0), so the chat's transport died with the turn and every
+    /// later steer hit a broken pipe. This control request cancels the turn in
+    /// place — the CLI answers `{"still_queued": []}`, stays up, and takes the
+    /// next input normally. The capability list it prints at init advertises
+    /// it (`interrupt_receipt_v1`, `interrupt_cancel_queued_v1`).
+    fn interrupt_write(&mut self) -> NativeWrite {
+        self.control_request_seq = self.control_request_seq.saturating_add(1);
+        self.interrupt_pending = true;
+        let request_id = format!(
+            "archcar-interrupt-{}-{}",
+            self.context.session_id, self.control_request_seq
+        );
+        self.pending_interrupt_ids.insert(request_id.clone());
+        let payload = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": { "subtype": "interrupt" },
+        });
+        claude_native_write(payload)
+    }
+
+    /// The answer to one of our interrupts, read as "what is still mine to
+    /// deliver". `None` for any other line.
+    ///
+    /// The ids in `still_queued` are the provider's, not ours, and their shape
+    /// is not something we can rely on: only the texts are matchable. So an
+    /// entry we cannot place falls back to naming every input we have written
+    /// and claude has not taken into a turn. That errs towards the provider
+    /// keeping the message, because the cost of being wrong the other way is
+    /// delivering the user's words twice.
+    fn interrupt_settlement(&mut self, line: &str) -> Result<Option<Vec<String>>> {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return Ok(None);
+        };
+        if string_at(&value, &["type"]).as_deref() != Some("control_response") {
+            return Ok(None);
+        }
+        let Some(request_id) = string_at(&value, &["response", "request_id"]) else {
+            return Ok(None);
+        };
+        if !self.pending_interrupt_ids.remove(&request_id) {
+            return Ok(None);
+        }
+        let entries = value
+            .pointer("/response/response/still_queued")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if entries.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let mut retained = Vec::new();
+        for entry in &entries {
+            match self.written_input_id_for_retained(entry) {
+                Some(local_input_id) => retained.push(local_input_id),
+                None => return Ok(Some(self.written_input_ids())),
+            }
+        }
+        Ok(Some(retained))
+    }
+
+    /// The local id of the written input a `still_queued` entry describes.
+    fn written_input_id_for_retained(&self, entry: &Value) -> Option<String> {
+        let text = claude_user_message_text(entry)?;
+        self.tracker
+            .written_inputs
+            .iter()
+            .find(|written| written.content == text)
+            .map(|written| written.local_input_id.clone())
+    }
+
+    fn written_input_ids(&self) -> Vec<String> {
+        self.tracker
+            .written_inputs
+            .iter()
+            .map(|written| written.local_input_id.clone())
+            .collect()
+    }
+
     pub(crate) fn settle_failed_input_write(&mut self, local_input_id: &str) {
         self.tracker.settle_failed_input_write(local_input_id);
     }
@@ -526,6 +620,15 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             // so they are handled before the transcript parser sees them.
             if let Some(draft) = self.control_request_interaction(line)? {
                 effects.push(HarnessEffect::InteractionRequested(draft));
+                continue;
+            }
+            // The answer to a stop we asked for: it says what claude is still
+            // holding, which is what decides whether a written input may be
+            // put back or must be left to the provider.
+            if let Some(retained_local_input_ids) = self.interrupt_settlement(line)? {
+                effects.push(HarnessEffect::InterruptSettled {
+                    retained_local_input_ids,
+                });
                 continue;
             }
             let Some(event) = self.parser.parse_line(line)? else {
@@ -596,8 +699,20 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                     self.tracker.note_replayed_user(&text, &mut effects);
                 }
                 Some(ClaudeLifecycleSignal::TurnFinished { status, .. }) => {
-                    if let Some(message) = claude_terminal_failure_message(&event) {
-                        effects.push(HarnessEffect::Fatal(message));
+                    // An interrupt we asked for ends the turn as
+                    // `error_during_execution`. That is the turn stopping on
+                    // request, not the session breaking: it must not surface as
+                    // a fatal, and the turn's own status is `interrupted`.
+                    let interrupted_on_request = std::mem::take(&mut self.interrupt_pending);
+                    let status = if interrupted_on_request && status == ClaudeResultStatus::Failed {
+                        ClaudeResultStatus::Interrupted
+                    } else {
+                        status
+                    };
+                    if !interrupted_on_request {
+                        if let Some(message) = claude_terminal_failure_message(&event) {
+                            effects.push(HarnessEffect::Fatal(message));
+                        }
                     }
                     self.tracker.note_terminal_result(
                         terminal_result_id
@@ -655,9 +770,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             HarnessControl::Kill => {
                 HarnessControlPlan::Signal(HarnessSignal::TerminateProcessGroup)
             }
-            HarnessControl::Interrupt => {
-                HarnessControlPlan::Signal(HarnessSignal::InterruptProcessGroup)
-            }
+            HarnessControl::Interrupt => HarnessControlPlan::NativeWrite(self.interrupt_write()),
             HarnessControl::SetModel(model) => {
                 self.context.controls.model = model;
                 HarnessControlPlan::RestartRequired(self.context.controls.clone())
@@ -891,6 +1004,34 @@ fn claude_native_write(payload: Value) -> NativeWrite {
         local_input_id: None,
         payload: bytes,
     }
+}
+
+/// The prose of a user message in any of the shapes claude uses for one: a
+/// bare string, `{text}`, or a message whose content blocks carry the text.
+/// `None` when the value is not a user message we can read.
+fn claude_user_message_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    if let Some(text) = string_at(value, &["text"]) {
+        return Some(text);
+    }
+    for path in [&["message", "content"][..], &["content"][..]] {
+        let blocks = match value.pointer(&format!("/{}", path.join("/"))) {
+            Some(Value::Array(blocks)) => blocks,
+            Some(Value::String(text)) => return Some(text.clone()),
+            _ => continue,
+        };
+        let text = blocks
+            .iter()
+            .filter_map(|block| string_at(block, &["text"]))
+            .collect::<Vec<_>>()
+            .join("");
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
 }
 
 pub fn encode_claude_user_message(input: &str) -> Value {
@@ -3685,6 +3826,240 @@ mod tests {
             })
             .unwrap();
         assert!(!adapter.tracker.ready());
+    }
+
+    /// Build an adapter with one written input, mid-turn, ready to be stopped.
+    fn adapter_mid_turn() -> ClaudeManagedAdapter {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: Some("fixture-session".to_owned()),
+            controls: Default::default(),
+        });
+        adapter.tracker.initialized = true;
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "active-input".to_owned(),
+                content: "work on it".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        adapter
+    }
+
+    /// The `result` claude ends an interrupted turn with, which carries no sign
+    /// of having been asked for: `is_error` is true and the subtype is the same
+    /// one a crashed turn uses.
+    const INTERRUPTED_RESULT: &[u8] = br#"{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"fixture-session","uuid":"result-interrupted","duration_ms":1200,"result":"Request interrupted by user"}
+"#;
+
+    #[test]
+    fn a_stopped_turn_reads_as_interrupted_and_not_as_a_broken_session() {
+        let mut adapter = adapter_mid_turn();
+
+        // The stop goes in band, so the CLI survives it; see
+        // `claude_interrupt_is_in_band_and_keeps_resume_recovery`.
+        let plan = adapter.plan_control(HarnessControl::Interrupt);
+        assert!(matches!(plan, HarnessControlPlan::NativeWrite(_)));
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: INTERRUPTED_RESULT.to_vec(),
+            })
+            .unwrap();
+
+        // A fatal here is what marked the chat failed with "Claude Code
+        // returned a failed result" every time the user pressed stop.
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, HarnessEffect::Fatal(_))),
+            "a stop the user asked for is not a session failure: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                HarnessEffect::TurnCompleted {
+                    local_input_id,
+                    status: HarnessTurnStatus::Interrupted,
+                } if local_input_id == "active-input"
+            )),
+            "the stopped turn should settle as interrupted: {effects:?}"
+        );
+        // The session takes the next steer; nothing restarts, nothing resumes.
+        assert!(adapter.tracker.ready());
+    }
+
+    #[test]
+    fn a_failed_result_we_did_not_ask_for_is_still_fatal() {
+        let mut adapter = adapter_mid_turn();
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: INTERRUPTED_RESULT.to_vec(),
+            })
+            .unwrap();
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, HarnessEffect::Fatal(_))),
+            "an unrequested failure must still surface: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn each_stop_is_consumed_by_the_turn_it_stopped() {
+        let mut adapter = adapter_mid_turn();
+        adapter.plan_control(HarnessControl::Interrupt);
+        adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: INTERRUPTED_RESULT.to_vec(),
+            })
+            .unwrap();
+
+        // A later turn that fails on its own must not be excused by the stop
+        // the previous turn consumed.
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "second-input".to_owned(),
+                content: "again".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: br#"{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"fixture-session","uuid":"result-crash","duration_ms":30,"result":"boom"}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, HarnessEffect::Fatal(_))),
+            "the stop must not carry over to the next turn: {effects:?}"
+        );
+    }
+
+    /// The keep-list the stop is answered with, in our own terms.
+    fn settlement_for(response: &str, written: &[(&str, &str)]) -> Vec<String> {
+        let mut adapter = adapter_mid_turn();
+        for (local_input_id, content) in written {
+            adapter
+                .encode_input(HarnessInput {
+                    local_input_id: (*local_input_id).to_owned(),
+                    content: (*content).to_owned(),
+                    visible_content: None,
+                    kind: crate::archcar::protocol::ArchcarInputKind::User,
+                    delivery: crate::archcar::protocol::ArchcarInputDelivery::Immediate,
+                })
+                .unwrap();
+        }
+        let HarnessControlPlan::NativeWrite(write) =
+            adapter.plan_control(HarnessControl::Interrupt)
+        else {
+            panic!("the stop should be written");
+        };
+        let request_id = serde_json::from_slice::<Value>(&write.payload).unwrap()["request_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let line = response.replace("REQUEST_ID", &request_id);
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: format!("{line}\n").into_bytes(),
+            })
+            .unwrap();
+        effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                HarnessEffect::InterruptSettled {
+                    retained_local_input_ids,
+                } => Some(retained_local_input_ids),
+                _ => None,
+            })
+            .expect("the stop's answer should settle it")
+    }
+
+    #[test]
+    fn a_stop_that_kept_nothing_leaves_every_written_input_ours_to_put_back() {
+        // What the live CLI answers once it has already read the steers:
+        // claude 2.1.329 drains stdin eagerly, so this is the common case.
+        let retained = settlement_for(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"REQUEST_ID","response":{"still_queued":[]}}}"#,
+            &[("steer-one", "one"), ("steer-two", "two")],
+        );
+
+        assert!(
+            retained.is_empty(),
+            "nothing kept means nothing is the provider's to deliver: {retained:?}"
+        );
+    }
+
+    #[test]
+    fn a_stop_that_kept_a_steer_names_it_so_it_is_not_sent_twice() {
+        let retained = settlement_for(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"REQUEST_ID","response":{"still_queued":[{"message":{"role":"user","content":[{"type":"text","text":"two"}]}}]}}}"#,
+            &[("steer-one", "one"), ("steer-two", "two")],
+        );
+
+        assert_eq!(retained, vec!["steer-two".to_owned()]);
+    }
+
+    #[test]
+    fn a_kept_steer_we_cannot_place_keeps_every_written_input() {
+        // The entries are claude's own records and their shape is not ours to
+        // depend on. Something held but unreadable must not be put back: the
+        // user would get the same steer twice.
+        let retained = settlement_for(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"REQUEST_ID","response":{"still_queued":[{"opaque_queue_entry":17}]}}}"#,
+            &[("steer-one", "one"), ("steer-two", "two")],
+        );
+
+        // Every input written and not yet taken into a turn, the fixture's
+        // first one included.
+        assert_eq!(
+            retained,
+            vec![
+                "active-input".to_owned(),
+                "steer-one".to_owned(),
+                "steer-two".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_control_response_for_something_else_settles_no_stop() {
+        let mut adapter = adapter_mid_turn();
+        adapter.plan_control(HarnessControl::Interrupt);
+
+        let effects = adapter
+            .observe_native(NativeRecord {
+                provider_key: "claude",
+                payload: br#"{"type":"control_response","response":{"subtype":"success","request_id":"archcar-mode-7-1","response":{"mode":"plan"}}}
+"#
+                .to_vec(),
+            })
+            .unwrap();
+
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, HarnessEffect::InterruptSettled { .. })),
+            "only our own interrupt's answer settles it: {effects:?}"
+        );
     }
 
     #[test]

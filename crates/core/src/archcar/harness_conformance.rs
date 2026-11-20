@@ -2,9 +2,9 @@ use super::harness::{managed_harness_for_kind, validate_managed_harness};
 use super::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessControl,
     HarnessControlPlan, HarnessDescriptor, HarnessEffect, HarnessFeature, HarnessInput,
-    HarnessRecoveryCause, HarnessRecoveryPlan, HarnessSignal, HarnessTier, HarnessTurnStatus,
-    NativeRecord, ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
-    SupportMode, ALL_HARNESS_FEATURES, CORE_HARNESS_FEATURES, EXTENDED_HARNESS_FEATURES,
+    HarnessRecoveryCause, HarnessRecoveryPlan, HarnessTier, HarnessTurnStatus, NativeRecord,
+    ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution, SupportMode,
+    ALL_HARNESS_FEATURES, CORE_HARNESS_FEATURES, EXTENDED_HARNESS_FEATURES,
 };
 use super::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarInputDelivery, ArchcarInputKind,
@@ -585,16 +585,26 @@ fn claude_interaction_resolution_answers_in_band() {
 }
 
 #[test]
-fn claude_interrupt_uses_process_group_and_resume_recovery() {
+fn claude_interrupt_is_in_band_and_keeps_resume_recovery() {
     let claude = managed_harness_for_kind(SessionKind::CLAUDE).unwrap();
     let mut adapter = claude
         .create_adapter(adapter_context(Some("claude-session-1")))
         .unwrap();
 
-    assert_eq!(
-        adapter.plan_control(HarnessControl::Interrupt),
-        HarnessControlPlan::Signal(HarnessSignal::InterruptProcessGroup)
-    );
+    // Stopping a turn must not stop the session. Verified against claude
+    // 2.1.329: SIGINT to the process group ends the CLI (exit 0), so the chat's
+    // transport died with the turn and every later steer hit a broken pipe.
+    // The in-band control request cancels the turn and leaves the CLI up.
+    let plan = adapter.plan_control(HarnessControl::Interrupt);
+    let HarnessControlPlan::NativeWrite(write) = plan else {
+        panic!("expected the interrupt to be written to the live session");
+    };
+    let payload: serde_json::Value = serde_json::from_slice(&write.payload).unwrap();
+    assert_eq!(payload["type"], "control_request");
+    assert_eq!(payload["request"]["subtype"], "interrupt");
+    assert!(payload["request_id"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty()));
     assert!(matches!(
         adapter.recovery_plan(HarnessRecoveryCause::InterruptDeadline),
         HarnessRecoveryPlan::RestartAndResume {

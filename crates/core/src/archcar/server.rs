@@ -1061,19 +1061,23 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
                         message: err.to_string(),
                     };
                 }
-                match handle
-                    .command_tx
-                    .send(crate::archcar::session::SessionCommand::SendInput {
-                        input,
-                        visible_input,
-                        kind,
-                        delivery,
-                    }) {
-                    Ok(_) => ArchcarResponse::Ack,
-                    Err(err) => ArchcarResponse::Error {
-                        message: err.to_string(),
-                    },
+                // A send that is not steering must not overtake messages the
+                // user is already waiting on. A direct send into a ready
+                // session used to go straight in, so a plain `session send`
+                // that arrived while the queue still held something answered
+                // out of order — the newest message became the turn and the
+                // older one waited for the one after it.
+                if let Some(response) = queue_behind_waiting_chat_input(
+                    state,
+                    &handle,
+                    &input,
+                    visible_input.as_deref(),
+                    &kind,
+                    delivery,
+                ) {
+                    return response;
                 }
+                send_input_and_await_write(&handle, input, visible_input, kind, delivery)
             }
             Ok(None) => ArchcarResponse::Error {
                 message: format!("unknown session {session_id}"),
@@ -4495,6 +4499,124 @@ fn validate_send_input_delivery(
         );
     }
     Ok(())
+}
+
+/// How long a send waits to hear what became of it before answering anyway.
+///
+/// A session loop takes commands every tick, so in ordinary use the write is
+/// confirmed or refused well inside this and the caller is told the truth. It
+/// stays short on purpose: this runs on the connection's own dispatch thread,
+/// and a long wait here delays that client's other requests and the events it
+/// is subscribed to — which is worse than answering "accepted" a little early.
+///
+/// A send that is not confirmed in time is not lost silently: the loop settles
+/// the input either way, a write that fails raises a session error, and the
+/// user's own message goes back on the chat's queue.
+const INPUT_WRITE_CONFIRMATION_WINDOW: Duration = Duration::from_millis(250);
+
+/// Hand an input to the session loop and answer with what happened to it.
+///
+/// `Ack` used to mean only "the command reached the loop's channel". It did not
+/// mean the input was written, and the difference was exactly the steer that
+/// vanished: a command still sitting in that channel when the daemon restarted
+/// was reported as sent, then died with the loop — no write, no row, nothing to
+/// tell the user their message was gone. The loop now answers from the write
+/// itself, so a refusal or a dead session is reported as the failure it is.
+fn send_input_and_await_write(
+    handle: &SessionHandle,
+    input: String,
+    visible_input: Option<String>,
+    kind: crate::archcar::protocol::ArchcarInputKind,
+    delivery: crate::archcar::protocol::ArchcarInputDelivery,
+) -> ArchcarResponse {
+    let (ack_tx, ack_rx) = mpsc::channel();
+    if let Err(err) = handle
+        .command_tx
+        .send(crate::archcar::session::SessionCommand::SendInput {
+            input,
+            visible_input,
+            kind,
+            delivery,
+            ack: Some(ack_tx),
+        })
+    {
+        return ArchcarResponse::Error {
+            message: err.to_string(),
+        };
+    }
+    match ack_rx.recv_timeout(INPUT_WRITE_CONFIRMATION_WINDOW) {
+        Ok(Ok(crate::archcar::session::InputWriteOutcome::Written)) => {
+            ArchcarResponse::InputAccepted {
+                written: true,
+                queued_for_next_session: false,
+            }
+        }
+        // The write failed but the message was kept: it is on the chat's queue
+        // and the next session delivers it. Not an error for the caller to
+        // retry — retrying would send it twice.
+        Ok(Ok(crate::archcar::session::InputWriteOutcome::QueuedForNextSession)) => {
+            ArchcarResponse::InputAccepted {
+                written: false,
+                queued_for_next_session: true,
+            }
+        }
+        Ok(Err(message)) => ArchcarResponse::Error { message },
+        Err(mpsc::RecvTimeoutError::Disconnected) => ArchcarResponse::Error {
+            message: "the session ended before it wrote this input; it was not delivered"
+                .to_owned(),
+        },
+        // Still in the loop's hands. Reported as accepted-but-unconfirmed
+        // rather than held on to: the loop settles it either way, and a client
+        // that is subscribed hears about a failure through session events.
+        Err(mpsc::RecvTimeoutError::Timeout) => ArchcarResponse::InputAccepted {
+            written: false,
+            queued_for_next_session: false,
+        },
+    }
+}
+
+/// Send a non-steering input to the back of the queue when the thread already
+/// has one waiting, so messages arrive in the order they were written.
+///
+/// Returns `None` when the send may go straight to the session: steering
+/// (`Immediate`) always may — that is what steering is — and so may anything
+/// sent to a thread whose queue is empty, which is the common case.
+fn queue_behind_waiting_chat_input(
+    state: &Arc<Mutex<ServerState>>,
+    handle: &SessionHandle,
+    input: &str,
+    visible_input: Option<&str>,
+    kind: &crate::archcar::protocol::ArchcarInputKind,
+    delivery: crate::archcar::protocol::ArchcarInputDelivery,
+) -> Option<ArchcarResponse> {
+    if delivery == crate::archcar::protocol::ArchcarInputDelivery::Immediate
+        || *kind != crate::archcar::protocol::ArchcarInputKind::User
+    {
+        return None;
+    }
+    let (thread_id, session_kind) = {
+        let snapshot = handle.snapshot.lock().ok()?;
+        (snapshot.thread_id, snapshot.kind)
+    };
+    // Only a managed harness has a queue to wait behind.
+    managed_harness_for_kind(session_kind)?;
+    let db_path = state.lock().ok()?.db_path.clone();
+    let waiting = WorkspaceStore::open_app(&db_path)
+        .and_then(|store| store.list_queued_chat_inputs(thread_id))
+        .map(|queued| !queued.is_empty())
+        .unwrap_or(false);
+    if !waiting {
+        return None;
+    }
+    Some(queue_chat_input(
+        state,
+        thread_id,
+        input.to_owned(),
+        visible_input.map(str::to_owned),
+        kind.clone(),
+        session_kind,
+        true,
+    ))
 }
 
 fn queue_chat_input(
@@ -11197,6 +11319,362 @@ exit 1
         assert!(command_rx.try_recv().is_err());
     }
 
+    /// A plain send into a ready session used to go straight in, so it became
+    /// the turn while a message queued before it waited for the turn after —
+    /// the user's words answered out of order. It now waits its turn, and
+    /// steering still does not.
+    /// Stands in for the session loop a dispatch now waits on: takes the one
+    /// command it is handed and answers its write acknowledgement, so the test
+    /// exercises the real confirmation path instead of timing out against a
+    /// loop that does not exist here. The command comes back for assertions.
+    fn pump_one_input_write(
+        command_rx: std::sync::mpsc::Receiver<crate::archcar::session::SessionCommand>,
+        outcome: Result<crate::archcar::session::InputWriteOutcome, String>,
+    ) -> std::thread::JoinHandle<crate::archcar::session::SessionCommand> {
+        std::thread::spawn(move || {
+            let command = command_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("a dispatched input should reach the session loop");
+            if let crate::archcar::session::SessionCommand::SendInput { ack: Some(ack), .. } =
+                &command
+            {
+                let _ = ack.send(outcome);
+            }
+            command
+        })
+    }
+
+    #[test]
+    fn an_auto_send_waits_behind_input_already_queued() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "first, read the spec",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::CLAUDE,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::WaitingForInput,
+            ready: true,
+            capabilities: None,
+            screen: String::new(),
+            turns: Default::default(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+            remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
+            attention_sweep: None,
+        }));
+
+        let response = dispatch_request(
+            ArchcarRequest::SendInput {
+                session_id: 9,
+                input: "second, write the code".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Auto,
+            },
+            &state,
+        );
+
+        assert!(
+            matches!(response, ArchcarResponse::QueuedChatInput { .. }),
+            "a send that cannot jump the queue is reported as queued, not as sent"
+        );
+        // The drain the enqueue kicks off hands over the message that was
+        // waiting first, not the one that just arrived.
+        assert!(matches!(
+            command_rx.try_recv(),
+            Ok(crate::archcar::session::SessionCommand::SendQueuedInput { claim })
+                if claim.input == "first, read the spec"
+        ));
+        assert_eq!(
+            WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
+                .unwrap()
+                .list_queued_chat_inputs(thread.id)
+                .unwrap()
+                .into_iter()
+                .map(|input| input.input)
+                .collect::<Vec<_>>(),
+            vec!["second, write the code".to_owned()]
+        );
+    }
+
+    /// The lie this fix removes: a send whose command died with the session
+    /// loop used to be reported as sent. Now the caller is told it was not
+    /// delivered, which is what lets the CLI and the composer surface it.
+    #[test]
+    fn a_send_the_session_never_wrote_is_reported_as_undelivered() {
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: 4,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::CLAUDE,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+            turns: Default::default(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+            remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
+            attention_sweep: None,
+        }));
+
+        // A loop that takes the command and then dies — the daemon restart
+        // case — answers nothing, and dropping the command drops the
+        // acknowledgement with it.
+        let dying_loop = std::thread::spawn(move || {
+            let _taken = command_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the command should reach the loop");
+        });
+        let response = dispatch_request(
+            ArchcarRequest::SendInput {
+                session_id: 9,
+                input: "stop, wrong file".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+            },
+            &state,
+        );
+        dying_loop.join().unwrap();
+
+        assert!(
+            matches!(
+                response,
+                ArchcarResponse::Error { ref message }
+                    if message.contains("before it wrote this input")
+            ),
+            "expected an undelivered report, got {response:?}"
+        );
+    }
+
+    /// A write the loop reports as failed is the caller's failure too, with the
+    /// provider's own reason rather than a bare acknowledgement.
+    #[test]
+    fn a_failed_write_is_reported_with_the_reason_the_loop_gave() {
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: 4,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::CLAUDE,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+            turns: Default::default(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: PathBuf::from("/tmp/does-not-matter.db"),
+            logs_dir: PathBuf::from("/tmp/does-not-matter-logs"),
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+            remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
+            attention_sweep: None,
+        }));
+
+        let loop_stand_in = pump_one_input_write(
+            command_rx,
+            Err("Claude stream input failed: Broken pipe (os error 32)".to_owned()),
+        );
+        let response = dispatch_request(
+            ArchcarRequest::SendInput {
+                session_id: 9,
+                input: "stop, wrong file".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+            },
+            &state,
+        );
+        loop_stand_in.join().unwrap();
+
+        assert!(
+            matches!(
+                response,
+                ArchcarResponse::Error { ref message } if message.contains("Broken pipe")
+            ),
+            "expected the loop's reason, got {response:?}"
+        );
+    }
+
+    /// Steering is the one send that is meant to jump the queue: it exists to
+    /// redirect the turn in flight, so a queue waiting behind it is no reason
+    /// to hold it back.
+    #[test]
+    fn an_immediate_send_still_jumps_a_waiting_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        let store = seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let thread = store
+            .create_chat_thread("berlin", "claude", "New Chat", None)
+            .unwrap();
+        store
+            .enqueue_chat_input(
+                thread.id,
+                "later, write the changelog",
+                None,
+                ArchcarInputKind::User,
+                SessionKind::CLAUDE,
+            )
+            .unwrap();
+        let snapshot = crate::archcar::session::SessionSnapshot {
+            session_id: 9,
+            thread_id: thread.id,
+            workspace: "berlin".to_owned(),
+            kind: SessionKind::CLAUDE,
+            pid: 12345,
+            status: ProcessStatus::Running,
+            runtime_state: crate::session_state::AgentSessionState::Running,
+            ready: false,
+            capabilities: None,
+            screen: String::new(),
+            turns: Default::default(),
+        };
+        let (command_tx, command_rx) = mpsc::channel();
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            snapshot.session_id,
+            crate::archcar::session::SessionHandle {
+                snapshot: Arc::new(Mutex::new(snapshot)),
+                command_tx,
+            },
+        );
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path: db_path.clone(),
+            logs_dir,
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions,
+            subscribers: Vec::new(),
+            remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
+            attention_sweep: None,
+        }));
+
+        let loop_stand_in = pump_one_input_write(
+            command_rx,
+            Ok(crate::archcar::session::InputWriteOutcome::Written),
+        );
+        let response = dispatch_request(
+            ArchcarRequest::SendInput {
+                session_id: 9,
+                input: "stop, wrong file".to_owned(),
+                visible_input: None,
+                kind: ArchcarInputKind::User,
+                delivery: ArchcarInputDelivery::Immediate,
+            },
+            &state,
+        );
+
+        assert!(matches!(
+            response,
+            ArchcarResponse::InputAccepted {
+                written: true,
+                queued_for_next_session: false
+            }
+        ));
+        assert!(matches!(
+            loop_stand_in.join().unwrap(),
+            crate::archcar::session::SessionCommand::SendInput { input, delivery, .. }
+                if input == "stop, wrong file" && delivery == ArchcarInputDelivery::Immediate
+        ));
+        assert_eq!(
+            WorkspaceStore::open_with_logs(&db_path, temp.path().join("logs"))
+                .unwrap()
+                .list_queued_chat_inputs(thread.id)
+                .unwrap()
+                .len(),
+            1,
+            "the queue is untouched by a steer"
+        );
+    }
+
     #[test]
     fn immediate_send_allows_not_ready_managed_session_for_steering() {
         let snapshot = crate::archcar::session::SessionSnapshot {
@@ -11238,6 +11716,10 @@ exit 1
             attention_sweep: None,
         }));
 
+        let loop_stand_in = pump_one_input_write(
+            command_rx,
+            Ok(crate::archcar::session::InputWriteOutcome::Written),
+        );
         let response = dispatch_request(
             ArchcarRequest::SendInput {
                 session_id: 9,
@@ -11249,14 +11731,20 @@ exit 1
             &state,
         );
 
-        assert_eq!(response, ArchcarResponse::Ack);
+        assert_eq!(
+            response,
+            ArchcarResponse::InputAccepted {
+                written: true,
+                queued_for_next_session: false
+            }
+        );
         assert!(matches!(
-            command_rx.try_recv(),
-            Ok(crate::archcar::session::SessionCommand::SendInput {
+            loop_stand_in.join().unwrap(),
+            crate::archcar::session::SessionCommand::SendInput {
                 input,
                 delivery: ArchcarInputDelivery::Immediate,
                 ..
-            }) if input == "steer now"
+            } if input == "steer now"
         ));
     }
 

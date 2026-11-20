@@ -394,6 +394,16 @@ pub enum HarnessEffect {
     Warning(String),
     Fatal(String),
     ResumeRequired,
+    /// A stop we asked for has been accepted, and the provider has told us
+    /// which of the inputs we had already written it is still holding.
+    ///
+    /// Everything we wrote that is *not* named here, the provider has dropped:
+    /// it is ours to put back. Anything named here it still intends to deliver,
+    /// so putting that back would send the user's words twice. An empty list
+    /// means it kept nothing.
+    InterruptSettled {
+        retained_local_input_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

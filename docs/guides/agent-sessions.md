@@ -83,6 +83,18 @@ delivers at the next turn boundary`). It fails only when the session is gone.
 Either way the agent receives exactly the text you sent; a session that is
 still starting is waited for rather than queued, so its first message goes in
 the same way it always has.
+
+A send that is not steering never overtakes a message already waiting, even
+when the agent is idle: it joins the back of the queue instead, so messages
+reach the agent in the order you wrote them.
+
+A send reports what actually happened to it. "Sent" means the bytes reached the
+agent's input, not merely that the daemon accepted the command, so a message
+lost to an agent that died — or to a daemon restart — is reported as undelivered
+rather than silently dropped. Where the message was yours to replay, it comes
+back at the head of that chat's queue and is delivered to the next session,
+which is also what happens to anything an agent was still holding when it
+exited.
 Without `--kind`, it messages the provider of `--thread-id`, or of the
 workspace's most recent chat.
 
@@ -97,7 +109,9 @@ wrong way; use the normal queue for everything else. Interrupting a good turn
 to add a nice-to-have wastes the turn.
 
 `archductor archcar interrupt <session-id>` stops the turn without sending
-anything.
+anything. It stops the turn, not the session: the agent stays up, the turn ends
+marked interrupted, and the next message you send goes into a new turn. (In the
+app that is the stop button the composer shows while a turn runs.)
 
 Steering needs an agent that can take input mid-turn, and Codex and Claude can.
 ACP agents such as Devin and Gemini take one prompt at a time, so for them
