@@ -19,7 +19,6 @@ use archductor_core::chat_transcript::{
 use archductor_core::paths::AppPaths;
 use archductor_core::provider_events::ProviderEventStore;
 use archductor_core::provider_interactions::ProviderInteractionStore;
-use archductor_core::session_state::AgentSessionState;
 use archductor_core::workspace::{ProcessRecord, WorkspaceStore};
 use std::fmt::Write as _;
 
