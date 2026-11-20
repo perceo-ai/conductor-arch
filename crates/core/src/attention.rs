@@ -213,7 +213,10 @@ pub fn derive_attention(
             if pr
                 .checks
                 .as_deref()
-                .is_some_and(|c| c.eq_ignore_ascii_case("failure"))
+                // `summarize_check_runs` (github_pr.rs) stores a failed rollup as
+                // "failing", and `StatusReport` copies that value unchanged — this
+                // must match the stored spelling, not GitHub's own "failure".
+                .is_some_and(|c| c.eq_ignore_ascii_case("failing"))
             {
                 items.push(item(
                     AttentionKind::ChecksFailed,
@@ -234,6 +237,12 @@ pub fn derive_attention(
         if workspace.additions + workspace.deletions > 0
             && workspace.state == Some(AgentActivity::Finished)
             && !queued
+            // A merged PR already answered "ready to review" — showing it after
+            // a squash merge is wrong, not merely stale. This is narrower than
+            // the deferred "clear diffs on arbitrary human action": it only
+            // fires once GitHub itself reports the PR merged, never on an
+            // archive, a close, or any other action the human takes.
+            && !workspace.pr.as_ref().is_some_and(|pr| pr.state == "merged")
         {
             items.push(item(
                 AttentionKind::DiffReady,
@@ -292,6 +301,7 @@ pub fn derive_attention(
 mod tests {
     use super::*;
     use crate::agent_status::{LivenessSource, PullRequestReport, SessionReport};
+    use crate::github_pr::{summarize_check_runs, PullRequestCheckRun};
 
     /// 2000 s after the epoch; `task()` finished at 1000 s.
     const NOW_MS: u64 = 2_000_000;
@@ -467,8 +477,10 @@ mod tests {
 
     #[test]
     fn failed_checks_on_open_pr_produce_both_items() {
+        // "failing" (lowercase, as `summarize_check_runs` actually stores it),
+        // matched case-insensitively — not GitHub's own "FAILURE" spelling.
         let mut ws = workspace("alpha", vec![]);
-        ws.pr = Some(pr("open", Some("FAILURE")));
+        ws.pr = Some(pr("open", Some("Failing")));
         let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
         assert_eq!(
             pairs(&queue),
@@ -477,6 +489,65 @@ mod tests {
                 (AttentionKind::PrOpen, "alpha"),
             ]
         );
+    }
+
+    #[test]
+    fn a_real_failed_check_run_produces_a_checks_failed_row() {
+        // Drives `pr.checks` from the actual parser, not a hand-picked
+        // literal: the P1 bug was exactly that the old fixtures repeated
+        // GitHub's "failure" spelling instead of what `summarize_check_runs`
+        // really stores ("failing"), so the mismatch never showed up here.
+        let failing_run = PullRequestCheckRun {
+            name: "ci/build".into(),
+            status: "failure".into(),
+            detail: None,
+        };
+        let summarized = summarize_check_runs(std::slice::from_ref(&failing_run));
+        assert_eq!(summarized.as_deref(), Some("failing"));
+
+        let mut ws = workspace("alpha", vec![]);
+        ws.pr = Some(pr("open", summarized.as_deref()));
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
+        assert!(
+            queue
+                .items
+                .iter()
+                .any(|i| i.kind == AttentionKind::ChecksFailed),
+            "a real failed check run produced no checks_failed row: {queue:?}"
+        );
+    }
+
+    #[test]
+    fn a_merged_pr_is_not_diff_ready() {
+        // The PR already answered "ready to review"; showing the diff again
+        // after a squash merge is wrong, not just stale. Narrower than the
+        // deferred "clear diffs on arbitrary human action": gated on GitHub's
+        // own merged state, not any other human action.
+        let mut ws = workspace("alpha", vec![session(1, AgentActivity::Finished)]);
+        ws.additions = 3;
+        ws.pr = Some(pr("merged", None));
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
+        assert!(
+            !queue
+                .items
+                .iter()
+                .any(|i| i.kind == AttentionKind::DiffReady),
+            "a merged PR's workspace still raised diff_ready: {queue:?}"
+        );
+    }
+
+    #[test]
+    fn an_open_pr_with_changes_is_still_diff_ready() {
+        // Guards the new merged-state check from over-suppressing: an open
+        // (not yet merged) PR with local changes must still surface.
+        let mut ws = workspace("alpha", vec![session(1, AgentActivity::Finished)]);
+        ws.additions = 3;
+        ws.pr = Some(pr("open", None));
+        let queue = derive_attention(&report(vec![ws]), &[], NOW_MS);
+        assert!(queue
+            .items
+            .iter()
+            .any(|i| i.kind == AttentionKind::DiffReady));
     }
 
     #[test]

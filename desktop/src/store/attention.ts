@@ -84,7 +84,15 @@ function run(): Promise<void> {
     setLoading(false);
     if (rerun) {
       rerun = false;
-      schedule();
+      if (watchers > 0) {
+        schedule();
+      } else {
+        // Nobody is watching anymore. Firing a hidden read here would set
+        // `stale = false` for a page that never saw the answer, so the next
+        // `watch()` would wrongly skip its promised fresh read. Leave it
+        // stale instead: the next open does the read.
+        stale = true;
+      }
     }
   });
   inFlight = request;

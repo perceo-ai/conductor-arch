@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -93,6 +93,45 @@ struct ServerState {
     /// clearing the entry cannot stop an in-flight sweep, and the queue that
     /// sweep derived is from *before* whatever invalidated it.
     attention_generation: u64,
+    /// Set while one sweep is already running. The generation check above
+    /// only gates *saving* a sweep's result; without this, every client that
+    /// misses the cache before the lead sweeper finishes starts its own
+    /// identical sweep. A miss that finds this set awaits it instead.
+    attention_sweep: Option<Arc<SweepInFlight>>,
+}
+
+/// The shared result of one in-flight attention sweep. Waiters block on this
+/// alone — never on the main `ServerState` lock, which the lead sweeper still
+/// needs in order to finish and clear the slot.
+struct SweepInFlight {
+    done: Mutex<Option<Result<crate::attention::AttentionQueue, String>>>,
+    cond: Condvar,
+}
+
+impl SweepInFlight {
+    fn new() -> Self {
+        Self {
+            done: Mutex::new(None),
+            cond: Condvar::new(),
+        }
+    }
+
+    /// Block until the lead sweeper reports in.
+    fn wait(&self) -> Result<crate::attention::AttentionQueue> {
+        let mut guard = self.done.lock().unwrap();
+        while guard.is_none() {
+            guard = self.cond.wait(guard).unwrap();
+        }
+        match guard.clone().expect("checked above") {
+            Ok(queue) => Ok(queue),
+            Err(message) => Err(anyhow!(message)),
+        }
+    }
+
+    fn finish(&self, result: Result<crate::attention::AttentionQueue, String>) {
+        *self.done.lock().unwrap() = Some(result);
+        self.cond.notify_all();
+    }
 }
 
 /// A derived attention queue, when it was derived, and nothing else: it is
@@ -334,6 +373,7 @@ impl ArchcarServer {
             subscribers: Vec::new(),
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         Ok(Self {
             listener,
@@ -3597,6 +3637,17 @@ fn dispatch_request(request: ArchcarRequest, state: &Arc<Mutex<ServerState>>) ->
             message: "subscribe must use a persistent connection".to_owned(),
         },
     };
+    // The pre-dispatch invalidation above only covers reads that started
+    // before this request did. A `ListAttention` that starts mid-mutation
+    // (e.g. mid-archive) can capture that same bumped generation, sweep the
+    // still-pre-change workspace, and — because the generation has not moved
+    // since — install that stale queue as the cache entry *after* the change
+    // completes. Invalidating again here, now that the mutation has actually
+    // finished, bumps the generation past any such in-flight sweep so its
+    // write-back is rejected rather than cached.
+    if mutating {
+        invalidate_attention_cache(&mut state.lock().unwrap());
+    }
     broadcast_inventory_change_for_response(state, &response);
     response
 }
@@ -4251,28 +4302,46 @@ fn list_attention(state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
 /// Serve the memoized queue, or run `sweep` and memoize what it derived.
 ///
 /// `sweep` is injected so this is testable without a fleet: it is the
-/// expensive part, and both rules here are about what happens *while* it runs.
-/// `ttl` is a parameter for the same reason — production always passes
+/// expensive part, and both rules here are about what happens *while* it
+/// runs. `ttl` is a parameter for the same reason — production always passes
 /// [`ATTENTION_CACHE_TTL`].
+///
+/// Only one sweep runs at a time. A miss that arrives while another is
+/// already in flight does not start a second identical sweep: it awaits the
+/// first one's result, on [`SweepInFlight`]'s own lock, never on `state`'s —
+/// the lead sweeper still needs `state` free in order to finish.
 fn attention_with_cache(
     state: &Arc<Mutex<ServerState>>,
     ttl: Duration,
     sweep: impl FnOnce() -> Result<crate::attention::AttentionQueue>,
 ) -> Result<crate::attention::AttentionQueue> {
     let entered_at = crate::agent_status::now_ms();
-    let (served, generation) = {
-        let guard = state.lock().unwrap();
-        let served = guard
-            .attention_cache
-            .as_ref()
-            .filter(|cached| cached_attention_is_fresh(cached.derived_at_ms, entered_at, ttl))
-            .map(|cached| cached.queue.clone());
-        (served, guard.attention_generation)
-    };
-    if let Some(queue) = served {
-        return Ok(queue);
+    enum Lookup {
+        Lead(Arc<SweepInFlight>, u64),
+        Await(Arc<SweepInFlight>),
     }
-    let queue = sweep()?;
+    let lookup = {
+        let mut guard = state.lock().unwrap();
+        if let Some(cached) = guard.attention_cache.as_ref() {
+            if cached_attention_is_fresh(cached.derived_at_ms, entered_at, ttl) {
+                return Ok(cached.queue.clone());
+            }
+        }
+        if let Some(in_progress) = guard.attention_sweep.clone() {
+            Lookup::Await(in_progress)
+        } else {
+            let slot = Arc::new(SweepInFlight::new());
+            guard.attention_sweep = Some(slot.clone());
+            Lookup::Lead(slot, guard.attention_generation)
+        }
+    };
+    let (slot, generation) = match lookup {
+        // Someone else is already sweeping for this miss; share their answer
+        // rather than running `sweep()` again.
+        Lookup::Await(slot) => return slot.wait(),
+        Lookup::Lead(slot, generation) => (slot, generation),
+    };
+    let result = sweep();
     // The sweep takes seconds, and anything that landed while it ran — the
     // human answering the very question this queue still lists — invalidated
     // the cache and moved the generation on. Such a queue describes the world
@@ -4284,14 +4353,25 @@ fn attention_with_cache(
     // function was entered: a sweep slower than the window would otherwise
     // produce an entry that is born expired and never served, which is exactly
     // the fleet the memoization exists for.
-    let mut guard = state.lock().unwrap();
-    if guard.attention_generation == generation {
-        guard.attention_cache = Some(CachedAttention {
-            derived_at_ms: crate::agent_status::now_ms(),
-            queue: queue.clone(),
-        });
+    {
+        let mut guard = state.lock().unwrap();
+        guard.attention_sweep = None;
+        if let Ok(queue) = &result {
+            if guard.attention_generation == generation {
+                guard.attention_cache = Some(CachedAttention {
+                    derived_at_ms: crate::agent_status::now_ms(),
+                    queue: queue.clone(),
+                });
+            }
+        }
     }
-    Ok(queue)
+    slot.finish(
+        result
+            .as_ref()
+            .map(Clone::clone)
+            .map_err(|err| err.to_string()),
+    );
+    result
 }
 
 /// Open the app store and map any failure to a protocol error response. Keeps
@@ -7401,6 +7481,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let ArchcarResponse::UpdateStatus { status } =
@@ -7493,6 +7574,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let import = || {
             dispatch_request(
@@ -7710,6 +7792,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let on = dispatch_request(
@@ -7806,6 +7889,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let added = dispatch_request(
             ArchcarRequest::AddRepository {
@@ -7897,6 +7981,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -7989,6 +8074,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -8092,6 +8178,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         // Claim the row from a separate connection the moment it is inserted,
@@ -8201,6 +8288,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let queued = store
             .enqueue_chat_input(
@@ -8301,6 +8389,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let closed = dispatch_request(
@@ -8419,6 +8508,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -8510,6 +8600,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let context = crate::workspace::DeterministicNamingContext {
@@ -8597,6 +8688,7 @@ mod tests {
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         // Agent metadata is applied while a thread renders, so a read can rename
@@ -8689,6 +8781,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -8743,6 +8836,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         // What the `set_workspace_context` MCP tool sends.
@@ -8810,6 +8904,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -8972,6 +9067,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -9087,6 +9183,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         drain_queued_input_for_thread(&state, thread.id);
@@ -9184,6 +9281,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         handle_session_event(
@@ -9273,6 +9371,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         handle_session_event(
@@ -9355,6 +9454,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         BusySession {
             state,
@@ -9601,6 +9701,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let interaction = ProviderInteractionStore::new(db_path.clone())
             .register(interaction_draft_for(
@@ -9729,6 +9830,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let mut adapter = crate::provider_adapters::acp::AcpAdapter::new(
             SessionKind::new("gemini"),
@@ -9838,6 +9940,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         let interaction = interactions
@@ -9893,6 +9996,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         interactions
@@ -9967,6 +10071,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         drain_every_queued_chat_thread(&state);
@@ -10024,6 +10129,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         // Two sends back to back, the way a user types a follow-up right after
@@ -10089,6 +10195,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         // A brand-new chat thread has no session, so nothing would ever deliver
@@ -10145,6 +10252,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         assert_eq!(
@@ -10176,6 +10284,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let guard = QueueDrainGuard::begin(&state, thread.id).expect("first drain runs");
@@ -10267,6 +10376,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -10317,6 +10427,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let first = ensure_default_session(
             &state,
@@ -10363,6 +10474,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let claude = ensure_default_session(
@@ -10407,6 +10519,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = spawn_session(
@@ -10631,6 +10744,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = ensure_default_session(
@@ -10712,6 +10826,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         };
         let (subscriber_tx, subscriber_rx) = mpsc::channel();
 
@@ -10766,6 +10881,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         begin_shutdown(&state);
@@ -10839,6 +10955,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
@@ -10923,6 +11040,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = ensure_chat_thread_session(
@@ -10980,6 +11098,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -11039,6 +11158,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = dispatch_request(
@@ -11113,6 +11233,7 @@ exit 1
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let response = ensure_chat_thread_session(
@@ -11528,6 +11649,7 @@ icon = "cloud"
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let added = dispatch_request(
@@ -11618,6 +11740,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let added = dispatch_request(
@@ -11715,6 +11838,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         dispatch_request(
             ArchcarRequest::AddRepository {
@@ -11821,6 +11945,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         dispatch_request(
@@ -12076,6 +12201,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let added = dispatch_request(
@@ -12210,6 +12336,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         // Read it off the wire, the way the iOS client's connect handshake does.
@@ -12249,6 +12376,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         dispatch_request(
@@ -12324,6 +12452,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         dispatch_request(
@@ -12450,6 +12579,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -12498,6 +12628,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -12537,6 +12668,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
         let (inside_tx, inside_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -12844,6 +12976,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }))
     }
 
@@ -12897,6 +13030,50 @@ default = true
     }
 
     #[test]
+    fn concurrent_misses_share_one_sweep_instead_of_each_running_it() {
+        // The generation check only gates *saving* a sweep's result; two
+        // clients that both miss before the first sweep finishes must not
+        // both run `sweep()` — the second has to await the first's answer.
+        let temp = tempfile::tempdir().unwrap();
+        let state = bare_state(temp.path());
+        let sweep_calls = Arc::new(AtomicUsize::new(0));
+        let lead_calls = Arc::clone(&sweep_calls);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let lead_barrier = Arc::clone(&barrier);
+        let lead_state = Arc::clone(&state);
+
+        let lead = thread::spawn(move || {
+            attention_with_cache(&lead_state, ATTENTION_CACHE_TTL, move || {
+                lead_calls.fetch_add(1, Ordering::SeqCst);
+                // By this point `attention_sweep` is already registered (set
+                // before `sweep()` runs), so the second thread crossing this
+                // barrier is guaranteed to see it and await rather than race.
+                lead_barrier.wait();
+                thread::sleep(Duration::from_millis(50));
+                Ok(marked_queue("led the sweep"))
+            })
+        });
+        barrier.wait();
+        let second = attention_with_cache(&state, ATTENTION_CACHE_TTL, || {
+            panic!("a concurrent miss ran its own sweep instead of sharing the lead's")
+        })
+        .unwrap();
+        let first = lead.join().unwrap().unwrap();
+
+        assert_eq!(first.items[0].headline, "led the sweep");
+        assert_eq!(second.items[0].headline, "led the sweep");
+        assert_eq!(
+            sweep_calls.load(Ordering::SeqCst),
+            1,
+            "a concurrent miss ran its own sweep instead of awaiting the lead's"
+        );
+        assert!(
+            state.lock().unwrap().attention_sweep.is_none(),
+            "the in-flight sweep slot was not cleared once it finished"
+        );
+    }
+
+    #[test]
     fn cached_attention_freshness_has_a_window_and_distrusts_a_backwards_clock() {
         // Pins the shipped constant, not a number copied next to it.
         let ttl = ATTENTION_CACHE_TTL;
@@ -12932,6 +13109,7 @@ default = true
             remote_listen: None,
             attention_cache: None,
             attention_generation: 0,
+            attention_sweep: None,
         }));
 
         let first = dispatch_request(ArchcarRequest::ListAttention {}, &state);
@@ -13015,6 +13193,62 @@ default = true
         assert!(
             matches!(expired, ArchcarResponse::Attention { ref queue } if *queue != sentinel),
             "an expired cached queue was served: {expired:?}"
+        );
+    }
+
+    #[test]
+    fn a_mutating_request_invalidates_the_cache_before_and_after_it_runs() {
+        // A mutating action that raises no event (the PR description's own
+        // example: archiving a workspace) used to invalidate the cache only
+        // once, before dispatch. A `ListAttention` that starts mid-mutation
+        // captures that same generation, sweeps the still-pre-change
+        // workspace, and — with nothing else to bump the generation — could
+        // install that stale queue as the cache entry *after* the mutation
+        // finished. A second invalidation once the mutation has actually run
+        // closes that window: the generation must move twice, not once, so
+        // such a sweep's write-back is rejected rather than cached.
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("state.db");
+        let logs_dir = temp.path().join("logs");
+        seeded_workspace_store(&db_path, &logs_dir, temp.path());
+        let state = Arc::new(Mutex::new(ServerState {
+            db_path,
+            logs_dir,
+            shutting_down: false,
+            spawning_pids: HashSet::new(),
+            queued_defaults: HashSet::new(),
+            queued_threads: HashSet::new(),
+            draining_threads: HashSet::new(),
+            drain_reruns: HashSet::new(),
+            sessions: HashMap::new(),
+            subscribers: Vec::new(),
+            remote_listen: None,
+            attention_cache: None,
+            attention_generation: 0,
+            attention_sweep: None,
+        }));
+
+        let before = state.lock().unwrap().attention_generation;
+        let response = dispatch_request(
+            ArchcarRequest::CreateChatThread {
+                workspace: "berlin".to_owned(),
+                provider: "claude".to_owned(),
+                title: "New Chat".to_owned(),
+            },
+            &state,
+        );
+        assert!(
+            matches!(response, ArchcarResponse::ChatThreadCreated { .. }),
+            "create_chat_thread got {response:?}"
+        );
+        // `CreateChatThread`'s response raises no inventory-change event of
+        // its own, so the only two invalidations are the pre- and
+        // post-dispatch ones this fix adds.
+        assert_eq!(
+            state.lock().unwrap().attention_generation,
+            before + 2,
+            "a mutating request with no event must invalidate the cache twice, \
+             not once, to cover a sweep that starts mid-mutation"
         );
     }
 

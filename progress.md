@@ -33,7 +33,7 @@ You can now see which workspace wants you without opening each one. The
 **Attention** page (a top-level desktop page, an iOS tab, and `archductor
 archcar attention [--json]`) is a single queue across every project and
 workspace on the daemon, ranked: agent asked, session failed or stalled, task
-finished (24h window), checks failed, review comments, diff ready, idle. The
+finished (24h window), checks failed, open pull requests, diff ready, idle. The
 order is total and stable, archived workspaces contribute nothing, and an empty
 queue prints `Nothing needs you`. The new `ListAttention` RPC is read-only and
 derived in core (`attention.rs`) from the status report and background tasks.
