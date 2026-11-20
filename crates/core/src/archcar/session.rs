@@ -2959,6 +2959,15 @@ fn run_codex_app_server_session_loop(
                                             .push((joined_turn_id, pending.local_input_id));
                                     }
                                 }
+                                // The agent has exited: there is nothing to
+                                // start the refused input's turn on, and the
+                                // write would only fail. It stays unsettled,
+                                // so the exit sweep puts it back.
+                                CodexInputResponseAction::RetryStart
+                                    if exited_stdout_deadline.is_some() =>
+                                {
+                                    continue;
+                                }
                                 CodexInputResponseAction::RetryStart => {
                                     let Some(thread_id) = provider_thread_id.as_deref() else {
                                         let _ = event_tx.send(ArchcarEvent::SessionError {
@@ -3012,7 +3021,10 @@ fn run_codex_app_server_session_loop(
                                                 "Codex immediate turn fallback failed: {err:#}"
                                             ),
                                         );
-                                        return;
+                                        // Not `return`: the loop goes on to its
+                                        // exit, whose sweep puts the refused
+                                        // input back and announces the exit.
+                                        continue;
                                     }
                                     pending_input_requests.insert(
                                         fallback_request_id,
