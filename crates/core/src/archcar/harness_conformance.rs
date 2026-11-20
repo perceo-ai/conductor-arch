@@ -2,9 +2,9 @@ use super::harness::{managed_harness_for_kind, validate_managed_harness};
 use super::harness_contract::{
     DesiredHarnessControls, HarnessAdapterContext, HarnessCapability, HarnessControl,
     HarnessControlPlan, HarnessDescriptor, HarnessEffect, HarnessFeature, HarnessInput,
-    HarnessRecoveryCause, HarnessRecoveryPlan, HarnessSignal, HarnessTier, HarnessTurnStatus,
-    NativeRecord, ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution,
-    SupportMode, ALL_HARNESS_FEATURES, CORE_HARNESS_FEATURES, EXTENDED_HARNESS_FEATURES,
+    HarnessRecoveryCause, HarnessRecoveryPlan, HarnessTier, HarnessTurnStatus, NativeRecord,
+    ProviderInteractionDraft, ProviderInteractionKind, ProviderInteractionResolution, SupportMode,
+    ALL_HARNESS_FEATURES, CORE_HARNESS_FEATURES, EXTENDED_HARNESS_FEATURES,
 };
 use super::protocol::{
     session_harness_capabilities_for_descriptor, ArchcarInputDelivery, ArchcarInputKind,

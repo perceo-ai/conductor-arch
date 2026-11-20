@@ -3291,9 +3291,13 @@ fn run_codex_app_server_session_loop(
                         requeue_failed_queued_handoff(&db_path, &event_tx, queued_handoff);
                         answer_input_write(
                             &ack,
-                            Err(format!(
-                                "Codex input written-state persistence failed: {err:#}"
-                            )),
+                            if requeued {
+                                Ok(InputWriteOutcome::QueuedForNextSession)
+                            } else {
+                                Err(format!(
+                                    "Codex input written-state persistence failed: {err:#}"
+                                ))
+                            },
                         );
                         mark_provider_session_failed(
                             &runtime_store,
@@ -3633,7 +3637,9 @@ fn run_claude_stream_session_loop(
                             if requeued {
                                 Ok(InputWriteOutcome::QueuedForNextSession)
                             } else {
-                                Err(format!("Claude input written-state persistence failed: {err:#}"))
+                                Err(format!(
+                                    "Claude input written-state persistence failed: {err:#}"
+                                ))
                             },
                         );
                         mark_provider_session_failed(
@@ -4174,7 +4180,9 @@ fn run_acp_session_loop(
                             if requeued {
                                 Ok(InputWriteOutcome::QueuedForNextSession)
                             } else {
-                                Err(format!("ACP input written-state persistence failed: {err:#}"))
+                                Err(format!(
+                                    "ACP input written-state persistence failed: {err:#}"
+                                ))
                             },
                         );
                         mark_provider_session_failed(
@@ -4918,7 +4926,7 @@ fn reclaim_unsettled_session_inputs(
     };
     let lost = unsettled
         .into_iter()
-        .filter(|input| !retained.iter().any(|kept| *kept == input.id))
+        .filter(|input| !retained.contains(&input.id))
         .collect::<Vec<_>>();
     for input in &lost {
         if let Err(err) = runtime_store.mark_provider_input_failed(&input.id, reason) {

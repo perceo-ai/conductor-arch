@@ -3609,9 +3609,13 @@ fn run_cli() -> Result<()> {
                                      at the head of thread {resolved_thread_id}; the next session delivers it"
                                 );
                             } else {
+                                // Still in the loop's hands. The message is on
+                                // its way, so the verb does not change; what
+                                // changes is that we do not claim the agent has
+                                // it when we have not been told so.
                                 println!(
-                                    "accepted {label}{immediate_label} message for session {session_id} thread \
-                                     {resolved_thread_id}; it has not been written to the agent yet"
+                                    "sent {label}{immediate_label} message to session {session_id} thread \
+                                     {resolved_thread_id} (not confirmed by the agent yet)"
                                 );
                             }
                         }
