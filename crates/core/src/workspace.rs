@@ -2730,8 +2730,8 @@ impl WorkspaceStore {
                     .collect::<rusqlite::Result<Vec<_>>>()
             })
             .unwrap_or_default();
-        for thread_id in doomed_threads {
-            crate::projection_cache::cache_for(&self.db_path).invalidate(thread_id);
+        for thread_id in &doomed_threads {
+            crate::projection_cache::cache_for(&self.db_path).invalidate(*thread_id);
         }
 
         self.conn.execute(
@@ -2815,6 +2815,15 @@ impl WorkspaceStore {
             "DELETE FROM workspace_ui_state WHERE workspace_id = ?1",
             [workspace_id],
         )?;
+        // Again, now the rows are gone. A projection pull that started before
+        // the first invalidation read rows that still existed, and would
+        // otherwise install them after it — and `chat_threads.id` gets reused,
+        // so that entry would surface in whichever new chat inherits the id.
+        // The cache's generation guard makes the late admit a no-op, and this
+        // covers a pull that completed in between.
+        for thread_id in &doomed_threads {
+            crate::projection_cache::cache_for(&self.db_path).invalidate(*thread_id);
+        }
         self.conn.execute(
             "DELETE FROM pull_requests WHERE workspace_id = ?1",
             [workspace_id],

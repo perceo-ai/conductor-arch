@@ -145,10 +145,32 @@ describe("applyEvent refresh ordering and scope", () => {
 
   it("refreshes the workspace list before the chat lists that read it", async () => {
     const order: string[] = [];
-    api.request.mockImplementation(async (req: { type: string }) => {
-      order.push(req.type);
+    // The renamed workspace must be in the list the chat pull reads from, or
+    // nothing is pulled and the ordering assertion proves nothing.
+    api.request.mockImplementation(async (req: { type: string; workspace?: string }) => {
+      order.push(req.type === "list_chat_threads" ? `list_chat_threads:${req.workspace}` : req.type);
       if (req.type === "list_workspaces") {
-        return { type: "workspaces", workspaces: [] };
+        return {
+          type: "workspaces",
+          workspaces: [
+            {
+              id: 1,
+              name: "billing-fix",
+              path: "/tmp/billing-fix",
+              branch: "billing-fix",
+              base_ref: "main",
+              status: "active",
+              repository_name: "demo",
+              diff_additions: 0,
+              diff_deletions: 0,
+              open_todos: 0,
+              active_sessions: 0,
+              run_running: false,
+              changed_files: 0,
+              updated_at: "1",
+            },
+          ],
+        };
       }
       if (req.type === "list_chat_threads") return { type: "chat_threads", threads: [] };
       return { type: "ack" };
@@ -161,9 +183,12 @@ describe("applyEvent refresh ordering and scope", () => {
     await vi.advanceTimersByTimeAsync(500);
 
     const workspaces = order.indexOf("list_workspaces");
-    const threads = order.indexOf("list_chat_threads");
+    const threads = order.indexOf("list_chat_threads:billing-fix");
     expect(workspaces).toBeGreaterThanOrEqual(0);
-    if (threads >= 0) expect(workspaces).toBeLessThan(threads);
+    expect(threads).toBeGreaterThanOrEqual(0);
+    expect(workspaces).toBeLessThan(threads);
+    // And never for the name it used to have.
+    expect(order).not.toContain("list_chat_threads:berlin");
   });
 
   it("refreshes only the completing workspace's chat list on a turn boundary", async () => {

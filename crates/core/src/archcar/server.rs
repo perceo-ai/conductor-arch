@@ -679,18 +679,55 @@ fn tick_background_tasks(
 /// but a client that asked in between would have been told a lie it had no
 /// reason to re-ask about.
 fn prime_git_facts(state: &Arc<Mutex<ServerState>>) {
+    let state = Arc::clone(state);
+    std::thread::spawn(move || {
+        let _in_flight = InFlight::enter();
+        // `max_age_ms: 0` so every workspace is derived, and the same
+        // broadcast as the periodic refresher: a client that read before this
+        // finished is holding the migration's nulls, and nothing else would
+        // tell it they had been replaced.
+        refresh_git_facts_and_broadcast(&state, 0, "initial git fact derivation failed");
+    });
+}
+
+/// Recompute the owed git facts and tell every client which workspaces moved.
+///
+/// The broadcast is the whole point: the desktop deliberately no longer
+/// re-reads the inventory for each streamed token, so without an event the
+/// sidebar's diff badge would not move until something else happened to pull.
+fn refresh_git_facts_and_broadcast(
+    state: &Arc<Mutex<ServerState>>,
+    max_age_ms: u64,
+    failure_message: &str,
+) {
     let (db_path, git_facts) = {
         let Ok(guard) = state.lock() else { return };
         (guard.db_path.clone(), guard.git_facts.clone())
     };
-    std::thread::spawn(move || {
-        let _in_flight = InFlight::enter();
-        if let Err(err) =
-            refresh_git_facts_once(&db_path, &git_facts, crate::agent_status::now_ms(), 0)
-        {
-            debug!(error = %err, "initial git fact derivation failed");
+    match refresh_git_facts_once(
+        &db_path,
+        &git_facts,
+        crate::agent_status::now_ms(),
+        max_age_ms,
+    ) {
+        Ok(refreshed) => {
+            if refreshed.is_empty() {
+                return;
+            }
+            let Ok(mut guard) = state.lock() else { return };
+            for workspace in refreshed {
+                broadcast(
+                    &mut guard,
+                    ArchcarEvent::InventoryChanged {
+                        scope: "workspace".to_owned(),
+                        workspace: Some(workspace),
+                        repository: None,
+                    },
+                );
+            }
         }
-    });
+        Err(err) => debug!(error = %err, "{failure_message}"),
+    }
 }
 
 /// Keep the workspace git facts warm.
@@ -706,40 +743,8 @@ fn spawn_git_fact_refresher(state: &Arc<Mutex<ServerState>>, shutdown: Arc<Atomi
             if shutdown.load(Ordering::SeqCst) || state.lock().unwrap().shutting_down {
                 break;
             }
-            let (db_path, git_facts) = {
-                let guard = state.lock().unwrap();
-                (guard.db_path.clone(), guard.git_facts.clone())
-            };
             let _in_flight = InFlight::enter();
-            match refresh_git_facts_once(
-                &db_path,
-                &git_facts,
-                crate::agent_status::now_ms(),
-                GIT_FACT_MAX_AGE_MS,
-            ) {
-                // Tell the clients, or nobody learns the badge moved. The
-                // desktop deliberately no longer re-reads the inventory for
-                // every streamed token, so without this the diff count would
-                // sit still for a whole turn and be stale at the moment the
-                // user reads it. It is also the only thing that corrects the
-                // zeros a freshly migrated database starts with.
-                Ok(refreshed) => {
-                    if !refreshed.is_empty() {
-                        let mut guard = state.lock().unwrap();
-                        for workspace in refreshed {
-                            broadcast(
-                                &mut guard,
-                                ArchcarEvent::InventoryChanged {
-                                    scope: "workspace".to_owned(),
-                                    workspace: Some(workspace),
-                                    repository: None,
-                                },
-                            );
-                        }
-                    }
-                }
-                Err(err) => debug!(error = %err, "git fact refresh failed"),
-            }
+            refresh_git_facts_and_broadcast(&state, GIT_FACT_MAX_AGE_MS, "git fact refresh failed");
             drop(_in_flight);
             std::thread::sleep(GIT_FACT_TICK);
         }
@@ -7702,9 +7707,13 @@ fn delete_workspace_response(
     delete_branch: bool,
 ) -> ArchcarResponse {
     // The cache is keyed by name and names get reused, so drop the entry
-    // whatever the delete goes on to report.
+    // whatever the delete goes on to report. Dropped twice: an inventory
+    // request arriving while the delete runs would otherwise re-publish the
+    // facts from the workspace row that is still there, and the restored entry
+    // would then outlive the row and be inherited by whatever workspace next
+    // takes the name.
     forget_workspace_git_facts(state, workspace);
-    match stop_workspace_managed_sessions(state, workspace)
+    let outcome = match stop_workspace_managed_sessions(state, workspace)
         .and_then(|()| open_lifecycle_workspace_store(state))
         .and_then(|s| s.delete_lifecycle_job(workspace, remove_worktree, delete_branch))
     {
@@ -7724,7 +7733,9 @@ fn delete_workspace_response(
         Err(err) => ArchcarResponse::Error {
             message: format!("{err:#}"),
         },
-    }
+    };
+    forget_workspace_git_facts(state, workspace);
+    outcome
 }
 
 fn shutdown_managed_sessions(state: &Arc<Mutex<ServerState>>, reason: &str) -> Result<()> {

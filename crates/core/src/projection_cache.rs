@@ -95,6 +95,14 @@ struct Inner {
     /// Threads whose retained set exceeded the byte budget. They are not
     /// re-admitted, so one enormous chat cannot thrash the cache.
     refused: HashSet<i64>,
+    /// Per-thread count of writes and invalidations, used to detect that the
+    /// world moved while a load was in flight.
+    ///
+    /// A load reads rows, then admits them. A record saved in between finds no
+    /// entry to fold into and returns, so admitting the rows read earlier
+    /// would lose it for every later pull. An invalidation in between would
+    /// likewise be undone. Both bump this; `admit` refuses when it has moved.
+    generation: HashMap<i64, u64>,
 }
 
 #[derive(Debug)]
@@ -142,9 +150,13 @@ impl ProjectionCache {
                 records.iter().map(|record| (**record).clone()).collect();
             return Ok(provider_projection_from_records(&owned));
         }
+        // Noted before the load, checked after it: anything that wrote or
+        // invalidated this thread in between makes these rows stale, and
+        // installing them would hide that write from every later pull.
+        let generation = self.generation(thread_id);
         let records = load()?;
         let projection = provider_projection_from_records(&records);
-        self.admit(thread_id, records);
+        self.admit(thread_id, records, generation);
         Ok(projection)
     }
 
@@ -164,6 +176,9 @@ impl ProjectionCache {
         inner.clock += 1;
         let clock = inner.clock;
         let budget = self.byte_budget;
+        // Bumped whether or not the thread is held: a load in flight needs to
+        // know this write happened even though there was nothing to fold into.
+        *inner.generation.entry(thread_id).or_default() += 1;
         let Some(entry) = inner.threads.get_mut(&thread_id) else {
             return;
         };
@@ -198,7 +213,17 @@ impl ProjectionCache {
     pub fn invalidate(&self, thread_id: i64) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.threads.remove(&thread_id);
+            // A load that started before this must not put the entry back.
+            *inner.generation.entry(thread_id).or_default() += 1;
         }
+    }
+
+    fn generation(&self, thread_id: i64) -> u64 {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.generation.get(&thread_id).copied())
+            .unwrap_or(0)
     }
 
     pub fn holds(&self, thread_id: i64) -> bool {
@@ -217,11 +242,16 @@ impl ProjectionCache {
         Some(entry.records.clone())
     }
 
-    fn admit(&self, thread_id: i64, records: Vec<ProviderEventRecord>) {
+    fn admit(&self, thread_id: i64, records: Vec<ProviderEventRecord>, generation: u64) {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
         if inner.refused.contains(&thread_id) {
+            return;
+        }
+        // Someone wrote or invalidated while these rows were being read. Drop
+        // them; the next pull reloads and sees everything.
+        if inner.generation.get(&thread_id).copied().unwrap_or(0) != generation {
             return;
         }
         let bytes: usize = records.iter().map(record_bytes).sum();
@@ -397,6 +427,66 @@ mod tests {
 
         assert_eq!(first, expected);
         assert_eq!(second, expected);
+    }
+
+    #[test]
+    fn a_record_written_during_a_load_is_not_lost() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _) = seeded_store(temp.path());
+        let cache = ProjectionCache::default();
+
+        // A session saves an event while the first pull is still reading rows.
+        // `note_record` finds no entry yet and returns, so if the pull then
+        // installs the rows it read, that event is missing from every later
+        // pull until the entry is dropped — a message or a tool completion
+        // that never appears.
+        let written = std::cell::RefCell::new(None);
+        let projection = cache
+            .projection(1, || {
+                let rows = store.list_for_chat_thread(1)?;
+                let late = store
+                    .upsert_event(&draft("late-1", ProviderEventPhase::Started, "late"))
+                    .unwrap();
+                cache.note_record(&late);
+                *written.borrow_mut() = Some(late);
+                Ok(rows)
+            })
+            .unwrap();
+        // The pull itself legitimately predates the write.
+        assert!(!projection
+            .items
+            .iter()
+            .any(|item| item.id.contains("late-1")));
+
+        // The next pull must see it.
+        let after = cache
+            .projection(1, || store.list_for_chat_thread(1))
+            .unwrap();
+        assert_eq!(
+            after,
+            provider_projection_from_records(&store.list_for_chat_thread(1).unwrap())
+        );
+        assert!(after.items.iter().any(|item| item.id.contains("late-1")));
+    }
+
+    #[test]
+    fn an_invalidation_during_a_load_is_not_undone_by_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, _) = seeded_store(temp.path());
+        let cache = ProjectionCache::default();
+
+        // Deleting a workspace invalidates mid-flight. A pull that started
+        // before must not install the rows it already read, or the entry comes
+        // back from the dead — and chat_threads ids get reused.
+        cache
+            .projection(1, || {
+                let rows = store.list_for_chat_thread(1)?;
+                cache.invalidate(1);
+                Ok(rows)
+            })
+            .unwrap();
+
+        assert!(!cache.holds(1));
     }
 
     #[test]
