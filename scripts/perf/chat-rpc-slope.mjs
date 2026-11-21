@@ -2,7 +2,7 @@
 // How does the cost of one chat refresh grow with the length of the chat?
 //
 // The desktop answers each `session_messages_updated` — one per streamed
-// provider event — with four full-thread RPCs, rate-limited to ten runs a
+// provider event — with four full-thread RPCs, rate-limited to four runs a
 // second per thread. The frequency is capped; the size of each run is not.
 // This measures the size: latency and response bytes for each of those RPCs,
 // swept against the number of provider_event rows in the thread.

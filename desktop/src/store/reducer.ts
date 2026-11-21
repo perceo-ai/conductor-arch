@@ -100,7 +100,7 @@ async function refreshThreadSnapshot(threadId: number) {
 // A streaming turn emits `session_messages_updated` once per provider event —
 // per token — and each one used to cost a full snapshot + projection pull, so
 // the renderer spent an active turn re-reading the whole thread and got slower
-// the longer the chat ran. Ten pulls a second is still far past the rate a
+// the longer the chat ran. Four pulls a second is still far past the rate a
 // human reads at, and turn boundaries flush immediately.
 export const CHAT_REFRESH_INTERVAL_MS = 250;
 

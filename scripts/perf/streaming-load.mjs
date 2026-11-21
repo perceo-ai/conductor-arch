@@ -10,6 +10,11 @@
 // a fixed window — both cumulative, so neither depends on the machine being
 // idle the way a latency figure does.
 //
+// Caveat on the spawn count: the counting shim sits on PATH for this script's
+// own `archductor session send` calls as well as for the daemon, so the total
+// is "git spawned during the window", not "git the daemon spawned". It is a
+// fair before/after on the same harness and a poor absolute number.
+//
 // Usage: node scripts/perf/streaming-load.mjs [--workspaces 10] [--seconds 60]
 
 import { fileURLToPath } from "node:url";

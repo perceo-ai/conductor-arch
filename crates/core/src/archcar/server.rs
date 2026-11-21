@@ -87,6 +87,10 @@ struct ServerState {
     /// [`ATTENTION_CACHE_TTL`]. In memory only, and part of this daemon's own
     /// state, so a restart starts with no queue rather than serving the
     /// previous process's answer.
+    /// Workspace git facts, so `list_workspaces` never shells out to git.
+    /// Behind its own lock inside the Arc: deriving is slow and must not make
+    /// requests queue on this mutex.
+    git_facts: Arc<GitFactCache>,
     attention_cache: Option<CachedAttention>,
     /// Bumped by every invalidation of `attention_cache`. A sweep captures it
     /// before it starts and writes its result back only if it has not moved:
@@ -197,10 +201,6 @@ fn event_changes_attention(event: &ArchcarEvent) -> bool {
             | ArchcarEvent::BackgroundTaskUpdated { .. }
             | ArchcarEvent::ChatQueueUpdated { .. }
     )
-    /// Workspace git facts, so `list_workspaces` never shells out to git.
-    /// Behind its own lock inside the Arc: deriving is slow and must not make
-    /// requests queue on this mutex.
-    git_facts: Arc<GitFactCache>,
 }
 
 /// How often the daemon advances background development tasks.
@@ -6496,9 +6496,7 @@ fn workspace_summaries(
                             changed_files: 0,
                             diff_additions: 0,
                             diff_deletions: 0,
-                            branch_ahead: 0,
-                            branch_behind: 0,
-                            has_upstream: false,
+                            push: None,
                             computed_at_ms: 0,
                         }
                     }
@@ -6509,19 +6507,14 @@ fn workspace_summaries(
                 // one, so leaving its last live numbers in place would pin a
                 // wrong diff badge on it permanently.
                 //
-                // The push state is `Some` for every active workspace — with
-                // `has_upstream: false` and zero counts when there is no
-                // upstream — and `None` only for archived ones. Collapsing the
-                // no-upstream case to `None` turned `branch_ahead: 0` into an
-                // absent field on the wire.
+                // `push` stays an Option all the way through: `None` means the
+                // git call failed and the ahead/behind indicator should be
+                // hidden, exactly as before, rather than showing a confident
+                // "0 ahead, 0 behind".
                 let active = line.workspace.status == "active";
                 line.diff_additions = if active { facts.diff_additions } else { 0 };
                 line.diff_deletions = if active { facts.diff_deletions } else { 0 };
-                line.branch_push_state = active.then_some(crate::workspace::BranchPushState {
-                    ahead: facts.branch_ahead,
-                    behind: facts.branch_behind,
-                    has_upstream: facts.has_upstream,
-                });
+                line.branch_push_state = if active { facts.push.clone() } else { None };
                 let tasks = task_counts
                     .get(&line.workspace.id)
                     .copied()
@@ -7691,12 +7684,26 @@ fn register_subscriber_with_snapshot(state: &mut ServerState, subscriber: Sender
     }
 }
 
+/// Drop a deleted workspace's cached git facts.
+///
+/// The cache is keyed by name and workspace names get reused, so without this a
+/// freshly created workspace inherits the dead one's diff badge until the
+/// staleness ceiling expires. It is also an unbounded map otherwise.
+fn forget_workspace_git_facts(state: &Arc<Mutex<ServerState>>, workspace: &str) {
+    if let Ok(guard) = state.lock() {
+        guard.git_facts.forget(workspace);
+    }
+}
+
 fn delete_workspace_response(
     state: &Arc<Mutex<ServerState>>,
     workspace: &str,
     remove_worktree: bool,
     delete_branch: bool,
 ) -> ArchcarResponse {
+    // The cache is keyed by name and names get reused, so drop the entry
+    // whatever the delete goes on to report.
+    forget_workspace_git_facts(state, workspace);
     match stop_workspace_managed_sessions(state, workspace)
         .and_then(|()| open_lifecycle_workspace_store(state))
         .and_then(|s| s.delete_lifecycle_job(workspace, remove_worktree, delete_branch))
@@ -7957,10 +7964,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let ArchcarResponse::UpdateStatus { status } =
@@ -8051,10 +8058,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let import = || {
             dispatch_request(
@@ -8270,10 +8277,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let on = dispatch_request(
@@ -8368,10 +8375,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let added = dispatch_request(
             ArchcarRequest::AddRepository {
@@ -8461,10 +8468,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -8555,10 +8562,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -8660,10 +8667,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Claim the row from a separate connection the moment it is inserted,
@@ -8771,10 +8778,10 @@ mod tests {
             sessions: HashMap::from([(process.id, handle.clone())]),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let queued = store
             .enqueue_chat_input(
@@ -8873,10 +8880,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let closed = dispatch_request(
@@ -8993,10 +9000,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -9086,10 +9093,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let context = crate::workspace::DeterministicNamingContext {
@@ -9175,10 +9182,10 @@ mod tests {
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Agent metadata is applied while a thread renders, so a read can rename
@@ -9269,10 +9276,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -9325,10 +9332,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // What the `set_workspace_context` MCP tool sends.
@@ -9394,10 +9401,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -9558,10 +9565,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -9675,10 +9682,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         drain_queued_input_for_thread(&state, thread.id);
@@ -9774,10 +9781,10 @@ exit 1
             sessions,
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         handle_session_event(
@@ -9857,6 +9864,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -9868,7 +9876,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         handle_session_event(
@@ -9949,10 +9956,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         BusySession {
             state,
@@ -10189,6 +10196,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10200,7 +10208,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let interaction = ProviderInteractionStore::new(db_path.clone())
             .register(interaction_draft_for(
@@ -10319,6 +10326,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10330,7 +10338,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let mut adapter = crate::provider_adapters::acp::AcpAdapter::new(
             SessionKind::new("gemini"),
@@ -10430,6 +10437,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10441,7 +10449,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         let interaction = interactions
@@ -10487,6 +10494,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10498,7 +10506,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let interactions = ProviderInteractionStore::new(db_path.clone());
         interactions
@@ -10563,6 +10570,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10574,7 +10582,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         drain_every_queued_chat_thread(&state);
@@ -10622,6 +10629,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10633,7 +10641,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Two sends back to back, the way a user types a follow-up right after
@@ -10689,6 +10696,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10700,7 +10708,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // A brand-new chat thread has no session, so nothing would ever deliver
@@ -10747,6 +10754,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10758,7 +10766,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         assert_eq!(
@@ -10780,6 +10787,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -10791,7 +10799,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let guard = QueueDrainGuard::begin(&state, thread.id).expect("first drain runs");
@@ -10881,10 +10888,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -10933,10 +10940,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let first = ensure_default_session(
             &state,
@@ -10981,10 +10988,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![event_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let claude = ensure_default_session(
@@ -11027,10 +11034,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = spawn_session(
@@ -11253,10 +11260,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = ensure_default_session(
@@ -11336,10 +11343,10 @@ exit 1
             ]),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         };
         let (subscriber_tx, subscriber_rx) = mpsc::channel();
 
@@ -11392,10 +11399,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         begin_shutdown(&state);
@@ -11453,6 +11460,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -11470,7 +11478,6 @@ exit 1
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         shutdown_managed_sessions(&state, "Archcar is shutting down.").unwrap();
@@ -11553,10 +11560,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = ensure_chat_thread_session(
@@ -11612,10 +11619,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = dispatch_request(
@@ -11706,6 +11713,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -11792,6 +11800,7 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
@@ -11865,6 +11874,7 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
@@ -11942,6 +11952,7 @@ exit 1
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -12029,10 +12040,10 @@ exit 1
             sessions,
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let loop_stand_in = pump_one_input_write(
@@ -12115,10 +12126,10 @@ exit 1
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let response = ensure_chat_thread_session(
@@ -12532,10 +12543,10 @@ icon = "cloud"
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let added = dispatch_request(
@@ -12624,10 +12635,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let added = dispatch_request(
@@ -12723,10 +12734,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         dispatch_request(
             ArchcarRequest::AddRepository {
@@ -12831,10 +12842,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         dispatch_request(
@@ -13088,10 +13099,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let added = dispatch_request(
@@ -13224,10 +13235,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         // Read it off the wire, the way the iOS client's connect handshake does.
@@ -13265,10 +13276,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: vec![subscriber_tx],
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         dispatch_request(
@@ -13342,10 +13353,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         dispatch_request(
@@ -13470,10 +13481,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -13520,10 +13531,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
 
         let restored = load_or_restore_session_handle(&state, process.id).unwrap();
@@ -13561,10 +13572,10 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
-            git_facts: Arc::new(GitFactCache::default()),
         }));
         let (inside_tx, inside_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -13870,6 +13881,7 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
@@ -14149,6 +14161,7 @@ default = true
             db_path: db_path.clone(),
             logs_dir,
             shutting_down: false,
+            git_facts: Arc::new(GitFactCache::default()),
             spawning_pids: HashSet::new(),
             queued_defaults: HashSet::new(),
             queued_threads: HashSet::new(),
@@ -14273,6 +14286,7 @@ default = true
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             remote_listen: None,
+            git_facts: Arc::new(GitFactCache::default()),
             attention_cache: None,
             attention_generation: 0,
             attention_sweep: None,
@@ -14493,9 +14507,11 @@ default = true
             changed_files,
             diff_additions: 0,
             diff_deletions: 0,
-            branch_ahead: 0,
-            branch_behind: 0,
-            has_upstream: false,
+            push: Some(crate::workspace::BranchPushState {
+                ahead: 0,
+                behind: 0,
+                has_upstream: false,
+            }),
             computed_at_ms,
         }
     }
@@ -14673,9 +14689,11 @@ default = true
                 changed_files: 12,
                 diff_additions: 300,
                 diff_deletions: 20,
-                branch_ahead: 3,
-                branch_behind: 1,
-                has_upstream: true,
+                push: Some(crate::workspace::BranchPushState {
+                    ahead: 3,
+                    behind: 1,
+                    has_upstream: true,
+                }),
                 computed_at_ms: 100,
             },
         );
@@ -14687,6 +14705,34 @@ default = true
         assert_eq!(berlin.changed_files, 0);
         assert_eq!(berlin.diff_additions, 0);
         assert_eq!(berlin.diff_deletions, 0);
+        assert_eq!(berlin.branch_ahead, None);
+        assert_eq!(berlin.branch_behind, None);
+    }
+
+    #[test]
+    fn an_unreadable_push_state_hides_the_indicator_rather_than_showing_zeros() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let _store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let cache = GitFactCache::default();
+        cache.publish(
+            "berlin",
+            crate::workspace::WorkspaceGitFacts {
+                changed_files: 1,
+                diff_additions: 0,
+                diff_deletions: 0,
+                // The git call failed. Deriving inline left the indicator
+                // hidden; folding the failure into zeros would claim, with
+                // confidence, that there is nothing to push.
+                push: None,
+                computed_at_ms: 100,
+            },
+        );
+
+        let summaries = workspace_summaries(&db_path, &cache).unwrap();
+        let berlin = summaries.iter().find(|s| s.name == "berlin").unwrap();
+
         assert_eq!(berlin.branch_ahead, None);
         assert_eq!(berlin.branch_behind, None);
     }

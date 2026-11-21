@@ -28,6 +28,13 @@ const SAMPLES = arg("samples", 15);
 // The git-counting shim is a shell script that execs the real git, so it adds
 // real overhead per spawn. Counting and timing are therefore separate runs:
 // pass --count-git 0 for honest latency, 1 for honest spawn counts.
+//
+// Since the daemon started caching, the spawn column is no longer per-request:
+// the git work moved to a background refresher on its own tick, so whatever it
+// does during a request lands in that request's count. It over-counts, which
+// cannot manufacture a false win, but read it as "spawns during this window"
+// rather than "spawns this call caused". For the daemon's steady-state cost,
+// measure an idle daemon instead.
 const COUNT_GIT = arg("count-git", 1) !== 0;
 
 const scratch = new Scratch(repoRoot, {

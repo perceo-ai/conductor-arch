@@ -260,6 +260,8 @@ export class Scratch {
 
 export function stats(samples) {
   const sorted = [...samples].sort((a, b) => a - b);
+  // With n <= 20 a "p95" is just the maximum, which reads as a tail figure
+  // while being a single sample. Reported as such.
   const at = (q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
   return {
     n: sorted.length,

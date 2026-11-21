@@ -1387,9 +1387,14 @@ pub struct WorkspaceGitFacts {
     pub changed_files: usize,
     pub diff_additions: usize,
     pub diff_deletions: usize,
-    pub branch_ahead: usize,
-    pub branch_behind: usize,
-    pub has_upstream: bool,
+    /// `None` when the push state could not be read at all.
+    ///
+    /// Distinct from a workspace with no upstream, which reports
+    /// `Some(BranchPushState { has_upstream: false, .. })`. Deriving inline
+    /// hid the ahead/behind indicator when the git call failed, and folding
+    /// the error into zeros would have shown a confident "0 ahead, 0 behind"
+    /// instead.
+    pub push: Option<BranchPushState>,
     /// When these were derived, so a refresher can age them out.
     pub computed_at_ms: u64,
 }
@@ -4133,9 +4138,7 @@ impl WorkspaceStore {
                 changed_files: 0,
                 diff_additions: 0,
                 diff_deletions: 0,
-                branch_ahead: 0,
-                branch_behind: 0,
-                has_upstream: false,
+                push: None,
                 computed_at_ms: now_ms,
             });
         }
@@ -4150,9 +4153,7 @@ impl WorkspaceStore {
             changed_files,
             diff_additions,
             diff_deletions,
-            branch_ahead: push.as_ref().map(|p| p.ahead).unwrap_or(0),
-            branch_behind: push.as_ref().map(|p| p.behind).unwrap_or(0),
-            has_upstream: push.as_ref().map(|p| p.has_upstream).unwrap_or(false),
+            push,
             computed_at_ms: now_ms,
         })
     }
@@ -4175,9 +4176,9 @@ impl WorkspaceStore {
                 facts.changed_files as i64,
                 facts.diff_additions as i64,
                 facts.diff_deletions as i64,
-                facts.branch_ahead as i64,
-                facts.branch_behind as i64,
-                i64::from(facts.has_upstream),
+                facts.push.as_ref().map(|p| p.ahead as i64),
+                facts.push.as_ref().map(|p| p.behind as i64),
+                facts.push.as_ref().map(|p| i64::from(p.has_upstream)),
                 facts.computed_at_ms as i64,
             ],
         )?;
@@ -4215,13 +4216,18 @@ impl WorkspaceStore {
         let Some(computed_at_ms) = computed_at else {
             return Ok(None);
         };
+        // `has_upstream` null means the push state was never readable, which is
+        // what keeps "could not read" distinct from "no upstream".
+        let push = upstream.map(|flag| BranchPushState {
+            ahead: ahead.unwrap_or(0).max(0) as usize,
+            behind: behind.unwrap_or(0).max(0) as usize,
+            has_upstream: flag != 0,
+        });
         Ok(Some(WorkspaceGitFacts {
             changed_files: changed.unwrap_or(0).max(0) as usize,
             diff_additions: additions.unwrap_or(0).max(0) as usize,
             diff_deletions: deletions.unwrap_or(0).max(0) as usize,
-            branch_ahead: ahead.unwrap_or(0).max(0) as usize,
-            branch_behind: behind.unwrap_or(0).max(0) as usize,
-            has_upstream: upstream.unwrap_or(0) != 0,
+            push,
             computed_at_ms: computed_at_ms.max(0) as u64,
         }))
     }
@@ -23775,9 +23781,11 @@ general = "Keep changes focused."
             changed_files: 3,
             diff_additions: 42,
             diff_deletions: 7,
-            branch_ahead: 2,
-            branch_behind: 1,
-            has_upstream: true,
+            push: Some(BranchPushState {
+                ahead: 2,
+                behind: 1,
+                has_upstream: true,
+            }),
             computed_at_ms: 1_700_000_000_000,
         }
     }
