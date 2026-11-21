@@ -716,6 +716,11 @@ fn refresh_git_facts_and_broadcast(
                 return;
             }
             let Ok(mut guard) = state.lock() else { return };
+            // The attention sweep reads these facts, so the memoized queue
+            // was derived from the old ones. `InventoryChanged` does not clear
+            // it — workspace add/remove sends that too — so clear it here,
+            // where the facts are known to have moved.
+            invalidate_attention_cache(&mut guard);
             for workspace in refreshed {
                 broadcast(
                     &mut guard,
@@ -14596,6 +14601,77 @@ default = true
 
         assert_eq!(refreshed, vec!["berlin".to_owned()]);
         assert_eq!(cache.get("berlin").map(|f| f.changed_files), Some(expected));
+    }
+
+    #[test]
+    fn refreshing_git_facts_drops_the_cached_attention_queue() {
+        // `list_attention` derives the queue from `git_facts`, so a queue
+        // memoized before the refresh no longer matches facts already
+        // published. The refresher only broadcasts `InventoryChanged`, which
+        // deliberately does not clear the cache, so it must clear it itself.
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let workspace = store.get_by_name("berlin").unwrap();
+        std::fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+        let state = bare_state(temp.path());
+        let generation_before = {
+            let mut guard = state.lock().unwrap();
+            guard.git_facts.mark_dirty("berlin");
+            guard.attention_cache = Some(CachedAttention {
+                derived_at_ms: crate::agent_status::now_ms(),
+                queue: marked_queue("stale, before the refresh"),
+            });
+            guard.attention_generation
+        };
+
+        refresh_git_facts_and_broadcast(&state, 60_000, "test refresh failed");
+
+        let guard = state.lock().unwrap();
+        assert!(
+            guard.git_facts.get("berlin").is_some(),
+            "facts were refreshed"
+        );
+        assert!(
+            guard.attention_cache.is_none(),
+            "the queue derived before the refresh is still being served"
+        );
+        assert_ne!(guard.attention_generation, generation_before);
+    }
+
+    #[test]
+    fn unrelated_inventory_changed_events_do_not_drop_the_attention_cache() {
+        // Adding or removing a workspace broadcasts the same event the
+        // refresher does. Only the refresher knows facts moved, so the event
+        // itself must keep leaving the cache alone.
+        let temp = tempfile::tempdir().unwrap();
+        let state = bare_state(temp.path());
+        let generation_before = {
+            let mut guard = state.lock().unwrap();
+            guard.attention_cache = Some(CachedAttention {
+                derived_at_ms: crate::agent_status::now_ms(),
+                queue: marked_queue("survives unrelated inventory traffic"),
+            });
+            guard.attention_generation
+        };
+
+        broadcast(
+            &mut state.lock().unwrap(),
+            ArchcarEvent::InventoryChanged {
+                scope: "workspace".to_owned(),
+                workspace: Some("some-workspace".to_owned()),
+                repository: None,
+            },
+        );
+
+        let guard = state.lock().unwrap();
+        let cached = guard.attention_cache.as_ref().expect("cache was dropped");
+        assert_eq!(
+            cached.queue.items[0].headline,
+            "survives unrelated inventory traffic"
+        );
+        assert_eq!(guard.attention_generation, generation_before);
     }
 
     #[test]
