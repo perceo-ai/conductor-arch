@@ -1374,6 +1374,31 @@ pub struct BranchPushState {
     pub has_upstream: bool,
 }
 
+/// The git-derived half of a workspace summary.
+///
+/// Deriving these costs roughly six git subprocesses per workspace
+/// (`rev-parse @{u}`, two `rev-list` counts, `merge-base`, `diff --shortstat`,
+/// `status --short`), which is the dominant cost of answering
+/// `list_workspaces`. They are therefore cached in memory and persisted here,
+/// so a daemon that has just started can report the last known truth rather
+/// than zeros while it recomputes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceGitFacts {
+    pub changed_files: usize,
+    pub diff_additions: usize,
+    pub diff_deletions: usize,
+    /// `None` when the push state could not be read at all.
+    ///
+    /// Distinct from a workspace with no upstream, which reports
+    /// `Some(BranchPushState { has_upstream: false, .. })`. Deriving inline
+    /// hid the ahead/behind indicator when the git call failed, and folding
+    /// the error into zeros would have shown a confident "0 ahead, 0 behind"
+    /// instead.
+    pub push: Option<BranchPushState>,
+    /// When these were derived, so a refresher can age them out.
+    pub computed_at_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecksSummary {
     pub workspace: Workspace,
@@ -1926,7 +1951,24 @@ impl WorkspaceStore {
         Ok(count as usize)
     }
 
+    /// Workspace status lines, deriving each active workspace's git facts.
+    ///
+    /// That derivation is six git subprocesses per workspace, so the daemon
+    /// uses [`Self::list_status_without_git`] and fills the git fields from its
+    /// cache instead. This variant remains for one-shot callers (the CLI), for
+    /// which paying once is fine.
     pub fn list_status(&self) -> Result<Vec<WorkspaceStatusLine>> {
+        self.list_status_inner(true)
+    }
+
+    /// Workspace status lines with the git-derived fields left empty.
+    ///
+    /// Everything here is a database read. The caller supplies the git facts.
+    pub fn list_status_without_git(&self) -> Result<Vec<WorkspaceStatusLine>> {
+        self.list_status_inner(false)
+    }
+
+    fn list_status_inner(&self, derive_git: bool) -> Result<Vec<WorkspaceStatusLine>> {
         let workspaces = self.list()?;
         let mut lines = Vec::with_capacity(workspaces.len());
         for workspace in workspaces {
@@ -1943,12 +1985,12 @@ impl WorkspaceStore {
             )?;
             let active_sessions =
                 self.count_running_processes(workspace.id, ProcessKind::Session)?;
-            let branch_push_state = if workspace.status == "active" {
+            let branch_push_state = if derive_git && workspace.status == "active" {
                 self.branch_push_state(&workspace.name).ok()
             } else {
                 None
             };
-            let (diff_additions, diff_deletions) = if workspace.status == "active" {
+            let (diff_additions, diff_deletions) = if derive_git && workspace.status == "active" {
                 self.diff_stats_against_base(&workspace.name)
                     .unwrap_or_default()
             } else {
@@ -2675,6 +2717,23 @@ impl WorkspaceStore {
     }
 
     fn delete_workspace_rows(&self, workspace_id: i64) -> Result<()> {
+        // Drop the cached projections for these threads before the rows go.
+        // `chat_threads.id` is INTEGER PRIMARY KEY without AUTOINCREMENT, so
+        // SQLite reuses ids: a new chat can be handed a deleted chat's id, and
+        // a cache that still held it would render the deleted conversation's
+        // timeline into the new one.
+        let doomed_threads: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM chat_threads WHERE workspace_id = ?1")
+            .and_then(|mut stmt| {
+                stmt.query_map([workspace_id], |row| row.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap_or_default();
+        for thread_id in &doomed_threads {
+            crate::projection_cache::cache_for(&self.db_path).invalidate(*thread_id);
+        }
+
         self.conn.execute(
             "DELETE FROM chat_events
              WHERE process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
@@ -2756,6 +2815,15 @@ impl WorkspaceStore {
             "DELETE FROM workspace_ui_state WHERE workspace_id = ?1",
             [workspace_id],
         )?;
+        // Again, now the rows are gone. A projection pull that started before
+        // the first invalidation read rows that still existed, and would
+        // otherwise install them after it — and `chat_threads.id` gets reused,
+        // so that entry would surface in whichever new chat inherits the id.
+        // The cache's generation guard makes the late admit a no-op, and this
+        // covers a pull that completed in between.
+        for thread_id in &doomed_threads {
+            crate::projection_cache::cache_for(&self.db_path).invalidate(*thread_id);
+        }
         self.conn.execute(
             "DELETE FROM pull_requests WHERE workspace_id = ?1",
             [workspace_id],
@@ -4066,6 +4134,111 @@ impl WorkspaceStore {
         let path = Self::resolve_in_workspace(&workspace.path, relative)?;
         fs::write(&path, content).with_context(|| format!("write {}", path.display()))?;
         Ok(())
+    }
+
+    /// Derive a workspace's git facts, paying the six subprocesses once.
+    ///
+    /// An archived workspace has no live worktree to inspect, so it reports
+    /// zeros rather than failing.
+    pub fn derive_git_facts(&self, name: &str, now_ms: u64) -> Result<WorkspaceGitFacts> {
+        let workspace = self.get_by_name(name)?;
+        if workspace.status != "active" {
+            return Ok(WorkspaceGitFacts {
+                changed_files: 0,
+                diff_additions: 0,
+                diff_deletions: 0,
+                push: None,
+                computed_at_ms: now_ms,
+            });
+        }
+        let push = self.branch_push_state(name).ok();
+        let (diff_additions, diff_deletions) =
+            self.diff_stats_against_base(name).unwrap_or_default();
+        let changed_files = self
+            .changed_files(name)
+            .map(|files| files.len())
+            .unwrap_or(0);
+        Ok(WorkspaceGitFacts {
+            changed_files,
+            diff_additions,
+            diff_deletions,
+            push,
+            computed_at_ms: now_ms,
+        })
+    }
+
+    /// Persist a workspace's git-derived summary fields.
+    pub fn store_git_facts(&self, name: &str, facts: &WorkspaceGitFacts) -> Result<()> {
+        let workspace = self.get_by_name(name)?;
+        self.conn.execute(
+            "UPDATE workspaces SET \
+               git_changed_files = ?2, \
+               git_diff_additions = ?3, \
+               git_diff_deletions = ?4, \
+               git_branch_ahead = ?5, \
+               git_branch_behind = ?6, \
+               git_has_upstream = ?7, \
+               git_facts_computed_at_ms = ?8 \
+             WHERE id = ?1",
+            rusqlite::params![
+                workspace.id,
+                facts.changed_files as i64,
+                facts.diff_additions as i64,
+                facts.diff_deletions as i64,
+                facts.push.as_ref().map(|p| p.ahead as i64),
+                facts.push.as_ref().map(|p| p.behind as i64),
+                facts.push.as_ref().map(|p| i64::from(p.has_upstream)),
+                facts.computed_at_ms as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The last persisted git facts, or `None` when none were ever derived.
+    ///
+    /// `None` and all-zeros are different answers and must stay that way: a
+    /// workspace whose facts have never been computed is unknown, while one
+    /// computed as zero really has no changes.
+    pub fn stored_git_facts(&self, name: &str) -> Result<Option<WorkspaceGitFacts>> {
+        let workspace = self.get_by_name(name)?;
+        let row = self.conn.query_row(
+            "SELECT git_changed_files, git_diff_additions, git_diff_deletions, \
+                    git_branch_ahead, git_branch_behind, git_has_upstream, \
+                    git_facts_computed_at_ms \
+             FROM workspaces WHERE id = ?1",
+            [workspace.id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                ))
+            },
+        )?;
+        let (changed, additions, deletions, ahead, behind, upstream, computed_at) = row;
+        // The computed-at stamp is what marks the set as present: without it
+        // there is nothing to age, so the row is treated as never derived.
+        let Some(computed_at_ms) = computed_at else {
+            return Ok(None);
+        };
+        // `has_upstream` null means the push state was never readable, which is
+        // what keeps "could not read" distinct from "no upstream".
+        let push = upstream.map(|flag| BranchPushState {
+            ahead: ahead.unwrap_or(0).max(0) as usize,
+            behind: behind.unwrap_or(0).max(0) as usize,
+            has_upstream: flag != 0,
+        });
+        Ok(Some(WorkspaceGitFacts {
+            changed_files: changed.unwrap_or(0).max(0) as usize,
+            diff_additions: additions.unwrap_or(0).max(0) as usize,
+            diff_deletions: deletions.unwrap_or(0).max(0) as usize,
+            push,
+            computed_at_ms: computed_at_ms.max(0) as u64,
+        }))
     }
 
     pub fn changed_files(&self, name: &str) -> Result<Vec<String>> {
@@ -23585,6 +23758,109 @@ general = "Keep changes focused."
         assert_eq!(model.open_todos, 1);
         assert_eq!(model.open_review_comments, 1);
         assert_eq!(model.status.as_str(), "active");
+    }
+
+    fn git_facts_fixture(temp: &tempfile::TempDir) -> (std::path::PathBuf, WorkspaceStore) {
+        let repo_path = init_repo(temp.path().join("demo"));
+        let db_path = temp.path().join("state.db");
+        RepositoryStore::open(&db_path)
+            .unwrap()
+            .add(AddRepository {
+                name: Some("demo".to_owned()),
+                root_path: repo_path,
+                default_branch: Some("main".to_owned()),
+                remote_name: "origin".to_owned(),
+                workspace_parent_path: Some(temp.path().join("workspaces/demo")),
+            })
+            .unwrap();
+        let store = WorkspaceStore::open(&db_path).unwrap();
+        store
+            .create(CreateWorkspace {
+                repository_name: "demo".to_owned(),
+                name: "berlin".to_owned(),
+                branch: "lc/berlin".to_owned(),
+                base_ref: Some("main".to_owned()),
+            })
+            .unwrap();
+        (db_path, store)
+    }
+
+    fn sample_git_facts() -> WorkspaceGitFacts {
+        WorkspaceGitFacts {
+            changed_files: 3,
+            diff_additions: 42,
+            diff_deletions: 7,
+            push: Some(BranchPushState {
+                ahead: 2,
+                behind: 1,
+                has_upstream: true,
+            }),
+            computed_at_ms: 1_700_000_000_000,
+        }
+    }
+
+    #[test]
+    fn deleting_a_workspace_drops_its_threads_from_the_projection_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db_path, store) = git_facts_fixture(&temp);
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread(&workspace.name, "claude", "Claude", None)
+            .unwrap();
+        let cache = crate::projection_cache::cache_for(&db_path);
+        // Pretend the daemon has projected this chat at least once.
+        cache.projection(thread.id, || Ok(Vec::new())).unwrap();
+        assert!(cache.holds(thread.id));
+
+        store.delete("berlin", true, false).unwrap();
+
+        // chat_threads.id is INTEGER PRIMARY KEY without AUTOINCREMENT, so
+        // SQLite reuses ids. A retained entry here would be served into the
+        // next chat that happens to be given this id — one conversation's
+        // transcript appearing inside another.
+        assert!(!cache.holds(thread.id));
+    }
+
+    #[test]
+    fn stored_git_facts_are_absent_before_anything_is_computed() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_db_path, store) = git_facts_fixture(&temp);
+
+        // Absent and "computed as zero" must stay distinguishable: a cold cache
+        // that serves zeros would tell the sidebar every workspace is clean.
+        assert_eq!(store.stored_git_facts("berlin").unwrap(), None);
+    }
+
+    #[test]
+    fn stored_git_facts_round_trip_every_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_db_path, store) = git_facts_fixture(&temp);
+
+        store
+            .store_git_facts("berlin", &sample_git_facts())
+            .unwrap();
+
+        assert_eq!(
+            store.stored_git_facts("berlin").unwrap(),
+            Some(sample_git_facts())
+        );
+    }
+
+    #[test]
+    fn stored_git_facts_survive_reopening_the_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db_path, store) = git_facts_fixture(&temp);
+        store
+            .store_git_facts("berlin", &sample_git_facts())
+            .unwrap();
+        drop(store);
+
+        let reopened = WorkspaceStore::open(&db_path).unwrap();
+
+        assert_eq!(
+            reopened.stored_git_facts("berlin").unwrap(),
+            Some(sample_git_facts())
+        );
     }
 
     #[test]

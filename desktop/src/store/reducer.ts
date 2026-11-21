@@ -17,38 +17,6 @@ import { attentionStore } from "./attention";
 import { daemonChangedSince, daemonEpoch } from "./daemonEpoch";
 import { noteTurnCompleted, observeChatGeneration } from "./turnSound";
 
-async function refreshWorkspaceInventoryAndChats() {
-  try {
-    await workspacesStore.refresh();
-    const activeWorkspaces = workspacesStore.state.order.filter(
-      (name) => workspacesStore.row(name)?.status !== "archived",
-    );
-    await threadsStore.refreshMany(activeWorkspaces);
-  } catch {
-    // transient; the next event or focus refresh retries
-  }
-}
-
-async function refreshThreadWorkspace(threadId: number) {
-  const workspace = threadsStore.workspaceForThread(threadId);
-  if (!workspace) {
-    await refreshWorkspaceInventoryAndChats();
-    return;
-  }
-  try {
-    await Promise.all([workspacesStore.refresh(), threadsStore.refresh(workspace)]);
-  } catch {
-    // transient; the next event or focus refresh retries
-  }
-}
-
-async function refreshThreadWorkspaceByName(workspace: string) {
-  try {
-    await Promise.all([workspacesStore.refresh(), threadsStore.refresh(workspace)]);
-  } catch {
-    // transient; the next event or focus refresh retries
-  }
-}
 
 async function refreshTerminalScreen(sessionId: number) {
   try {
@@ -132,14 +100,103 @@ async function refreshThreadSnapshot(threadId: number) {
 // A streaming turn emits `session_messages_updated` once per provider event —
 // per token — and each one used to cost a full snapshot + projection pull, so
 // the renderer spent an active turn re-reading the whole thread and got slower
-// the longer the chat ran. Ten pulls a second is still far past the rate a
+// the longer the chat ran. Four pulls a second is still far past the rate a
 // human reads at, and turn boundaries flush immediately.
-const CHAT_REFRESH_INTERVAL_MS = 100;
+export const CHAT_REFRESH_INTERVAL_MS = 250;
+
+/**
+ * How long a burst of lifecycle events is given to finish before the workspace
+ * inventory is re-read.
+ *
+ * `list_workspaces` is the most expensive call the renderer makes: the daemon
+ * answers it with roughly six git subprocesses per active workspace, measured
+ * at ~450ms each and 5s across ten workspaces
+ * (`docs/evidence/2026-11-19-concurrent-chat-perf-baseline.md`). One agent turn
+ * emits a spawn, a start, a ready, interactions and a completion, and six
+ * different event types used to answer each of those with a full inventory
+ * re-read, so a busy minute across ten workspaces kept the daemon permanently
+ * spawning git. Trailing-only, matching iOS's `refreshQuietWindow`.
+ */
+const INVENTORY_REFRESH_INTERVAL_MS = 250;
 
 const chatRefresh = createRefreshCoalescer<number>(
   (threadId) => void refreshThreadSnapshot(threadId),
   { intervalMs: CHAT_REFRESH_INTERVAL_MS },
 );
+
+// One coalescer key, because `list_workspaces` is global: one call serves every
+// workspace, and it is the expensive half. Chat lists are per workspace and
+// cheap (a database read), so which of them to pull is accumulated alongside
+// and drained by the same run.
+//
+// Keying the queue by workspace name was the first attempt and was wrong twice
+// over: ten workspaces meant ten full inventory reads, and two independent keys
+// gave no ordering between the workspace list and the chat lists that are
+// chosen from it — so after a rename the chat lists were pulled for the old
+// name.
+const INVENTORY_KEY = "\u0000workspaces";
+
+/** Whose chat lists the next inventory run owes. `"all"` wins over any set. */
+let owedChatLists: Set<string> | "all" = new Set();
+
+function oweChatList(workspace: string | undefined) {
+  if (owedChatLists === "all") return;
+  if (workspace == null) {
+    owedChatLists = "all";
+    return;
+  }
+  owedChatLists.add(workspace);
+}
+
+const refreshQueue = createRefreshCoalescer<string>(
+  () => void runInventoryRefresh(),
+  { intervalMs: INVENTORY_REFRESH_INTERVAL_MS, leading: false },
+);
+
+/**
+ * The workspace list first, awaited, then the chat lists owed.
+ *
+ * The order is load-bearing: the chat lists to pull are read from
+ * `workspacesStore.state.order`, so doing them concurrently asks for whatever
+ * names the previous inventory had.
+ */
+async function runInventoryRefresh() {
+  const owed = owedChatLists;
+  owedChatLists = new Set();
+  await workspacesStore.refresh().catch(() => {});
+  const workspaces =
+    owed === "all"
+      ? workspacesStore.state.order.filter(
+          (name) => workspacesStore.row(name)?.status !== "archived",
+        )
+      : [...owed];
+  await threadsStore.refreshMany(workspaces);
+}
+
+/** Re-read the workspace list and every chat list once the burst settles. */
+function requestInventoryRefresh(): void {
+  oweChatList(undefined);
+  refreshQueue.request(INVENTORY_KEY);
+}
+
+/** Re-read the workspace list, plus one workspace's chat list. */
+function requestWorkspaceRefresh(workspace: string | undefined): void {
+  oweChatList(workspace);
+  refreshQueue.request(INVENTORY_KEY);
+}
+
+/**
+ * Re-read now: the end of a turn is the state the user reads, so it must not
+ * wait out an interval.
+ *
+ * Only the named workspace's chat list is owed when it is known. A turn
+ * boundary is the hottest lifecycle event there is, and pulling every
+ * workspace's chat list on each one would undo the saving this exists for.
+ */
+function flushInventoryRefresh(workspace: string | undefined): void {
+  oweChatList(workspace);
+  refreshQueue.flush(INVENTORY_KEY);
+}
 
 /** Force a fresh snapshot+projection pull (used when a chat tab is opened). */
 export function loadThread(threadId: number): void {
@@ -224,8 +281,10 @@ export function applyEvent(event: ArchcarEvent) {
     }
 
     case "chat_queue_updated":
+      // No inventory refresh: a queued input changes the chat, not the
+      // workspace list. iOS leaves this event out of
+      // `WorkspacesStore.invalidates(_:)` for the same reason.
       chatRefresh.request((event as { thread_id: number }).thread_id);
-      void refreshThreadWorkspace((event as { thread_id: number }).thread_id);
       break;
 
     case "session_started": {
@@ -268,7 +327,7 @@ export function applyEvent(event: ArchcarEvent) {
         // would otherwise be missed.
         observeChatGeneration(e.thread_id, { canFinish: false });
       }
-      void refreshThreadWorkspace(e.thread_id);
+      requestWorkspaceRefresh(threadsStore.workspaceForThread(e.thread_id) ?? e.workspace);
       break;
     }
 
@@ -277,7 +336,7 @@ export function applyEvent(event: ArchcarEvent) {
       for (const threadId of chatStore.markSessionExited((event as { session_id: number }).session_id)) {
         observeChatGeneration(threadId);
       }
-      void refreshWorkspaceInventoryAndChats();
+      requestInventoryRefresh();
       break;
     }
 
@@ -319,7 +378,7 @@ export function applyEvent(event: ArchcarEvent) {
       // Pull the projection too: whether a subagent outlives this turn is only
       // known from it, and the sound waits on that answer.
       chatRefresh.request(e.thread_id);
-      void refreshThreadWorkspace(e.thread_id);
+      requestWorkspaceRefresh(threadsStore.workspaceForThread(e.thread_id));
       break;
     }
 
@@ -328,7 +387,7 @@ export function applyEvent(event: ArchcarEvent) {
       noteTurnCompleted(e.thread_id);
       // The end of a turn is the state the user reads; never sit on it.
       chatRefresh.flush(e.thread_id);
-      void refreshThreadWorkspace(e.thread_id);
+      flushInventoryRefresh(threadsStore.workspaceForThread(e.thread_id));
       break;
     }
 
@@ -339,7 +398,7 @@ export function applyEvent(event: ArchcarEvent) {
     }
 
     case "background_task_updated": {
-      void refreshWorkspaceInventoryAndChats();
+      requestInventoryRefresh();
       break;
     }
 
@@ -351,7 +410,7 @@ export function applyEvent(event: ArchcarEvent) {
     case "task_updated": {
       // Task counts feed the sidebar rows and the Summary tab badge.
       intelStore.refreshWorkspaceIntel((event as { workspace: string }).workspace);
-      void workspacesStore.refresh().catch(() => {});
+      requestInventoryRefresh();
       break;
     }
 
@@ -362,24 +421,26 @@ export function applyEvent(event: ArchcarEvent) {
       // blank.
       const e = event as { old_name: string; new_name: string };
       nav.renameWorkspace(e.old_name, e.new_name);
-      void refreshWorkspaceInventoryAndChats();
+      requestInventoryRefresh();
       break;
     }
 
     case "chat_thread_renamed": {
       // Retitled from agent metadata; the tab strip reads the thread list.
-      void refreshThreadWorkspace((event as { thread_id: number }).thread_id);
+      requestWorkspaceRefresh(
+        threadsStore.workspaceForThread((event as { thread_id: number }).thread_id),
+      );
       break;
     }
 
     case "inventory_changed": {
       const e = event as { scope: string; workspace?: string };
       if (e.scope === "repositories") {
-        void refreshWorkspaceInventoryAndChats();
+        requestInventoryRefresh();
       } else if (e.workspace) {
-        void refreshThreadWorkspaceByName(e.workspace);
+        requestWorkspaceRefresh(e.workspace);
       } else {
-        void refreshWorkspaceInventoryAndChats();
+        requestInventoryRefresh();
       }
       break;
     }
