@@ -110,3 +110,68 @@ Phase 1 combined, and it needs no protocol change. The projection cache remains
 worth building, because 10 ticks a second per thread across many threads still
 adds up and the cost grows with chat length, but it is the second priority, not
 the first.
+
+# After Phase 1 (2026-11-19)
+
+Same harness, same machine, release binaries, minimum of fifteen samples.
+
+## Inventory refresh (`list_workspaces`)
+
+| active workspaces | before | after | git spawns before | after |
+|---|---|---|---|---|
+| 1 | 321ms | 6.3ms | 6 | 0 |
+| 5 | 2240ms | 5.4ms | 30 | 0 |
+| 10 | 5019ms | **2.2ms** | 60 | **0** |
+
+`get_inventory_snapshot` at ten workspaces: 5136ms and 61 git subprocesses
+before, **41.9ms and 1** after. The response is byte-identical to the previous
+inline-git version (3906 bytes at ten workspaces, 4222 for the snapshot) — an
+earlier attempt collapsed `branch_push_state` to `None` when a workspace had no
+upstream, which silently turned `branch_ahead: 0` into an absent field and
+showed up as a 350-byte drop.
+
+The remaining single git spawn on the snapshot path is the first, cold
+derivation for a workspace nothing has measured yet.
+
+## Chat refresh, against transcript length
+
+`get_chat_projection`, cold (cache miss) and warm (cache hit), after both the
+projection cache and the quadratic fix:
+
+| rows | before (no cache) | cold | warm | bytes |
+|---|---|---|---|---|
+| 221 | 3.9ms | 18.7ms | 3.1ms | 37kB |
+| 504 | 8.0ms | 89.1ms | 4.5ms | 84kB |
+| 1006 | 12.7ms | 266.1ms | 9.6ms | 170kB |
+| 2008 | 27.9ms | 285.7ms | 25.2ms | 345kB |
+| 4008 | 181.2ms | 620.9ms | **65.7ms** | 701kB |
+
+Two honest caveats on this table.
+
+**The cold column is worse than the "before" column**, and that is expected
+rather than a regression: a cold pull now also pays to parse and retain the
+records, and in this benchmark every size is a thread the daemon has never
+projected. In production a thread goes cold only on daemon start or eviction,
+and the warm column is what a streaming turn actually pays.
+
+**The cache was not where most of the win came from.** It moved 4000 rows from
+181ms to 133ms — the SQLite read and the JSON parse were not the dominant cost.
+That isolated the rest as CPU inside the projection and made the suspected
+quadratic provable: `render_provider_event_projection` scanned its accumulated
+background-card folds linearly for every event. Replacing that scan with a set
+took the same pull from 133ms to 65.7ms. So the earlier withdrawal of the
+superlinearity claim was itself wrong — the claim was right, the evidence for
+it was not, and removing the I/O is what made it measurable.
+
+The projection is still mildly superlinear (4000 rows costs about 15x what 500
+does, where linear would be 8x), so the plan's flatness bar was not met. The
+absolute figures are now low enough that this is a follow-up rather than a
+blocker.
+
+## What is still unmeasured
+
+The projection delta cursor was not built, so a streaming 4000-row thread still
+ships about 700kB per pull — roughly 2.7MB/s at four pulls a second, per
+thread. That is the clearest remaining cost and the reason to do the cursor
+work, but it is a protocol change across the daemon, the desktop and iOS and
+belongs in its own change.

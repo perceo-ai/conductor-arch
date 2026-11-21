@@ -2712,6 +2712,23 @@ impl WorkspaceStore {
     }
 
     fn delete_workspace_rows(&self, workspace_id: i64) -> Result<()> {
+        // Drop the cached projections for these threads before the rows go.
+        // `chat_threads.id` is INTEGER PRIMARY KEY without AUTOINCREMENT, so
+        // SQLite reuses ids: a new chat can be handed a deleted chat's id, and
+        // a cache that still held it would render the deleted conversation's
+        // timeline into the new one.
+        let doomed_threads: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM chat_threads WHERE workspace_id = ?1")
+            .and_then(|mut stmt| {
+                stmt.query_map([workspace_id], |row| row.get::<_, i64>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap_or_default();
+        for thread_id in doomed_threads {
+            crate::projection_cache::cache_for(&self.db_path).invalidate(thread_id);
+        }
+
         self.conn.execute(
             "DELETE FROM chat_events
              WHERE process_id IN (SELECT id FROM processes WHERE workspace_id = ?1)",
@@ -23763,6 +23780,28 @@ general = "Keep changes focused."
             has_upstream: true,
             computed_at_ms: 1_700_000_000_000,
         }
+    }
+
+    #[test]
+    fn deleting_a_workspace_drops_its_threads_from_the_projection_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let (db_path, store) = git_facts_fixture(&temp);
+        let workspace = store.get_by_name("berlin").unwrap();
+        let thread = store
+            .create_chat_thread(&workspace.name, "claude", "Claude", None)
+            .unwrap();
+        let cache = crate::projection_cache::cache_for(&db_path);
+        // Pretend the daemon has projected this chat at least once.
+        cache.projection(thread.id, || Ok(Vec::new())).unwrap();
+        assert!(cache.holds(thread.id));
+
+        store.delete("berlin", true, false).unwrap();
+
+        // chat_threads.id is INTEGER PRIMARY KEY without AUTOINCREMENT, so
+        // SQLite reuses ids. A retained entry here would be served into the
+        // next chat that happens to be given this id — one conversation's
+        // transcript appearing inside another.
+        assert!(!cache.holds(thread.id));
     }
 
     #[test]

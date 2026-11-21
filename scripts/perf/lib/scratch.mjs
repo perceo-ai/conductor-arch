@@ -70,7 +70,20 @@ export class Scratch {
 
   /** Fresh scratch tree, a seed repository with one commit, and a git shim. */
   reset() {
-    rmSync(this.root, { recursive: true, force: true });
+    // A daemon left over from an earlier run keeps writing into this tree, and
+    // a directory being written to while it is removed fails with ENOTEMPTY on
+    // macOS rather than retrying. Stop whoever holds the socket first, then
+    // remove with a few attempts.
+    this.stop();
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        rmSync(this.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        break;
+      } catch (err) {
+        if (attempt === 4) throw err;
+        spawnSync("sleep", ["1"]);
+      }
+    }
     for (const dir of ["home", "data", "state", "ws", "bin"]) {
       mkdirSync(join(this.root, dir), { recursive: true });
     }
@@ -205,8 +218,14 @@ export class Scratch {
   /** `archductor <args>` against this scratch daemon. */
   cliRun(args) {
     const res = spawnSync(this.cli, args, { env: this.env(), encoding: "utf8" });
+    if (res.error) {
+      throw new Error(`could not launch ${this.cli}: ${res.error.message}`);
+    }
     if (res.status !== 0) {
-      throw new Error(`archductor ${args.join(" ")} failed:\n${res.stdout}\n${res.stderr}`);
+      throw new Error(
+        `archductor ${args.join(" ")} exited ${res.status}` +
+          `\nstdout: ${res.stdout ?? "(none)"}\nstderr: ${res.stderr ?? "(none)"}`,
+      );
     }
     return res.stdout;
   }

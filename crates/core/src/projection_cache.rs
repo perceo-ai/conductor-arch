@@ -17,7 +17,7 @@
 //! items would mean reimplementing those merge rules beside the real ones.
 //! Correctness first; the saving being banked here is the read and the parse.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -52,6 +52,16 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<ProjectionCache>>> {
 
 /// The projection cache for one database, creating it on first use.
 pub fn cache_for(db_path: &Path) -> Arc<ProjectionCache> {
+    // Canonicalize, so a reader reaching the database through /var and a writer
+    // through /private/var (the same place, on macOS) share one entry. The two
+    // agreeing is the invariant the whole cache rests on, and splitting it
+    // would freeze a streaming chat at its first pull with nothing to show why.
+    // Before the file exists there is nothing to resolve, so the raw path
+    // stands in.
+    let db_path = db_path
+        .canonicalize()
+        .unwrap_or_else(|_| db_path.to_path_buf());
+    let db_path = db_path.as_path();
     let Ok(mut registry) = registry().lock() else {
         // A poisoned registry must not take the daemon down; an unshared cache
         // is merely slower, because nothing will fold records into it.
@@ -65,7 +75,14 @@ pub fn cache_for(db_path: &Path) -> Arc<ProjectionCache> {
 
 #[derive(Debug)]
 struct Entry {
-    records: Vec<ProviderEventRecord>,
+    /// Behind `Arc` so handing the set out is a pointer bump per record rather
+    /// than a deep clone of every parsed JSON value. The same mutex serialises
+    /// every session thread's `note_record`, so cloning megabytes under it put
+    /// the write path for every streaming agent behind the readers.
+    records: Vec<Arc<ProviderEventRecord>>,
+    /// `identity_key` → position in `records`. A linear scan per streamed delta
+    /// was the same quadratic shape as the one removed from the projection.
+    index_by_identity: HashMap<String, usize>,
     bytes: usize,
     /// Bumped on every access, for least-recently-used eviction.
     touched: u64,
@@ -77,7 +94,7 @@ struct Inner {
     clock: u64,
     /// Threads whose retained set exceeded the byte budget. They are not
     /// re-admitted, so one enormous chat cannot thrash the cache.
-    refused: HashMap<i64, ()>,
+    refused: HashSet<i64>,
 }
 
 #[derive(Debug)]
@@ -121,7 +138,9 @@ impl ProjectionCache {
         load: impl FnOnce() -> Result<Vec<ProviderEventRecord>>,
     ) -> Result<ProviderProjection> {
         if let Some(records) = self.retained(thread_id) {
-            return Ok(provider_projection_from_records(&records));
+            let owned: Vec<ProviderEventRecord> =
+                records.iter().map(|record| (**record).clone()).collect();
+            return Ok(provider_projection_from_records(&owned));
         }
         let records = load()?;
         let projection = provider_projection_from_records(&records);
@@ -149,23 +168,24 @@ impl ProjectionCache {
             return;
         };
         entry.touched = clock;
-        match entry
-            .records
-            .iter()
-            .position(|held| held.identity_key == record.identity_key)
-        {
+        match entry.index_by_identity.get(&record.identity_key).copied() {
             Some(index) => {
                 entry.bytes = entry
                     .bytes
                     .saturating_sub(record_bytes(&entry.records[index]));
-                entry.records[index] = record.clone();
+                entry.records[index] = Arc::new(record.clone());
             }
-            None => entry.records.push(record.clone()),
+            None => {
+                entry
+                    .index_by_identity
+                    .insert(record.identity_key.clone(), entry.records.len());
+                entry.records.push(Arc::new(record.clone()));
+            }
         }
         entry.bytes += record_bytes(record);
         if entry.bytes > budget {
             inner.threads.remove(&thread_id);
-            inner.refused.insert(thread_id, ());
+            inner.refused.insert(thread_id);
         }
     }
 
@@ -181,14 +201,6 @@ impl ProjectionCache {
         }
     }
 
-    /// Drop everything. For a daemon whose database was replaced underneath it.
-    pub fn clear(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.threads.clear();
-            inner.refused.clear();
-        }
-    }
-
     pub fn holds(&self, thread_id: i64) -> bool {
         self.inner
             .lock()
@@ -196,7 +208,7 @@ impl ProjectionCache {
             .unwrap_or(false)
     }
 
-    fn retained(&self, thread_id: i64) -> Option<Vec<ProviderEventRecord>> {
+    fn retained(&self, thread_id: i64) -> Option<Vec<Arc<ProviderEventRecord>>> {
         let mut inner = self.inner.lock().ok()?;
         inner.clock += 1;
         let clock = inner.clock;
@@ -209,20 +221,26 @@ impl ProjectionCache {
         let Ok(mut inner) = self.inner.lock() else {
             return;
         };
-        if inner.refused.contains_key(&thread_id) {
+        if inner.refused.contains(&thread_id) {
             return;
         }
         let bytes: usize = records.iter().map(record_bytes).sum();
         if bytes > self.byte_budget {
-            inner.refused.insert(thread_id, ());
+            inner.refused.insert(thread_id);
             return;
         }
         inner.clock += 1;
         let touched = inner.clock;
+        let index_by_identity = records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (record.identity_key.clone(), index))
+            .collect();
         inner.threads.insert(
             thread_id,
             Entry {
-                records,
+                records: records.into_iter().map(Arc::new).collect(),
+                index_by_identity,
                 bytes,
                 touched,
             },

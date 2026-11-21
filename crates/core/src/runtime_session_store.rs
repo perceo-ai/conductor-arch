@@ -14,6 +14,7 @@ use crate::workspace::{SessionKind, WorkspaceStore};
 #[derive(Debug, Clone)]
 pub struct RuntimeSessionStore {
     db_path: PathBuf,
+    projections: std::sync::Arc<crate::projection_cache::ProjectionCache>,
     chat_store: ChatStore,
     provider_event_store: ProviderEventStore,
     provider_input_store: ProviderInputStore,
@@ -22,7 +23,9 @@ pub struct RuntimeSessionStore {
 
 impl RuntimeSessionStore {
     pub fn new(db_path: PathBuf) -> Self {
+        let projections = crate::projection_cache::cache_for(&db_path);
         Self {
+            projections,
             chat_store: ChatStore::new(db_path.clone()),
             provider_event_store: ProviderEventStore::new(db_path.clone()),
             provider_input_store: ProviderInputStore::new(db_path.clone()),
@@ -105,7 +108,11 @@ impl RuntimeSessionStore {
         // the next pull to re-read the whole thread. This is the single funnel
         // for session-written events; the other writer
         // (interrupt_active_turns_for_process) invalidates instead.
-        crate::projection_cache::cache_for(&self.db_path).note_record(&record);
+        //
+        // The handle is resolved once at construction: this is the hottest
+        // write path in the daemon, and looking it up here would take a
+        // process-global lock for every streamed provider event.
+        self.projections.note_record(&record);
         Ok(record)
     }
 

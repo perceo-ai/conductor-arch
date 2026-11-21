@@ -128,3 +128,61 @@ describe("chat refresh interval", () => {
     expect(CHAT_REFRESH_INTERVAL_MS).toBe(250);
   });
 });
+
+describe("applyEvent refresh ordering and scope", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  function sentTypes() {
+    return api.request.mock.calls.map(([req]) => (req as { type: string }).type);
+  }
+
+  it("refreshes the workspace list before the chat lists that read it", async () => {
+    const order: string[] = [];
+    api.request.mockImplementation(async (req: { type: string }) => {
+      order.push(req.type);
+      if (req.type === "list_workspaces") {
+        return { type: "workspaces", workspaces: [] };
+      }
+      if (req.type === "list_chat_threads") return { type: "chat_threads", threads: [] };
+      return { type: "ack" };
+    });
+    const { applyEvent } = await import("./reducer");
+
+    // A rename changes which names the chat lists should be pulled for, so
+    // pulling them against a stale workspace list asks for the old name.
+    applyEvent({ type: "workspace_renamed", old_name: "berlin", new_name: "billing-fix" });
+    await vi.advanceTimersByTimeAsync(500);
+
+    const workspaces = order.indexOf("list_workspaces");
+    const threads = order.indexOf("list_chat_threads");
+    expect(workspaces).toBeGreaterThanOrEqual(0);
+    if (threads >= 0) expect(workspaces).toBeLessThan(threads);
+  });
+
+  it("refreshes only the completing workspace's chat list on a turn boundary", async () => {
+    const { applyEvent } = await import("./reducer");
+    const { threadsStore } = await import("./threads");
+    threadsStore.setThreads("berlin", [
+      { id: 2, workspace: "berlin", provider: "claude", title: "t", status: "active" } as never,
+    ]);
+
+    applyEvent({ type: "turn_completed", session_id: 11, thread_id: 2, status: "success" });
+    await vi.advanceTimersByTimeAsync(500);
+
+    const threadPulls = api.request.mock.calls
+      .map(([req]) => req as { type: string; workspace?: string })
+      .filter((req) => req.type === "list_chat_threads");
+    // One workspace, not every active one: this is the hottest lifecycle event
+    // in a change whose whole purpose is fewer calls.
+    expect(threadPulls).toHaveLength(1);
+    expect(threadPulls[0]?.workspace).toBe("berlin");
+    expect(sentTypes()).toContain("list_workspaces");
+  });
+});

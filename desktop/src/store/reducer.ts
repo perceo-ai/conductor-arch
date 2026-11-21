@@ -124,59 +124,78 @@ const chatRefresh = createRefreshCoalescer<number>(
   { intervalMs: CHAT_REFRESH_INTERVAL_MS },
 );
 
-// Coalescer keys. The workspace list is global — one `list_workspaces` serves
-// every workspace — while chat threads are per workspace. Keying both off the
-// workspace name was the first attempt and was wrong: ten workspaces meant ten
-// full inventory reads, which is the storm this is meant to stop.
+// One coalescer key, because `list_workspaces` is global: one call serves every
+// workspace, and it is the expensive half. Chat lists are per workspace and
+// cheap (a database read), so which of them to pull is accumulated alongside
+// and drained by the same run.
+//
+// Keying the queue by workspace name was the first attempt and was wrong twice
+// over: ten workspaces meant ten full inventory reads, and two independent keys
+// gave no ordering between the workspace list and the chat lists that are
+// chosen from it — so after a rename the chat lists were pulled for the old
+// name.
 const INVENTORY_KEY = "\u0000workspaces";
-const ALL_THREADS_KEY = "\u0000all-threads";
+
+/** Whose chat lists the next inventory run owes. `"all"` wins over any set. */
+let owedChatLists: Set<string> | "all" = new Set();
+
+function oweChatList(workspace: string | undefined) {
+  if (owedChatLists === "all") return;
+  if (workspace == null) {
+    owedChatLists = "all";
+    return;
+  }
+  owedChatLists.add(workspace);
+}
 
 const refreshQueue = createRefreshCoalescer<string>(
-  (key) => {
-    if (key === INVENTORY_KEY) {
-      void workspacesStore.refresh().catch(() => {});
-      return;
-    }
-    if (key === ALL_THREADS_KEY) {
-      void refreshAllWorkspaceChats();
-      return;
-    }
-    void threadsStore.refresh(key).catch(() => {});
-  },
+  () => void runInventoryRefresh(),
   { intervalMs: INVENTORY_REFRESH_INTERVAL_MS, leading: false },
 );
 
-async function refreshAllWorkspaceChats() {
-  const active = workspacesStore.state.order.filter(
-    (name) => workspacesStore.row(name)?.status !== "archived",
-  );
-  await threadsStore.refreshMany(active);
+/**
+ * The workspace list first, awaited, then the chat lists owed.
+ *
+ * The order is load-bearing: the chat lists to pull are read from
+ * `workspacesStore.state.order`, so doing them concurrently asks for whatever
+ * names the previous inventory had.
+ */
+async function runInventoryRefresh() {
+  const owed = owedChatLists;
+  owedChatLists = new Set();
+  await workspacesStore.refresh().catch(() => {});
+  const workspaces =
+    owed === "all"
+      ? workspacesStore.state.order.filter(
+          (name) => workspacesStore.row(name)?.status !== "archived",
+        )
+      : [...owed];
+  await threadsStore.refreshMany(workspaces);
 }
 
 /** Re-read the workspace list and every chat list once the burst settles. */
 function requestInventoryRefresh(): void {
+  oweChatList(undefined);
   refreshQueue.request(INVENTORY_KEY);
-  refreshQueue.request(ALL_THREADS_KEY);
+}
+
+/** Re-read the workspace list, plus one workspace's chat list. */
+function requestWorkspaceRefresh(workspace: string | undefined): void {
+  oweChatList(workspace);
+  refreshQueue.request(INVENTORY_KEY);
 }
 
 /**
- * Re-read the workspace list, plus one workspace's chat list, once the burst
- * settles. `list_chat_threads` is a database read, so it is cheap per
- * workspace; `list_workspaces` is not, which is why it is one shared key.
+ * Re-read now: the end of a turn is the state the user reads, so it must not
+ * wait out an interval.
+ *
+ * Only the named workspace's chat list is owed when it is known. A turn
+ * boundary is the hottest lifecycle event there is, and pulling every
+ * workspace's chat list on each one would undo the saving this exists for.
  */
-function requestWorkspaceRefresh(workspace: string | undefined): void {
-  refreshQueue.request(INVENTORY_KEY);
-  if (workspace == null) {
-    refreshQueue.request(ALL_THREADS_KEY);
-    return;
-  }
-  refreshQueue.request(workspace);
-}
-
-/** Re-read now: the end of a turn is the state the user reads. */
-function flushInventoryRefresh(): void {
+function flushInventoryRefresh(workspace: string | undefined): void {
+  oweChatList(workspace);
   refreshQueue.flush(INVENTORY_KEY);
-  refreshQueue.request(ALL_THREADS_KEY);
 }
 
 /** Force a fresh snapshot+projection pull (used when a chat tab is opened). */
@@ -368,7 +387,7 @@ export function applyEvent(event: ArchcarEvent) {
       noteTurnCompleted(e.thread_id);
       // The end of a turn is the state the user reads; never sit on it.
       chatRefresh.flush(e.thread_id);
-      flushInventoryRefresh();
+      flushInventoryRefresh(threadsStore.workspaceForThread(e.thread_id));
       break;
     }
 

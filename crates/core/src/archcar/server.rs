@@ -399,6 +399,7 @@ impl ArchcarServer {
         spawn_queued_input_startup_sweep(&self.state);
         spawn_background_task_supervisor(&self.state, Arc::clone(&shutdown));
         spawn_git_fact_refresher(&self.state, Arc::clone(&shutdown));
+        prime_git_facts(&self.state);
         spawn_update_check_refresher(&self.state, Arc::clone(&shutdown));
         // Kept for an in-place restart: the listener thread drops its own
         // handle on shutdown, which would close the socket before the handoff.
@@ -670,6 +671,28 @@ fn tick_background_tasks(
     Ok(advanced)
 }
 
+/// Derive every workspace's git facts once, off the request path.
+///
+/// The migration that added the persisted columns leaves them null, so on the
+/// first run after an upgrade nothing is known and `list_workspaces` would
+/// report every workspace clean. The refresher corrects that within a tick,
+/// but a client that asked in between would have been told a lie it had no
+/// reason to re-ask about.
+fn prime_git_facts(state: &Arc<Mutex<ServerState>>) {
+    let (db_path, git_facts) = {
+        let Ok(guard) = state.lock() else { return };
+        (guard.db_path.clone(), guard.git_facts.clone())
+    };
+    std::thread::spawn(move || {
+        let _in_flight = InFlight::enter();
+        if let Err(err) =
+            refresh_git_facts_once(&db_path, &git_facts, crate::agent_status::now_ms(), 0)
+        {
+            debug!(error = %err, "initial git fact derivation failed");
+        }
+    });
+}
+
 /// Keep the workspace git facts warm.
 ///
 /// Recomputes whatever an event marked dirty, plus anything older than
@@ -688,13 +711,34 @@ fn spawn_git_fact_refresher(state: &Arc<Mutex<ServerState>>, shutdown: Arc<Atomi
                 (guard.db_path.clone(), guard.git_facts.clone())
             };
             let _in_flight = InFlight::enter();
-            if let Err(err) = refresh_git_facts_once(
+            match refresh_git_facts_once(
                 &db_path,
                 &git_facts,
                 crate::agent_status::now_ms(),
                 GIT_FACT_MAX_AGE_MS,
             ) {
-                debug!(error = %err, "git fact refresh failed");
+                // Tell the clients, or nobody learns the badge moved. The
+                // desktop deliberately no longer re-reads the inventory for
+                // every streamed token, so without this the diff count would
+                // sit still for a whole turn and be stale at the moment the
+                // user reads it. It is also the only thing that corrects the
+                // zeros a freshly migrated database starts with.
+                Ok(refreshed) => {
+                    if !refreshed.is_empty() {
+                        let mut guard = state.lock().unwrap();
+                        for workspace in refreshed {
+                            broadcast(
+                                &mut guard,
+                                ArchcarEvent::InventoryChanged {
+                                    scope: "workspace".to_owned(),
+                                    workspace: Some(workspace),
+                                    repository: None,
+                                },
+                            );
+                        }
+                    }
+                }
+                Err(err) => debug!(error = %err, "git fact refresh failed"),
             }
             drop(_in_flight);
             std::thread::sleep(GIT_FACT_TICK);
@@ -6459,26 +6503,32 @@ fn workspace_summaries(
                         }
                     }
                 };
-                line.diff_additions = facts.diff_additions;
-                line.diff_deletions = facts.diff_deletions;
-                // Shape must match what deriving inline produced: `Some` for
-                // every active workspace — with `has_upstream: false` and zero
-                // counts when there is no upstream — and `None` only for
-                // archived ones. Collapsing the no-upstream case to `None`
-                // turned `branch_ahead: 0` into an absent field on the wire.
-                line.branch_push_state = (line.workspace.status == "active").then_some(
-                    crate::workspace::BranchPushState {
-                        ahead: facts.branch_ahead,
-                        behind: facts.branch_behind,
-                        has_upstream: facts.has_upstream,
-                    },
-                );
+                // Every git-derived field is gated on the workspace being
+                // active, matching what deriving inline produced. An archived
+                // workspace has no live worktree and nothing ever re-derives
+                // one, so leaving its last live numbers in place would pin a
+                // wrong diff badge on it permanently.
+                //
+                // The push state is `Some` for every active workspace — with
+                // `has_upstream: false` and zero counts when there is no
+                // upstream — and `None` only for archived ones. Collapsing the
+                // no-upstream case to `None` turned `branch_ahead: 0` into an
+                // absent field on the wire.
+                let active = line.workspace.status == "active";
+                line.diff_additions = if active { facts.diff_additions } else { 0 };
+                line.diff_deletions = if active { facts.diff_deletions } else { 0 };
+                line.branch_push_state = active.then_some(crate::workspace::BranchPushState {
+                    ahead: facts.branch_ahead,
+                    behind: facts.branch_behind,
+                    has_upstream: facts.has_upstream,
+                });
                 let tasks = task_counts
                     .get(&line.workspace.id)
                     .copied()
                     .unwrap_or_default();
                 let awaiting_input = awaiting.contains(&line.workspace.name);
-                workspace_summary_from_status_line(line, facts.changed_files, tasks, awaiting_input)
+                let changed_files = if active { facts.changed_files } else { 0 };
+                workspace_summary_from_status_line(line, changed_files, tasks, awaiting_input)
             })
             .collect())
     })
@@ -14605,6 +14655,76 @@ default = true
 
         assert_eq!(refreshed, vec!["berlin".to_owned()]);
         assert_eq!(cache.get("berlin").map(|f| f.changed_files), Some(expected));
+    }
+
+    #[test]
+    fn an_archived_workspace_reports_no_git_facts() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let cache = GitFactCache::default();
+        // Facts derived while it was live. Archiving must not leave them on
+        // screen: the old inline-git version zeroed every git field for a
+        // non-active workspace, and nothing ever re-derives an archived one.
+        cache.publish(
+            "berlin",
+            crate::workspace::WorkspaceGitFacts {
+                changed_files: 12,
+                diff_additions: 300,
+                diff_deletions: 20,
+                branch_ahead: 3,
+                branch_behind: 1,
+                has_upstream: true,
+                computed_at_ms: 100,
+            },
+        );
+        store.archive("berlin").unwrap();
+
+        let summaries = workspace_summaries(&db_path, &cache).unwrap();
+        let berlin = summaries.iter().find(|s| s.name == "berlin").unwrap();
+
+        assert_eq!(berlin.changed_files, 0);
+        assert_eq!(berlin.diff_additions, 0);
+        assert_eq!(berlin.diff_deletions, 0);
+        assert_eq!(berlin.branch_ahead, None);
+        assert_eq!(berlin.branch_behind, None);
+    }
+
+    #[test]
+    fn an_active_workspace_without_an_upstream_still_reports_zero_ahead() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let _store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let cache = GitFactCache::default();
+        cache.publish("berlin", git_facts(0, 100));
+
+        let summaries = workspace_summaries(&db_path, &cache).unwrap();
+        let berlin = summaries.iter().find(|s| s.name == "berlin").unwrap();
+
+        // Present and zero, not absent: the inline version always produced a
+        // BranchPushState for an active workspace.
+        assert_eq!(berlin.branch_ahead, Some(0));
+        assert_eq!(berlin.branch_behind, Some(0));
+    }
+
+    #[test]
+    fn the_refresher_names_the_workspaces_whose_facts_moved() {
+        let temp = tempfile::tempdir().unwrap();
+        let logs = temp.path().join("logs");
+        let db_path = temp.path().join("state.db");
+        let store = seeded_workspace_store(&db_path, &logs, temp.path());
+        let workspace = store.get_by_name("berlin").unwrap();
+        std::fs::write(workspace.path.join("notes.txt"), "new\n").unwrap();
+        let cache = GitFactCache::default();
+
+        let refreshed = refresh_git_facts_once(&db_path, &cache, 1_000, 60_000).unwrap();
+
+        // The caller broadcasts these, so a client learns the badge moved. The
+        // renderer no longer pulls the inventory per streamed token, so without
+        // a broadcast the diff badge would sit still for a whole turn.
+        assert_eq!(refreshed, vec!["berlin".to_owned()]);
     }
 
     #[test]

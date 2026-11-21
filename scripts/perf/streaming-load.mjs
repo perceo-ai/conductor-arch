@@ -31,8 +31,10 @@ const SECONDS = arg("seconds", 60);
 // for a steadily streaming turn.
 const SEND_INTERVAL_MS = arg("send-interval", 2000);
 
+// Root is per-invocation so a before/after pair cannot share scratch state or
+// race each other's leftover daemon.
 const scratch = new Scratch(repoRoot, {
-  root: "/tmp/archductor-perf-streaming",
+  root: process.env.PERF_ROOT ?? "/tmp/archductor-perf-streaming",
   countGit: true,
 });
 
