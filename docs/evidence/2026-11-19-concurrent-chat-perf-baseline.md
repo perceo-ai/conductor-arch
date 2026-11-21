@@ -217,3 +217,33 @@ real against a scratch daemon with a replay-provider agent:
   the cached git facts as a live badge (`Alpha +1 −0`, file counts on each
   workspace), and the chat surface renders the full nested timeline with the
   Changes panel agreeing at `notes.txt +1 −0`.
+
+# The attention sweep, on the same cache (2026-11-21)
+
+`#272`'s `list_attention` built its workspace rows through
+`agent_status::collect_status`, which used `WorkspaceStore::list_status()` —
+the variant that derives each active workspace's git facts inline. That is the
+same cost removed from `list_workspaces` above, paid again on every miss of the
+sweep's own three-second cache.
+
+Measured with `scripts/perf/inventory-cost.mjs` (which now includes
+`list_attention`) and a probe that waits past the three-second TTL before each
+sweep, so every one is a genuine miss rather than a hit on the attention cache.
+Ten workspaces, release binaries, one-commit repository:
+
+| cold `list_attention` | before | after |
+|---|---|---|
+| git subprocesses per sweep | 50, 68, 50, 71 | 0, 0, 0, 1 |
+| time per sweep | 3026ms | **2.3ms** |
+
+The response is 135 bytes on both sides — the queue itself is unchanged; only
+what it costs to build is.
+
+`#272` measured this path at 10–14s with thirty workspaces and mitigated it
+with the TTL. The sweep now reads the same derived set the inventory does, so
+there is nothing left for the TTL to hide.
+
+**Watch the TTL when measuring this.** Nine rapid samples report zero git
+spawns on the *unchanged* code too, because the attention cache serves them.
+The first version of this measurement did exactly that and would have claimed
+the win without the change being present.

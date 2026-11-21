@@ -95,6 +95,16 @@ async function main() {
       );
     }
 
+    // The attention sweep builds a row per workspace the same way the
+    // inventory does. It used to derive each one's git facts inline, so it
+    // carried the cost this cache removes; this is the regression guard.
+    const attention = await measure({ type: "list_attention" });
+    console.log(
+      `\nlist_attention at ${MAX_WORKSPACES} workspaces: ` +
+        `${fmtMs(attention.times.min)} min, ${fmtMs(attention.times.median)} median, ` +
+        `${attention.spawns} git spawns, ${attention.bytes} bytes`,
+    );
+
     // What the desktop actually calls on startup and on window focus; it bundles
     // the workspace list with repositories and every workspace's chat threads.
     const snapshot = await measure({ type: "get_inventory_snapshot" });
