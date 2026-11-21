@@ -249,10 +249,41 @@ pub fn collect_status(
     now_ms: u64,
     probe: &mut dyn FnMut(&ProcessRecord) -> Option<LiveProbe>,
 ) -> Result<StatusReport> {
+    collect_status_with_facts(store, db_path, only_workspace, now_ms, probe, None)
+}
+
+/// As [`collect_status`], reading the git-derived fields from `git_facts`
+/// rather than deriving them, when a cache is supplied.
+///
+/// Deriving costs about six git subprocesses per active workspace. A one-shot
+/// CLI invocation pays that once and is welcome to; the daemon's attention
+/// sweep runs for every workspace on the board, unattended, on a three-second
+/// cache — so it is the caller that most needs to not pay it. Passing `None`
+/// keeps the old inline behaviour.
+pub fn collect_status_with_facts(
+    store: &WorkspaceStore,
+    db_path: &Path,
+    only_workspace: Option<&str>,
+    now_ms: u64,
+    probe: &mut dyn FnMut(&ProcessRecord) -> Option<LiveProbe>,
+    git_facts: Option<&crate::git_facts::GitFactCache>,
+) -> Result<StatusReport> {
     let events = ProviderEventStore::new(db_path);
     let interactions = ProviderInteractionStore::new(db_path.to_path_buf());
     let mut workspaces = Vec::new();
-    for line in store.list_status()? {
+    let lines = match git_facts {
+        Some(cache) => {
+            let mut lines = store.list_status_without_git()?;
+            for line in &mut lines {
+                crate::git_facts::fill_status_line_from_facts(line, cache, |name| {
+                    store.stored_git_facts(name).ok().flatten()
+                });
+            }
+            lines
+        }
+        None => store.list_status()?,
+    };
+    for line in lines {
         if only_workspace.is_some_and(|name| name != line.workspace.name) {
             continue;
         }
@@ -614,6 +645,44 @@ mod tests {
         let records = store_claude_records(&db_path, Some(thread.id), &native, base_ms);
         let last_ms = records.iter().map(|r| r.occurred_at_ms).max().unwrap();
         (store, db_path, process, last_ms)
+    }
+
+    #[test]
+    fn collect_status_reads_cached_git_facts_instead_of_running_git() {
+        let temp = tempfile::tempdir().unwrap();
+        let (store, db_path, _process, last_ms) = board_with_a_stale_pid(temp.path());
+        let cache = crate::git_facts::GitFactCache::default();
+        // The worktree's real diff is not this. Anything that shelled out to
+        // git would report that instead, so these numbers can only have come
+        // from the cache.
+        cache.publish(
+            "berlin",
+            crate::workspace::WorkspaceGitFacts {
+                changed_files: 9,
+                diff_additions: 123,
+                diff_deletions: 45,
+                push: Some(crate::workspace::BranchPushState {
+                    ahead: 2,
+                    behind: 1,
+                    has_upstream: true,
+                }),
+                computed_at_ms: 1,
+            },
+        );
+
+        let report =
+            collect_status_with_facts(&store, &db_path, None, last_ms, &mut |_| None, Some(&cache))
+                .unwrap();
+
+        let workspace = report
+            .workspaces
+            .iter()
+            .find(|w| w.workspace == "berlin")
+            .expect("the board lists berlin");
+        assert_eq!(workspace.additions, 123);
+        assert_eq!(workspace.deletions, 45);
+        assert_eq!(workspace.ahead, Some(2));
+        assert_eq!(workspace.behind, Some(1));
     }
 
     #[test]

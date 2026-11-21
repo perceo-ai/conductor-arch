@@ -32,6 +32,7 @@ use crate::archcar::session::{
     SessionCommand, SessionHandle,
 };
 use crate::archcar::transport::{self, DuplexStream, LocalListener};
+use crate::git_facts::{fill_status_line_from_facts, GitFactCache};
 use crate::notifications::NotificationDeviceStore;
 use crate::paths::AppPaths;
 use crate::provider_events::ProviderEventStore;
@@ -4406,8 +4407,19 @@ fn list_attention(state: &Arc<Mutex<ServerState>>) -> ArchcarResponse {
                 })
             };
             let swept_at = crate::agent_status::now_ms();
-            let report =
-                crate::agent_status::collect_status(store, &db_path, None, swept_at, &mut probe)?;
+            // The sweep reads the daemon's cached git facts rather than
+            // deriving them. It runs for every workspace on the board,
+            // unattended, so deriving inline cost about six git subprocesses
+            // per active workspace on every cache miss.
+            let git_facts = state.lock().unwrap().git_facts.clone();
+            let report = crate::agent_status::collect_status_with_facts(
+                store,
+                &db_path,
+                None,
+                swept_at,
+                &mut probe,
+                Some(&git_facts),
+            )?;
             let tasks = store.list_background_tasks(false)?;
             Ok(crate::attention::derive_attention(
                 &report, &tasks, swept_at,
@@ -6408,67 +6420,6 @@ fn workspace_summary_from_status_line(
     }
 }
 
-/// The daemon's cache of workspace git facts.
-///
-/// Deriving them costs six git subprocesses per workspace, and answering
-/// `list_workspaces` from scratch measured 450ms per workspace — 5s across ten
-/// (`docs/evidence/2026-11-19-concurrent-chat-perf-baseline.md`). This holds
-/// the last derived set so a request never waits on git.
-///
-/// It has its own lock rather than living inside `ServerState`: deriving is
-/// slow, and nothing else should queue behind it.
-#[derive(Debug, Default)]
-pub struct GitFactCache {
-    inner: Mutex<GitFactCacheInner>,
-}
-
-#[derive(Debug, Default)]
-struct GitFactCacheInner {
-    facts: HashMap<String, crate::workspace::WorkspaceGitFacts>,
-    dirty: BTreeSet<String>,
-}
-
-impl GitFactCache {
-    pub fn get(&self, workspace: &str) -> Option<crate::workspace::WorkspaceGitFacts> {
-        self.inner
-            .lock()
-            .ok()
-            .and_then(|inner| inner.facts.get(workspace).cloned())
-    }
-
-    pub fn publish(&self, workspace: &str, facts: crate::workspace::WorkspaceGitFacts) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.facts.insert(workspace.to_owned(), facts);
-        }
-    }
-
-    /// Note that a workspace's git state may have moved.
-    pub fn mark_dirty(&self, workspace: &str) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.dirty.insert(workspace.to_owned());
-        }
-    }
-
-    /// Take the set of workspaces owed a recompute, clearing it.
-    ///
-    /// Taking rather than peeking means a workspace marked again while its
-    /// recompute is running is picked up by the next pass instead of being
-    /// silently dropped.
-    pub fn dirty_workspaces(&self) -> Vec<String> {
-        self.inner
-            .lock()
-            .map(|mut inner| std::mem::take(&mut inner.dirty).into_iter().collect())
-            .unwrap_or_default()
-    }
-
-    pub fn forget(&self, workspace: &str) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.facts.remove(workspace);
-            inner.dirty.remove(workspace);
-        }
-    }
-}
-
 fn workspace_summaries(
     db_path: &Path,
     git_facts: &GitFactCache,
@@ -6481,51 +6432,14 @@ fn workspace_summaries(
         Ok(lines
             .into_iter()
             .map(|mut line| {
-                let name = line.workspace.name.clone();
-                // Cache, then the last persisted set, then nothing. Serving
-                // zeros for a workspace whose state was never measured would
-                // tell the sidebar it is clean, so that case is also queued for
-                // the refresher.
-                let facts = git_facts.get(&name).or_else(|| {
-                    let stored = store.stored_git_facts(&name).ok().flatten();
-                    if let Some(facts) = stored.clone() {
-                        git_facts.publish(&name, facts);
-                    }
-                    stored
+                let changed_files = fill_status_line_from_facts(&mut line, git_facts, |name| {
+                    store.stored_git_facts(name).ok().flatten()
                 });
-                let facts = match facts {
-                    Some(facts) => facts,
-                    None => {
-                        git_facts.mark_dirty(&name);
-                        crate::workspace::WorkspaceGitFacts {
-                            changed_files: 0,
-                            diff_additions: 0,
-                            diff_deletions: 0,
-                            push: None,
-                            computed_at_ms: 0,
-                        }
-                    }
-                };
-                // Every git-derived field is gated on the workspace being
-                // active, matching what deriving inline produced. An archived
-                // workspace has no live worktree and nothing ever re-derives
-                // one, so leaving its last live numbers in place would pin a
-                // wrong diff badge on it permanently.
-                //
-                // `push` stays an Option all the way through: `None` means the
-                // git call failed and the ahead/behind indicator should be
-                // hidden, exactly as before, rather than showing a confident
-                // "0 ahead, 0 behind".
-                let active = line.workspace.status == "active";
-                line.diff_additions = if active { facts.diff_additions } else { 0 };
-                line.diff_deletions = if active { facts.diff_deletions } else { 0 };
-                line.branch_push_state = if active { facts.push.clone() } else { None };
                 let tasks = task_counts
                     .get(&line.workspace.id)
                     .copied()
                     .unwrap_or_default();
                 let awaiting_input = awaiting.contains(&line.workspace.name);
-                let changed_files = if active { facts.changed_files } else { 0 };
                 workspace_summary_from_status_line(line, changed_files, tasks, awaiting_input)
             })
             .collect())
