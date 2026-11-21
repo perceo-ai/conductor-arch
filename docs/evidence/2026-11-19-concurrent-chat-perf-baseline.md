@@ -175,3 +175,45 @@ ships about 700kB per pull — roughly 2.7MB/s at four pulls a second, per
 thread. That is the clearest remaining cost and the reason to do the cursor
 work, but it is a protocol change across the daemon, the desktop and iOS and
 belongs in its own change.
+
+## After the review fix pass
+
+The fixes that closed the staleness holes also touched the hot paths, so
+everything was re-measured on release binaries.
+
+`list_workspaces` at ten workspaces: **1.9ms, 0 git subprocesses, 3906 bytes** —
+unchanged from before the fixes and byte-identical to the original.
+
+The clearest number is the daemon's own steady-state cost. Ten workspaces, no
+sessions running, nothing asking it anything:
+
+| | idle daemon, 10 workspaces |
+|---|---|
+| git subprocesses | 3.6/s |
+| daemon CPU | 0% of one core (0.16s over 40s) |
+
+That 3.6/s is exactly what the staleness ceiling implies — ten workspaces, six
+subprocesses each, re-derived no more often than every fifteen seconds — so the
+background cost is now a small constant rather than a per-request charge of
+sixty subprocesses.
+
+The ten-workspace streaming window reports 59 git subprocesses a second against
+121 at base, but that figure counts the benchmark's own `session send`
+invocations, because the counting shim sits on `PATH` for the CLI as well as
+the daemon. It is a fair before/after on the same harness and a poor absolute
+number; the idle measurement above is the one to quote for the daemon.
+
+## Verified in the real application
+
+Benchmarks prove the socket, not the window. Both surfaces were driven for
+real against a scratch daemon with a replay-provider agent:
+
+- **CLI** — `archductor chat <ws> --full` renders a streamed turn: nested
+  subagent cards, tool calls with results, the background task. Two consecutive
+  projection pulls are identical; a pull from a *freshly started* daemon with an
+  empty cache is identical to the cached one; and a second streamed turn grows
+  the timeline from 16 items to 30, so records fold into the cache end to end.
+- **Electron** — the real window opens past the setup gate, the sidebar shows
+  the cached git facts as a live badge (`Alpha +1 −0`, file counts on each
+  workspace), and the chat surface renders the full nested timeline with the
+  Changes panel agreeing at `notes.txt +1 −0`.
