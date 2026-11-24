@@ -722,8 +722,8 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
             let retry_delay_ms = number_at(&event.raw_json, &["retry_delay_ms"]);
             let limit_message = rate_limit_message(&event.raw_json);
             let limit_retry_after_ms = rate_limit_retry_after_ms(&event.raw_json);
-            let limit_is_allowed = rate_limit_is_allowed(&event.raw_json);
-            let limit_is_terminal = rate_limit_is_terminal(&event.raw_json);
+            let limit_is_silent = rate_limit_is_silent(&event.raw_json);
+            let limit_rejects_request = rate_limit_rejects_request(&event.raw_json);
             let mut provider_event_drafts = event
                 .clone()
                 .into_provider_event_drafts(self.provider_context());
@@ -734,7 +734,7 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                     }
                 }
             }
-            if !(event_kind == ClaudeProviderEventKind::RateLimit && limit_is_allowed) {
+            if !(event_kind == ClaudeProviderEventKind::RateLimit && limit_is_silent) {
                 effects.extend(
                     provider_event_drafts
                         .into_iter()
@@ -804,12 +804,12 @@ impl ManagedHarnessAdapter for ClaudeManagedAdapter {
                     message: retry_message.unwrap_or_else(|| "Claude API retry".to_owned()),
                     delay_ms: retry_delay_ms,
                 });
-            } else if event_kind == ClaudeProviderEventKind::RateLimit && !limit_is_allowed {
+            } else if event_kind == ClaudeProviderEventKind::RateLimit && !limit_is_silent {
                 effects.push(HarnessEffect::RateLimited {
                     message: limit_message,
                     retry_after_ms: limit_retry_after_ms,
                 });
-                if limit_is_terminal {
+                if limit_rejects_request {
                     self.tracker.note_terminal_result(
                         claude_fallback_event_id(&event.raw_json),
                         ClaudeResultStatus::Failed,
@@ -2243,13 +2243,23 @@ fn rate_limit_retry_after_ms(value: &Value) -> Option<u64> {
         .or_else(|| number_at(value, &["retry_after_ms"]))
 }
 
-fn rate_limit_is_allowed(value: &Value) -> bool {
+/// `allowed` is the quiet case: the request went through with room to spare,
+/// and there is nothing for the chat to show.
+fn rate_limit_is_silent(value: &Value) -> bool {
     string_at(value, &["rate_limit_info", "status"])
         .is_some_and(|status| status.eq_ignore_ascii_case("allowed"))
 }
 
-fn rate_limit_is_terminal(value: &Value) -> bool {
-    !rate_limit_is_allowed(value)
+/// Only a status that actually refused the request ends the turn.
+///
+/// `allowed_warning` means the request was served while the account sits near
+/// a limit: Claude keeps streaming the same turn straight through it, so
+/// treating it as a rejection failed turns that were still running. A
+/// `rate_limit_event` with no status at all stays terminal, since we cannot
+/// tell that the request was served.
+fn rate_limit_rejects_request(value: &Value) -> bool {
+    !string_at(value, &["rate_limit_info", "status"])
+        .is_some_and(|status| status.to_ascii_lowercase().starts_with("allowed"))
 }
 
 fn claude_result_defers_a_tool(value: &Value) -> bool {
@@ -4976,6 +4986,86 @@ mod tests {
             effect,
             HarnessEffect::ProviderEvent(event) if event.kind == ProviderEventKind::LimitFailure
         )));
+    }
+
+    /// `allowed_warning` means the request went through and the account is
+    /// near a limit. Claude keeps streaming the same turn afterwards, so it
+    /// must not end the turn: only the real `result` does.
+    #[test]
+    fn claude_allowed_warning_rate_limit_mid_turn_keeps_the_turn_running() {
+        let mut adapter = ClaudeManagedAdapter::new(HarnessAdapterContext {
+            session_id: 7,
+            thread_id: 11,
+            workspace: "fixture-workspace".to_owned(),
+            native_session_id: None,
+            controls: Default::default(),
+        });
+        adapter.tracker.initialized = true;
+        adapter
+            .encode_input(HarnessInput {
+                local_input_id: "warned-input".to_owned(),
+                content: "Keep working".to_owned(),
+                visible_content: None,
+                kind: crate::archcar::protocol::ArchcarInputKind::User,
+                delivery: crate::archcar::protocol::ArchcarInputDelivery::Auto,
+            })
+            .unwrap();
+        let mut observe = |line: &str| {
+            adapter
+                .observe_native(NativeRecord {
+                    provider_key: CLAUDE_PROVIDER_NAME,
+                    payload: format!("{line}\n").into_bytes(),
+                })
+                .unwrap()
+        };
+        let mut mid_turn = observe(
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"message_start","message":{"id":"m1"}}}"#,
+        );
+        let warning = observe(
+            r#"{"type":"rate_limit_event","session_id":"s1","uuid":"rl-warn","rate_limit_info":{"status":"allowed_warning","rateLimitType":"seven_day","utilization":0.89,"overageStatus":"rejected","isUsingOverage":false}}"#,
+        );
+        mid_turn.extend(warning.iter().cloned());
+        mid_turn.extend(observe(
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}}"#,
+        ));
+        mid_turn.extend(observe(
+            r#"{"type":"stream_event","session_id":"s1","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"still going"}}}"#,
+        ));
+
+        assert!(
+            !mid_turn.iter().any(|effect| matches!(
+                effect,
+                HarnessEffect::TurnCompleted { .. }
+                    | HarnessEffect::TurnSettled { .. }
+                    | HarnessEffect::Fatal(_)
+            )),
+            "an allowed_warning rate limit must not end the turn: {mid_turn:?}"
+        );
+        // The warning is still shown, as a non-failing timeline event.
+        assert!(warning.iter().any(|effect| matches!(
+            effect,
+            HarnessEffect::ProviderEvent(event)
+                if event.kind == ProviderEventKind::LimitFailure
+                    && event.phase != ProviderEventPhase::Failed
+        )));
+
+        let finished = observe(
+            r#"{"type":"result","subtype":"success","session_id":"s1","uuid":"r-warned","result":"done","duration_ms":5000}"#,
+        );
+        let completions: Vec<_> = finished
+            .iter()
+            .filter_map(|effect| match effect {
+                HarnessEffect::TurnCompleted {
+                    local_input_id,
+                    status,
+                } => Some((local_input_id.as_str(), *status)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            completions,
+            vec![("warned-input", HarnessTurnStatus::Success)]
+        );
     }
 
     #[test]
